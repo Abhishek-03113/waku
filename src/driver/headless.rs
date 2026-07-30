@@ -1,0 +1,483 @@
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread;
+
+use anyhow::Context as _;
+use crossbeam_channel::{Sender, unbounded};
+use serde_json::Value;
+use uuid::Uuid;
+
+use crate::driver::DriverControl;
+use crate::model::{ActivityKind, DriverEvent, ProviderKind, RuntimeMode};
+
+enum CommandMessage {
+    Prompt(String),
+    Shutdown,
+}
+
+pub struct HeadlessDriver {
+    commands: Sender<CommandMessage>,
+    active_pid: Arc<AtomicU32>,
+}
+
+impl HeadlessDriver {
+    pub fn start(
+        provider: ProviderKind,
+        binary: PathBuf,
+        cwd: PathBuf,
+        mode: RuntimeMode,
+        existing_session_id: Option<String>,
+        events: Sender<DriverEvent>,
+    ) -> anyhow::Result<Self> {
+        let (commands, command_rx) = unbounded();
+        let active_pid = Arc::new(AtomicU32::new(0));
+        let worker_pid = active_pid.clone();
+
+        thread::Builder::new()
+            .name(format!("waku-{}-driver", provider.id()))
+            .spawn(move || {
+                let had_existing_session = existing_session_id.is_some();
+                let mut provider_session_id = match provider {
+                    ProviderKind::Claude => {
+                        Some(existing_session_id.unwrap_or_else(|| Uuid::new_v4().to_string()))
+                    }
+                    ProviderKind::OpenCode => existing_session_id,
+                    _ => None,
+                };
+                let mut can_resume = had_existing_session;
+                if provider_session_id.is_some() {
+                    let _ = events.send(DriverEvent::Connected {
+                        provider_session_id: provider_session_id.clone(),
+                    });
+                }
+                while let Ok(message) = command_rx.recv() {
+                    match message {
+                        CommandMessage::Prompt(prompt) => {
+                            if let Some(session_id) = run_prompt(
+                                provider,
+                                &binary,
+                                &cwd,
+                                mode,
+                                provider_session_id.as_deref(),
+                                can_resume,
+                                prompt,
+                                &events,
+                                &worker_pid,
+                            ) {
+                                provider_session_id = Some(session_id);
+                                can_resume = true;
+                            }
+                        }
+                        CommandMessage::Shutdown => break,
+                    }
+                }
+            })
+            .context("failed to start provider driver thread")?;
+
+        Ok(Self {
+            commands,
+            active_pid,
+        })
+    }
+}
+
+impl DriverControl for HeadlessDriver {
+    fn prompt(&self, prompt: String) {
+        let _ = self.commands.send(CommandMessage::Prompt(prompt));
+    }
+
+    fn cancel(&self) {
+        let pid = self.active_pid.load(Ordering::Relaxed);
+        if pid != 0 {
+            #[cfg(unix)]
+            {
+                let _ = Command::new("/bin/kill")
+                    .args(["-INT", &pid.to_string()])
+                    .status();
+            }
+        }
+    }
+
+    fn respond(&self, _request_id: String, _option_id: String) {}
+}
+
+impl Drop for HeadlessDriver {
+    fn drop(&mut self) {
+        self.cancel();
+        let _ = self.commands.send(CommandMessage::Shutdown);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_prompt(
+    provider: ProviderKind,
+    binary: &PathBuf,
+    cwd: &PathBuf,
+    mode: RuntimeMode,
+    provider_session_id: Option<&str>,
+    resume: bool,
+    prompt: String,
+    events: &Sender<DriverEvent>,
+    active_pid: &AtomicU32,
+) -> Option<String> {
+    let _ = events.send(DriverEvent::TurnStarted);
+    let mut command = Command::new(binary);
+    command.current_dir(cwd);
+    match provider {
+        ProviderKind::Claude => {
+            command.args([
+                "-p",
+                &prompt,
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--permission-mode",
+                match mode {
+                    RuntimeMode::Plan => "plan",
+                    RuntimeMode::Ask => "auto",
+                    RuntimeMode::Auto => "acceptEdits",
+                },
+            ]);
+            if let Some(session_id) = provider_session_id {
+                if resume {
+                    command.args(["--resume", session_id]);
+                } else {
+                    command.args(["--session-id", session_id]);
+                }
+            }
+        }
+        ProviderKind::OpenCode => {
+            command.args(["run", "--format", "json", "--thinking"]);
+            match mode {
+                RuntimeMode::Plan => {
+                    command.args(["--agent", "plan"]);
+                }
+                RuntimeMode::Auto => {
+                    command.arg("--auto");
+                }
+                RuntimeMode::Ask => {}
+            }
+            if let Some(session_id) = provider_session_id {
+                command.args(["--session", session_id]);
+            }
+            command.arg(prompt);
+        }
+        _ => return None,
+    }
+    let result = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match result {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = events.send(DriverEvent::Error(format!(
+                "Failed to start {}: {error}",
+                provider.display_name()
+            )));
+            let _ = events.send(DriverEvent::TurnFinished {
+                success: false,
+                summary: None,
+            });
+            return None;
+        }
+    };
+    active_pid.store(child.id(), Ordering::Relaxed);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stderr_events = events.clone();
+    let provider_name = provider.display_name().to_owned();
+    let stderr_thread = stderr.map(|stderr| {
+        thread::spawn(move || {
+            let lines = BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>();
+            if !lines.is_empty() {
+                let message = lines.join("\n");
+                if message.to_ascii_lowercase().contains("error") {
+                    let _ = stderr_events
+                        .send(DriverEvent::Error(format!("{provider_name}: {message}")));
+                }
+            }
+        })
+    });
+
+    let mut parser = StreamParser::default();
+    if let Some(stdout) = stdout {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                match provider {
+                    ProviderKind::Claude => parser.parse_claude(value, events),
+                    ProviderKind::OpenCode => parser.parse_opencode(value, events),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let status = child.wait();
+    active_pid.store(0, Ordering::Relaxed);
+    if let Some(thread) = stderr_thread {
+        let _ = thread.join();
+    }
+    let success = status.map(|status| status.success()).unwrap_or(false);
+    let _ = events.send(DriverEvent::TurnFinished {
+        success,
+        summary: (!success).then(|| {
+            format!(
+                "{} exited before completing the turn.",
+                provider.short_name()
+            )
+        }),
+    });
+    parser.provider_session_id
+}
+
+#[derive(Default)]
+struct StreamParser {
+    saw_text_delta: bool,
+    saw_reasoning_delta: bool,
+    provider_session_id: Option<String>,
+}
+
+impl StreamParser {
+    fn parse_claude(&mut self, value: Value, events: &Sender<DriverEvent>) {
+        match value.get("type").and_then(Value::as_str) {
+            Some("system") if value.get("subtype").and_then(Value::as_str) == Some("init") => {
+                if let Some(id) = value.get("session_id").and_then(Value::as_str) {
+                    self.provider_session_id = Some(id.to_owned());
+                    let _ = events.send(DriverEvent::Connected {
+                        provider_session_id: Some(id.to_owned()),
+                    });
+                }
+            }
+            Some("stream_event") => {
+                let event = value.get("event").unwrap_or(&Value::Null);
+                let delta = event.get("delta").unwrap_or(&Value::Null);
+                match delta.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => {
+                        if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                            self.saw_text_delta = true;
+                            let _ = events.send(DriverEvent::TextDelta(text.to_owned()));
+                        }
+                    }
+                    Some("thinking_delta") => {
+                        if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                            self.saw_reasoning_delta = true;
+                            let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("assistant") => {
+                if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+                    for block in content {
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("text") if !self.saw_text_delta => {
+                                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                                    let _ = events.send(DriverEvent::TextDelta(text.to_owned()));
+                                }
+                            }
+                            Some("thinking") if !self.saw_reasoning_delta => {
+                                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                                    let _ =
+                                        events.send(DriverEvent::ReasoningDelta(text.to_owned()));
+                                }
+                            }
+                            Some("tool_use") => {
+                                let title = block
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("Tool")
+                                    .to_owned();
+                                let detail = block
+                                    .get("input")
+                                    .map(compact_json)
+                                    .filter(|value| !value.is_empty());
+                                let _ = events.send(DriverEvent::Activity {
+                                    kind: classify_tool(&title),
+                                    title,
+                                    detail,
+                                    complete: false,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Some("result") if value.get("is_error").and_then(Value::as_bool) == Some(true) => {
+                if let Some(result) = value.get("result").and_then(Value::as_str) {
+                    let _ = events.send(DriverEvent::Error(result.to_owned()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn parse_opencode(&mut self, value: Value, events: &Sender<DriverEvent>) {
+        if let Some(id) = value
+            .get("sessionID")
+            .and_then(Value::as_str)
+            .or_else(|| value.pointer("/part/sessionID").and_then(Value::as_str))
+            && self.provider_session_id.as_deref() != Some(id)
+        {
+            self.provider_session_id = Some(id.to_owned());
+            let _ = events.send(DriverEvent::Connected {
+                provider_session_id: Some(id.to_owned()),
+            });
+        }
+        let event_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let part = value.get("part").unwrap_or(&value);
+        match event_type {
+            "text" | "text.delta" | "message.part.updated" => {
+                let text = part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| value.get("delta").and_then(Value::as_str));
+                if let Some(text) = text {
+                    let delta = if self.saw_text_delta {
+                        text
+                    } else {
+                        self.saw_text_delta = true;
+                        text
+                    };
+                    let _ = events.send(DriverEvent::TextDelta(delta.to_owned()));
+                }
+            }
+            "reasoning" | "thinking" => {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
+                }
+            }
+            "tool_use" | "tool" | "tool.updated" => {
+                let title = part
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .or_else(|| part.get("name").and_then(Value::as_str))
+                    .unwrap_or("Tool")
+                    .to_owned();
+                let detail = part
+                    .pointer("/state/input")
+                    .or_else(|| part.get("input"))
+                    .map(compact_json);
+                let complete = matches!(
+                    part.pointer("/state/status").and_then(Value::as_str),
+                    Some("completed" | "error")
+                );
+                let _ = events.send(DriverEvent::Activity {
+                    kind: classify_tool(&title),
+                    title,
+                    detail,
+                    complete,
+                });
+            }
+            "error" => {
+                let message = value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .or_else(|| value.get("message").and_then(Value::as_str))
+                    .unwrap_or("OpenCode reported an error");
+                let _ = events.send(DriverEvent::Error(message.to_owned()));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn compact_json(value: &Value) -> String {
+    let value = serde_json::to_string(value).unwrap_or_default();
+    if value.chars().count() > 180 {
+        format!("{}…", value.chars().take(179).collect::<String>())
+    } else {
+        value
+    }
+}
+
+fn classify_tool(name: &str) -> ActivityKind {
+    let normalized = name.to_ascii_lowercase();
+    if normalized.contains("bash") || normalized.contains("command") {
+        ActivityKind::Command
+    } else if normalized.contains("edit")
+        || normalized.contains("write")
+        || normalized.contains("patch")
+    {
+        ActivityKind::FileChange
+    } else if normalized.contains("search") || normalized.contains("grep") {
+        ActivityKind::Search
+    } else if normalized.contains("todo") || normalized.contains("plan") {
+        ActivityKind::Plan
+    } else {
+        ActivityKind::Tool
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_stream_captures_native_session_and_text() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_opencode(
+            serde_json::json!({
+                "type": "text",
+                "sessionID": "ses_native",
+                "part": {"text": "hello"}
+            }),
+            &events,
+        );
+
+        assert_eq!(parser.provider_session_id.as_deref(), Some("ses_native"));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Connected {
+                provider_session_id: Some(id)
+            } if id == "ses_native"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::TextDelta(text) if text == "hello"
+        ));
+    }
+
+    #[test]
+    fn claude_stream_captures_session_and_partial_delta() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_claude(
+            serde_json::json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "98f012ee-537c-40bd-817c-e6496030973b"
+            }),
+            &events,
+        );
+        parser.parse_claude(
+            serde_json::json!({
+                "type": "stream_event",
+                "event": {"delta": {"type": "text_delta", "text": "hi"}}
+            }),
+            &events,
+        );
+
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Connected { .. }
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::TextDelta(text) if text == "hi"
+        ));
+    }
+}
