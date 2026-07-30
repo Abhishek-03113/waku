@@ -32,10 +32,6 @@ pub struct Theme {
     pub warning: Hsla,
     pub danger: Hsla,
     pub danger_soft: Hsla,
-
-    pub chip_bg: Hsla,
-    pub chip_text: Hsla,
-    pub code_text: Hsla,
 }
 
 impl Theme {
@@ -64,10 +60,6 @@ impl Theme {
             warning: rgb(0xE0B36A).into(),
             danger: rgb(0xE2726A).into(),
             danger_soft: hsla(4.0 / 360.0, 0.55, 0.63, 0.10),
-
-            chip_bg: hsla(220.0 / 360.0, 0.10, 0.90, 0.08),
-            chip_text: rgb(0xD9DDE3).into(),
-            code_text: rgb(0xD5D9DF).into(),
         }
     }
 }

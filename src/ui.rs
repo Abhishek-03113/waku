@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use gpui::{
     App, Div, ElementId, Hsla, InteractiveElement, Interactivity, RenderOnce, SharedString,
     Stateful, StyleRefinement, Styled, Svg, Window, div, prelude::*, px, rgb, svg,
@@ -165,7 +163,7 @@ impl RenderOnce for MenuChip {
             .gap(px(6.0))
             .text_size(px(11.5))
             .line_height(px(14.0))
-            .cursor_pointer()
+            .cursor_default()
             .when(self.selected, |element| element.bg(theme.overlay))
             .hover(|element| element.bg(theme.overlay))
             .when_some(self.icon, |element, (path, color)| {
@@ -232,74 +230,9 @@ fn civil_from_unix(timestamp: u64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InlineSpan {
-    Code,
-    Bold,
-}
-
-/// Strips a minimal inline-markdown subset (`code`, **bold**) out of `text`,
-/// returning the cleaned string plus byte ranges to highlight. Unmatched
-/// markers are kept literally.
-pub fn parse_inline_markdown(text: &str) -> (String, Vec<(Range<usize>, InlineSpan)>) {
-    let mut cleaned = String::with_capacity(text.len());
-    let mut spans = Vec::new();
-    let bytes = text.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'`' {
-            if let Some(length) = text[index + 1..].find('`') {
-                let start = cleaned.len();
-                cleaned.push_str(&text[index + 1..index + 1 + length]);
-                spans.push((start..cleaned.len(), InlineSpan::Code));
-                index += length + 2;
-                continue;
-            }
-        }
-        if bytes[index] == b'*' && index + 1 < bytes.len() && bytes[index + 1] == b'*' {
-            if let Some(length) = text[index + 2..].find("**") {
-                let start = cleaned.len();
-                cleaned.push_str(&text[index + 2..index + 2 + length]);
-                spans.push((start..cleaned.len(), InlineSpan::Bold));
-                index += length + 4;
-                continue;
-            }
-        }
-        let character = text[index..].chars().next().expect("char at index");
-        cleaned.push(character);
-        index += character.len_utf8();
-    }
-    (cleaned, spans)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn inline_markdown_extracts_code_and_bold() {
-        let (cleaned, spans) = parse_inline_markdown("run `cargo test` and **verify** it");
-        assert_eq!(cleaned, "run cargo test and verify it");
-        assert_eq!(spans.len(), 2);
-        assert_eq!(&cleaned[spans[0].0.clone()], "cargo test");
-        assert_eq!(spans[0].1, InlineSpan::Code);
-        assert_eq!(&cleaned[spans[1].0.clone()], "verify");
-        assert_eq!(spans[1].1, InlineSpan::Bold);
-    }
-
-    #[test]
-    fn inline_markdown_keeps_unmatched_markers() {
-        let (cleaned, spans) = parse_inline_markdown("a ` lonely backtick and ** stars");
-        assert_eq!(cleaned, "a ` lonely backtick and ** stars");
-        assert!(spans.is_empty());
-    }
-
-    #[test]
-    fn inline_markdown_is_unicode_safe() {
-        let (cleaned, spans) = parse_inline_markdown("日本語 `コード` テキスト");
-        assert_eq!(cleaned, "日本語 コード テキスト");
-        assert_eq!(&cleaned[spans[0].0.clone()], "コード");
-    }
 
     #[test]
     fn relative_time_formats_buckets() {

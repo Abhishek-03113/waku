@@ -5,10 +5,11 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, unbounded};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, BoxShadow, Context, Corner, Div, Entity, FocusHandle,
-    FontWeight, HighlightStyle, Hsla, IntoElement, ListAlignment, ListState, PathPromptOptions,
-    Render, SharedString, StyledText, TextStyle, Timer, Window, div, hsla, list, point, prelude::*,
-    pulsating_between, px,
+    Animation, AnimationExt, AnyElement, App, BoxShadow, ClipboardItem, Context, Corner,
+    DismissEvent, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, IntoElement,
+    ListAlignment, ListState, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
+    Render, SharedString, Subscription, Timer, WeakEntity, Window, anchored, deferred, div, hsla,
+    list, point, prelude::*, pulsating_between, px, rems,
 };
 use uuid::Uuid;
 
@@ -19,13 +20,14 @@ use crate::model::{
     ProviderKind, ProviderProbe, RuntimeMode, SessionStatus, compact_path, unix_time,
 };
 use gpui_component::Icon as ComponentIcon;
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_component::text::{TextView, TextViewStyle};
 
 use crate::persistence::{PersistedState, StateStore};
 use crate::theme::Theme;
 use crate::ui::{
-    InlineSpan, MenuChip, activity_icon, activity_noun, icon, key_hint, parse_inline_markdown,
-    provider_color, provider_icon, relative_time, section_label, status_color, status_label,
+    MenuChip, activity_icon, activity_noun, icon, key_hint, provider_color, provider_icon,
+    relative_time, section_label, status_color, status_label,
 };
 use crate::{CancelTurn, FocusComposer, NewSession, ToggleSidebar};
 
@@ -57,11 +59,14 @@ pub struct Waku {
     branch: Option<String>,
     toast: Option<String>,
     transcript_rows: ListState,
+    message_context_menu: Option<Entity<PopupMenu>>,
+    message_context_menu_position: Point<Pixels>,
+    _message_context_menu_subscription: Option<Subscription>,
 }
 
 impl Waku {
-    pub fn new(_window: &mut Window, cx: &mut App) -> Entity<Self> {
-        let composer = cx.new(ComposerInput::new);
+    pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
+        let composer = cx.new(|cx| ComposerInput::new(window, cx));
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
         let mut state = store.load_or_fresh(cwd);
@@ -132,6 +137,9 @@ impl Waku {
                 branch,
                 toast: None,
                 transcript_rows: ListState::new(0, ListAlignment::Bottom, px(512.0)),
+                message_context_menu: None,
+                message_context_menu_position: Point::default(),
+                _message_context_menu_subscription: None,
             }
         })
     }
@@ -642,7 +650,7 @@ impl Waku {
                     .text_size(px(12.5))
                     .line_height(px(16.0))
                     .rounded(px(7.0))
-                    .cursor_pointer()
+                    .cursor_default()
                     .when(selected, |element| element.bg(theme.overlay))
                     .hover(|element| element.bg(theme.overlay))
                     .active(|element| element.bg(theme.overlay_strong))
@@ -696,7 +704,7 @@ impl Waku {
                         .px(px(8.0))
                         .py(px(6.0))
                         .rounded(px(7.0))
-                        .cursor_pointer()
+                        .cursor_default()
                         .when(selected, |element| element.bg(theme.overlay))
                         .hover(|element| element.bg(theme.overlay))
                         .active(|element| element.bg(theme.overlay_strong))
@@ -780,7 +788,7 @@ impl Waku {
                         .text_size(px(12.5))
                         .line_height(px(16.0))
                         .rounded(px(7.0))
-                        .cursor_pointer()
+                        .cursor_default()
                         .hover(|element| element.bg(theme.overlay))
                         .active(|element| element.bg(theme.overlay_strong))
                         .child(icon("icons/plus.svg", 13.0, theme.text_secondary))
@@ -821,7 +829,7 @@ impl Waku {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .cursor_pointer()
+                                    .cursor_default()
                                     .hover(|element| element.bg(theme.overlay))
                                     .active(|element| element.bg(theme.overlay_strong))
                                     .child(icon("icons/plus.svg", 11.0, theme.text_ghost))
@@ -883,7 +891,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .cursor_pointer()
+                    .cursor_default()
                     .hover(|element| element.bg(theme.overlay))
                     .active(|element| element.bg(theme.overlay_strong))
                     .child(icon("icons/panel-left.svg", 14.0, theme.text_tertiary))
@@ -995,7 +1003,7 @@ impl Waku {
                         .rounded_full()
                         .flex()
                         .items_center()
-                        .cursor_pointer()
+                        .cursor_default()
                         .bg(theme.inverse)
                         .text_color(theme.on_inverse)
                         .text_size(px(12.5))
@@ -1061,7 +1069,7 @@ impl Waku {
                     .gap(px(6.0))
                     .text_size(px(12.0))
                     .line_height(px(15.0))
-                    .cursor_pointer()
+                    .cursor_default()
                     .when(selected, |element| element.bg(theme.raised).shadow_sm())
                     .when(!installed, |element| element.opacity(0.5))
                     .active(|element| element.opacity(0.8))
@@ -1140,10 +1148,12 @@ impl Waku {
             .min_h_0()
             .w_full()
             .child(
-                list(self.transcript_rows.clone(), move |index, _window, cx| {
+                list(self.transcript_rows.clone(), move |index, window, cx| {
                     entity
                         .upgrade()
-                        .map(|entity| entity.update(cx, |this, cx| this.transcript_row(index, cx)))
+                        .map(|entity| {
+                            entity.update(cx, |this, cx| this.transcript_row(index, window, cx))
+                        })
                         .unwrap_or_else(|| div().into_any_element())
                 })
                 .size_full(),
@@ -1204,8 +1214,14 @@ impl Waku {
     /// activity clusters belong to the in-flight (or just-finished) turn, so
     /// they render in chronological position: right before the assistant
     /// message they produced, never pinned to the end of the transcript.
-    fn transcript_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn transcript_row(
+        &self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::dark();
+        let waku = cx.entity().downgrade();
         let row_count = self.transcript_row_count();
         let (message_count, last_is_assistant) = self
             .selected_session()
@@ -1231,7 +1247,7 @@ impl Waku {
             TranscriptRowKind::Message(message_index) => self
                 .selected_session()
                 .and_then(|session| session.messages.get(message_index))
-                .map(|message| render_message(&theme, message))
+                .map(|message| render_message(&theme, message, waku, window, cx))
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::Reasoning => self.render_reasoning_row(&theme, cx),
             TranscriptRowKind::Activities => self.render_activities_row(&theme, cx),
@@ -1278,7 +1294,7 @@ impl Waku {
                     .gap(px(6.0))
                     .text_size(px(11.0))
                     .line_height(px(14.0))
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(icon(
                         if expanded {
                             "icons/chevron-down.svg"
@@ -1337,7 +1353,7 @@ impl Waku {
                 .gap(px(6.0))
                 .text_size(px(11.0))
                 .line_height(px(14.0))
-                .cursor_pointer()
+                .cursor_default()
                 .child(icon(
                     if expanded {
                         "icons/chevron-down.svg"
@@ -1384,7 +1400,7 @@ impl Waku {
                     .line_height(px(14.0))
                     .when(has_detail, |element| {
                         element
-                            .cursor_pointer()
+                            .cursor_default()
                             .hover(|element| element.bg(theme.overlay))
                             .active(|element| element.bg(theme.overlay_strong))
                     })
@@ -1482,7 +1498,7 @@ impl Waku {
                     .rounded(px(7.0))
                     .flex()
                     .items_center()
-                    .cursor_pointer()
+                    .cursor_default()
                     .text_size(px(11.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .when(allow, |element| {
@@ -1572,7 +1588,7 @@ impl Waku {
         let fresh_session = session
             .map(|session| session.messages.is_empty())
             .unwrap_or(false);
-        let focused = self.composer.read(cx).focus().is_focused(window);
+        let focused = self.composer.read(cx).is_visually_focused(window);
         let has_draft = !self.composer.read(cx).content().trim().is_empty();
         let weak = cx.entity().downgrade();
         let provider_options = ProviderKind::ALL
@@ -1709,7 +1725,7 @@ impl Waku {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .cursor_pointer()
+                                .cursor_default()
                                 .bg(theme.overlay_strong)
                                 .hover(|element| element.bg(theme.danger_soft))
                                 .active(|element| element.opacity(0.8))
@@ -1733,7 +1749,7 @@ impl Waku {
                                 })
                                 .when(has_draft, |element| {
                                     element
-                                        .cursor_pointer()
+                                        .cursor_default()
                                         .hover(|element| element.opacity(0.9))
                                         .active(|element| element.opacity(0.8))
                                 })
@@ -1811,6 +1827,64 @@ impl Waku {
                     ),
             )
     }
+
+    fn open_message_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        role: MessageRole,
+        content: String,
+        code: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let action_context = window.focused(cx);
+        let composer = self.composer.clone();
+        let menu = PopupMenu::build(window, cx, move |mut menu, _window, _cx| {
+            if let Some(action_context) = action_context {
+                menu = menu.action_context(action_context);
+            }
+
+            let copy_content = content.clone();
+            menu = menu
+                .min_w(px(170.0))
+                .item(
+                    PopupMenuItem::new("Copy Message").on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
+                    }),
+                );
+
+            if role == MessageRole::User {
+                let composer = composer.clone();
+                let edit_content = content.clone();
+                menu = menu.item(PopupMenuItem::new("Edit in Composer").on_click(
+                    move |_, window, cx| {
+                        composer.update(cx, |composer, cx| {
+                            composer.set_content(edit_content.clone(), cx);
+                        });
+                        window.focus(&composer.read(cx).focus());
+                    },
+                ));
+            }
+
+            if let Some(code) = code.clone() {
+                menu = menu.item(PopupMenuItem::new("Copy Code").on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                }));
+            }
+            menu
+        });
+        let subscription =
+            cx.subscribe_in(&menu, window, |waku, _, _: &DismissEvent, _window, cx| {
+                waku.message_context_menu = None;
+                cx.notify();
+            });
+
+        self.message_context_menu_position = event.position;
+        self.message_context_menu = Some(menu.clone());
+        self._message_context_menu_subscription = Some(subscription);
+        menu.focus_handle(cx).focus(window);
+        cx.notify();
+    }
 }
 
 impl Render for Waku {
@@ -1822,6 +1896,8 @@ impl Render for Waku {
             .unwrap_or(true);
         let permission = self.render_permission(cx);
         let toast = self.toast.clone();
+        let message_context_menu = self.message_context_menu.clone();
+        let message_context_menu_position = self.message_context_menu_position;
         div()
             .key_context("Waku")
             .on_action(cx.listener(Self::new_session_action))
@@ -1882,6 +1958,15 @@ impl Render for Waku {
                             .child(self.render_workspace_footer())
                     }),
             )
+            .children(message_context_menu.map(|menu| {
+                deferred(
+                    anchored()
+                        .snap_to_window_with_margin(px(8.0))
+                        .anchor(Corner::TopLeft)
+                        .position(message_context_menu_position)
+                        .child(div().cursor_default().child(menu)),
+                )
+            }))
     }
 }
 
@@ -1940,34 +2025,59 @@ fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement 
         .into_any_element()
 }
 
-fn render_message(theme: &Theme, message: &Message) -> AnyElement {
-    match message.role {
-        MessageRole::User => div()
-            .w_full()
-            .flex()
-            .justify_end()
-            .child(
-                div()
-                    .max_w(px(540.0))
-                    .rounded(px(12.0))
-                    .bg(theme.raised)
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .text_size(px(13.0))
-                    .line_height(px(20.0))
-                    .text_color(theme.text)
-                    .whitespace_normal()
-                    .child(SharedString::from(message.content.clone())),
-            )
-            .into_any_element(),
+fn render_message(
+    theme: &Theme,
+    message: &Message,
+    waku: WeakEntity<Waku>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let content = message.content.clone();
+    let message_id = message.id;
+    let role = message.role;
+    let code = fenced_code(&content);
+    let menu_content = content.clone();
+    let element = match role {
+        MessageRole::User => div().w_full().flex().justify_end().child(
+            div()
+                .max_w(px(540.0))
+                .rounded(px(12.0))
+                .bg(theme.raised)
+                .px(px(12.0))
+                .py(px(8.0))
+                .text_size(px(14.0))
+                .line_height(px(20.0))
+                .text_color(theme.text)
+                .whitespace_normal()
+                .child(selectable_plain_text(
+                    SharedString::from(format!("message-{message_id}-user")),
+                    &content,
+                    window,
+                    cx,
+                )),
+        ),
         MessageRole::Assistant => {
+            let text_id = if message.streaming {
+                format!("message-{message_id}-assistant-{}", content.len())
+            } else {
+                format!("message-{message_id}-assistant")
+            };
             let mut column = div()
                 .w_full()
                 .min_w_0()
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                .child(render_rich_text(theme, &message.content));
+                .text_size(px(13.5))
+                .line_height(px(21.0))
+                .text_color(theme.text)
+                .child(
+                    TextView::markdown(SharedString::from(text_id), content.clone(), window, cx)
+                        .style(TextViewStyle::default().paragraph_gap(rems(0.5)))
+                        .selectable(true)
+                        .w_full()
+                        .cursor_text(),
+                );
             if message.streaming {
                 column = column.child(pulse_dot(
                     format!("stream-{}", message.id),
@@ -1975,210 +2085,92 @@ fn render_message(theme: &Theme, message: &Message) -> AnyElement {
                     theme.accent,
                 ));
             }
-            column.into_any_element()
+            column
         }
-        MessageRole::System => div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .child(
-                div()
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .rounded_full()
-                    .bg(theme.overlay)
-                    .text_size(px(11.0))
-                    .text_color(theme.text_tertiary)
-                    .child(SharedString::from(message.content.clone())),
-            )
-            .into_any_element(),
-    }
-}
-
-/// Renders assistant markdown-ish content: fenced code blocks, paragraphs,
-/// bullet and numbered lists, and inline `code` / **bold** spans.
-fn render_rich_text(theme: &Theme, content: &str) -> Div {
-    let mut root = div().flex().flex_col().gap(px(8.0));
-    let mut in_code = false;
-    for segment in content.split("```") {
-        if !segment.is_empty() {
-            if in_code {
-                let (language, code) = segment
-                    .split_once('\n')
-                    .map(|(language, code)| (language.trim(), code))
-                    .unwrap_or(("", segment));
-                let code = code.trim_end();
-                if !code.is_empty() {
-                    root = root.child(render_code_block(theme, language, code));
-                }
-            } else {
-                for block in segment.split("\n\n") {
-                    let block = block.trim();
-                    if !block.is_empty() {
-                        root = root.child(render_text_block(theme, block));
-                    }
-                }
-            }
-        }
-        in_code = !in_code;
-    }
-    root
-}
-
-fn render_code_block(theme: &Theme, language: &str, code: &str) -> Div {
-    let mut block = div()
-        .w_full()
-        .rounded(px(8.0))
-        .bg(theme.inset)
-        .border_1()
-        .border_color(theme.border)
-        .my(px(2.0));
-    if !language.is_empty() {
-        block = block.child(
+        MessageRole::System => div().w_full().flex().justify_center().child(
             div()
                 .px(px(10.0))
-                .pt(px(7.0))
-                .text_size(px(9.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text_ghost)
-                .child(SharedString::from(language.to_ascii_uppercase())),
-        );
-    }
-    block.child(
-        div()
-            .px(px(10.0))
-            .py(px(8.0))
-            .font_family("SF Mono")
-            .text_size(px(11.5))
-            .line_height(px(17.5))
-            .text_color(theme.code_text)
-            .whitespace_normal()
-            .child(SharedString::from(code.to_owned())),
-    )
-}
-
-/// A paragraph, heading, or list chunk between blank lines.
-fn render_text_block(theme: &Theme, block: &str) -> Div {
-    let lines = block.lines().map(str::trim_end).collect::<Vec<_>>();
-    let is_list_line = |line: &str| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("• ")
-            || numbered_prefix(trimmed).is_some()
+                .py(px(4.0))
+                .rounded_full()
+                .bg(theme.overlay)
+                .text_size(px(11.0))
+                .line_height(px(16.0))
+                .text_color(theme.text_tertiary)
+                .child(selectable_plain_text(
+                    SharedString::from(format!("message-{message_id}-system")),
+                    &content,
+                    window,
+                    cx,
+                )),
+        ),
     };
-    if lines.iter().any(|line| is_list_line(line)) {
-        let mut list = div().flex().flex_col().gap(px(5.0));
-        for line in lines {
-            let trimmed = line.trim_start();
-            if let Some((marker, rest)) = list_item(trimmed) {
-                list = list.child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(9.0))
-                        .child(
-                            div()
-                                .flex_none()
-                                .min_w(px(11.0))
-                                .text_size(px(13.5))
-                                .line_height(px(21.0))
-                                .text_color(theme.text_tertiary)
-                                .child(SharedString::from(marker)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(inline_text(theme, rest, 13.5, 21.0, theme.text)),
-                        ),
-                );
-            } else if !trimmed.is_empty() {
-                list = list.child(inline_text(theme, trimmed, 13.5, 21.0, theme.text));
+
+    element
+        .id(message_id)
+        .capture_any_mouse_down(move |event, window, cx| {
+            if event.button != MouseButton::Right {
+                return;
             }
-        }
-        return list;
-    }
-    if let Some(rest) = block
-        .strip_prefix("### ")
-        .or_else(|| block.strip_prefix("## "))
-    {
-        return div()
-            .mt(px(4.0))
-            .text_size(px(14.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(theme.text)
-            .child(SharedString::from(rest.to_owned()));
-    }
-    if let Some(rest) = block.strip_prefix("# ") {
-        return div()
-            .mt(px(4.0))
-            .text_size(px(15.5))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(theme.text)
-            .child(SharedString::from(rest.to_owned()));
-    }
-    div().child(inline_text(theme, block, 13.5, 21.0, theme.text))
-}
-
-fn list_item(line: &str) -> Option<(String, &str)> {
-    for bullet in ["- ", "* ", "• "] {
-        if let Some(rest) = line.strip_prefix(bullet) {
-            return Some(("•".to_owned(), rest));
-        }
-    }
-    numbered_prefix(line)
-}
-
-fn numbered_prefix(line: &str) -> Option<(String, &str)> {
-    let digits = line.chars().take_while(char::is_ascii_digit).count();
-    if digits == 0 || digits > 3 {
-        return None;
-    }
-    let rest = line[digits..].strip_prefix(". ")?;
-    Some((format!("{}.", &line[..digits]), rest))
-}
-
-/// Body text with inline `code` and **bold** spans styled via highlights.
-fn inline_text(theme: &Theme, text: &str, size: f32, line_height: f32, color: Hsla) -> AnyElement {
-    let (cleaned, spans) = parse_inline_markdown(text);
-    if spans.is_empty() {
-        return div()
-            .text_size(px(size))
-            .line_height(px(line_height))
-            .text_color(color)
-            .whitespace_normal()
-            .child(SharedString::from(cleaned))
-            .into_any_element();
-    }
-    let mut style = TextStyle::default();
-    style.color = color;
-    style.font_family = ".SystemUIFont".into();
-    style.font_size = px(size).into();
-    style.line_height = px(line_height).into();
-    let highlights = spans
-        .into_iter()
-        .map(|(range, kind)| {
-            (
-                range,
-                match kind {
-                    InlineSpan::Code => HighlightStyle {
-                        color: Some(theme.chip_text),
-                        background_color: Some(theme.chip_bg),
-                        ..Default::default()
-                    },
-                    InlineSpan::Bold => HighlightStyle {
-                        font_weight: Some(FontWeight::SEMIBOLD),
-                        ..Default::default()
-                    },
-                },
-            )
+            cx.stop_propagation();
+            let content = menu_content.clone();
+            let code = code.clone();
+            _ = waku.update(cx, |waku, cx| {
+                waku.open_message_context_menu(event, role, content, code, window, cx);
+            });
         })
-        .collect::<Vec<_>>();
-    div()
-        .whitespace_normal()
-        .child(StyledText::new(cleaned).with_default_highlights(&style, highlights))
         .into_any_element()
+}
+
+fn selectable_plain_text(
+    id: impl Into<gpui::ElementId>,
+    content: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> TextView {
+    let html = if content.is_empty() {
+        "<p></p>".to_owned()
+    } else {
+        content
+            .split('\n')
+            .map(|line| format!("<p>{}</p>", escape_html(line)))
+            .collect::<String>()
+    };
+    TextView::html(id, html, window, cx)
+        .style(TextViewStyle::default().paragraph_gap(rems(0.0)))
+        .selectable(true)
+        .w_full()
+        .cursor_text()
+}
+
+fn escape_html(content: &str) -> String {
+    content
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn fenced_code(content: &str) -> Option<String> {
+    let mut code_blocks = Vec::new();
+    let mut segments = content.split("```");
+    let _ = segments.next();
+    while let Some(fenced) = segments.next() {
+        let (language, code) = fenced
+            .split_once('\n')
+            .map(|(language, code)| (language.trim(), code))
+            .unwrap_or(("", fenced));
+        let code = if language.is_empty() && !fenced.contains('\n') {
+            fenced
+        } else {
+            code
+        };
+        if !code.trim().is_empty() {
+            code_blocks.push(code.trim_end().to_owned());
+        }
+        let _ = segments.next();
+    }
+    (!code_blocks.is_empty()).then(|| code_blocks.join("\n\n"))
 }
 
 fn activity_summary(activities: &[ActivityItem]) -> String {
@@ -2217,7 +2209,25 @@ fn git_branch(path: &std::path::Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TranscriptRowKind::*, transcript_row_kind};
+    use super::{TranscriptRowKind::*, escape_html, fenced_code, transcript_row_kind};
+
+    #[test]
+    fn plain_message_html_is_escaped() {
+        assert_eq!(
+            escape_html("<tag a='b'>&\""),
+            "&lt;tag a=&#39;b&#39;&gt;&amp;&quot;"
+        );
+    }
+
+    #[test]
+    fn fenced_code_collects_all_blocks_without_languages() {
+        let markdown = "Before\n```rust\nfn main() {}\n```\nAfter\n```\ncargo test\n```";
+        assert_eq!(
+            fenced_code(markdown).as_deref(),
+            Some("fn main() {}\n\ncargo test")
+        );
+        assert_eq!(fenced_code("No code here"), None);
+    }
 
     #[test]
     fn clusters_render_before_the_turns_assistant_message() {
