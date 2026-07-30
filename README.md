@@ -12,12 +12,11 @@ The first MVP supports:
 | Claude Code | `stream-json` | Native Claude session ID |
 | Codex CLI | `app-server` JSON-RPC | `thread/start` and `thread/resume` |
 | OpenCode | Native JSON events | Native OpenCode session ID |
-| Grok Build | ACP over stdio | `session/new` and `session/load` |
+| Grok Build | Native `streaming-json` | Native Grok session ID |
 
-ACP is intentionally not the universal abstraction. Each provider is connected
-through its strongest native interface and translated into Waku's small,
-provider-neutral event model. Grok uses ACP because that is Grok Build's native
-GUI protocol.
+Each provider is connected through its strongest structured interface and
+translated into Waku's small, provider-neutral event model. Grok uses its
+ordered headless NDJSON stream rather than ACP.
 
 ## Run
 
@@ -72,8 +71,8 @@ State is written atomically to the platform-local application data directory as
 activity, permissions, completion, and errors. `src/app.rs` owns the GPUI view
 state and never parses a provider wire format.
 
-The MVP keeps Codex and Grok transports alive for a session. Claude Code and
-OpenCode use resumable per-turn processes, preserving their native session IDs.
+The MVP keeps the Codex transport alive for a session. Claude Code, OpenCode,
+and Grok use resumable per-turn processes, preserving their native session IDs.
 The next product layer is richer provider-native configuration: model pickers,
 structured diffs, file attachments, and OpenCode's managed server API.
 

@@ -6,16 +6,15 @@ description = "A fast, native control plane for local coding agents"
 license = "MIT"
 
 [dependencies]
-agent-client-protocol = "2.0.0"
 anyhow = "1.0"
 crossbeam-channel = "0.5"
 dirs = "6.0"
 gpui = { version = "0.2.2", features = ["macos-blade"] }
 gpui-component = "0.5.1"
+markdown = "1.0.0"
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync"] }
 unicode-segmentation = "1.12"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 

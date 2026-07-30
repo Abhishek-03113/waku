@@ -1,15 +1,15 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, BoxShadow, ClipboardItem, Context, Corner,
     DismissEvent, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, IntoElement,
     ListAlignment, ListState, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
-    Render, SharedString, Subscription, Timer, WeakEntity, Window, anchored, deferred, div, hsla,
-    list, point, prelude::*, pulsating_between, px, rems,
+    Render, SharedString, StyleRefinement, Subscription, Timer, WeakEntity, Window, anchored,
+    deferred, div, hsla, list, point, prelude::*, pulsating_between, px, rems,
 };
 use uuid::Uuid;
 
@@ -17,7 +17,8 @@ use crate::driver::{self, DriverHandle};
 use crate::input::{ComposerEvent, ComposerInput};
 use crate::model::{
     ActivityItem, AgentSession, DriverEvent, Message, MessageRole, PendingPermission, Project,
-    ProviderKind, ProviderProbe, RuntimeMode, SessionStatus, compact_path, unix_time,
+    ProviderKind, ProviderProbe, ReasoningBlock, RuntimeMode, SessionStatus, TranscriptBlock,
+    TranscriptBlockContent, compact_path, unix_time, unix_time_millis,
 };
 use gpui_component::Icon as ComponentIcon;
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
@@ -35,6 +36,13 @@ const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 252.0;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamPhase {
+    Text,
+    Reasoning,
+    Activity,
+}
+
 pub struct Waku {
     state: PersistedState,
     store: StateStore,
@@ -43,10 +51,7 @@ pub struct Waku {
     driver: Option<DriverHandle>,
     driver_session: Option<Uuid>,
     driver_events: Option<Receiver<DriverEvent>>,
-    activities: Vec<ActivityItem>,
-    reasoning: String,
-    reasoning_started: Option<Instant>,
-    reasoning_finished: Option<Instant>,
+    stream_phase: Option<StreamPhase>,
     /// User override for the thinking disclosure; `None` follows the turn
     /// (open while thinking, closed once the answer starts).
     reasoning_expanded: Option<bool>,
@@ -73,6 +78,16 @@ impl Waku {
         for session in &mut state.sessions {
             if session.status != SessionStatus::Idle {
                 session.status = SessionStatus::Idle;
+            }
+            for message in &mut session.messages {
+                message.streaming = false;
+            }
+            for block in &mut session.transcript_blocks {
+                if let TranscriptBlockContent::Activities(activities) = &mut block.content {
+                    for activity in activities {
+                        activity.complete = true;
+                    }
+                }
             }
         }
         let probes = ProviderKind::ALL
@@ -125,10 +140,7 @@ impl Waku {
                 driver: None,
                 driver_session: None,
                 driver_events: None,
-                activities: Vec::new(),
-                reasoning: String::new(),
-                reasoning_started: None,
-                reasoning_finished: None,
+                stream_phase: None,
                 reasoning_expanded: None,
                 activities_expanded: None,
                 expanded_activity_items: HashSet::new(),
@@ -164,6 +176,12 @@ impl Waku {
             .sessions
             .iter_mut()
             .find(|session| session.id == id)
+    }
+
+    fn selected_transcript_blocks(&self) -> &[TranscriptBlock] {
+        self.selected_session()
+            .map(|session| session.transcript_blocks.as_slice())
+            .unwrap_or(&[])
     }
 
     fn save(&mut self) {
@@ -230,15 +248,9 @@ impl Waku {
         session
             .messages
             .push(Message::new(MessageRole::User, &prompt));
-        let mut assistant = Message::new(MessageRole::Assistant, "");
-        assistant.streaming = true;
-        session.messages.push(assistant);
         session.status = SessionStatus::Connecting;
         session.updated_at = unix_time();
-        self.activities.clear();
-        self.reasoning.clear();
-        self.reasoning_started = None;
-        self.reasoning_finished = None;
+        self.stream_phase = None;
         self.reasoning_expanded = None;
         self.activities_expanded = None;
         self.expanded_activity_items.clear();
@@ -251,10 +263,9 @@ impl Waku {
                 let message = format!("Could not start the agent: {error}");
                 if let Some(session) = self.selected_session_mut() {
                     session.status = SessionStatus::Failed;
-                    if let Some(last) = session.messages.last_mut() {
-                        last.content = message;
-                        last.streaming = false;
-                    }
+                    session
+                        .messages
+                        .push(Message::new(MessageRole::Assistant, message));
                 }
             }
         }
@@ -278,15 +289,13 @@ impl Waku {
         changed
     }
 
-    /// One list row per message, plus live reasoning and activity clusters.
+    /// One list row per message plus each ordered non-message turn block.
     fn transcript_row_count(&self) -> usize {
         let messages = self
             .selected_session()
             .map(|session| session.messages.len())
             .unwrap_or(0);
-        messages
-            + usize::from(!self.reasoning.trim().is_empty())
-            + usize::from(!self.activities.is_empty())
+        messages + self.selected_transcript_blocks().len()
     }
 
     /// Keep the list's row count in sync with the transcript. Appends keep
@@ -302,14 +311,170 @@ impl Waku {
         }
     }
 
-    /// Streaming mutates the trailing rows in place, so re-measure them.
+    /// Streaming mutates current-turn rows in place, so re-measure the part of
+    /// the transcript that can still change.
     fn remeasure_transcript_tail(&self) {
         self.sync_transcript_rows();
         let count = self.transcript_rows.item_count();
-        let from = count.saturating_sub(3);
+        let from = self
+            .selected_transcript_blocks()
+            .first()
+            .map(|block| block.after_message.saturating_sub(1))
+            .unwrap_or_else(|| count.saturating_sub(2));
         if from < count {
             self.transcript_rows.splice(from..count, count - from);
         }
+    }
+
+    fn finish_streaming_assistant(&mut self) {
+        if let Some(session) = self.selected_session_mut() {
+            for message in &mut session.messages {
+                if message.role == MessageRole::Assistant && message.streaming {
+                    message.streaming = false;
+                }
+            }
+        }
+    }
+
+    fn append_text_delta(&mut self, delta: String) {
+        let continuing = self.stream_phase == Some(StreamPhase::Text);
+        if !continuing {
+            self.finish_streaming_assistant();
+        }
+        if let Some(session) = self.selected_session_mut() {
+            let existing = continuing.then(|| {
+                session
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|message| message.role == MessageRole::Assistant && message.streaming)
+            });
+            if let Some(Some(message)) = existing {
+                message.content.push_str(&delta);
+            } else {
+                let mut message = Message::new(MessageRole::Assistant, delta);
+                message.streaming = true;
+                session.messages.push(message);
+            }
+            session.updated_at = unix_time();
+        }
+        self.stream_phase = Some(StreamPhase::Text);
+    }
+
+    fn append_reasoning_delta(&mut self, delta: String) {
+        let now = unix_time_millis();
+        let continuing = self.stream_phase == Some(StreamPhase::Reasoning);
+        if !continuing {
+            self.finish_streaming_assistant();
+        }
+        if let Some(session) = self.selected_session_mut() {
+            if continuing
+                && let Some(TranscriptBlock {
+                    content: TranscriptBlockContent::Reasoning(reasoning),
+                    ..
+                }) = session.transcript_blocks.last_mut()
+            {
+                reasoning.content.push_str(&delta);
+                reasoning.finished_at_ms = now;
+            } else {
+                session.transcript_blocks.push(TranscriptBlock {
+                    after_message: session.messages.len(),
+                    content: TranscriptBlockContent::Reasoning(ReasoningBlock {
+                        content: delta,
+                        started_at_ms: now,
+                        finished_at_ms: now,
+                    }),
+                });
+            }
+            session.updated_at = unix_time();
+        }
+        self.stream_phase = Some(StreamPhase::Reasoning);
+    }
+
+    fn update_activity(
+        &mut self,
+        source_id: Option<String>,
+        kind: crate::model::ActivityKind,
+        title: String,
+        detail: Option<String>,
+        complete: bool,
+    ) {
+        if self.stream_phase == Some(StreamPhase::Text) {
+            self.finish_streaming_assistant();
+        }
+
+        let continuing = self.stream_phase == Some(StreamPhase::Activity);
+        if let Some(session) = self.selected_session_mut() {
+            for block in session.transcript_blocks.iter_mut().rev() {
+                let TranscriptBlockContent::Activities(activities) = &mut block.content else {
+                    continue;
+                };
+                let matching = activities.iter_mut().rev().find(|activity| {
+                    source_id
+                        .as_ref()
+                        .is_some_and(|id| activity.source_id.as_ref() == Some(id))
+                        || (source_id.is_none() && activity.title == title && !activity.complete)
+                });
+                if let Some(activity) = matching {
+                    activity.kind = kind;
+                    activity.title = title;
+                    activity.complete = complete;
+                    if detail.is_some() {
+                        activity.detail = detail;
+                    }
+                    session.updated_at = unix_time();
+                    self.stream_phase = Some(StreamPhase::Activity);
+                    return;
+                }
+            }
+
+            let after_message = session.messages.len();
+            let item = ActivityItem::new(source_id, kind, title, detail, complete);
+            if continuing
+                && let Some(TranscriptBlock {
+                    after_message: anchor,
+                    content: TranscriptBlockContent::Activities(activities),
+                }) = session.transcript_blocks.last_mut()
+                && *anchor == after_message
+            {
+                activities.push(item);
+            } else {
+                session.transcript_blocks.push(TranscriptBlock {
+                    after_message,
+                    content: TranscriptBlockContent::Activities(vec![item]),
+                });
+            }
+            session.updated_at = unix_time();
+        }
+        self.stream_phase = Some(StreamPhase::Activity);
+    }
+
+    fn complete_turn_blocks(&mut self) {
+        if let Some(session) = self.selected_session_mut() {
+            for block in &mut session.transcript_blocks {
+                if let TranscriptBlockContent::Activities(activities) = &mut block.content {
+                    for activity in activities {
+                        activity.complete = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn turn_has_assistant_message(&self) -> bool {
+        self.selected_session()
+            .and_then(|session| {
+                let last_user = session
+                    .messages
+                    .iter()
+                    .rposition(|message| message.role == MessageRole::User)?;
+                Some(
+                    session.messages[last_user + 1..]
+                        .iter()
+                        .any(|message| message.role == MessageRole::Assistant),
+                )
+            })
+            .unwrap_or(false)
     }
 
     fn handle_driver_event(&mut self, event: DriverEvent) {
@@ -330,48 +495,19 @@ impl Waku {
                 }
             }
             DriverEvent::TextDelta(delta) => {
-                if let Some(session) = self.selected_session_mut() {
-                    if let Some(message) =
-                        session.messages.iter_mut().rev().find(|message| {
-                            message.role == MessageRole::Assistant && message.streaming
-                        })
-                    {
-                        message.content.push_str(&delta);
-                    } else {
-                        let mut message = Message::new(MessageRole::Assistant, delta);
-                        message.streaming = true;
-                        session.messages.push(message);
-                    }
-                    session.updated_at = unix_time();
-                }
+                self.append_text_delta(delta);
             }
             DriverEvent::ReasoningDelta(delta) => {
-                if self.reasoning_started.is_none() {
-                    self.reasoning_started = Some(Instant::now());
-                }
-                self.reasoning_finished = Some(Instant::now());
-                self.reasoning.push_str(&delta);
+                self.append_reasoning_delta(delta);
             }
             DriverEvent::Activity {
+                id,
                 kind,
                 title,
                 detail,
                 complete,
             } => {
-                if let Some(activity) = self
-                    .activities
-                    .iter_mut()
-                    .rev()
-                    .find(|activity| activity.title == title && !activity.complete)
-                {
-                    activity.complete = complete;
-                    if detail.is_some() {
-                        activity.detail = detail;
-                    }
-                } else {
-                    self.activities
-                        .push(ActivityItem::new(kind, title, detail, complete));
-                }
+                self.update_activity(id, kind, title, detail, complete);
             }
             DriverEvent::Permission {
                 request_id,
@@ -390,49 +526,53 @@ impl Waku {
                 }
             }
             DriverEvent::TurnFinished { success, summary } => {
+                self.finish_streaming_assistant();
+                self.complete_turn_blocks();
+                self.stream_phase = None;
+                let needs_fallback = !self.turn_has_assistant_message();
                 if let Some(session) = self.selected_session_mut() {
                     session.status = if success {
                         SessionStatus::Idle
                     } else {
                         SessionStatus::Failed
                     };
-                    if let Some(message) =
-                        session.messages.iter_mut().rev().find(|message| {
-                            message.role == MessageRole::Assistant && message.streaming
-                        })
-                    {
-                        if message.content.is_empty() {
-                            message.content = summary.unwrap_or_else(|| {
+                    if needs_fallback {
+                        session.messages.push(Message::new(
+                            MessageRole::Assistant,
+                            summary.unwrap_or_else(|| {
                                 if success {
                                     "Turn completed.".into()
                                 } else {
                                     "The agent stopped before returning a response.".into()
                                 }
-                            });
-                        }
-                        message.streaming = false;
+                            }),
+                        ));
                     }
                 }
                 self.pending_permission = None;
             }
             DriverEvent::Error(error) => {
                 self.toast = Some(error.clone());
+                let should_append = !self.turn_has_assistant_message()
+                    && self
+                        .selected_session()
+                        .is_some_and(|session| session.status != SessionStatus::Working);
                 if let Some(session) = self.selected_session_mut() {
                     if session.status != SessionStatus::Working {
                         session.status = SessionStatus::Failed;
                     }
-                    if let Some(message) =
-                        session.messages.iter_mut().rev().find(|message| {
-                            message.role == MessageRole::Assistant && message.streaming
-                        })
-                        && message.content.is_empty()
-                    {
-                        message.content = error;
-                        message.streaming = false;
+                    if should_append {
+                        session
+                            .messages
+                            .push(Message::new(MessageRole::Assistant, error));
                     }
                 }
             }
             DriverEvent::ProcessExited => {
+                self.finish_streaming_assistant();
+                self.complete_turn_blocks();
+                self.stream_phase = None;
+                self.pending_permission = None;
                 if let Some(session) = self.selected_session_mut()
                     && matches!(
                         session.status,
@@ -440,6 +580,7 @@ impl Waku {
                     )
                 {
                     session.status = SessionStatus::Failed;
+                    session.updated_at = unix_time();
                 }
             }
         }
@@ -528,10 +669,7 @@ impl Waku {
         self.driver = None;
         self.driver_session = None;
         self.driver_events = None;
-        self.activities.clear();
-        self.reasoning.clear();
-        self.reasoning_started = None;
-        self.reasoning_finished = None;
+        self.stream_phase = None;
         self.reasoning_expanded = None;
         self.activities_expanded = None;
         self.expanded_activity_items.clear();
@@ -566,18 +704,16 @@ impl Waku {
         if let Some(driver) = &self.driver {
             driver.cancel();
         }
+        self.finish_streaming_assistant();
+        self.complete_turn_blocks();
+        self.stream_phase = None;
+        let needs_fallback = !self.turn_has_assistant_message();
         if let Some(session) = self.selected_session_mut() {
             session.status = SessionStatus::Idle;
-            if let Some(message) = session
-                .messages
-                .iter_mut()
-                .rev()
-                .find(|message| message.role == MessageRole::Assistant && message.streaming)
-            {
-                if message.content.is_empty() {
-                    message.content = "Stopped.".into();
-                }
-                message.streaming = false;
+            if needs_fallback {
+                session
+                    .messages
+                    .push(Message::new(MessageRole::Assistant, "Stopped."));
             }
         }
         self.pending_permission = None;
@@ -1161,28 +1297,22 @@ impl Waku {
             .into_any_element()
     }
 
-    /// Seconds the provider spent streaming reasoning this turn.
-    fn reasoning_seconds(&self) -> u64 {
-        match (self.reasoning_started, self.reasoning_finished) {
-            (Some(started), Some(finished)) => finished.duration_since(started).as_secs().max(1),
-            _ => 1,
-        }
-    }
-
-    /// The provider is still thinking: the turn's answer has not started.
+    /// The provider's latest ordered block is still reasoning.
     fn reasoning_live(&self) -> bool {
-        self.selected_session()
-            .and_then(|session| session.messages.last())
-            .map(|message| {
-                message.role == MessageRole::Assistant
-                    && message.streaming
-                    && message.content.is_empty()
-            })
-            .unwrap_or(false)
+        self.stream_phase == Some(StreamPhase::Reasoning)
+            && self
+                .selected_session()
+                .is_some_and(|session| session.status == SessionStatus::Working)
     }
 
     fn activities_running(&self) -> bool {
-        self.activities.iter().any(|activity| !activity.complete)
+        self.selected_transcript_blocks().iter().any(|block| {
+            matches!(
+                &block.content,
+                TranscriptBlockContent::Activities(activities)
+                    if activities.iter().any(|activity| !activity.complete)
+            )
+        })
     }
 
     fn toggle_reasoning(&mut self, cx: &mut Context<Self>) {
@@ -1210,10 +1340,9 @@ impl Waku {
     }
 
     /// A single transcript row, self-centered to the content column so the
-    /// list can measure it at its true wrap width. The live reasoning and
-    /// activity clusters belong to the in-flight (or just-finished) turn, so
-    /// they render in chronological position: right before the assistant
-    /// message they produced, never pinned to the end of the transcript.
+    /// list can measure it at its true wrap width. Current-turn reasoning and
+    /// activity blocks are anchored at the exact boundary between assistant
+    /// text segments where their provider events arrived.
     fn transcript_row(
         &self,
         index: usize,
@@ -1223,34 +1352,37 @@ impl Waku {
         let theme = Theme::dark();
         let waku = cx.entity().downgrade();
         let row_count = self.transcript_row_count();
-        let (message_count, last_is_assistant) = self
+        let message_count = self
             .selected_session()
-            .map(|session| {
-                (
-                    session.messages.len(),
-                    session
-                        .messages
-                        .last()
-                        .map(|last| last.role == MessageRole::Assistant)
-                        .unwrap_or(false),
-                )
-            })
-            .unwrap_or((0, false));
-        let kind = transcript_row_kind(
-            message_count,
-            last_is_assistant,
-            !self.reasoning.trim().is_empty(),
-            !self.activities.is_empty(),
-            index,
-        );
+            .map(|session| session.messages.len())
+            .unwrap_or(0);
+        let anchors = self
+            .selected_transcript_blocks()
+            .iter()
+            .map(|block| block.after_message)
+            .collect::<Vec<_>>();
+        let kind = transcript_row_kinds(message_count, &anchors)
+            .get(index)
+            .copied()
+            .unwrap_or(TranscriptRowKind::Message(index));
         let inner = match kind {
             TranscriptRowKind::Message(message_index) => self
                 .selected_session()
                 .and_then(|session| session.messages.get(message_index))
                 .map(|message| render_message(&theme, message, waku, window, cx))
                 .unwrap_or_else(|| div().into_any_element()),
-            TranscriptRowKind::Reasoning => self.render_reasoning_row(&theme, cx),
-            TranscriptRowKind::Activities => self.render_activities_row(&theme, cx),
+            TranscriptRowKind::TurnBlock(block_index) => self
+                .selected_transcript_blocks()
+                .get(block_index)
+                .map(|block| match &block.content {
+                    TranscriptBlockContent::Reasoning(reasoning) => {
+                        self.render_reasoning_row(reasoning, block_index, &theme, cx)
+                    }
+                    TranscriptBlockContent::Activities(activities) => {
+                        self.render_activities_row(activities, block_index, &theme, cx)
+                    }
+                })
+                .unwrap_or_else(|| div().into_any_element()),
         };
         div()
             .w_full()
@@ -1273,13 +1405,30 @@ impl Waku {
     /// The turn's reasoning as a disclosure: open while the provider is
     /// thinking, collapsing to "Thought for Ns" once the answer starts, and
     /// clickable either way.
-    fn render_reasoning_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let live = self.reasoning_live();
+    fn render_reasoning_row(
+        &self,
+        reasoning: &ReasoningBlock,
+        block_index: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let live =
+            self.reasoning_live()
+                && self.selected_transcript_blocks().iter().rposition(|block| {
+                    matches!(block.content, TranscriptBlockContent::Reasoning(_))
+                }) == Some(block_index);
         let expanded = self.reasoning_expanded.unwrap_or(live);
         let label = if live {
             "Thinking".to_owned()
         } else {
-            format!("Thought for {}s", self.reasoning_seconds())
+            format!(
+                "Thought for {}s",
+                reasoning
+                    .finished_at_ms
+                    .saturating_sub(reasoning.started_at_ms)
+                    .div_ceil(1000)
+                    .max(1)
+            )
         };
         div()
             .flex()
@@ -1287,7 +1436,7 @@ impl Waku {
             .gap(px(6.0))
             .child(
                 div()
-                    .id("thinking-toggle")
+                    .id(SharedString::from(format!("thinking-toggle-{block_index}")))
                     .h(px(22.0))
                     .flex()
                     .items_center()
@@ -1307,7 +1456,7 @@ impl Waku {
                     .child(if live {
                         icon("icons/sparkle.svg", 11.0, theme.text_tertiary)
                             .with_animation(
-                                "thinking-pulse",
+                                SharedString::from(format!("thinking-pulse-{block_index}")),
                                 Animation::new(Duration::from_millis(1800))
                                     .repeat()
                                     .with_easing(pulsating_between(0.4, 1.0)),
@@ -1333,7 +1482,7 @@ impl Waku {
                         .line_height(px(18.0))
                         .text_color(theme.text_tertiary)
                         .whitespace_normal()
-                        .child(SharedString::from(self.reasoning.clone())),
+                        .child(SharedString::from(reasoning.content.clone())),
                 )
             })
             .into_any_element()
@@ -1341,12 +1490,18 @@ impl Waku {
 
     /// The turn's tool activity as a disclosure: the summary line toggles the
     /// row list, and each row with detail expands to its full content.
-    fn render_activities_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let running = self.activities_running();
+    fn render_activities_row(
+        &self,
+        activities: &[ActivityItem],
+        block_index: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let running = activities.iter().any(|activity| !activity.complete);
         let expanded = self.activities_expanded.unwrap_or(running);
         let cluster = div().flex().flex_col().gap(px(2.0)).child(
             div()
-                .id("activity-toggle")
+                .id(SharedString::from(format!("activity-toggle-{block_index}")))
                 .h(px(22.0))
                 .flex()
                 .items_center()
@@ -1364,13 +1519,17 @@ impl Waku {
                     theme.text_ghost,
                 ))
                 .when(running, |element| {
-                    element.child(pulse_dot("activity-running", 5.0, theme.accent))
+                    element.child(pulse_dot(
+                        format!("activity-running-{block_index}"),
+                        5.0,
+                        theme.accent,
+                    ))
                 })
                 .child(
                     div()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_tertiary)
-                        .child(SharedString::from(activity_summary(&self.activities))),
+                        .child(SharedString::from(activity_summary(activities))),
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_activities(cx))),
         );
@@ -1378,7 +1537,7 @@ impl Waku {
             return cluster.into_any_element();
         }
         let mut items = div().flex().flex_col().pl(px(15.0));
-        for activity in &self.activities {
+        for activity in activities {
             let id = activity.id;
             let detail = activity
                 .detail
@@ -1975,37 +2134,34 @@ impl Render for Waku {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TranscriptRowKind {
     Message(usize),
-    Reasoning,
-    Activities,
+    TurnBlock(usize),
 }
 
-/// Maps a flat list index onto the transcript's chronological order: earlier
-/// messages, then the live reasoning and activity clusters, then the
-/// assistant message they belong to. When the turn has no trailing assistant
-/// message the clusters simply follow the last message.
-fn transcript_row_kind(
-    message_count: usize,
-    last_is_assistant: bool,
-    has_reasoning: bool,
-    has_activities: bool,
-    index: usize,
-) -> TranscriptRowKind {
-    let anchor = if last_is_assistant {
-        message_count.saturating_sub(1)
-    } else {
-        message_count
-    };
-    let cluster_rows = usize::from(has_reasoning) + usize::from(has_activities);
-    if index < anchor {
-        return TranscriptRowKind::Message(index);
+/// Interleave live turn blocks at the exact message boundary where their
+/// provider events arrived. `anchors[n] == 2` means block `n` renders after
+/// messages 0 and 1, before message 2.
+fn transcript_row_kinds(message_count: usize, anchors: &[usize]) -> Vec<TranscriptRowKind> {
+    let mut blocks_after = vec![Vec::new(); message_count + 1];
+    for (block_index, anchor) in anchors.iter().copied().enumerate() {
+        blocks_after[anchor.min(message_count)].push(block_index);
     }
-    if has_reasoning && index == anchor {
-        return TranscriptRowKind::Reasoning;
+    let mut rows = Vec::with_capacity(message_count + anchors.len());
+    rows.extend(
+        blocks_after[0]
+            .iter()
+            .copied()
+            .map(TranscriptRowKind::TurnBlock),
+    );
+    for message_index in 0..message_count {
+        rows.push(TranscriptRowKind::Message(message_index));
+        rows.extend(
+            blocks_after[message_index + 1]
+                .iter()
+                .copied()
+                .map(TranscriptRowKind::TurnBlock),
+        );
     }
-    if has_activities && index == anchor + usize::from(has_reasoning) {
-        return TranscriptRowKind::Activities;
-    }
-    TranscriptRowKind::Message(index - cluster_rows)
+    rows
 }
 
 fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
@@ -2062,22 +2218,35 @@ fn render_message(
             } else {
                 format!("message-{message_id}-assistant")
             };
+            let markdown_blocks = markdown_blocks(&content);
             let mut column = div()
                 .w_full()
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
+                // gpui-component currently marks every top-level node as the
+                // final node in a non-scrollable TextView, which suppresses
+                // paragraph margins. Separate views give semantic Markdown
+                // blocks a real layout gap.
+                .gap(px(12.0))
+                .py(px(4.0))
                 .text_size(px(13.5))
                 .line_height(px(21.0))
-                .text_color(theme.text)
-                .child(
-                    TextView::markdown(SharedString::from(text_id), content.clone(), window, cx)
-                        .style(TextViewStyle::default().paragraph_gap(rems(0.5)))
-                        .selectable(true)
-                        .w_full()
-                        .cursor_text(),
+                .text_color(theme.text);
+            for (block_index, block) in markdown_blocks.into_iter().enumerate() {
+                column = column.child(
+                    TextView::markdown(
+                        SharedString::from(format!("{text_id}-block-{block_index}")),
+                        block,
+                        window,
+                        cx,
+                    )
+                    .style(assistant_markdown_style(theme))
+                    .selectable(true)
+                    .w_full()
+                    .cursor_text(),
                 );
+            }
             if message.streaming {
                 column = column.child(pulse_dot(
                     format!("stream-{}", message.id),
@@ -2119,6 +2288,68 @@ fn render_message(
             });
         })
         .into_any_element()
+}
+
+fn markdown_blocks(content: &str) -> Vec<String> {
+    let Ok(markdown::mdast::Node::Root(root)) =
+        markdown::to_mdast(content, &markdown::ParseOptions::gfm())
+    else {
+        return vec![content.to_owned()];
+    };
+
+    let definitions = root
+        .children
+        .iter()
+        .filter(|node| matches!(node, markdown::mdast::Node::Definition(_)))
+        .filter_map(|node| {
+            let position = node.position()?;
+            content
+                .get(position.start.offset..position.end.offset)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut blocks = root
+        .children
+        .iter()
+        .filter(|node| !matches!(node, markdown::mdast::Node::Definition(_)))
+        .filter_map(|node| {
+            let position = node.position()?;
+            let block = content
+                .get(position.start.offset..position.end.offset)?
+                .trim_end_matches(['\r', '\n']);
+            Some(if definitions.is_empty() {
+                block.to_owned()
+            } else {
+                format!("{block}\n\n{definitions}")
+            })
+        })
+        .collect::<Vec<_>>();
+    if blocks.is_empty() {
+        blocks.push(content.to_owned());
+    }
+    blocks
+}
+
+fn assistant_markdown_style(theme: &Theme) -> TextViewStyle {
+    TextViewStyle::default()
+        .paragraph_gap(rems(0.75))
+        .heading_font_size(|level, base| match level {
+            1 => base * 1.5,
+            2 => base * 1.3,
+            3 => base * 1.15,
+            4 => base * 1.05,
+            _ => base,
+        })
+        .code_block(
+            StyleRefinement::default()
+                .bg(theme.inset)
+                .border_1()
+                .border_color(theme.border_strong)
+                .rounded(px(8.0))
+                .p(px(12.0))
+                .text_size(px(12.0)),
+        )
 }
 
 fn selectable_plain_text(
@@ -2209,7 +2440,9 @@ fn git_branch(path: &std::path::Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TranscriptRowKind::*, escape_html, fenced_code, transcript_row_kind};
+    use super::{
+        TranscriptRowKind::*, escape_html, fenced_code, markdown_blocks, transcript_row_kinds,
+    };
 
     #[test]
     fn plain_message_html_is_escaped() {
@@ -2230,45 +2463,67 @@ mod tests {
     }
 
     #[test]
-    fn clusters_render_before_the_turns_assistant_message() {
-        // user, assistant, user, assistant(streaming) + reasoning + activities
-        let rows = (0..6)
-            .map(|index| transcript_row_kind(4, true, true, true, index))
-            .collect::<Vec<_>>();
+    fn markdown_root_nodes_render_as_individually_spaced_blocks() {
+        let blocks = markdown_blocks(
+            "Intro\n\n**Section:**\n- one\n- two\n\n```rust\nfn main() {}\n```\n\nOutro",
+        );
+        assert_eq!(
+            blocks,
+            vec![
+                "Intro",
+                "**Section:**",
+                "- one\n- two",
+                "```rust\nfn main() {}\n```",
+                "Outro"
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_reference_definitions_are_kept_with_each_visible_block() {
+        let blocks = markdown_blocks("See [docs][ref].\n\n[ref]: https://example.com");
+        assert_eq!(
+            blocks,
+            vec!["See [docs][ref].\n\n[ref]: https://example.com"]
+        );
+    }
+
+    #[test]
+    fn turn_blocks_keep_their_message_boundaries() {
+        // user, assistant text, tool row, assistant text, reasoning row,
+        // assistant text
+        let rows = transcript_row_kinds(4, &[2, 3]);
         assert_eq!(
             rows,
             vec![
                 Message(0),
                 Message(1),
+                TurnBlock(0),
                 Message(2),
-                Reasoning,
-                Activities,
+                TurnBlock(1),
                 Message(3)
             ]
         );
     }
 
     #[test]
-    fn clusters_follow_messages_when_no_assistant_reply_yet() {
-        let rows = (0..3)
-            .map(|index| transcript_row_kind(2, false, true, false, index))
-            .collect::<Vec<_>>();
-        assert_eq!(rows, vec![Message(0), Message(1), Reasoning]);
+    fn blocks_follow_the_latest_message_without_a_reply() {
+        let rows = transcript_row_kinds(2, &[2]);
+        assert_eq!(rows, vec![Message(0), Message(1), TurnBlock(0)]);
     }
 
     #[test]
     fn plain_transcript_maps_one_to_one() {
-        let rows = (0..4)
-            .map(|index| transcript_row_kind(4, true, false, false, index))
-            .collect::<Vec<_>>();
+        let rows = transcript_row_kinds(4, &[]);
         assert_eq!(rows, vec![Message(0), Message(1), Message(2), Message(3)]);
     }
 
     #[test]
-    fn single_cluster_still_anchors_before_the_reply() {
-        let rows = (0..3)
-            .map(|index| transcript_row_kind(2, true, false, true, index))
-            .collect::<Vec<_>>();
-        assert_eq!(rows, vec![Message(0), Activities, Message(1)]);
+    fn multiple_blocks_at_one_boundary_preserve_event_order() {
+        let rows = transcript_row_kinds(2, &[1, 1]);
+        assert_eq!(
+            rows,
+            vec![Message(0), TurnBlock(0), TurnBlock(1), Message(1)]
+        );
     }
 }

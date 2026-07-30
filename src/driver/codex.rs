@@ -308,6 +308,7 @@ fn handle_codex_message(
                     let title = codex_item_title(item);
                     let detail = codex_item_detail(item);
                     let _ = events.send(DriverEvent::Activity {
+                        id: item.get("id").and_then(Value::as_str).map(str::to_owned),
                         kind,
                         title,
                         detail,

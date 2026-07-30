@@ -1,5 +1,4 @@
 mod codex;
-mod grok;
 mod headless;
 
 use std::path::PathBuf;
@@ -50,21 +49,16 @@ pub fn start(
             provider_session_id,
             events,
         )?),
-        ProviderKind::Claude | ProviderKind::OpenCode => Arc::new(headless::HeadlessDriver::start(
-            provider,
-            binary,
-            cwd,
-            mode,
-            provider_session_id,
-            events,
-        )?),
-        ProviderKind::Grok => Arc::new(grok::GrokDriver::start(
-            binary,
-            cwd,
-            mode,
-            provider_session_id,
-            events,
-        )?),
+        ProviderKind::Claude | ProviderKind::OpenCode | ProviderKind::Grok => {
+            Arc::new(headless::HeadlessDriver::start(
+                provider,
+                binary,
+                cwd,
+                mode,
+                provider_session_id,
+                events,
+            )?)
+        }
     };
     Ok(DriverHandle { inner })
 }

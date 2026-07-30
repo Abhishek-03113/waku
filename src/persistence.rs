@@ -105,17 +105,56 @@ fn temporary_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{
+        ActivityItem, ActivityKind, ReasoningBlock, TranscriptBlock, TranscriptBlockContent,
+    };
 
     #[test]
     fn state_round_trips() {
         let directory = std::env::temp_dir().join(format!("waku-state-{}", Uuid::new_v4()));
         let store = StateStore::new(directory.join("state.json"));
-        let state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].transcript_blocks.extend([
+            TranscriptBlock {
+                after_message: 1,
+                content: TranscriptBlockContent::Reasoning(ReasoningBlock {
+                    content: "Checking the source".into(),
+                    started_at_ms: 1_000,
+                    finished_at_ms: 2_500,
+                }),
+            },
+            TranscriptBlock {
+                after_message: 1,
+                content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+                    Some("tool-1".into()),
+                    ActivityKind::Search,
+                    "Read src/main.rs",
+                    Some("{\"path\":\"src/main.rs\"}".into()),
+                    true,
+                )]),
+            },
+        ]);
         store.save(&state).unwrap();
         let restored = store.load().unwrap();
         assert_eq!(restored.projects[0].name, "project");
         assert_eq!(restored.sessions.len(), 1);
+        assert_eq!(restored.sessions[0].transcript_blocks.len(), 2);
+        assert!(matches!(
+            &restored.sessions[0].transcript_blocks[0].content,
+            TranscriptBlockContent::Reasoning(reasoning)
+                if reasoning.content == "Checking the source"
+        ));
         fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn sessions_without_transcript_blocks_remain_compatible() {
+        let session = AgentSession::new(Uuid::new_v4(), ProviderKind::Grok);
+        let mut value = serde_json::to_value(session).unwrap();
+        value.as_object_mut().unwrap().remove("transcript_blocks");
+
+        let restored = serde_json::from_value::<AgentSession>(value).unwrap();
+        assert!(restored.transcript_blocks.is_empty());
     }
 
     #[test]

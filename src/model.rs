@@ -181,6 +181,8 @@ pub struct AgentSession {
     pub updated_at: u64,
     pub provider_session_id: Option<String>,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub transcript_blocks: Vec<TranscriptBlock>,
 }
 
 impl AgentSession {
@@ -197,6 +199,7 @@ impl AgentSession {
             updated_at: now,
             provider_session_id: None,
             messages: Vec::new(),
+            transcript_blocks: Vec::new(),
         }
     }
 
@@ -267,6 +270,7 @@ pub enum DriverEvent {
     TextDelta(String),
     ReasoningDelta(String),
     Activity {
+        id: Option<String>,
         kind: ActivityKind,
         title: String,
         detail: Option<String>,
@@ -293,9 +297,11 @@ pub struct PermissionOption {
     pub allow: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActivityItem {
     pub id: Uuid,
+    #[serde(default)]
+    pub source_id: Option<String>,
     pub kind: ActivityKind,
     pub title: String,
     pub detail: Option<String>,
@@ -304,6 +310,7 @@ pub struct ActivityItem {
 
 impl ActivityItem {
     pub fn new(
+        source_id: Option<String>,
         kind: ActivityKind,
         title: impl Into<String>,
         detail: Option<String>,
@@ -311,12 +318,34 @@ impl ActivityItem {
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
+            source_id,
             kind,
             title: title.into(),
             detail,
             complete,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReasoningBlock {
+    pub content: String,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "data")]
+pub enum TranscriptBlockContent {
+    Reasoning(ReasoningBlock),
+    Activities(Vec<ActivityItem>),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TranscriptBlock {
+    /// Render this block immediately after this many persisted messages.
+    pub after_message: usize,
+    pub content: TranscriptBlockContent,
 }
 
 #[derive(Clone, Debug)]
@@ -331,6 +360,13 @@ pub fn unix_time() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+pub fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
 }
 

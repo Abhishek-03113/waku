@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -41,7 +42,7 @@ impl HeadlessDriver {
             .spawn(move || {
                 let had_existing_session = existing_session_id.is_some();
                 let mut provider_session_id = match provider {
-                    ProviderKind::Claude => {
+                    ProviderKind::Claude | ProviderKind::Grok => {
                         Some(existing_session_id.unwrap_or_else(|| Uuid::new_v4().to_string()))
                     }
                     ProviderKind::OpenCode => existing_session_id,
@@ -166,7 +167,37 @@ fn run_prompt(
             }
             command.arg(prompt);
         }
-        _ => return None,
+        ProviderKind::Grok => {
+            command.args([
+                "--no-auto-update",
+                "-p",
+                &prompt,
+                "--output-format",
+                "streaming-json",
+            ]);
+            match mode {
+                RuntimeMode::Plan => {
+                    command.args(["--permission-mode", "plan"]);
+                }
+                RuntimeMode::Ask => {
+                    // Grok's headless stream has no interactive permission
+                    // response channel. Deny unapproved tools instead of
+                    // blocking on a terminal prompt that Waku cannot answer.
+                    command.args(["--permission-mode", "dontAsk"]);
+                }
+                RuntimeMode::Auto => {
+                    command.arg("--always-approve");
+                }
+            }
+            if let Some(session_id) = provider_session_id {
+                if resume {
+                    command.args(["--resume", session_id]);
+                } else {
+                    command.args(["--session-id", session_id]);
+                }
+            }
+        }
+        ProviderKind::Codex => return None,
     }
     let result = command
         .stdout(Stdio::piped())
@@ -215,7 +246,8 @@ fn run_prompt(
                 match provider {
                     ProviderKind::Claude => parser.parse_claude(value, events),
                     ProviderKind::OpenCode => parser.parse_opencode(value, events),
-                    _ => {}
+                    ProviderKind::Grok => parser.parse_grok(value, events),
+                    ProviderKind::Codex => {}
                 }
             }
         }
@@ -243,6 +275,7 @@ struct StreamParser {
     saw_text_delta: bool,
     saw_reasoning_delta: bool,
     provider_session_id: Option<String>,
+    grok_tools: HashMap<String, (ActivityKind, String)>,
 }
 
 impl StreamParser {
@@ -291,6 +324,7 @@ impl StreamParser {
                                 }
                             }
                             Some("tool_use") => {
+                                let id = block.get("id").and_then(Value::as_str).map(str::to_owned);
                                 let title = block
                                     .get("name")
                                     .and_then(Value::as_str)
@@ -301,6 +335,7 @@ impl StreamParser {
                                     .map(compact_json)
                                     .filter(|value| !value.is_empty());
                                 let _ = events.send(DriverEvent::Activity {
+                                    id,
                                     kind: classify_tool(&title),
                                     title,
                                     detail,
@@ -375,6 +410,11 @@ impl StreamParser {
                     Some("completed" | "error")
                 );
                 let _ = events.send(DriverEvent::Activity {
+                    id: part
+                        .get("callID")
+                        .or_else(|| part.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                     kind: classify_tool(&title),
                     title,
                     detail,
@@ -387,6 +427,110 @@ impl StreamParser {
                     .and_then(Value::as_str)
                     .or_else(|| value.get("message").and_then(Value::as_str))
                     .unwrap_or("OpenCode reported an error");
+                let _ = events.send(DriverEvent::Error(message.to_owned()));
+            }
+            _ => {}
+        }
+    }
+
+    fn parse_grok(&mut self, value: Value, events: &Sender<DriverEvent>) {
+        match value.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = value.get("data").and_then(Value::as_str) {
+                    let _ = events.send(DriverEvent::TextDelta(text.to_owned()));
+                }
+            }
+            Some("thought") => {
+                if let Some(text) = value.get("data").and_then(Value::as_str) {
+                    let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
+                }
+            }
+            Some("tool_call") => {
+                let id = value
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let title = value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|title| !title.is_empty())
+                    .or_else(|| value.get("toolName").and_then(Value::as_str))
+                    .unwrap_or("Tool")
+                    .to_owned();
+                let kind = classify_grok_tool(
+                    value.get("kind").and_then(Value::as_str),
+                    value.get("toolName").and_then(Value::as_str),
+                    &title,
+                );
+                if let Some(id) = &id {
+                    self.grok_tools.insert(id.clone(), (kind, title.clone()));
+                }
+                let detail = value
+                    .get("rawInput")
+                    .filter(|input| !input.is_null())
+                    .map(compact_json);
+                let complete = matches!(
+                    value.get("status").and_then(Value::as_str),
+                    Some("completed" | "failed")
+                );
+                let _ = events.send(DriverEvent::Activity {
+                    id,
+                    kind,
+                    title,
+                    detail,
+                    complete,
+                });
+            }
+            Some("tool_call_update") => {
+                let id = value
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let (kind, title) = id
+                    .as_ref()
+                    .and_then(|id| self.grok_tools.get(id))
+                    .cloned()
+                    .unwrap_or((ActivityKind::Tool, "Tool".to_owned()));
+                let detail = value
+                    .get("rawOutput")
+                    .filter(|output| !output.is_null())
+                    .map(compact_json);
+                let complete = matches!(
+                    value.get("status").and_then(Value::as_str),
+                    Some("completed" | "failed")
+                );
+                let _ = events.send(DriverEvent::Activity {
+                    id,
+                    kind,
+                    title,
+                    detail,
+                    complete,
+                });
+            }
+            Some("plan") => {
+                let _ = events.send(DriverEvent::Activity {
+                    id: Some("grok-plan".into()),
+                    kind: ActivityKind::Plan,
+                    title: "Plan updated".into(),
+                    detail: value.get("entries").map(compact_json),
+                    complete: false,
+                });
+            }
+            Some("end") => {
+                if let Some(id) = value.get("sessionId").and_then(Value::as_str)
+                    && self.provider_session_id.as_deref() != Some(id)
+                {
+                    self.provider_session_id = Some(id.to_owned());
+                    let _ = events.send(DriverEvent::Connected {
+                        provider_session_id: Some(id.to_owned()),
+                    });
+                }
+            }
+            Some("error") => {
+                let message = value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Grok reported an error");
                 let _ = events.send(DriverEvent::Error(message.to_owned()));
             }
             _ => {}
@@ -418,6 +562,16 @@ fn classify_tool(name: &str) -> ActivityKind {
         ActivityKind::Plan
     } else {
         ActivityKind::Tool
+    }
+}
+
+fn classify_grok_tool(kind: Option<&str>, name: Option<&str>, title: &str) -> ActivityKind {
+    match kind.unwrap_or_default() {
+        "execute" => ActivityKind::Command,
+        "edit" | "delete" | "move" => ActivityKind::FileChange,
+        "search" | "fetch" | "read" => ActivityKind::Search,
+        "think" => ActivityKind::Reasoning,
+        _ => classify_tool(name.unwrap_or(title)),
     }
 }
 
@@ -478,6 +632,93 @@ mod tests {
         assert!(matches!(
             receiver.recv().unwrap(),
             DriverEvent::TextDelta(text) if text == "hi"
+        ));
+    }
+
+    #[test]
+    fn grok_native_stream_emits_text_and_tools_in_wire_order() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_grok(
+            serde_json::json!({"type": "text", "data": "Before"}),
+            &events,
+        );
+        parser.parse_grok(
+            serde_json::json!({
+                "type": "tool_call",
+                "toolCallId": "tool-1",
+                "title": "Read src/main.rs",
+                "kind": "read",
+                "toolName": "read_file",
+                "status": "in_progress",
+                "rawInput": {"path": "src/main.rs"}
+            }),
+            &events,
+        );
+        parser.parse_grok(
+            serde_json::json!({
+                "type": "tool_call_update",
+                "toolCallId": "tool-1",
+                "status": "completed",
+                "rawOutput": {"lines": 12}
+            }),
+            &events,
+        );
+        parser.parse_grok(
+            serde_json::json!({"type": "text", "data": "After"}),
+            &events,
+        );
+
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::TextDelta(text) if text == "Before"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Activity {
+                id: Some(id),
+                title,
+                complete: false,
+                ..
+            } if id == "tool-1" && title == "Read src/main.rs"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Activity {
+                id: Some(id),
+                title,
+                complete: true,
+                ..
+            } if id == "tool-1" && title == "Read src/main.rs"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::TextDelta(text) if text == "After"
+        ));
+    }
+
+    #[test]
+    fn grok_native_end_captures_the_resumable_session() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_grok(
+            serde_json::json!({
+                "type": "end",
+                "stopReason": "end_turn",
+                "sessionId": "c26f9cf7-dc11-4075-b0f4-544e65105469"
+            }),
+            &events,
+        );
+
+        assert_eq!(
+            parser.provider_session_id.as_deref(),
+            Some("c26f9cf7-dc11-4075-b0f4-544e65105469")
+        );
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Connected {
+                provider_session_id: Some(id)
+            } if id == "c26f9cf7-dc11-4075-b0f4-544e65105469"
         ));
     }
 }
