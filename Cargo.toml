@@ -11,6 +11,7 @@ anyhow = "1.0"
 crossbeam-channel = "0.5"
 dirs = "6.0"
 gpui = { version = "0.2.2", features = ["macos-blade"] }
+gpui-component = "0.5.1"
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

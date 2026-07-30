@@ -44,30 +44,12 @@ impl ProviderKind {
         }
     }
 
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Self::Claude => "C",
-            Self::Codex => "O",
-            Self::OpenCode => "◈",
-            Self::Grok => "X",
-        }
-    }
-
     pub fn command(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
-        }
-    }
-
-    pub fn integration_label(self) -> &'static str {
-        match self {
-            Self::Claude => "stream-json",
-            Self::Codex => "app-server",
-            Self::OpenCode => "JSON events",
-            Self::Grok => "ACP",
         }
     }
 }
@@ -386,8 +368,8 @@ mod tests {
     fn provider_ids_are_stable() {
         assert_eq!(ProviderKind::Claude.id(), "claude");
         assert_eq!(ProviderKind::Codex.command(), "codex");
-        assert_eq!(ProviderKind::OpenCode.integration_label(), "JSON events");
-        assert_eq!(ProviderKind::Grok.integration_label(), "ACP");
+        assert_eq!(ProviderKind::OpenCode.command(), "opencode");
+        assert_eq!(ProviderKind::Grok.command(), "grok");
     }
 
     #[test]

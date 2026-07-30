@@ -5,8 +5,8 @@ use gpui::{
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative,
-    rgba, size,
+    UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla, point, prelude::*, px,
+    relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -53,7 +53,7 @@ impl ComposerInput {
         Self {
             focus_handle: cx.focus_handle(),
             content: "".into(),
-            placeholder: "Ask your agent to build, fix, or explain…".into(),
+            placeholder: "Do anything…".into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -446,7 +446,7 @@ impl Element for InputElement {
         let style = window.text_style();
         let theme = Theme::dark();
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), theme.text_faint)
+            (input.placeholder.clone(), theme.text_ghost)
         } else {
             (content, style.color)
         };
@@ -513,7 +513,7 @@ impl Element for InputElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0xc8f16933),
+                    hsla(220.0 / 360.0, 0.10, 0.90, 0.18),
                 )),
                 None,
             )
@@ -584,9 +584,9 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .h(px(26.0))
+            .h(px(24.0))
             .line_height(px(22.0))
-            .text_size(px(14.0))
+            .text_size(px(13.5))
             .text_color(theme.text)
             .child(InputElement { input: cx.entity() })
     }
