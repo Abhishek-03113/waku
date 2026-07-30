@@ -28,9 +28,20 @@ Requirements:
 - At least one supported agent CLI available in `PATH` or a common local
   install directory
 
+For development, run:
+
 ```sh
-cargo run
+scripts/dev.sh
 ```
+
+This builds and signs `target/debug/Waku.app`, launches the bundled executable,
+and watches Rust sources, embedded assets, resources, and Cargo manifests. After
+a successful rebuild it restarts the app automatically. A failed build leaves
+the last working app open. Press `Ctrl-C` to stop the watcher and app.
+
+Running `cargo run` directly is useful for quick terminal debugging, but it
+launches a bare executable without the macOS app-bundle identity used by
+accessibility tools.
 
 Waku detects `claude`, `codex`, `opencode`, and `grok` at launch. Existing CLI
 authentication and configuration remain owned by each provider.
