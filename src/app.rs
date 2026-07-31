@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, unbounded};
 use gpui::{
@@ -22,6 +22,7 @@ use crate::model::{
 use gpui_component::Icon as ComponentIcon;
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::text::{TextView, TextViewStyle};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::persistence::{PersistedState, StateStore};
 use crate::theme::Theme;
@@ -35,12 +36,24 @@ const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 252.0;
 const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
+const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
+const STREAM_MARKDOWN_DELAY: Duration = Duration::from_millis(12);
+const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
+const STREAM_CATCH_UP_FRAMES: usize = 18;
+const STREAM_MIN_GRAPHEMES_PER_FRAME: usize = 12;
+const STREAM_MAX_GRAPHEMES_PER_FRAME: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StreamPhase {
     Text,
     Reasoning,
     Activity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamDeltaKind {
+    Text,
+    Reasoning,
 }
 
 pub struct Waku {
@@ -51,6 +64,10 @@ pub struct Waku {
     driver: Option<DriverHandle>,
     driver_session: Option<Uuid>,
     driver_events: Option<Receiver<DriverEvent>>,
+    pending_driver_events: VecDeque<DriverEvent>,
+    stream_state_dirty: bool,
+    stream_remeasure_pending: bool,
+    last_stream_save: Instant,
     stream_phase: Option<StreamPhase>,
     /// User expansion overrides keyed by persisted transcript block index.
     reasoning_expanded: HashMap<usize, bool>,
@@ -119,7 +136,7 @@ impl Waku {
 
             cx.spawn(async move |this, cx| {
                 loop {
-                    Timer::after(Duration::from_millis(32)).await;
+                    Timer::after(STREAM_FRAME_INTERVAL).await;
                     if this
                         .update(cx, |this, cx| {
                             if this.drain_driver_events() {
@@ -142,6 +159,10 @@ impl Waku {
                 driver: None,
                 driver_session: None,
                 driver_events: None,
+                pending_driver_events: VecDeque::new(),
+                stream_state_dirty: false,
+                stream_remeasure_pending: false,
+                last_stream_save: Instant::now(),
                 stream_phase: None,
                 reasoning_expanded: HashMap::new(),
                 activities_expanded: HashMap::new(),
@@ -184,8 +205,11 @@ impl Waku {
     }
 
     fn save(&mut self) {
+        self.last_stream_save = Instant::now();
         if let Err(error) = self.store.save(&self.state) {
             self.toast = Some(format!("Could not save local state: {error}"));
+        } else {
+            self.stream_state_dirty = false;
         }
     }
 
@@ -249,6 +273,8 @@ impl Waku {
             .push(Message::new(MessageRole::User, &prompt));
         session.status = SessionStatus::Connecting;
         session.updated_at = unix_time();
+        self.pending_driver_events.clear();
+        self.stream_remeasure_pending = false;
         self.stream_phase = None;
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
@@ -272,20 +298,62 @@ impl Waku {
         cx.notify();
     }
 
+    fn collect_driver_events(&mut self) {
+        if let Some(receiver) = self.driver_events.clone() {
+            while let Ok(event) = receiver.try_recv() {
+                self.pending_driver_events.push_back(event);
+            }
+        }
+    }
+
     fn drain_driver_events(&mut self) -> bool {
-        let Some(receiver) = self.driver_events.clone() else {
-            return false;
-        };
+        let follow_up_remeasure = std::mem::take(&mut self.stream_remeasure_pending);
+        self.collect_driver_events();
         let mut changed = false;
-        while let Ok(event) = receiver.try_recv() {
+        let mut force_save = false;
+        let mut markdown_changed = false;
+        let mut revealed_stream_chunk = false;
+        while let Some(event) = self.pending_driver_events.front() {
+            let kind = stream_delta_kind(event);
+            if kind.is_some() && revealed_stream_chunk {
+                break;
+            }
+
+            let event = if let Some(kind) = kind {
+                revealed_stream_chunk = true;
+                pop_stream_chunk(&mut self.pending_driver_events, kind)
+            } else {
+                self.pending_driver_events.pop_front()
+            };
+            let Some(event) = event else {
+                break;
+            };
+            force_save |= matches!(
+                event,
+                DriverEvent::Connected { .. }
+                    | DriverEvent::Permission { .. }
+                    | DriverEvent::TurnFinished { .. }
+                    | DriverEvent::Error(_)
+                    | DriverEvent::ProcessExited
+            );
+            markdown_changed |= matches!(event, DriverEvent::TextDelta(_));
             changed = true;
             self.handle_driver_event(event);
         }
+
         if changed {
-            self.save();
+            self.stream_state_dirty = true;
+        }
+        if changed || follow_up_remeasure {
             self.remeasure_transcript_tail();
         }
-        changed
+        self.stream_remeasure_pending = markdown_changed;
+        if self.stream_state_dirty
+            && (force_save || self.last_stream_save.elapsed() >= STREAM_SAVE_INTERVAL)
+        {
+            self.save();
+        }
+        changed || follow_up_remeasure
     }
 
     /// One list row per message plus each ordered non-message turn block.
@@ -479,6 +547,15 @@ impl Waku {
             .unwrap_or(false)
     }
 
+    fn accepts_turn_output(&self) -> bool {
+        self.selected_session().is_some_and(|session| {
+            matches!(
+                session.status,
+                SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
+            )
+        })
+    }
+
     fn handle_driver_event(&mut self, event: DriverEvent) {
         match event {
             DriverEvent::Connected {
@@ -497,10 +574,14 @@ impl Waku {
                 }
             }
             DriverEvent::TextDelta(delta) => {
-                self.append_text_delta(delta);
+                if self.accepts_turn_output() {
+                    self.append_text_delta(delta);
+                }
             }
             DriverEvent::ReasoningDelta(delta) => {
-                self.append_reasoning_delta(delta);
+                if self.accepts_turn_output() {
+                    self.append_reasoning_delta(delta);
+                }
             }
             DriverEvent::Activity {
                 id,
@@ -509,7 +590,9 @@ impl Waku {
                 detail,
                 complete,
             } => {
-                self.update_activity(id, kind, title, detail, complete);
+                if self.accepts_turn_output() {
+                    self.update_activity(id, kind, title, detail, complete);
+                }
             }
             DriverEvent::Permission {
                 request_id,
@@ -517,14 +600,16 @@ impl Waku {
                 detail,
                 options,
             } => {
-                self.pending_permission = Some(PendingPermission {
-                    request_id,
-                    title,
-                    detail,
-                    options,
-                });
-                if let Some(session) = self.selected_session_mut() {
-                    session.status = SessionStatus::Waiting;
+                if self.accepts_turn_output() {
+                    self.pending_permission = Some(PendingPermission {
+                        request_id,
+                        title,
+                        detail,
+                        options,
+                    });
+                    if let Some(session) = self.selected_session_mut() {
+                        session.status = SessionStatus::Waiting;
+                    }
                 }
             }
             DriverEvent::TurnFinished { success, summary } => {
@@ -705,6 +790,8 @@ impl Waku {
         self.driver = None;
         self.driver_session = None;
         self.driver_events = None;
+        self.pending_driver_events.clear();
+        self.stream_remeasure_pending = false;
         self.stream_phase = None;
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
@@ -739,6 +826,13 @@ impl Waku {
     fn cancel_turn(&mut self, cx: &mut Context<Self>) {
         if let Some(driver) = &self.driver {
             driver.cancel();
+        }
+        // Do not leave already-received text in the smoothing queue: once the
+        // message is marked complete, a later delta would otherwise create a
+        // second assistant bubble. Show the received portion immediately.
+        self.collect_driver_events();
+        while let Some(event) = self.pending_driver_events.pop_front() {
+            self.handle_driver_event(event);
         }
         self.finish_streaming_assistant();
         self.complete_turn_blocks();
@@ -2169,6 +2263,98 @@ fn message_starts_followup_turn(messages: &[Message], message_index: usize) -> b
             .any(|message| message.role == MessageRole::User)
 }
 
+fn stream_delta_kind(event: &DriverEvent) -> Option<StreamDeltaKind> {
+    match event {
+        DriverEvent::TextDelta(_) => Some(StreamDeltaKind::Text),
+        DriverEvent::ReasoningDelta(_) => Some(StreamDeltaKind::Reasoning),
+        _ => None,
+    }
+}
+
+fn stream_delta_text(event: &DriverEvent, kind: StreamDeltaKind) -> Option<&str> {
+    match (kind, event) {
+        (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
+        | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => Some(text),
+        _ => None,
+    }
+}
+
+fn stream_frame_budget(backlog: usize) -> usize {
+    backlog
+        .div_ceil(STREAM_CATCH_UP_FRAMES)
+        .clamp(
+            STREAM_MIN_GRAPHEMES_PER_FRAME,
+            STREAM_MAX_GRAPHEMES_PER_FRAME,
+        )
+        .min(backlog)
+}
+
+/// Pop one display-sized chunk while retaining the provider's event order.
+///
+/// Adjacent deltas of the same kind are coalesced. Large deltas are split on
+/// grapheme and line boundaries, so a provider that emits its whole answer in
+/// one event still gets the same progressive presentation as token streams.
+fn pop_stream_chunk(
+    events: &mut VecDeque<DriverEvent>,
+    kind: StreamDeltaKind,
+) -> Option<DriverEvent> {
+    let backlog = events
+        .iter()
+        .map_while(|event| stream_delta_text(event, kind))
+        .map(|text| text.graphemes(true).count())
+        .sum();
+    if backlog == 0 {
+        return events.pop_front();
+    }
+
+    let mut remaining_budget = stream_frame_budget(backlog);
+    let mut chunk = String::new();
+    while remaining_budget > 0 {
+        let Some(text) = events.front_mut().and_then(|event| match (kind, event) {
+            (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
+            | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => Some(text),
+            _ => None,
+        }) else {
+            break;
+        };
+
+        let (prefix, graphemes) = take_stream_prefix(text, remaining_budget);
+        let reached_line_boundary = prefix.ends_with('\n');
+        chunk.push_str(&prefix);
+        remaining_budget = remaining_budget.saturating_sub(graphemes);
+        if text.is_empty() {
+            events.pop_front();
+        }
+        if reached_line_boundary {
+            break;
+        }
+    }
+
+    match kind {
+        StreamDeltaKind::Text => Some(DriverEvent::TextDelta(chunk)),
+        StreamDeltaKind::Reasoning => Some(DriverEvent::ReasoningDelta(chunk)),
+    }
+}
+
+fn take_stream_prefix(text: &mut String, budget: usize) -> (String, usize) {
+    if text.is_empty() || budget == 0 {
+        return (String::new(), 0);
+    }
+
+    let mut count = 0;
+    let mut end = text.len();
+    for (start, grapheme) in text.grapheme_indices(true) {
+        count += 1;
+        end = start + grapheme.len();
+        if grapheme == "\n" || count == budget {
+            break;
+        }
+    }
+
+    let remainder = text.split_off(end);
+    (std::mem::replace(text, remainder), count)
+}
+
 fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
     div()
         .w(px(size))
@@ -2218,11 +2404,6 @@ fn render_message(
                 )),
         ),
         MessageRole::Assistant => {
-            let text_id = if message.streaming {
-                format!("message-{message_id}-assistant-{}", content.len())
-            } else {
-                format!("message-{message_id}-assistant")
-            };
             let mut column = div()
                 .w_full()
                 .min_w_0()
@@ -2233,11 +2414,17 @@ fn render_message(
                 .line_height(px(21.0))
                 .text_color(theme.text)
                 .child(
-                    TextView::markdown(SharedString::from(text_id), content, window, cx)
-                        .style(assistant_markdown_style(theme))
-                        .selectable(true)
-                        .w_full()
-                        .cursor_text(),
+                    TextView::markdown(
+                        SharedString::from(format!("message-{message_id}-assistant")),
+                        content,
+                        window,
+                        cx,
+                    )
+                    .update_delay(STREAM_MARKDOWN_DELAY)
+                    .style(assistant_markdown_style(theme))
+                    .selectable(true)
+                    .w_full()
+                    .cursor_text(),
                 );
             if message.streaming {
                 column = column.child(pulse_dot(
@@ -2418,10 +2605,11 @@ fn git_branch(path: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        TranscriptRowKind::*, escape_html, fenced_code, message_starts_followup_turn,
-        transcript_row_kinds,
+        StreamDeltaKind, TranscriptRowKind::*, escape_html, fenced_code,
+        message_starts_followup_turn, pop_stream_chunk, take_stream_prefix, transcript_row_kinds,
     };
-    use crate::model::{Message, MessageRole};
+    use crate::model::{ActivityKind, DriverEvent, Message, MessageRole};
+    use std::collections::VecDeque;
 
     #[test]
     fn plain_message_html_is_escaped() {
@@ -2453,6 +2641,52 @@ mod tests {
             Some("fn main() {}\n\ncargo test")
         );
         assert_eq!(fenced_code("No code here"), None);
+    }
+
+    #[test]
+    fn stream_prefix_stops_at_lines_without_splitting_graphemes() {
+        let mut text = "hello 👋🏽\nnext line".to_owned();
+        let (first, count) = take_stream_prefix(&mut text, 100);
+        assert_eq!(first, "hello 👋🏽\n");
+        assert_eq!(count, 8);
+        assert_eq!(text, "next line");
+
+        let mut emoji = "👨‍👩‍👧‍👦x".to_owned();
+        let (first, count) = take_stream_prefix(&mut emoji, 1);
+        assert_eq!(first, "👨‍👩‍👧‍👦");
+        assert_eq!(count, 1);
+        assert_eq!(emoji, "x");
+    }
+
+    #[test]
+    fn stream_chunks_coalesce_deltas_and_preserve_event_order() {
+        let mut events = VecDeque::from([
+            DriverEvent::TextDelta("first ".into()),
+            DriverEvent::TextDelta("line\nsecond line".into()),
+            DriverEvent::Activity {
+                id: None,
+                kind: ActivityKind::Tool,
+                title: "Tool".into(),
+                detail: None,
+                complete: true,
+            },
+            DriverEvent::TextDelta("after tool".into()),
+        ]);
+
+        assert!(matches!(
+            pop_stream_chunk(&mut events, StreamDeltaKind::Text),
+            Some(DriverEvent::TextDelta(text)) if text == "first line\n"
+        ));
+        assert!(matches!(
+            events.front(),
+            Some(DriverEvent::TextDelta(text)) if text == "second line"
+        ));
+
+        assert!(matches!(
+            pop_stream_chunk(&mut events, StreamDeltaKind::Text),
+            Some(DriverEvent::TextDelta(text)) if text == "second line"
+        ));
+        assert!(matches!(events.front(), Some(DriverEvent::Activity { .. })));
     }
 
     #[test]

@@ -96,6 +96,7 @@ pub struct TextView {
     style: StyleRefinement,
     selectable: bool,
     scrollable: bool,
+    update_delay: Duration,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
 }
 
@@ -430,6 +431,7 @@ impl TextView {
             state,
             selectable: false,
             scrollable: false,
+            update_delay: Duration::from_millis(200),
             code_block_actions: None,
         }
     }
@@ -461,6 +463,7 @@ impl TextView {
             raw: html,
             selectable: false,
             scrollable: false,
+            update_delay: Duration::from_millis(200),
             code_block_actions: None,
         }
     }
@@ -513,6 +516,15 @@ impl TextView {
     /// This mode is suitable for small content, such as a few lines of text, a label, etc.
     pub fn scrollable(mut self, scrollable: bool) -> Self {
         self.scrollable = scrollable;
+        self
+    }
+
+    /// Set the debounce delay used when reparsing updated source text.
+    ///
+    /// The default is 200ms. Live content can use a shorter delay while
+    /// retaining a stable element ID and its keyed view state.
+    pub fn update_delay(mut self, delay: Duration) -> Self {
+        self.update_delay = delay;
         self
     }
 
@@ -625,7 +637,7 @@ impl Element for TextView {
                 highlight_theme,
                 rx,
                 tx_result,
-                Duration::from_millis(200),
+                self.update_delay,
                 code_block_actions,
             ))
             .detach();
