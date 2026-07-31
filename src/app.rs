@@ -1898,25 +1898,6 @@ impl Waku {
         }
     }
 
-    fn choose_provider(&mut self, provider: ProviderKind, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session_mut()
-            && session.messages.is_empty()
-        {
-            let session_id = session.id;
-            session.provider = provider;
-            // `None` follows the provider's live default. Choosing a concrete
-            // model in the picker pins that model on the task.
-            session.model = None;
-            session.reasoning_effort = None;
-            session.service_tier = None;
-            self.state.last_provider = provider;
-            self.model_picker_tab = ModelPickerTab::Provider(provider);
-            self.reset_session_runtime(session_id);
-            self.save();
-            cx.notify();
-        }
-    }
-
     fn choose_model(&mut self, provider: ProviderKind, model: String, cx: &mut Context<Self>) {
         if let Some(session) = self.selected_session_mut()
             && session.messages.is_empty()
@@ -2555,94 +2536,10 @@ impl Waku {
                         .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
                 );
         }
-        let selected_provider = self
-            .selected_session()
-            .map(|session| session.provider)
-            .unwrap_or_default();
         let project_name = self
             .selected_project()
             .map(|project| project.name.as_str())
             .unwrap_or("your project");
-        let probe = self
-            .probes
-            .iter()
-            .find(|probe| probe.provider == selected_provider);
-        let caption = match probe {
-            Some(probe) if probe.installed => {
-                let version = probe
-                    .version
-                    .as_deref()
-                    .unwrap_or("ready")
-                    .chars()
-                    .take(48)
-                    .collect::<String>();
-                format!("Ready · {version}")
-            }
-            _ => format!(
-                "Not installed — `{}` was not found on this Mac",
-                selected_provider.command()
-            ),
-        };
-
-        let mut picker = div()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .p(px(3.0))
-            .rounded(px(9.0))
-            .bg(theme.overlay);
-        for provider in ProviderKind::ALL {
-            let selected = selected_provider == provider;
-            let installed = self
-                .probes
-                .iter()
-                .find(|probe| probe.provider == provider)
-                .map(|probe| probe.installed)
-                .unwrap_or(false);
-            picker = picker.child(
-                div()
-                    .id(SharedString::from(format!("provider-{}", provider.id())))
-                    .h(px(28.0))
-                    .px(px(11.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(px(12.0))
-                    .line_height(px(15.0))
-                    .cursor_default()
-                    .when(selected, |element| element.bg(theme.raised).shadow_sm())
-                    .when(!installed, |element| element.opacity(0.5))
-                    .active(|element| element.opacity(0.8))
-                    .child(icon(
-                        provider_icon(provider),
-                        11.0,
-                        if selected {
-                            provider_color(provider)
-                        } else {
-                            theme.text_tertiary
-                        },
-                    ))
-                    .child(
-                        div()
-                            .font_weight(if selected {
-                                FontWeight::MEDIUM
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(if selected {
-                                theme.text
-                            } else {
-                                theme.text_secondary
-                            })
-                            .child(provider.short_name()),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.choose_provider(provider, cx);
-                    })),
-            );
-        }
-
         div()
             .flex_1()
             .flex()
@@ -2661,21 +2558,6 @@ impl Waku {
                     .child(SharedString::from(format!(
                         "What should we build in {project_name}?"
                     ))),
-            )
-            .child(
-                div()
-                    .mt(px(6.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text_tertiary)
-                    .child("Pick an agent, then describe the outcome you want."),
-            )
-            .child(div().mt(px(22.0)).child(picker))
-            .child(
-                div()
-                    .mt(px(10.0))
-                    .text_size(px(11.0))
-                    .text_color(theme.text_ghost)
-                    .child(SharedString::from(caption)),
             )
     }
 
