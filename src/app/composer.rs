@@ -429,10 +429,14 @@ impl Waku {
                                     .justify_center()
                                     .hover(|element| element.bg(theme.overlay_strong))
                                     .child(icon(
-                                        "icons/star.svg",
+                                        if is_favorite {
+                                            "icons/star-filled.svg"
+                                        } else {
+                                            "icons/star.svg"
+                                        },
                                         14.0,
                                         if is_favorite {
-                                            theme.text_secondary
+                                            theme.favorite
                                         } else {
                                             theme.text_ghost
                                         },

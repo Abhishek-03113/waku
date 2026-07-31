@@ -30,6 +30,7 @@ pub struct Theme {
     pub on_inverse: Hsla,
 
     pub warning: Hsla,
+    pub favorite: Hsla,
     pub danger: Hsla,
     pub danger_soft: Hsla,
 }
@@ -58,6 +59,7 @@ impl Theme {
             on_inverse: rgb(0x17181C).into(),
 
             warning: rgb(0xE0B36A).into(),
+            favorite: rgb(0xEAB308).into(),
             danger: rgb(0xE2726A).into(),
             danger_soft: hsla(4.0 / 360.0, 0.55, 0.63, 0.10),
         }

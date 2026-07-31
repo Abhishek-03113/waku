@@ -273,6 +273,7 @@ mod tests {
             "icons/lock.svg",
             "icons/lock-open.svg",
             "icons/star.svg",
+            "icons/star-filled.svg",
             "icons/sparkle.svg",
             "icons/zap.svg",
         ];
