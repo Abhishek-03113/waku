@@ -533,6 +533,16 @@ impl AgentSession {
         {
             self.provider_cursor = Some(ProviderResumeCursor::from_session_id(self.provider, id));
         }
+        for block in &mut self.transcript_blocks {
+            let TranscriptBlockContent::Activities(activities) = &mut block.content else {
+                continue;
+            };
+            for activity in activities {
+                if activity.kind == ActivityKind::Search && activity.title.trim() == "Search for" {
+                    activity.title = "Browsed the web".into();
+                }
+            }
+        }
 
         if !self.turns.is_empty()
             || !self
@@ -946,5 +956,30 @@ mod tests {
         assert_eq!(session.provider_turns_after(1), 1);
         assert_eq!(session.provider_turns_after(2), 1);
         assert_eq!(session.provider_turns_after(3), 0);
+    }
+
+    #[test]
+    fn legacy_empty_search_titles_are_repaired() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.transcript_blocks.push(TranscriptBlock {
+            after_message: 0,
+            turn_id: None,
+            content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+                Some("search-1".into()),
+                ActivityKind::Search,
+                "Search for ",
+                None,
+                true,
+            )]),
+        });
+
+        session.migrate_legacy_state();
+
+        let TranscriptBlockContent::Activities(activities) = &session.transcript_blocks[0].content
+        else {
+            panic!("expected activities");
+        };
+        assert_eq!(activities[0].title, "Browsed the web");
     }
 }

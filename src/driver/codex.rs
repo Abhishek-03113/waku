@@ -550,8 +550,11 @@ fn codex_item_title(item: &Value) -> String {
     if let Some(command) = item.get("command").and_then(Value::as_str) {
         return command.to_owned();
     }
-    if let Some(query) = item.get("query").and_then(Value::as_str) {
+    if let Some(query) = non_empty_string(item.get("query")) {
         return format!("Search for {query}");
+    }
+    if item.get("type").and_then(Value::as_str) == Some("webSearch") {
+        return codex_web_search_title(item);
     }
     if let Some(name) = item.get("tool").and_then(Value::as_str) {
         return split_camel_case(name);
@@ -561,6 +564,61 @@ fn codex_item_title(item: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("Activity");
     split_camel_case(item_type)
+}
+
+fn codex_web_search_title(item: &Value) -> String {
+    let Some(action) = item.get("action") else {
+        return "Searched the web".into();
+    };
+
+    match action.get("type").and_then(Value::as_str) {
+        Some("search") => {
+            if let Some(query) = non_empty_string(action.get("query")) {
+                return format!("Search for {query}");
+            }
+            if let Some(query) =
+                action
+                    .get("queries")
+                    .and_then(Value::as_array)
+                    .and_then(|queries| {
+                        queries
+                            .iter()
+                            .find_map(|query| non_empty_string(Some(query)))
+                    })
+            {
+                return format!("Search for {query}");
+            }
+            "Searched the web".into()
+        }
+        Some("openPage") => non_empty_string(action.get("url"))
+            .map(|url| format!("Open {url}"))
+            .unwrap_or_else(|| "Opened a web page".into()),
+        Some("findInPage") => match (
+            non_empty_string(action.get("pattern")),
+            non_empty_string(action.get("url")),
+        ) {
+            (Some(pattern), Some(url)) => format!("Find {pattern} in {url}"),
+            (Some(pattern), None) => format!("Find {pattern} on the page"),
+            (None, Some(url)) => format!("Search within {url}"),
+            (None, None) => "Searched within a web page".into(),
+        },
+        _ => item
+            .get("results")
+            .and_then(Value::as_array)
+            .filter(|results| !results.is_empty())
+            .map(|results| {
+                let noun = if results.len() == 1 { "page" } else { "pages" };
+                format!("Browsed {} {noun}", results.len())
+            })
+            .unwrap_or_else(|| "Browsed the web".into()),
+    }
+}
+
+fn non_empty_string(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn codex_item_detail(item: &Value) -> Option<String> {
@@ -708,5 +766,50 @@ mod tests {
             Err("cannot roll back".to_owned())
         );
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn web_search_titles_never_end_with_an_empty_query() {
+        let batch_open = json!({
+            "type": "webSearch",
+            "query": "",
+            "action": { "type": "other" },
+            "results": [{ "url": "https://openai.com" }, { "url": "https://deepseek.com" }]
+        });
+        let nested_query = json!({
+            "type": "webSearch",
+            "query": "",
+            "action": { "type": "search", "queries": ["GPT-5.6 Luna official"] }
+        });
+
+        assert_eq!(codex_item_title(&batch_open), "Browsed 2 pages");
+        assert_eq!(
+            codex_item_title(&nested_query),
+            "Search for GPT-5.6 Luna official"
+        );
+    }
+
+    #[test]
+    fn web_search_titles_describe_open_and_find_actions() {
+        let open = json!({
+            "type": "webSearch",
+            "query": "",
+            "action": { "type": "openPage", "url": "https://openai.com" }
+        });
+        let find = json!({
+            "type": "webSearch",
+            "query": "",
+            "action": {
+                "type": "findInPage",
+                "pattern": "pricing",
+                "url": "https://openai.com"
+            }
+        });
+
+        assert_eq!(codex_item_title(&open), "Open https://openai.com");
+        assert_eq!(
+            codex_item_title(&find),
+            "Find pricing in https://openai.com"
+        );
     }
 }
