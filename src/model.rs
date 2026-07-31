@@ -533,6 +533,13 @@ impl AgentSession {
         {
             self.provider_cursor = Some(ProviderResumeCursor::from_session_id(self.provider, id));
         }
+        if self.provider == ProviderKind::Codex {
+            for message in &mut self.messages {
+                if message.role == MessageRole::Assistant && message.content.contains('\u{e200}') {
+                    message.content = strip_legacy_codex_citations(&message.content);
+                }
+            }
+        }
         for block in &mut self.transcript_blocks {
             let TranscriptBlockContent::Activities(activities) = &mut block.content else {
                 continue;
@@ -677,6 +684,35 @@ impl AgentSession {
         }
         self.updated_at = unix_time();
     }
+}
+
+fn strip_legacy_codex_citations(text: &str) -> String {
+    const START: char = '\u{e200}';
+    const END: char = '\u{e201}';
+    const SEPARATOR: char = '\u{e202}';
+
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(start) = remaining.find(START) {
+        output.push_str(&remaining[..start]);
+        let marker_start = start + START.len_utf8();
+        let Some(end_offset) = remaining[marker_start..].find(END) else {
+            output.push_str(&remaining[start..]);
+            return output;
+        };
+        let marker_end = marker_start + end_offset;
+        let marker = &remaining[marker_start..marker_end];
+        if marker
+            .split(SEPARATOR)
+            .next()
+            .is_some_and(|prefix| prefix != "cite")
+        {
+            output.push_str(&remaining[start..marker_end + END.len_utf8()]);
+        }
+        remaining = &remaining[marker_end + END.len_utf8()..];
+    }
+    output.push_str(remaining);
+    output
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -981,5 +1017,19 @@ mod tests {
             panic!("expected activities");
         };
         assert_eq!(activities[0].title, "Browsed the web");
+    }
+
+    #[test]
+    fn legacy_codex_citation_markers_are_removed() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.messages.push(Message::new(
+            MessageRole::Assistant,
+            "Claim.\u{e200}cite\u{e202}turn3view0\u{e202}turn2view2\u{e201}\nNext.",
+        ));
+
+        session.migrate_legacy_state();
+
+        assert_eq!(session.messages[0].content, "Claim.\nNext.");
     }
 }

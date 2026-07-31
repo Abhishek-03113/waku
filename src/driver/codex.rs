@@ -265,6 +265,7 @@ impl CodexDriver {
         thread::Builder::new()
             .name("waku-codex-reader".into())
             .spawn(move || {
+                let mut stream_state = CodexStreamState::default();
                 for line in BufReader::new(stdout).lines() {
                     match line {
                         Ok(line) if !line.trim().is_empty() => {
@@ -275,6 +276,7 @@ impl CodexDriver {
                                     &reader_turn_id,
                                     &reader_pending_responses,
                                     &reader_events,
+                                    &mut stream_state,
                                 ),
                                 Err(error) => {
                                     let _ = reader_events.send(DriverEvent::Error(format!(
@@ -389,12 +391,122 @@ fn wait_for_thread_id(thread_id: &Mutex<Option<String>>) -> Option<String> {
     None
 }
 
+const CODEX_CITATION_START: char = '\u{e200}';
+const CODEX_CITATION_END: char = '\u{e201}';
+const CODEX_CITATION_SEPARATOR: char = '\u{e202}';
+
+#[derive(Default)]
+struct CodexStreamState {
+    citations: HashMap<String, String>,
+    citation_numbers: HashMap<String, usize>,
+    citation_buffer: String,
+    next_citation_number: usize,
+}
+
+impl CodexStreamState {
+    fn begin_turn(&mut self) {
+        self.citations.clear();
+        self.citation_numbers.clear();
+        self.citation_buffer.clear();
+        self.next_citation_number = 1;
+    }
+
+    fn capture_citations(&mut self, item: &Value) {
+        if item.get("type").and_then(Value::as_str) != Some("webSearch") {
+            return;
+        }
+        let Some(results) = item.get("results").and_then(Value::as_array) else {
+            return;
+        };
+        for result in results {
+            let reference = result
+                .get("ref_id")
+                .or_else(|| result.get("refId"))
+                .and_then(Value::as_str)
+                .filter(|reference| !reference.is_empty());
+            let url = result
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|url| !url.is_empty());
+            if let (Some(reference), Some(url)) = (reference, url) {
+                self.citations.insert(reference.into(), url.into());
+            }
+        }
+    }
+
+    fn rewrite_citation_delta(&mut self, delta: &str) -> String {
+        self.citation_buffer.push_str(delta);
+        let mut input = std::mem::take(&mut self.citation_buffer);
+        let mut output = String::with_capacity(input.len());
+
+        loop {
+            let Some(start) = input.find(CODEX_CITATION_START) else {
+                output.push_str(&input);
+                break;
+            };
+            output.push_str(&input[..start]);
+            let marker_start = start + CODEX_CITATION_START.len_utf8();
+            let Some(end_offset) = input[marker_start..].find(CODEX_CITATION_END) else {
+                self.citation_buffer.push_str(&input[start..]);
+                break;
+            };
+            let marker_end = marker_start + end_offset;
+            let marker = &input[marker_start..marker_end];
+            let citation = self.render_citation(marker);
+            if !citation.is_empty() {
+                if output
+                    .chars()
+                    .last()
+                    .is_some_and(|character| !character.is_whitespace())
+                {
+                    output.push(' ');
+                }
+                output.push_str(&citation);
+            }
+            input.drain(..marker_end + CODEX_CITATION_END.len_utf8());
+        }
+
+        output
+    }
+
+    fn render_citation(&mut self, marker: &str) -> String {
+        let mut parts = marker.split(CODEX_CITATION_SEPARATOR);
+        if parts.next() != Some("cite") {
+            return String::new();
+        }
+
+        let mut links = Vec::new();
+        for reference in parts.filter(|part| !part.is_empty()) {
+            let Some(url) = self.citations.get(reference).cloned() else {
+                continue;
+            };
+            let number = *self
+                .citation_numbers
+                .entry(reference.into())
+                .or_insert_with(|| {
+                    let number = self.next_citation_number;
+                    self.next_citation_number += 1;
+                    number
+                });
+            links.push(format!("[{number}]({})", markdown_link_destination(&url)));
+        }
+        links.join(" ")
+    }
+}
+
+fn markdown_link_destination(url: &str) -> String {
+    url.replace('\\', "\\\\")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
+}
+
 fn handle_codex_message(
     value: Value,
     thread_id: &Mutex<Option<String>>,
     turn_id: &Mutex<Option<String>>,
     pending_responses: &Mutex<HashMap<u64, Sender<Result<(), String>>>>,
     events: &Sender<DriverEvent>,
+    stream_state: &mut CodexStreamState,
 ) {
     if let Some(id) = value.get("id").and_then(Value::as_u64)
         && id != 1
@@ -432,6 +544,7 @@ fn handle_codex_message(
 
     match method {
         "turn/started" => {
+            stream_state.begin_turn();
             if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
                 *turn_id.lock() = Some(id.to_owned());
             }
@@ -439,7 +552,10 @@ fn handle_codex_message(
         }
         "item/agentMessage/delta" => {
             if let Some(delta) = params.get("delta").and_then(Value::as_str) {
-                let _ = events.send(DriverEvent::TextDelta(delta.to_owned()));
+                let delta = stream_state.rewrite_citation_delta(delta);
+                if !delta.is_empty() {
+                    let _ = events.send(DriverEvent::TextDelta(delta));
+                }
             }
         }
         "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
@@ -453,6 +569,7 @@ fn handle_codex_message(
         }
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item") {
+                stream_state.capture_citations(item);
                 let complete = method == "item/completed";
                 let kind = codex_activity_kind(item);
                 if let Some(kind) = kind {
@@ -469,6 +586,7 @@ fn handle_codex_message(
             }
         }
         "turn/completed" => {
+            stream_state.citation_buffer.clear();
             *turn_id.lock() = None;
             let status = params
                 .pointer("/turn/status")
@@ -730,6 +848,7 @@ mod tests {
         let (response_tx, response_rx) = bounded(1);
         pending.lock().insert(42, response_tx);
         let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
 
         handle_codex_message(
             json!({"id": 42, "result": {}}),
@@ -737,6 +856,7 @@ mod tests {
             &turn_id,
             &pending,
             &event_tx,
+            &mut stream_state,
         );
 
         assert_eq!(response_rx.recv().unwrap(), Ok(()));
@@ -752,6 +872,7 @@ mod tests {
         let (response_tx, response_rx) = bounded(1);
         pending.lock().insert(43, response_tx);
         let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
 
         handle_codex_message(
             json!({"id": 43, "error": {"message": "cannot roll back"}}),
@@ -759,6 +880,7 @@ mod tests {
             &turn_id,
             &pending,
             &event_tx,
+            &mut stream_state,
         );
 
         assert_eq!(
@@ -810,6 +932,38 @@ mod tests {
         assert_eq!(
             codex_item_title(&find),
             "Find pricing in https://openai.com"
+        );
+    }
+
+    #[test]
+    fn citation_markers_become_stable_markdown_links_across_deltas() {
+        let mut state = CodexStreamState::default();
+        state.begin_turn();
+        state.capture_citations(&json!({
+            "type": "webSearch",
+            "results": [
+                { "ref_id": "turn3view0", "url": "https://openai.com/model" },
+                { "ref_id": "turn2view2", "url": "https://deepseek.com/model" }
+            ]
+        }));
+
+        assert_eq!(state.rewrite_citation_delta("Claim.\u{e200}ci"), "Claim.");
+        assert_eq!(
+            state.rewrite_citation_delta(
+                "te\u{e202}turn3view0\u{e202}turn2view2\u{e201}\nNext. \u{e200}cite\u{e202}turn2view2\u{e201}"
+            ),
+            "[1](https://openai.com/model) [2](https://deepseek.com/model)\nNext. [2](https://deepseek.com/model)"
+        );
+        assert!(state.citation_buffer.is_empty());
+    }
+
+    #[test]
+    fn unknown_citation_markers_are_removed() {
+        let mut state = CodexStreamState::default();
+
+        assert_eq!(
+            state.rewrite_citation_delta("Claim.\u{e200}cite\u{e202}turn9search0\u{e201} After."),
+            "Claim. After."
         );
     }
 }

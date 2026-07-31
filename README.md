@@ -18,6 +18,20 @@ Each provider is connected through its strongest structured interface and
 translated into Waku's small, provider-neutral event model. Grok uses its
 ordered headless NDJSON stream rather than ACP.
 
+## Product reference
+
+[T3 Code](https://github.com/pingdotgg/t3code) is Waku's primary product
+reference for coding-agent workflows, information hierarchy, tool activity,
+and transcript presentation. Before changing user-visible behavior, inspect
+the same flow in the current T3 Code app or source rather than relying on an
+older screenshot or recollection.
+
+T3 Code is reference evidence, not a requirement to copy web-specific details
+or existing bugs. Waku should preserve the intent of the reference while using
+native macOS interaction conventions and provider-native structured data.
+Explicit user screenshots and feedback are the acceptance criteria when they
+conflict with a prior treatment.
+
 ## Run
 
 Requirements:
