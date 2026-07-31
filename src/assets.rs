@@ -25,6 +25,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "chevron-down",
     "chevron-right",
     "folder",
+    "folder-new",
     "git-branch",
     "hexagon",
     "list",

@@ -197,22 +197,47 @@ impl Waku {
             let group_header = session_group_label(&theme, group).when(is_first_group, |element| {
                 element.justify_between().child(
                     div()
-                        .id("new-session")
-                        .w(px(20.0))
-                        .h(px(20.0))
-                        .rounded(px(6.0))
                         .flex()
                         .items_center()
-                        .justify_center()
-                        .cursor_default()
-                        .hover(|element| element.bg(theme.overlay))
-                        .active(|element| element.bg(theme.overlay_strong))
-                        .child(icon("icons/plus.svg", 15.0, theme.text_ghost))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(project_id) = this.state.selected_project {
-                                this.create_session_for(project_id, this.state.last_provider, cx);
-                            }
-                        })),
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .id("add-project")
+                                .w(px(20.0))
+                                .h(px(20.0))
+                                .rounded(px(6.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_default()
+                                .hover(|element| element.bg(theme.overlay))
+                                .active(|element| element.bg(theme.overlay_strong))
+                                .child(icon("icons/folder-new.svg", 15.0, theme.text_ghost))
+                                .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
+                        )
+                        .child(
+                            div()
+                                .id("new-session")
+                                .w(px(20.0))
+                                .h(px(20.0))
+                                .rounded(px(6.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_default()
+                                .hover(|element| element.bg(theme.overlay))
+                                .active(|element| element.bg(theme.overlay_strong))
+                                .child(icon("icons/plus.svg", 15.0, theme.text_ghost))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(project_id) = this.state.selected_project {
+                                        this.create_session_for(
+                                            project_id,
+                                            this.state.last_provider,
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        ),
                 )
             });
             is_first_group = false;

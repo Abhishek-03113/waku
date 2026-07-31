@@ -201,6 +201,7 @@ mod tests {
             "icons/chevron-down.svg",
             "icons/chevron-right.svg",
             "icons/folder.svg",
+            "icons/folder-new.svg",
             "icons/alert.svg",
             "icons/lock.svg",
             "icons/lock-open.svg",
