@@ -2,6 +2,7 @@ mod app;
 mod assets;
 mod checkpoint;
 mod driver;
+mod identity;
 mod input;
 mod model;
 mod model_catalog;
@@ -16,6 +17,7 @@ use gpui::{
 };
 
 use crate::app::Waku;
+use crate::identity::APP_NAME;
 use crate::input::{
     Backspace, Copy, Cut, Delete, End, Enter, Home, Left, Paste, Right, SelectAll, SelectLeft,
     SelectRight,
@@ -34,11 +36,11 @@ fn main() {
             crate::theme::init_component_theme(cx);
             cx.set_menus(vec![
                 Menu {
-                    name: "Waku".into(),
+                    name: APP_NAME.into(),
                     items: vec![
                         MenuItem::action("New Session", NewSession),
                         MenuItem::separator(),
-                        MenuItem::action("Quit Waku", Quit),
+                        MenuItem::action(format!("Quit {APP_NAME}"), Quit),
                     ],
                 },
                 Menu {
@@ -79,7 +81,7 @@ fn main() {
                 .open_window(
                     WindowOptions {
                         titlebar: Some(TitlebarOptions {
-                            title: Some("Waku".into()),
+                            title: Some(APP_NAME.into()),
                             appears_transparent: true,
                             traffic_light_position: Some(point(px(16.0), px(18.0))),
                         }),

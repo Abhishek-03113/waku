@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{AgentSession, FavoriteModel, Project, ProviderKind};
 
 const STATE_VERSION: u32 = 3;
@@ -58,7 +59,7 @@ impl StateStore {
     pub fn default_path() -> PathBuf {
         dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
-            .join("Waku")
+            .join(DATA_DIRECTORY_NAME)
             .join("state.json")
     }
 
@@ -123,6 +124,17 @@ mod tests {
         ActivityItem, ActivityKind, FavoriteModel, ReasoningBlock, TranscriptBlock,
         TranscriptBlockContent,
     };
+
+    #[test]
+    fn default_path_uses_build_specific_data_directory() {
+        let path = StateStore::default_path();
+        let data_directory = path.parent().and_then(Path::file_name);
+
+        #[cfg(debug_assertions)]
+        assert_eq!(data_directory, Some(std::ffi::OsStr::new("Waku Debug")));
+        #[cfg(not(debug_assertions))]
+        assert_eq!(data_directory, Some(std::ffi::OsStr::new("Waku")));
+    }
 
     #[test]
     fn state_round_trips() {

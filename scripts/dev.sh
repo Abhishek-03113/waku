@@ -4,7 +4,7 @@ set -u
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$root"
 
-app="$root/target/debug/Waku.app"
+app="$root/target/debug/Waku Debug.app"
 
 source_signature() {
     find Cargo.toml Cargo.lock src assets resources -type f \
@@ -14,8 +14,7 @@ source_signature() {
 }
 
 stop_app() {
-    pkill -TERM -x Waku 2>/dev/null || true
-    pkill -TERM -x waku 2>/dev/null || true
+    pkill -TERM -x "Waku Debug" 2>/dev/null || true
 }
 
 build_and_restart() {

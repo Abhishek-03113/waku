@@ -33,10 +33,16 @@ For development, run:
 scripts/dev.sh
 ```
 
-This builds and signs `target/debug/Waku.app`, launches the bundled executable,
-and watches Rust sources, embedded assets, resources, and Cargo manifests. After
-a successful rebuild it restarts the app automatically. A failed build leaves
-the last working app open. Press `Ctrl-C` to stop the watcher and app.
+This builds and signs `target/debug/Waku Debug.app`, launches the bundled
+executable, and watches Rust sources, embedded assets, resources, and Cargo
+manifests. After a successful rebuild it restarts the app automatically. A
+failed build leaves the last working app open. Press `Ctrl-C` to stop the
+watcher and app.
+
+Debug builds use the app name `Waku Debug`, bundle identifier `codes.waku.dev`,
+and their own `Waku Debug/state.json` local data directory. Release builds use
+`Waku`, bundle identifier `codes.waku`, and `Waku/state.json`, so both apps can
+be installed and used without sharing state.
 
 Running `cargo run` directly is useful for quick terminal debugging, but it
 launches a bare executable without the macOS app-bundle identity used by
@@ -92,8 +98,8 @@ notarization options.
 - In a Git project, revert a completed Codex turn from its checkpoint action.
 - Toggle the sidebar with `⌘⇧S` and focus the composer with `⌘L`.
 
-State is written atomically to the platform-local application data directory as
-`Waku/state.json`. No telemetry or remote Waku service is involved.
+State is written atomically to the profile-specific platform-local application
+data directory described above. No telemetry or remote Waku service is involved.
 
 ## Architecture
 
