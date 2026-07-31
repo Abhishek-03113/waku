@@ -23,7 +23,7 @@ pub(crate) fn parse(
     highlight_theme: &HighlightTheme,
 ) -> Result<node::Node, SharedString> {
     markdown::to_mdast(&raw, &ParseOptions::gfm())
-        .map(|n| ast_to_node(n, style, cx, highlight_theme))
+        .map(|n| ast_to_node(n, style, cx, highlight_theme).optimize_for_rendering())
         .map_err(|e| e.to_string().into())
 }
 

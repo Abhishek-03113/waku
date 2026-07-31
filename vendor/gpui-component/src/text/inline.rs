@@ -227,7 +227,7 @@ impl IntoElement for Inline {
 
 impl Element for Inline {
     type RequestLayoutState = ();
-    type PrepaintState = Hitbox;
+    type PrepaintState = Option<Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -279,8 +279,7 @@ impl Element for Inline {
         self.styled_text
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
 
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        hitbox
+        (!self.links.is_empty()).then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal))
     }
 
     fn paint(
@@ -293,8 +292,6 @@ impl Element for Inline {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let current_view = window.current_view();
-        let hitbox = prepaint;
         let mut state = self.state.lock().unwrap();
 
         let text_layout = self.styled_text.layout().clone();
@@ -302,64 +299,58 @@ impl Element for Inline {
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 
         // layout selections
-        let (is_selectable, is_selection, selection) =
-            self.layout_selections(&text_layout, window, cx);
+        let (_, is_selection, selection) = self.layout_selections(&text_layout, window, cx);
 
         state.selection = selection;
-
-        if is_selection || is_selectable {
-            window.set_cursor_style(CursorStyle::IBeam, &hitbox);
-        }
-
-        // link cursor pointer
-        let mouse_position = window.mouse_position();
-        if let Some(_) = Self::link_for_position(&text_layout, &self.links, mouse_position) {
-            window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
-        }
 
         if let Some(selection) = &state.selection {
             Self::paint_selection(selection, &text_layout, &bounds, window, cx);
         }
 
-        // mouse move, update hovered link
-        window.on_mouse_event({
-            let hitbox = hitbox.clone();
-            let text_layout = text_layout.clone();
-            let mut hovered_index = state.hovered_index;
-            move |event: &MouseMoveEvent, phase, window, cx| {
-                if !phase.bubble() || !hitbox.is_hovered(window) {
-                    return;
-                }
-
-                let current = hovered_index;
-                let updated = text_layout.index_for_position(event.position).ok();
-                //  notify update when hovering over different links
-                if current != updated {
-                    hovered_index = updated;
-                    cx.notify(current_view);
-                }
+        if let Some(hitbox) = prepaint {
+            let current_view = window.current_view();
+            let mouse_position = window.mouse_position();
+            if Self::link_for_position(&text_layout, &self.links, mouse_position).is_some() {
+                window.set_cursor_style(CursorStyle::PointingHand, hitbox);
             }
-        });
 
-        if !is_selection {
-            // click to open link
             window.on_mouse_event({
-                let links = self.links.clone();
+                let hitbox = hitbox.clone();
                 let text_layout = text_layout.clone();
-
-                move |event: &MouseUpEvent, phase, _, cx| {
-                    if !bounds.contains(&event.position) || !phase.bubble() {
+                let mut hovered_index = state.hovered_index;
+                move |event: &MouseMoveEvent, phase, window, cx| {
+                    if !phase.bubble() || !hitbox.is_hovered(window) {
                         return;
                     }
 
-                    if let Some(link) =
-                        Self::link_for_position(&text_layout, &links, event.position)
-                    {
-                        cx.stop_propagation();
-                        cx.open_url(&link.url);
+                    let current = hovered_index;
+                    let updated = text_layout.index_for_position(event.position).ok();
+                    if current != updated {
+                        hovered_index = updated;
+                        cx.notify(current_view);
                     }
                 }
             });
+
+            if !is_selection {
+                window.on_mouse_event({
+                    let links = self.links.clone();
+                    let text_layout = text_layout.clone();
+
+                    move |event: &MouseUpEvent, phase, _, cx| {
+                        if !bounds.contains(&event.position) || !phase.bubble() {
+                            return;
+                        }
+
+                        if let Some(link) =
+                            Self::link_for_position(&text_layout, &links, event.position)
+                        {
+                            cx.stop_propagation();
+                            cx.open_url(&link.url);
+                        }
+                    }
+                });
+            }
         }
     }
 }

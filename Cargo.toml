@@ -35,3 +35,11 @@ raw-window-handle = "0.6"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Keep debug assertions and incremental builds for app code, but do not run
+# GPUI's text shaping and Taffy layout hot paths completely unoptimized.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

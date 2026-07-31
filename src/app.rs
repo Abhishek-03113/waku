@@ -40,11 +40,12 @@ const CONTENT_MAX_WIDTH: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 252.0;
 const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
-const STREAM_MARKDOWN_DELAY: Duration = Duration::from_millis(12);
+const STREAM_MARKDOWN_DELAY: Duration = Duration::from_millis(32);
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 const STREAM_CATCH_UP_FRAMES: usize = 18;
 const STREAM_MIN_GRAPHEMES_PER_FRAME: usize = 12;
 const STREAM_MAX_GRAPHEMES_PER_FRAME: usize = 256;
+const STREAM_REMEASURE_TAIL_ROWS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StreamPhase {
@@ -916,18 +917,34 @@ impl Waku {
         }
     }
 
-    /// Streaming mutates current-turn rows in place, so re-measure the part of
-    /// the transcript that can still change.
+    /// Provider events arrive in transcript order, so only the active tail can
+    /// change height. Keeping earlier row measurements intact is critical
+    /// for responsive scrolling while a long answer is still growing.
     fn remeasure_transcript_tail(&self) {
         self.sync_transcript_rows();
         let count = self.transcript_rows.item_count();
-        let from = self
-            .selected_transcript_blocks()
-            .first()
-            .map(|block| block.after_message.saturating_sub(1))
-            .unwrap_or_else(|| count.saturating_sub(2));
+        let from = count.saturating_sub(STREAM_REMEASURE_TAIL_ROWS);
         if from < count {
             self.transcript_rows.splice(from..count, count - from);
+        }
+    }
+
+    fn remeasure_transcript_block(&self, block_index: usize) {
+        self.sync_transcript_rows();
+        let message_count = self
+            .selected_session()
+            .map(|session| session.messages.len())
+            .unwrap_or(0);
+        let anchors = self
+            .selected_transcript_blocks()
+            .iter()
+            .map(|block| block.after_message)
+            .collect::<Vec<_>>();
+        if let Some(row_index) = transcript_row_kinds(message_count, &anchors)
+            .iter()
+            .position(|kind| *kind == TranscriptRowKind::TurnBlock(block_index))
+        {
+            self.transcript_rows.splice(row_index..row_index + 1, 1);
         }
     }
 
@@ -2247,13 +2264,13 @@ impl Waku {
 
     fn toggle_reasoning(&mut self, block_index: usize, current: bool, cx: &mut Context<Self>) {
         self.reasoning_expanded.insert(block_index, !current);
-        self.remeasure_transcript_tail();
+        self.remeasure_transcript_block(block_index);
         cx.notify();
     }
 
     fn toggle_activities(&mut self, block_index: usize, current: bool, cx: &mut Context<Self>) {
         self.activities_expanded.insert(block_index, !current);
-        self.remeasure_transcript_tail();
+        self.remeasure_transcript_block(block_index);
         cx.notify();
     }
 
@@ -2261,7 +2278,15 @@ impl Waku {
         if !self.expanded_activity_items.remove(&id) {
             self.expanded_activity_items.insert(id);
         }
-        self.remeasure_transcript_tail();
+        if let Some(block_index) = self.selected_transcript_blocks().iter().position(|block| {
+            matches!(
+                &block.content,
+                TranscriptBlockContent::Activities(activities)
+                    if activities.iter().any(|activity| activity.id == id)
+            )
+        }) {
+            self.remeasure_transcript_block(block_index);
+        }
         cx.notify();
     }
 

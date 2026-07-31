@@ -446,6 +446,11 @@ pub(crate) enum Node {
         children: Vec<Node>,
         ordered: bool,
     },
+    /// A long, non-nested list rendered as a handful of multiline text
+    /// layouts instead of one flex/layout subtree per item.
+    PlainList {
+        chunks: Vec<Paragraph>,
+    },
     ListItem {
         children: Vec<Node>,
         spread: bool,
@@ -468,6 +473,9 @@ pub(crate) enum Node {
 }
 
 impl Node {
+    const PLAIN_LIST_MIN_ITEMS: usize = 32;
+    const PLAIN_LIST_CHUNK_ITEMS: usize = 24;
+
     pub(super) fn is_list_item(&self) -> bool {
         matches!(self, Self::ListItem { .. })
     }
@@ -482,6 +490,98 @@ impl Node {
             Self::Root { mut children } if children.len() == 1 => children.remove(0).compact(),
             _ => self,
         }
+    }
+
+    /// Collapse long simple lists into multiline text chunks. This retains a
+    /// single document/selection model while avoiding hundreds of Taffy nodes
+    /// for line-oriented responses such as numbered enumerations.
+    pub(crate) fn optimize_for_rendering(self) -> Node {
+        match self {
+            Self::Root { children } => Self::Root {
+                children: children
+                    .into_iter()
+                    .map(Self::optimize_for_rendering)
+                    .collect(),
+            },
+            Self::Blockquote { children } => Self::Blockquote {
+                children: children
+                    .into_iter()
+                    .map(Self::optimize_for_rendering)
+                    .collect(),
+            },
+            Self::List { children, ordered } => {
+                let children = children
+                    .into_iter()
+                    .map(Self::optimize_for_rendering)
+                    .collect::<Vec<_>>();
+                Self::plain_list_chunks(&children, ordered)
+                    .map(|chunks| Self::PlainList { chunks })
+                    .unwrap_or(Self::List { children, ordered })
+            }
+            Self::ListItem {
+                children,
+                spread,
+                checked,
+            } => Self::ListItem {
+                children: children
+                    .into_iter()
+                    .map(Self::optimize_for_rendering)
+                    .collect(),
+                spread,
+                checked,
+            },
+            node => node,
+        }
+    }
+
+    fn plain_list_chunks(children: &[Node], ordered: bool) -> Option<Vec<Paragraph>> {
+        if children.len() < Self::PLAIN_LIST_MIN_ITEMS {
+            return None;
+        }
+
+        let paragraphs = children
+            .iter()
+            .map(|child| match child {
+                Self::ListItem {
+                    children,
+                    spread: false,
+                    checked: None,
+                } if children.len() == 1 => match &children[0] {
+                    Self::Paragraph(paragraph)
+                        if paragraph.children.iter().all(|child| child.image.is_none()) =>
+                    {
+                        Some(paragraph)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        Some(
+            paragraphs
+                .chunks(Self::PLAIN_LIST_CHUNK_ITEMS)
+                .enumerate()
+                .map(|(chunk_index, paragraphs)| {
+                    let mut chunk = Paragraph::default();
+                    for (item_offset, paragraph) in paragraphs.iter().enumerate() {
+                        let item_index =
+                            chunk_index * Self::PLAIN_LIST_CHUNK_ITEMS + item_offset;
+                        if ordered {
+                            chunk.push_str(&format!("{}. ", item_index + 1));
+                        } else {
+                            chunk.push_str("• ");
+                        }
+                        chunk.children.extend(paragraph.children.iter().cloned());
+                        chunk.link_refs.extend(paragraph.link_refs.clone());
+                        if item_offset + 1 < paragraphs.len() {
+                            chunk.push_str("\n");
+                        }
+                    }
+                    chunk
+                })
+                .collect(),
+        )
     }
 
     pub(super) fn selected_text(&self) -> String {
@@ -517,6 +617,16 @@ impl Node {
                 for c in children.iter() {
                     text.push_str(&c.selected_text());
                 }
+            }
+            Node::PlainList { chunks } => {
+                text.push_str(
+                    &chunks
+                        .iter()
+                        .map(Paragraph::selected_text)
+                        .filter(|selection| !selection.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
             }
             Node::ListItem { children, .. } => {
                 for c in children.iter() {
@@ -563,6 +673,54 @@ impl Node {
         }
 
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn simple_ordered_list(item_count: usize) -> Node {
+        Node::List {
+            ordered: true,
+            children: (1..=item_count)
+                .map(|index| Node::ListItem {
+                    children: vec![Node::Paragraph(Paragraph::new(format!(
+                        "Item {index}"
+                    )))],
+                    spread: false,
+                    checked: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn paragraph_text(paragraph: &Paragraph) -> String {
+        paragraph
+            .children
+            .iter()
+            .map(|child| child.text.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn long_simple_lists_use_multiline_chunks() {
+        let optimized = simple_ordered_list(64).optimize_for_rendering();
+        let Node::PlainList { chunks } = optimized else {
+            panic!("expected long simple list to be flattened");
+        };
+
+        assert_eq!(chunks.len(), 3);
+        assert!(paragraph_text(&chunks[0]).starts_with("1. Item 1\n"));
+        assert!(paragraph_text(&chunks[2]).ends_with("64. Item 64"));
+    }
+
+    #[test]
+    fn short_lists_keep_semantic_layout() {
+        assert!(matches!(
+            simple_ordered_list(Node::PLAIN_LIST_MIN_ITEMS - 1).optimize_for_rendering(),
+            Node::List { .. }
+        ));
     }
 }
 
@@ -789,6 +947,11 @@ impl Node {
                     };
                     format!("{}{}", prefix, child.to_markdown())
                 })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Node::PlainList { chunks } => chunks
+                .iter()
+                .map(Paragraph::to_markdown)
                 .collect::<Vec<_>>()
                 .join("\n"),
             Node::ListItem {
@@ -1238,6 +1401,20 @@ impl Node {
                     }
                     items
                 })
+                .into_any_element(),
+            Node::PlainList { chunks } => div()
+                .id("plain-list")
+                .pb(mb)
+                .children(
+                    chunks
+                        .iter()
+                        .map(|chunk| {
+                            chunk
+                                .render(node_cx, window, cx)
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>(),
+                )
                 .into_any_element(),
             Node::CodeBlock(code_block) => code_block.render(&options, node_cx, window, cx),
             Node::Table { .. } => div()

@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Bounds, ClipboardItem, Context, Element, ElementId, Entity,
-    EntityId, FocusHandle, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
-    KeyBinding, LayoutId, ListState, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, RenderOnce, SharedString, Size, StyleRefinement, Styled, Timer, Window, div, px,
+    AnyElement, App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
+    Entity, EntityId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    InteractiveElement, IntoElement, KeyBinding, LayoutId, ListState, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, RenderOnce, SharedString, Size,
+    StyleRefinement, Styled, Timer, Window, div, px,
 };
 use smol::stream::StreamExt;
 
@@ -126,6 +127,7 @@ struct UpdateFuture {
     current_style: TextViewStyle,
     current_text: SharedString,
     timer: Timer,
+    timer_pending: bool,
     rx: Pin<Box<smol::channel::Receiver<Update>>>,
     tx_result: smol::channel::Sender<Result<ParsedContent, SharedString>>,
     delay: Duration,
@@ -150,6 +152,7 @@ impl UpdateFuture {
             current_style: style,
             current_text: text,
             timer: Timer::never(),
+            timer_pending: false,
             rx: Box::pin(rx),
             tx_result,
             delay,
@@ -176,9 +179,10 @@ impl Future for UpdateFuture {
                         }
                         _ => false,
                     };
-                    if changed {
+                    if changed && !self.timer_pending {
                         let delay = self.delay;
                         self.timer.set_after(delay);
+                        self.timer_pending = true;
                     }
                     continue;
                 }
@@ -188,6 +192,7 @@ impl Future for UpdateFuture {
 
             match self.timer.poll_next(cx) {
                 Poll::Ready(Some(_)) => {
+                    self.timer_pending = false;
                     let res = parse_content(
                         self.type_,
                         &self.current_text,
@@ -230,6 +235,7 @@ pub(crate) struct TextViewState {
     is_selecting: bool,
     is_selectable: bool,
     list_state: ListState,
+    current_text: SharedString,
 }
 
 impl TextViewState {
@@ -245,6 +251,7 @@ impl TextViewState {
             is_selecting: false,
             is_selectable: false,
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
+            current_text: SharedString::default(),
         }
     }
 }
@@ -420,8 +427,18 @@ impl TextView {
             &state,
             cx,
         );
-        if let Some(tx) = &state.read(cx).tx {
-            let _ = tx.try_send(Update::Text(markdown.clone()));
+        if let Some(tx) = state.read(cx).tx.clone() {
+            let changed = state.update(cx, |state, _| {
+                if state.current_text == markdown {
+                    false
+                } else {
+                    state.current_text = markdown.clone();
+                    true
+                }
+            });
+            if changed {
+                let _ = tx.try_send(Update::Text(markdown.clone()));
+            }
         }
         Self {
             id,
@@ -452,8 +469,18 @@ impl TextView {
             });
         let init_state =
             Self::create_init_state(TextViewType::Html, &html, &highlight_theme, &state, cx);
-        if let Some(tx) = &state.read(cx).tx {
-            let _ = tx.try_send(Update::Text(html.clone()));
+        if let Some(tx) = state.read(cx).tx.clone() {
+            let changed = state.update(cx, |state, _| {
+                if state.current_text == html {
+                    false
+                } else {
+                    state.current_text = html.clone();
+                    true
+                }
+            });
+            if changed {
+                let _ = tx.try_send(Update::Text(html.clone()));
+            }
         }
         Self {
             id,
@@ -562,7 +589,7 @@ impl IntoElement for TextView {
 
 impl Element for TextView {
     type RequestLayoutState = AnyElement;
-    type PrepaintState = ();
+    type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -605,6 +632,7 @@ impl Element for TextView {
                 |state, _| {
                     state.parsed_result = Some(parsed_result);
                     state.tx = Some(tx);
+                    state.current_text = text.clone();
                 }
             });
 
@@ -684,12 +712,14 @@ impl Element for TextView {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         request_layout.prepaint(window, cx);
+        hitbox
     }
 
     fn paint(
@@ -698,12 +728,16 @@ impl Element for TextView {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         request_layout: &mut Self::RequestLayoutState,
-        _: &mut Self::PrepaintState,
+        hitbox: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
         let entity_id = window.current_view();
         let is_selectable = self.selectable;
+
+        if is_selectable {
+            window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        }
 
         self.state.update(cx, |state, _| {
             state.parent_entity = Some(entity_id);
