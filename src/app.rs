@@ -1793,7 +1793,7 @@ impl Waku {
 
     // ── Composer ───────────────────────────────────────────────────────────
 
-    fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn render_composer(&self, _window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::dark();
         let session = self.selected_session();
         let provider = session.map(|session| session.provider).unwrap_or_default();
@@ -1811,7 +1811,6 @@ impl Waku {
         let fresh_session = session
             .map(|session| session.messages.is_empty())
             .unwrap_or(false);
-        let focused = self.composer.read(cx).is_visually_focused(window);
         let has_draft = !self.composer.read(cx).content().trim().is_empty();
         let weak = cx.entity().downgrade();
         let provider_options = ProviderKind::ALL
@@ -1835,11 +1834,7 @@ impl Waku {
                 .mx_auto()
                 .rounded(px(13.0))
                 .border_1()
-                .border_color(if focused {
-                    theme.border_strong
-                } else {
-                    theme.border
-                })
+                .border_color(theme.border)
                 .bg(theme.raised)
                 .shadow(vec![BoxShadow {
                     color: hsla(0.0, 0.0, 0.0, 0.24),
@@ -1861,14 +1856,17 @@ impl Waku {
                             // The provider is a real select while the session
                             // has no history; afterwards it is locked in.
                             let weak = weak.clone();
+                            let composer = self.composer.clone();
                             MenuChip::new("composer-provider")
                                 .icon(
                                     provider_icon(provider),
                                     provider_color(provider).opacity(0.9),
                                 )
                                 .label(provider.short_name())
-                                .dropdown_menu(move |mut menu, _window, _cx| {
-                                    menu = menu.min_w(px(190.0));
+                                .dropdown_menu(move |mut menu, _window, cx| {
+                                    menu = menu
+                                        .action_context(composer.read(cx).focus())
+                                        .min_w(px(190.0));
                                     for (kind, installed, checked) in
                                         provider_options.iter().copied()
                                     {
@@ -1916,10 +1914,13 @@ impl Waku {
                         })
                         .child({
                             let weak = weak.clone();
+                            let composer = self.composer.clone();
                             MenuChip::new("runtime-mode")
                                 .label(mode.label())
-                                .dropdown_menu(move |mut menu, _window, _cx| {
-                                    menu = menu.min_w(px(140.0));
+                                .dropdown_menu(move |mut menu, _window, cx| {
+                                    menu = menu
+                                        .action_context(composer.read(cx).focus())
+                                        .min_w(px(140.0));
                                     for option in
                                         [RuntimeMode::Plan, RuntimeMode::Ask, RuntimeMode::Auto]
                                     {
