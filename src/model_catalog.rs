@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -69,7 +69,7 @@ pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderMod
 }
 
 fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
-    let Ok(output) = Command::new(binary).arg("models").output() else {
+    let Ok(output) = crate::command_env::command(binary).arg("models").output() else {
         return Vec::new();
     };
     parse_opencode_models(&String::from_utf8_lossy(&output.stdout))
@@ -96,7 +96,7 @@ fn parse_opencode_models(output: &str) -> Vec<ProviderModel> {
 }
 
 fn discover_grok_models(binary: &Path) -> Vec<ProviderModel> {
-    let Ok(output) = Command::new(binary).arg("models").output() else {
+    let Ok(output) = crate::command_env::command(binary).arg("models").output() else {
         return Vec::new();
     };
     let combined = format!(
@@ -145,7 +145,7 @@ fn parse_grok_models(output: &str) -> Vec<ProviderModel> {
 }
 
 fn discover_codex_models(binary: &Path) -> Vec<ProviderModel> {
-    let Ok(mut child) = Command::new(binary)
+    let Ok(mut child) = crate::command_env::command(binary)
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -159,7 +159,7 @@ fn run_prompt(
     active_pid: &AtomicU32,
 ) -> Option<String> {
     let _ = events.send(DriverEvent::TurnStarted);
-    let mut command = Command::new(binary);
+    let mut command = crate::command_env::command(binary);
     command.current_dir(cwd);
     match provider {
         ProviderKind::Claude => {

@@ -19,6 +19,12 @@ pub struct PersistedState {
     pub selected_project: Option<Uuid>,
     pub selected_session: Option<Uuid>,
     pub last_provider: ProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_service_tier: Option<String>,
     #[serde(default)]
     pub favorite_models: Vec<FavoriteModel>,
 }
@@ -32,6 +38,9 @@ impl PersistedState {
             selected_project: None,
             selected_session: None,
             last_provider: ProviderKind::Codex,
+            last_model: None,
+            last_reasoning_effort: None,
+            last_service_tier: None,
             favorite_models: Vec::new(),
         }
     }
@@ -46,8 +55,23 @@ impl PersistedState {
             projects: vec![project],
             sessions: vec![session],
             last_provider: ProviderKind::Codex,
+            last_model: None,
+            last_reasoning_effort: None,
+            last_service_tier: None,
             favorite_models: Vec::new(),
         }
+    }
+
+    pub fn new_session(&self, project_id: Uuid, provider: ProviderKind) -> AgentSession {
+        let mut session = AgentSession::new(project_id, provider);
+        if provider == self.last_provider {
+            session.model.clone_from(&self.last_model);
+            session
+                .reasoning_effort
+                .clone_from(&self.last_reasoning_effort);
+            session.service_tier.clone_from(&self.last_service_tier);
+        }
+        session
     }
 }
 
@@ -96,6 +120,26 @@ impl StateStore {
         for session in &mut state.sessions {
             session.migrate_legacy_state();
         }
+        if let Some(session) = state
+            .selected_session
+            .and_then(|selected_session| {
+                state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == selected_session)
+            })
+            .cloned()
+        {
+            if state.last_model.is_none() {
+                state.last_model = session.model;
+            }
+            if state.last_reasoning_effort.is_none() {
+                state.last_reasoning_effort = session.reasoning_effort;
+            }
+            if state.last_service_tier.is_none() {
+                state.last_service_tier = session.service_tier;
+            }
+        }
         Ok(state)
     }
 
@@ -142,8 +186,11 @@ mod tests {
         let store = StateStore::new(directory.join("state.json"));
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].model = Some("gpt-5.6-luna".into());
+        state.last_model = Some("gpt-5.6-luna".into());
         state.sessions[0].reasoning_effort = Some("xhigh".into());
+        state.last_reasoning_effort = Some("xhigh".into());
         state.sessions[0].service_tier = Some("fast".into());
+        state.last_service_tier = Some("fast".into());
         state.sessions[0].runtime_mode = crate::model::RuntimeMode::Auto;
         state.favorite_models.push(FavoriteModel {
             provider: ProviderKind::Codex,
@@ -176,6 +223,9 @@ mod tests {
         assert_eq!(restored.projects[0].name, "project");
         assert_eq!(restored.sessions.len(), 1);
         assert_eq!(restored.sessions[0].model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(restored.last_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(restored.last_reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(restored.last_service_tier.as_deref(), Some("fast"));
         assert_eq!(
             restored.sessions[0].reasoning_effort.as_deref(),
             Some("xhigh")
@@ -222,6 +272,12 @@ mod tests {
         ));
         let mut value = serde_json::to_value(&state).unwrap();
         value.as_object_mut().unwrap().remove("favorite_models");
+        value.as_object_mut().unwrap().remove("last_model");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("last_reasoning_effort");
+        value.as_object_mut().unwrap().remove("last_service_tier");
         value["sessions"][0]
             .as_object_mut()
             .unwrap()
@@ -234,6 +290,9 @@ mod tests {
         let restored = store.load().unwrap();
         assert_eq!(restored.version, STATE_VERSION);
         assert!(restored.favorite_models.is_empty());
+        assert!(restored.last_model.is_none());
+        assert!(restored.last_reasoning_effort.is_none());
+        assert!(restored.last_service_tier.is_none());
         assert!(restored.sessions[0].model.is_none());
         assert_eq!(
             restored.sessions[0]
@@ -250,6 +309,52 @@ mod tests {
                 .all(|message| message.turn_id.is_some())
         );
 
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn selected_model_and_traits_are_used_for_new_sessions() {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.last_provider = ProviderKind::Grok;
+        state.last_model = Some("grok-code-fast-1".into());
+        state.last_reasoning_effort = Some("high".into());
+        state.last_service_tier = Some("fast".into());
+
+        let remembered = state.new_session(state.projects[0].id, ProviderKind::Grok);
+        let other_provider = state.new_session(state.projects[0].id, ProviderKind::Codex);
+
+        assert_eq!(remembered.model.as_deref(), Some("grok-code-fast-1"));
+        assert_eq!(remembered.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(remembered.service_tier.as_deref(), Some("fast"));
+        assert!(other_provider.model.is_none());
+        assert!(other_provider.reasoning_effort.is_none());
+        assert!(other_provider.service_tier.is_none());
+    }
+
+    #[test]
+    fn missing_remembered_selection_is_backfilled_from_selected_session() {
+        let directory = std::env::temp_dir().join(format!("waku-model-{}", Uuid::new_v4()));
+        let path = directory.join("state.json");
+        let store = StateStore::new(path.clone());
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].model = Some("gpt-5.6-luna".into());
+        state.sessions[0].reasoning_effort = Some("xhigh".into());
+        state.sessions[0].service_tier = Some("fast".into());
+        let mut value = serde_json::to_value(state).unwrap();
+        value.as_object_mut().unwrap().remove("last_model");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("last_reasoning_effort");
+        value.as_object_mut().unwrap().remove("last_service_tier");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let restored = store.load().unwrap();
+
+        assert_eq!(restored.last_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(restored.last_reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(restored.last_service_tier.as_deref(), Some("fast"));
         fs::remove_dir_all(directory).ok();
     }
 

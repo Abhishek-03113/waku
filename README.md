@@ -102,7 +102,8 @@ notarization options.
 
 - Add local project folders from the sidebar.
 - Start independent sessions with `⌘N`.
-- Search and select a provider model before the first message; favorite models
+- Search and select a provider model before the first message; its reasoning
+  effort and service tier are remembered for new tasks too, and favorite models
   stay available in the picker.
 - Tune provider-advertised reasoning effort and speed from one compact model
   traits menu.

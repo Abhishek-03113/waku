@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -55,7 +55,7 @@ impl CodexDriver {
             }
             None => None,
         };
-        let mut child = Command::new(binary)
+        let mut child = crate::command_env::command(binary)
             .args(["app-server", "--stdio"])
             .current_dir(&cwd)
             .stdin(Stdio::piped())
@@ -809,6 +809,7 @@ fn is_visible_stderr_notice(line: &str) -> bool {
         || line.contains('⚠')
         || lowercase.contains("fatal")
         || lowercase.contains("warning")
+        || lowercase.contains("no such file or directory")
         || lowercase.contains("mcp startup incomplete")
 }
 
@@ -838,6 +839,13 @@ mod tests {
             codex_permissions(RuntimeMode::FullAccess, InteractionMode::Plan),
             ("never", "read-only", "user")
         );
+    }
+
+    #[test]
+    fn missing_launcher_dependencies_are_visible() {
+        assert!(is_visible_stderr_notice(
+            "env: node: No such file or directory"
+        ));
     }
 
     #[test]

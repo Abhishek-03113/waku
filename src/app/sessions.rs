@@ -19,12 +19,22 @@ impl Waku {
 
     pub(super) fn select_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         self.state.selected_session = Some(session_id);
-        if let Some((project_id, provider)) = self
-            .selected_session()
-            .map(|session| (session.project_id, session.provider))
+        if let Some((project_id, provider, model, reasoning_effort, service_tier)) =
+            self.selected_session().map(|session| {
+                (
+                    session.project_id,
+                    session.provider,
+                    session.model.clone(),
+                    session.reasoning_effort.clone(),
+                    session.service_tier.clone(),
+                )
+            })
         {
             self.state.selected_project = Some(project_id);
             self.state.last_provider = provider;
+            self.state.last_model = model;
+            self.state.last_reasoning_effort = reasoning_effort;
+            self.state.last_service_tier = service_tier;
         }
         self.reset_visible_state();
         self.branch = self
@@ -41,7 +51,7 @@ impl Waku {
         provider: ProviderKind,
         cx: &mut Context<Self>,
     ) {
-        let session = AgentSession::new(project_id, provider);
+        let session = self.state.new_session(project_id, provider);
         let id = session.id;
         self.state.sessions.push(session);
         self.state.selected_project = Some(project_id);
@@ -166,10 +176,13 @@ impl Waku {
         {
             let session_id = session.id;
             session.provider = provider;
-            session.model = Some(model);
+            session.model = Some(model.clone());
             session.reasoning_effort = None;
             session.service_tier = None;
             self.state.last_provider = provider;
+            self.state.last_model = Some(model);
+            self.state.last_reasoning_effort = None;
+            self.state.last_service_tier = None;
             self.model_picker_tab = ModelPickerTab::Provider(provider);
             self.reset_session_runtime(session_id);
             self.save();
@@ -238,7 +251,8 @@ impl Waku {
             && session.reasoning_effort.as_deref() != Some(effort.as_str())
         {
             let session_id = session.id;
-            session.reasoning_effort = Some(effort);
+            session.reasoning_effort = Some(effort.clone());
+            self.state.last_reasoning_effort = Some(effort);
             self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
@@ -250,7 +264,8 @@ impl Waku {
             && session.service_tier.as_deref() != Some(tier.as_str())
         {
             let session_id = session.id;
-            session.service_tier = Some(tier);
+            session.service_tier = Some(tier.clone());
+            self.state.last_service_tier = Some(tier);
             self.reset_session_runtime(session_id);
             self.save();
             cx.notify();

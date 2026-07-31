@@ -301,7 +301,7 @@ impl ProviderProbe {
         let mut probe = Self::pending(provider);
         let path = probe.path.clone();
         let version = path.as_ref().and_then(|path| {
-            std::process::Command::new(path)
+            crate::command_env::command(path)
                 .arg("--version")
                 .output()
                 .ok()
@@ -331,30 +331,7 @@ impl ProviderProbe {
 }
 
 fn find_in_path(command: &str) -> Option<PathBuf> {
-    let candidate = Path::new(command);
-    if candidate.components().count() > 1 && candidate.is_file() {
-        return Some(candidate.to_path_buf());
-    }
-    let mut directories = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .unwrap_or_default();
-    if let Some(home) = dirs::home_dir() {
-        directories.extend([
-            home.join(".local/bin"),
-            home.join(".bun/bin"),
-            home.join(".cargo/bin"),
-            home.join(".local/share/mise/shims"),
-        ]);
-    }
-    directories.extend([
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/usr/bin"),
-    ]);
-    directories
-        .into_iter()
-        .map(|directory| directory.join(command))
-        .find(|candidate| candidate.is_file())
+    crate::command_env::find_executable(command)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
