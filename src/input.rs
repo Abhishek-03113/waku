@@ -5,9 +5,9 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, DismissEvent, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style,
-    Subscription, Task, TextRun, Timer, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
-    hsla, point, prelude::*, px, relative, size,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, StyledText, Subscription,
+    Task, TextLayout, TextRun, Timer, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
+    hsla, point, prelude::*, px, size,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use unicode_segmentation::UnicodeSegmentation;
@@ -120,8 +120,7 @@ pub struct ComposerInput {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    last_layout: Option<ShapedLine>,
-    last_bounds: Option<Bounds<Pixels>>,
+    last_layout: Option<TextLayout>,
     is_selecting: bool,
     external_context_menu_focus_holds: usize,
     blink_cursor: Entity<BlinkCursor>,
@@ -155,7 +154,6 @@ impl ComposerInput {
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
-            last_bounds: None,
             is_selecting: false,
             external_context_menu_focus_holds: 0,
             blink_cursor,
@@ -369,17 +367,13 @@ impl ComposerInput {
         if self.content.is_empty() {
             return 0;
         }
-        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
-        else {
+        let Some(layout) = self.last_layout.as_ref() else {
             return 0;
         };
-        if position.y < bounds.top() {
-            return 0;
-        }
-        if position.y > bounds.bottom() {
-            return self.content.len();
-        }
-        line.closest_index_for_x(position.x - bounds.left())
+        layout
+            .index_for_position(position)
+            .unwrap_or_else(|index| index)
+            .min(self.content.len())
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -540,12 +534,22 @@ impl EntityInputHandler for ComposerInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let line = self.last_layout.as_ref()?;
+        let layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
-        Some(Bounds::from_corners(
-            point(bounds.left() + line.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + line.x_for_index(range.end), bounds.bottom()),
-        ))
+        let start = layout.position_for_index(range.start)?;
+        let end = layout.position_for_index(range.end)?;
+        let line_height = layout.line_height();
+        if start.y == end.y {
+            Some(Bounds::from_corners(
+                start,
+                point(end.x, end.y + line_height),
+            ))
+        } else {
+            Some(Bounds::from_corners(
+                point(bounds.left(), start.y),
+                point(bounds.right(), end.y + line_height),
+            ))
+        }
     }
 
     fn character_index_for_point(
@@ -554,9 +558,11 @@ impl EntityInputHandler for ComposerInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<usize> {
-        let bounds = self.last_bounds?;
-        let line = self.last_layout.as_ref()?;
-        let utf8_index = line.index_for_x(point.x - bounds.left())?;
+        let layout = self.last_layout.as_ref()?;
+        let utf8_index = layout
+            .index_for_position(point)
+            .unwrap_or_else(|index| index)
+            .min(self.content.len());
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -602,10 +608,50 @@ struct InputElement {
     input: Entity<ComposerInput>,
 }
 
+struct InputLayoutState {
+    text: StyledText,
+    text_layout_state: (),
+}
+
 struct PrepaintState {
-    line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+}
+
+fn input_text_runs(
+    display_len: usize,
+    base_run: TextRun,
+    selected_range: Option<&Range<usize>>,
+    marked_range: Option<&Range<usize>>,
+) -> Vec<TextRun> {
+    let mut boundaries = vec![0, display_len];
+    for range in [selected_range, marked_range].into_iter().flatten() {
+        boundaries.push(range.start.min(display_len));
+        boundaries.push(range.end.min(display_len));
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    boundaries
+        .windows(2)
+        .filter_map(|boundary| {
+            let start = boundary[0];
+            let end = boundary[1];
+            (start < end).then(|| TextRun {
+                len: end - start,
+                background_color: selected_range
+                    .filter(|range| range.start < end && range.end > start)
+                    .map(|_| hsla(220.0 / 360.0, 0.10, 0.90, 0.18)),
+                underline: marked_range
+                    .filter(|range| range.start < end && range.end > start)
+                    .map(|_| UnderlineStyle {
+                        color: Some(base_run.color),
+                        thickness: px(1.0),
+                        wavy: false,
+                    }),
+                ..base_run.clone()
+            })
+        })
+        .collect()
 }
 
 impl IntoElement for InputElement {
@@ -617,7 +663,7 @@ impl IntoElement for InputElement {
 }
 
 impl Element for InputElement {
-    type RequestLayoutState = ();
+    type RequestLayoutState = InputLayoutState;
     type PrepaintState = PrepaintState;
 
     fn id(&self) -> Option<ElementId> {
@@ -630,44 +676,26 @@ impl Element for InputElement {
 
     fn request_layout(
         &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
-        let cursor_visible = cursor_should_be_visible(
-            window.is_window_active(),
-            input.focus_handle.is_focused(window),
-            input.context_menu_preserves_visual_focus(),
-            input.blink_cursor.read(cx).visible(),
-        );
         let style = window.text_style();
         let theme = Theme::dark();
-        let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), theme.text_ghost)
+        let (display_text, text_color, selected_range, marked_range) = if content.is_empty() {
+            (input.placeholder.clone(), theme.text_ghost, None, None)
         } else {
-            (content, style.color)
+            (
+                content,
+                style.color,
+                Some(&input.selected_range),
+                input.marked_range.as_ref(),
+            )
         };
-        let run = TextRun {
+        let base_run = TextRun {
             len: display_text.len(),
             font: style.font(),
             color: text_color,
@@ -675,73 +703,55 @@ impl Element for InputElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
-            vec![
-                TextRun {
-                    len: marked_range.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked_range.end - marked_range.start,
-                    underline: Some(UnderlineStyle {
-                        color: Some(run.color),
-                        thickness: px(1.0),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: display_text.len() - marked_range.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect()
-        } else {
-            vec![run]
-        };
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(display_text, font_size, &runs, None);
-        let cursor_position = line.x_for_index(cursor);
-        let (selection, cursor) = if selected_range.is_empty() {
-            (
-                None,
-                cursor_visible.then(|| {
-                    fill(
-                        Bounds::new(
-                            point(bounds.left() + cursor_position, bounds.top()),
-                            size(px(1.5), bounds.size.height),
-                        ),
-                        theme.accent,
-                    )
-                }),
-            )
-        } else {
-            (
-                Some(fill(
-                    Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.end),
-                            bounds.bottom(),
-                        ),
-                    ),
-                    hsla(220.0 / 360.0, 0.10, 0.90, 0.18),
-                )),
-                None,
-            )
-        };
-        PrepaintState {
-            line: Some(line),
-            cursor,
-            selection,
-        }
+        let runs = input_text_runs(display_text.len(), base_run, selected_range, marked_range);
+        let mut text = StyledText::new(display_text).with_runs(runs);
+        let (layout_id, text_layout_state) = text.request_layout(id, inspector_id, window, cx);
+        (
+            layout_id,
+            InputLayoutState {
+                text,
+                text_layout_state,
+            },
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout_state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        layout_state.text.prepaint(
+            None,
+            None,
+            bounds,
+            &mut layout_state.text_layout_state,
+            window,
+            cx,
+        );
+        let input = self.input.read(cx);
+        let cursor = input.cursor_offset();
+        let cursor_visible = cursor_should_be_visible(
+            window.is_window_active(),
+            input.focus_handle.is_focused(window),
+            input.context_menu_preserves_visual_focus(),
+            input.blink_cursor.read(cx).visible(),
+        );
+        let theme = Theme::dark();
+        let layout = layout_state.text.layout();
+        let cursor = (input.selected_range.is_empty() && cursor_visible)
+            .then(|| layout.position_for_index(cursor))
+            .flatten()
+            .map(|cursor_position| {
+                fill(
+                    Bounds::new(cursor_position, size(px(1.5), layout.line_height())),
+                    theme.accent,
+                )
+            });
+        PrepaintState { cursor }
     }
 
     fn paint(
@@ -749,7 +759,7 @@ impl Element for InputElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
+        layout_state: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
@@ -762,18 +772,21 @@ impl Element for InputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
-        let line = prepaint.line.take().expect("input line");
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .ok();
+        layout_state.text.paint(
+            None,
+            None,
+            bounds,
+            &mut layout_state.text_layout_state,
+            &mut (),
+            window,
+            cx,
+        );
         if visually_focused && let Some(cursor) = prepaint.cursor.take() {
             window.paint_quad(cursor);
         }
+        let text_layout = layout_state.text.layout().clone();
         self.input.update(cx, |input, _| {
-            input.last_layout = Some(line);
-            input.last_bounds = Some(bounds);
+            input.last_layout = Some(text_layout);
         });
     }
 }
@@ -806,7 +819,7 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .h(px(24.0))
+            .min_h(px(24.0))
             .line_height(px(22.0))
             .text_size(px(13.5))
             .text_color(theme.text)
@@ -861,12 +874,50 @@ impl Focusable for ComposerInput {
 
 #[cfg(test)]
 mod tests {
-    use super::cursor_should_be_visible;
+    use gpui::{TextRun, font, hsla};
+
+    use super::{cursor_should_be_visible, input_text_runs};
 
     #[test]
     fn context_menu_keeps_cursor_visible_while_it_owns_focus() {
         assert!(cursor_should_be_visible(true, false, true, false));
         assert!(!cursor_should_be_visible(true, false, false, true));
         assert!(!cursor_should_be_visible(false, false, true, true));
+    }
+
+    #[test]
+    fn selection_and_ime_styles_survive_wrapped_text_run_splitting() {
+        let selection = 2..8;
+        let marked = 4..6;
+        let runs = input_text_runs(
+            10,
+            TextRun {
+                len: 10,
+                font: font(".SystemUIFont"),
+                color: hsla(0.0, 0.0, 1.0, 1.0),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            },
+            Some(&selection),
+            Some(&marked),
+        );
+
+        assert_eq!(
+            runs.iter().map(|run| run.len).collect::<Vec<_>>(),
+            [2, 2, 2, 2, 2]
+        );
+        assert_eq!(
+            runs.iter()
+                .map(|run| run.background_color.is_some())
+                .collect::<Vec<_>>(),
+            [false, true, true, true, false]
+        );
+        assert_eq!(
+            runs.iter()
+                .map(|run| run.underline.is_some())
+                .collect::<Vec<_>>(),
+            [false, false, true, false, false]
+        );
     }
 }
