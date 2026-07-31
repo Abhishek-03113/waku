@@ -1,27 +1,26 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, BoxShadow, ClipboardItem, Context, Corner,
-    DismissEvent, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla, IntoElement,
-    ListAlignment, ListState, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point,
-    Render, SharedString, StyleRefinement, Subscription, Timer, WeakEntity, Window, anchored,
-    deferred, div, hsla, list, point, prelude::*, pulsating_between, px, rems,
+    Animation, AnimationExt, AnyElement, App, BoxShadow, ClipboardItem, Context, Corner, Div,
+    Entity, FocusHandle, FontWeight, Hsla, IntoElement, ListAlignment, ListState,
+    PathPromptOptions, Render, SharedString, StyleRefinement, Timer, Window, div, hsla, list,
+    point, prelude::*, pulsating_between, px, rems,
 };
 use uuid::Uuid;
 
 use crate::driver::{self, DriverHandle};
-use crate::input::{ComposerEvent, ComposerInput};
+use crate::input::{ComposerEvent, ComposerInput, preserve_composer_focus_for_context_menu};
 use crate::model::{
     ActivityItem, AgentSession, DriverEvent, Message, MessageRole, PendingPermission, Project,
     ProviderKind, ProviderProbe, ReasoningBlock, RuntimeMode, SessionStatus, TranscriptBlock,
     TranscriptBlockContent, compact_path, unix_time, unix_time_millis,
 };
 use gpui_component::Icon as ComponentIcon;
-use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::text::{TextView, TextViewStyle};
 
 use crate::persistence::{PersistedState, StateStore};
@@ -35,6 +34,7 @@ use crate::{CancelTurn, FocusComposer, NewSession, ToggleSidebar};
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 252.0;
+const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StreamPhase {
@@ -52,11 +52,9 @@ pub struct Waku {
     driver_session: Option<Uuid>,
     driver_events: Option<Receiver<DriverEvent>>,
     stream_phase: Option<StreamPhase>,
-    /// User override for the thinking disclosure; `None` follows the turn
-    /// (open while thinking, closed once the answer starts).
-    reasoning_expanded: Option<bool>,
-    /// User override for the activity disclosure; `None` follows the turn.
-    activities_expanded: Option<bool>,
+    /// User expansion overrides keyed by persisted transcript block index.
+    reasoning_expanded: HashMap<usize, bool>,
+    activities_expanded: HashMap<usize, bool>,
     /// Individual tool rows the user has opened to read their full detail.
     expanded_activity_items: HashSet<Uuid>,
     pending_permission: Option<PendingPermission>,
@@ -64,9 +62,6 @@ pub struct Waku {
     branch: Option<String>,
     toast: Option<String>,
     transcript_rows: ListState,
-    message_context_menu: Option<Entity<PopupMenu>>,
-    message_context_menu_position: Point<Pixels>,
-    _message_context_menu_subscription: Option<Subscription>,
 }
 
 impl Waku {
@@ -82,6 +77,13 @@ impl Waku {
             for message in &mut session.messages {
                 message.streaming = false;
             }
+            session.transcript_blocks.retain(|block| {
+                !matches!(
+                    &block.content,
+                    TranscriptBlockContent::Reasoning(reasoning)
+                        if reasoning.content.trim().is_empty()
+                )
+            });
             for block in &mut session.transcript_blocks {
                 if let TranscriptBlockContent::Activities(activities) = &mut block.content {
                     for activity in activities {
@@ -141,17 +143,14 @@ impl Waku {
                 driver_session: None,
                 driver_events: None,
                 stream_phase: None,
-                reasoning_expanded: None,
-                activities_expanded: None,
+                reasoning_expanded: HashMap::new(),
+                activities_expanded: HashMap::new(),
                 expanded_activity_items: HashSet::new(),
                 pending_permission: None,
                 sidebar_visible: true,
                 branch,
                 toast: None,
                 transcript_rows: ListState::new(0, ListAlignment::Bottom, px(512.0)),
-                message_context_menu: None,
-                message_context_menu_position: Point::default(),
-                _message_context_menu_subscription: None,
             }
         })
     }
@@ -251,8 +250,8 @@ impl Waku {
         session.status = SessionStatus::Connecting;
         session.updated_at = unix_time();
         self.stream_phase = None;
-        self.reasoning_expanded = None;
-        self.activities_expanded = None;
+        self.reasoning_expanded.clear();
+        self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.pending_permission = None;
         self.toast = None;
@@ -362,8 +361,11 @@ impl Waku {
     }
 
     fn append_reasoning_delta(&mut self, delta: String) {
-        let now = unix_time_millis();
         let continuing = self.stream_phase == Some(StreamPhase::Reasoning);
+        if !continuing && delta.trim().is_empty() {
+            return;
+        }
+        let now = unix_time_millis();
         if !continuing {
             self.finish_streaming_assistant();
         }
@@ -638,6 +640,40 @@ impl Waku {
         cx.notify();
     }
 
+    fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .state
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+        else {
+            return;
+        };
+        let project_id = self.state.sessions[index].project_id;
+        let was_selected = self.state.selected_session == Some(session_id);
+        self.state.sessions.remove(index);
+
+        if !was_selected {
+            self.save();
+            cx.notify();
+            return;
+        }
+
+        self.state.selected_session = None;
+        let next_session = self
+            .state
+            .sessions
+            .iter()
+            .filter(|session| session.project_id == project_id)
+            .max_by_key(|session| session.updated_at)
+            .map(|session| session.id);
+        if let Some(session_id) = next_session {
+            self.select_session(session_id, cx);
+        } else {
+            self.create_session_for(project_id, self.state.last_provider, cx);
+        }
+    }
+
     fn new_session_action(&mut self, _: &NewSession, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(project_id) = self.state.selected_project {
             self.create_session_for(project_id, self.state.last_provider, cx);
@@ -670,8 +706,8 @@ impl Waku {
         self.driver_session = None;
         self.driver_events = None;
         self.stream_phase = None;
-        self.reasoning_expanded = None;
-        self.activities_expanded = None;
+        self.reasoning_expanded.clear();
+        self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.pending_permission = None;
         self.toast = None;
@@ -831,6 +867,8 @@ impl Waku {
                 let session_id = session.id;
                 let selected = selected_session == Some(session.id);
                 let active = !matches!(session.status, SessionStatus::Idle);
+                let waku = cx.entity().downgrade();
+                let composer = self.composer.clone();
                 sessions = sessions.child(
                     div()
                         .id(SharedString::from(format!("session-{}", session.id)))
@@ -900,7 +938,24 @@ impl Waku {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.select_session(session_id, cx);
-                        })),
+                        }))
+                        .context_menu_with_id(
+                            SharedString::from(format!("session-context-menu-{session_id}")),
+                            move |menu, window, cx| {
+                                let waku = waku.clone();
+                                preserve_composer_focus_for_context_menu(
+                                    &composer, menu, window, cx,
+                                )
+                                .min_w(px(140.0))
+                                .item(
+                                    PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
+                                        let _ = waku.update(cx, |waku, cx| {
+                                            waku.remove_session(session_id, cx);
+                                        });
+                                    }),
+                                )
+                            },
+                        ),
                 );
             }
         }
@@ -1305,28 +1360,14 @@ impl Waku {
                 .is_some_and(|session| session.status == SessionStatus::Working)
     }
 
-    fn activities_running(&self) -> bool {
-        self.selected_transcript_blocks().iter().any(|block| {
-            matches!(
-                &block.content,
-                TranscriptBlockContent::Activities(activities)
-                    if activities.iter().any(|activity| !activity.complete)
-            )
-        })
-    }
-
-    fn toggle_reasoning(&mut self, cx: &mut Context<Self>) {
-        let current = self.reasoning_expanded.unwrap_or(self.reasoning_live());
-        self.reasoning_expanded = Some(!current);
+    fn toggle_reasoning(&mut self, block_index: usize, current: bool, cx: &mut Context<Self>) {
+        self.reasoning_expanded.insert(block_index, !current);
         self.remeasure_transcript_tail();
         cx.notify();
     }
 
-    fn toggle_activities(&mut self, cx: &mut Context<Self>) {
-        let current = self
-            .activities_expanded
-            .unwrap_or(self.activities_running());
-        self.activities_expanded = Some(!current);
+    fn toggle_activities(&mut self, block_index: usize, current: bool, cx: &mut Context<Self>) {
+        self.activities_expanded.insert(block_index, !current);
         self.remeasure_transcript_tail();
         cx.notify();
     }
@@ -1350,7 +1391,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::dark();
-        let waku = cx.entity().downgrade();
+        let composer = self.composer.clone();
         let row_count = self.transcript_row_count();
         let message_count = self
             .selected_session()
@@ -1365,11 +1406,19 @@ impl Waku {
             .get(index)
             .copied()
             .unwrap_or(TranscriptRowKind::Message(index));
+        let starts_followup_turn = match kind {
+            TranscriptRowKind::Message(message_index) => {
+                self.selected_session().is_some_and(|session| {
+                    message_starts_followup_turn(&session.messages, message_index)
+                })
+            }
+            TranscriptRowKind::TurnBlock(_) => false,
+        };
         let inner = match kind {
             TranscriptRowKind::Message(message_index) => self
                 .selected_session()
                 .and_then(|session| session.messages.get(message_index))
-                .map(|message| render_message(&theme, message, waku, window, cx))
+                .map(|message| render_message(&theme, message, composer, window, cx))
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnBlock(block_index) => self
                 .selected_transcript_blocks()
@@ -1391,6 +1440,9 @@ impl Waku {
             .px(px(20.0))
             .py(px(8.0))
             .when(index == 0, |element| element.pt(px(22.0)))
+            .when(starts_followup_turn, |element| {
+                element.pt(px(FOLLOWUP_TURN_TOP_GAP))
+            })
             .when(index + 1 == row_count, |element| element.pb(px(22.0)))
             .child(
                 div()
@@ -1417,7 +1469,11 @@ impl Waku {
                 && self.selected_transcript_blocks().iter().rposition(|block| {
                     matches!(block.content, TranscriptBlockContent::Reasoning(_))
                 }) == Some(block_index);
-        let expanded = self.reasoning_expanded.unwrap_or(live);
+        let expanded = self
+            .reasoning_expanded
+            .get(&block_index)
+            .copied()
+            .unwrap_or(live);
         let label = if live {
             "Thinking".to_owned()
         } else {
@@ -1472,7 +1528,9 @@ impl Waku {
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(label)),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_reasoning(cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_reasoning(block_index, expanded, cx);
+                    })),
             )
             .when(expanded, |element| {
                 element.child(
@@ -1498,7 +1556,11 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let running = activities.iter().any(|activity| !activity.complete);
-        let expanded = self.activities_expanded.unwrap_or(running);
+        let expanded = self
+            .activities_expanded
+            .get(&block_index)
+            .copied()
+            .unwrap_or(running);
         let cluster = div().flex().flex_col().gap(px(2.0)).child(
             div()
                 .id(SharedString::from(format!("activity-toggle-{block_index}")))
@@ -1531,7 +1593,9 @@ impl Waku {
                         .text_color(theme.text_tertiary)
                         .child(SharedString::from(activity_summary(activities))),
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_activities(cx))),
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_activities(block_index, expanded, cx);
+                })),
         );
         if !expanded {
             return cluster.into_any_element();
@@ -1986,64 +2050,6 @@ impl Waku {
                     ),
             )
     }
-
-    fn open_message_context_menu(
-        &mut self,
-        event: &MouseDownEvent,
-        role: MessageRole,
-        content: String,
-        code: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let action_context = window.focused(cx);
-        let composer = self.composer.clone();
-        let menu = PopupMenu::build(window, cx, move |mut menu, _window, _cx| {
-            if let Some(action_context) = action_context {
-                menu = menu.action_context(action_context);
-            }
-
-            let copy_content = content.clone();
-            menu = menu
-                .min_w(px(170.0))
-                .item(
-                    PopupMenuItem::new("Copy Message").on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
-                    }),
-                );
-
-            if role == MessageRole::User {
-                let composer = composer.clone();
-                let edit_content = content.clone();
-                menu = menu.item(PopupMenuItem::new("Edit in Composer").on_click(
-                    move |_, window, cx| {
-                        composer.update(cx, |composer, cx| {
-                            composer.set_content(edit_content.clone(), cx);
-                        });
-                        window.focus(&composer.read(cx).focus());
-                    },
-                ));
-            }
-
-            if let Some(code) = code.clone() {
-                menu = menu.item(PopupMenuItem::new("Copy Code").on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                }));
-            }
-            menu
-        });
-        let subscription =
-            cx.subscribe_in(&menu, window, |waku, _, _: &DismissEvent, _window, cx| {
-                waku.message_context_menu = None;
-                cx.notify();
-            });
-
-        self.message_context_menu_position = event.position;
-        self.message_context_menu = Some(menu.clone());
-        self._message_context_menu_subscription = Some(subscription);
-        menu.focus_handle(cx).focus(window);
-        cx.notify();
-    }
 }
 
 impl Render for Waku {
@@ -2055,8 +2061,6 @@ impl Render for Waku {
             .unwrap_or(true);
         let permission = self.render_permission(cx);
         let toast = self.toast.clone();
-        let message_context_menu = self.message_context_menu.clone();
-        let message_context_menu_position = self.message_context_menu_position;
         div()
             .key_context("Waku")
             .on_action(cx.listener(Self::new_session_action))
@@ -2117,15 +2121,6 @@ impl Render for Waku {
                             .child(self.render_workspace_footer())
                     }),
             )
-            .children(message_context_menu.map(|menu| {
-                deferred(
-                    anchored()
-                        .snap_to_window_with_margin(px(8.0))
-                        .anchor(Corner::TopLeft)
-                        .position(message_context_menu_position)
-                        .child(div().cursor_default().child(menu)),
-                )
-            }))
     }
 }
 
@@ -2164,6 +2159,15 @@ fn transcript_row_kinds(message_count: usize, anchors: &[usize]) -> Vec<Transcri
     rows
 }
 
+fn message_starts_followup_turn(messages: &[Message], message_index: usize) -> bool {
+    messages
+        .get(message_index)
+        .is_some_and(|message| message.role == MessageRole::User)
+        && messages[..message_index]
+            .iter()
+            .any(|message| message.role == MessageRole::User)
+}
+
 fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
     div()
         .w(px(size))
@@ -2184,7 +2188,7 @@ fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement 
 fn render_message(
     theme: &Theme,
     message: &Message,
-    waku: WeakEntity<Waku>,
+    composer: Entity<ComposerInput>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -2218,35 +2222,22 @@ fn render_message(
             } else {
                 format!("message-{message_id}-assistant")
             };
-            let markdown_blocks = markdown_blocks(&content);
             let mut column = div()
                 .w_full()
                 .min_w_0()
                 .flex()
                 .flex_col()
-                // gpui-component currently marks every top-level node as the
-                // final node in a non-scrollable TextView, which suppresses
-                // paragraph margins. Separate views give semantic Markdown
-                // blocks a real layout gap.
-                .gap(px(12.0))
                 .py(px(4.0))
                 .text_size(px(13.5))
                 .line_height(px(21.0))
-                .text_color(theme.text);
-            for (block_index, block) in markdown_blocks.into_iter().enumerate() {
-                column = column.child(
-                    TextView::markdown(
-                        SharedString::from(format!("{text_id}-block-{block_index}")),
-                        block,
-                        window,
-                        cx,
-                    )
-                    .style(assistant_markdown_style(theme))
-                    .selectable(true)
-                    .w_full()
-                    .cursor_text(),
+                .text_color(theme.text)
+                .child(
+                    TextView::markdown(SharedString::from(text_id), content, window, cx)
+                        .style(assistant_markdown_style(theme))
+                        .selectable(true)
+                        .w_full()
+                        .cursor_text(),
                 );
-            }
             if message.streaming {
                 column = column.child(pulse_dot(
                     format!("stream-{}", message.id),
@@ -2276,59 +2267,44 @@ fn render_message(
 
     element
         .id(message_id)
-        .capture_any_mouse_down(move |event, window, cx| {
-            if event.button != MouseButton::Right {
-                return;
-            }
-            cx.stop_propagation();
-            let content = menu_content.clone();
-            let code = code.clone();
-            _ = waku.update(cx, |waku, cx| {
-                waku.open_message_context_menu(event, role, content, code, window, cx);
-            });
-        })
+        .context_menu_with_id(
+            SharedString::from(format!("message-context-menu-{message_id}")),
+            move |menu, window, cx| {
+                let copy_content = menu_content.clone();
+                let mut menu =
+                    preserve_composer_focus_for_context_menu(&composer, menu, window, cx)
+                        .min_w(px(170.0))
+                        .item(
+                            PopupMenuItem::new("Copy Message").on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_content.clone(),
+                                ));
+                            }),
+                        );
+
+                if role == MessageRole::User {
+                    let composer = composer.clone();
+                    let edit_content = menu_content.clone();
+                    menu = menu.item(PopupMenuItem::new("Edit in Composer").on_click(
+                        move |_, window, cx| {
+                            composer.update(cx, |composer, cx| {
+                                composer.set_content(edit_content.clone(), cx);
+                            });
+                            window.focus(&composer.read(cx).focus());
+                        },
+                    ));
+                }
+
+                if let Some(code) = code.clone() {
+                    menu = menu.item(PopupMenuItem::new("Copy Code").on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                    }));
+                }
+
+                menu
+            },
+        )
         .into_any_element()
-}
-
-fn markdown_blocks(content: &str) -> Vec<String> {
-    let Ok(markdown::mdast::Node::Root(root)) =
-        markdown::to_mdast(content, &markdown::ParseOptions::gfm())
-    else {
-        return vec![content.to_owned()];
-    };
-
-    let definitions = root
-        .children
-        .iter()
-        .filter(|node| matches!(node, markdown::mdast::Node::Definition(_)))
-        .filter_map(|node| {
-            let position = node.position()?;
-            content
-                .get(position.start.offset..position.end.offset)
-                .map(str::to_owned)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut blocks = root
-        .children
-        .iter()
-        .filter(|node| !matches!(node, markdown::mdast::Node::Definition(_)))
-        .filter_map(|node| {
-            let position = node.position()?;
-            let block = content
-                .get(position.start.offset..position.end.offset)?
-                .trim_end_matches(['\r', '\n']);
-            Some(if definitions.is_empty() {
-                block.to_owned()
-            } else {
-                format!("{block}\n\n{definitions}")
-            })
-        })
-        .collect::<Vec<_>>();
-    if blocks.is_empty() {
-        blocks.push(content.to_owned());
-    }
-    blocks
 }
 
 fn assistant_markdown_style(theme: &Theme) -> TextViewStyle {
@@ -2441,8 +2417,10 @@ fn git_branch(path: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        TranscriptRowKind::*, escape_html, fenced_code, markdown_blocks, transcript_row_kinds,
+        TranscriptRowKind::*, escape_html, fenced_code, message_starts_followup_turn,
+        transcript_row_kinds,
     };
+    use crate::model::{Message, MessageRole};
 
     #[test]
     fn plain_message_html_is_escaped() {
@@ -2453,6 +2431,20 @@ mod tests {
     }
 
     #[test]
+    fn only_later_user_messages_start_followup_turns() {
+        let messages = vec![
+            Message::new(MessageRole::User, "first"),
+            Message::new(MessageRole::Assistant, "answer"),
+            Message::new(MessageRole::User, "follow-up"),
+            Message::new(MessageRole::Assistant, "answer"),
+        ];
+        assert!(!message_starts_followup_turn(&messages, 0));
+        assert!(!message_starts_followup_turn(&messages, 1));
+        assert!(message_starts_followup_turn(&messages, 2));
+        assert!(!message_starts_followup_turn(&messages, 3));
+    }
+
+    #[test]
     fn fenced_code_collects_all_blocks_without_languages() {
         let markdown = "Before\n```rust\nfn main() {}\n```\nAfter\n```\ncargo test\n```";
         assert_eq!(
@@ -2460,32 +2452,6 @@ mod tests {
             Some("fn main() {}\n\ncargo test")
         );
         assert_eq!(fenced_code("No code here"), None);
-    }
-
-    #[test]
-    fn markdown_root_nodes_render_as_individually_spaced_blocks() {
-        let blocks = markdown_blocks(
-            "Intro\n\n**Section:**\n- one\n- two\n\n```rust\nfn main() {}\n```\n\nOutro",
-        );
-        assert_eq!(
-            blocks,
-            vec![
-                "Intro",
-                "**Section:**",
-                "- one\n- two",
-                "```rust\nfn main() {}\n```",
-                "Outro"
-            ]
-        );
-    }
-
-    #[test]
-    fn markdown_reference_definitions_are_kept_with_each_visible_block() {
-        let blocks = markdown_blocks("See [docs][ref].\n\n[ref]: https://example.com");
-        assert_eq!(
-            blocks,
-            vec!["See [docs][ref].\n\n[ref]: https://example.com"]
-        );
     }
 
     #[test]

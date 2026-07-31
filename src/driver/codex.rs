@@ -296,7 +296,11 @@ fn handle_codex_message(
             }
         }
         "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-            if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+            if let Some(delta) = params
+                .get("delta")
+                .and_then(Value::as_str)
+                .filter(|delta| !delta.is_empty())
+            {
                 let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
             }
         }

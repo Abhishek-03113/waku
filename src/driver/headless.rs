@@ -275,6 +275,7 @@ struct StreamParser {
     saw_text_delta: bool,
     saw_reasoning_delta: bool,
     provider_session_id: Option<String>,
+    claude_tools: HashMap<String, (ActivityKind, String)>,
     grok_tools: HashMap<String, (ActivityKind, String)>,
 }
 
@@ -300,7 +301,11 @@ impl StreamParser {
                         }
                     }
                     Some("thinking_delta") => {
-                        if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                        if let Some(text) = delta
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.is_empty())
+                        {
                             self.saw_reasoning_delta = true;
                             let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
                         }
@@ -318,7 +323,12 @@ impl StreamParser {
                                 }
                             }
                             Some("thinking") if !self.saw_reasoning_delta => {
-                                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                                if let Some(text) = block
+                                    .get("thinking")
+                                    .and_then(Value::as_str)
+                                    .filter(|text| !text.is_empty())
+                                {
+                                    self.saw_reasoning_delta = true;
                                     let _ =
                                         events.send(DriverEvent::ReasoningDelta(text.to_owned()));
                                 }
@@ -330,13 +340,17 @@ impl StreamParser {
                                     .and_then(Value::as_str)
                                     .unwrap_or("Tool")
                                     .to_owned();
+                                let kind = classify_tool(&title);
+                                if let Some(id) = &id {
+                                    self.claude_tools.insert(id.clone(), (kind, title.clone()));
+                                }
                                 let detail = block
                                     .get("input")
                                     .map(compact_json)
                                     .filter(|value| !value.is_empty());
                                 let _ = events.send(DriverEvent::Activity {
                                     id,
-                                    kind: classify_tool(&title),
+                                    kind,
                                     title,
                                     detail,
                                     complete: false,
@@ -344,6 +358,31 @@ impl StreamParser {
                             }
                             _ => {}
                         }
+                    }
+                }
+            }
+            Some("user") => {
+                if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+                    for block in content {
+                        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                            continue;
+                        }
+                        let id = block
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        let (kind, title) = id
+                            .as_ref()
+                            .and_then(|id| self.claude_tools.remove(id))
+                            .unwrap_or((ActivityKind::Tool, "Tool".to_owned()));
+                        let _ = events.send(DriverEvent::Activity {
+                            id,
+                            kind,
+                            title,
+                            // Keep the command input already shown in the row.
+                            detail: None,
+                            complete: true,
+                        });
                     }
                 }
             }
@@ -390,7 +429,11 @@ impl StreamParser {
                 }
             }
             "reasoning" | "thinking" => {
-                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                if let Some(text) = part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                {
                     let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
                 }
             }
@@ -441,7 +484,11 @@ impl StreamParser {
                 }
             }
             Some("thought") => {
-                if let Some(text) = value.get("data").and_then(Value::as_str) {
+                if let Some(text) = value
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                {
                     let _ = events.send(DriverEvent::ReasoningDelta(text.to_owned()));
                 }
             }
@@ -633,6 +680,97 @@ mod tests {
             receiver.recv().unwrap(),
             DriverEvent::TextDelta(text) if text == "hi"
         ));
+    }
+
+    #[test]
+    fn claude_empty_thinking_delta_does_not_hide_final_thinking() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_claude(
+            serde_json::json!({
+                "type": "stream_event",
+                "event": {
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": ""
+                    }
+                }
+            }),
+            &events,
+        );
+        parser.parse_claude(
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "thinking",
+                        "thinking": "Visible reasoning"
+                    }]
+                }
+            }),
+            &events,
+        );
+
+        assert!(parser.saw_reasoning_delta);
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::ReasoningDelta(text) if text == "Visible reasoning"
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn claude_tool_result_completes_the_matching_activity() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_claude(
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_123",
+                        "name": "Bash",
+                        "input": {"command": "cargo test"}
+                    }]
+                }
+            }),
+            &events,
+        );
+        parser.parse_claude(
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_123",
+                        "content": "test result: ok"
+                    }]
+                }
+            }),
+            &events,
+        );
+
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Activity {
+                id: Some(id),
+                title,
+                complete: false,
+                ..
+            } if id == "toolu_123" && title == "Bash"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Activity {
+                id: Some(id),
+                title,
+                detail: None,
+                complete: true,
+                ..
+            } if id == "toolu_123" && title == "Bash"
+        ));
+        assert!(parser.claude_tools.is_empty());
     }
 
     #[test]

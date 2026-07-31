@@ -2,14 +2,14 @@ use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Corner, CursorStyle, DismissEvent, Element, ElementId,
+    App, Bounds, ClipboardItem, Context, CursorStyle, DismissEvent, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style,
-    Subscription, Task, TextRun, Timer, UTF16Selection, UnderlineStyle, Window, actions, anchored,
-    deferred, div, fill, hsla, point, prelude::*, px, relative, size,
+    Subscription, Task, TextRun, Timer, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
+    hsla, point, prelude::*, px, relative, size,
 };
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::Theme;
@@ -123,9 +123,7 @@ pub struct ComposerInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
-    context_menu: Option<Entity<PopupMenu>>,
-    context_menu_position: Point<Pixels>,
-    _context_menu_subscription: Option<Subscription>,
+    external_context_menu_focus_holds: usize,
     blink_cursor: Entity<BlinkCursor>,
     _subscriptions: Vec<Subscription>,
 }
@@ -138,11 +136,11 @@ impl ComposerInput {
             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
             cx.observe_window_activation(window, |input, window, cx| {
                 if window.is_window_active()
-                    && (input.focus_handle.is_focused(window) || input.context_menu.is_some())
+                    && (input.focus_handle.is_focused(window)
+                        || input.context_menu_preserves_visual_focus())
                 {
                     input.blink_cursor.update(cx, |cursor, cx| cursor.start(cx));
                 } else if !window.is_window_active() {
-                    input.context_menu = None;
                     input.blink_cursor.update(cx, |cursor, cx| cursor.stop(cx));
                 }
             }),
@@ -159,9 +157,7 @@ impl ComposerInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
-            context_menu: None,
-            context_menu_position: Point::default(),
-            _context_menu_subscription: None,
+            external_context_menu_focus_holds: 0,
             blink_cursor,
             _subscriptions,
         }
@@ -172,7 +168,37 @@ impl ComposerInput {
     }
 
     pub fn is_visually_focused(&self, window: &Window) -> bool {
-        self.focus_handle.is_focused(window) || self.context_menu.is_some()
+        self.focus_handle.is_focused(window) || self.context_menu_preserves_visual_focus()
+    }
+
+    pub fn preserve_visual_focus_for_context_menu(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.is_visually_focused(window) {
+            return false;
+        }
+        self.external_context_menu_focus_holds += 1;
+        cx.notify();
+        true
+    }
+
+    pub fn release_visual_focus_for_context_menu(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.external_context_menu_focus_holds =
+            self.external_context_menu_focus_holds.saturating_sub(1);
+        if !self.is_visually_focused(window) {
+            self.blink_cursor.update(cx, |cursor, cx| cursor.stop(cx));
+        }
+        cx.notify();
+    }
+
+    fn context_menu_preserves_visual_focus(&self) -> bool {
+        self.external_context_menu_focus_holds > 0
     }
 
     pub fn content(&self) -> &str {
@@ -203,7 +229,7 @@ impl ComposerInput {
     }
 
     fn on_blur(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if self.context_menu.is_some() {
+        if self.context_menu_preserves_visual_focus() {
             cx.notify();
             return;
         }
@@ -307,59 +333,11 @@ impl ComposerInput {
 
     fn on_context_mouse_down(
         &mut self,
-        event: &MouseDownEvent,
+        _: &MouseDownEvent,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
-        let has_selection = !self.selected_range.is_empty();
-        let has_content = !self.content.is_empty();
-        let all_selected = has_content
-            && self.selected_range.start == 0
-            && self.selected_range.end == self.content.len();
-        let can_paste = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .is_some();
-        let action_context = self.focus_handle.clone();
-        let menu = PopupMenu::build(window, cx, move |mut menu, _window, _cx| {
-            menu = menu
-                .action_context(action_context)
-                .min_w(px(150.0))
-                .item(
-                    PopupMenuItem::new("Cut")
-                        .action(Box::new(Cut))
-                        .disabled(!has_selection),
-                )
-                .item(
-                    PopupMenuItem::new("Copy")
-                        .action(Box::new(Copy))
-                        .disabled(!has_selection),
-                )
-                .item(
-                    PopupMenuItem::new("Paste")
-                        .action(Box::new(Paste))
-                        .disabled(!can_paste),
-                )
-                .separator()
-                .item(
-                    PopupMenuItem::new("Select All")
-                        .action(Box::new(SelectAll))
-                        .disabled(!has_content || all_selected),
-                );
-            menu
-        });
-        let subscription =
-            cx.subscribe_in(&menu, window, |input, _, _: &DismissEvent, _window, cx| {
-                input.context_menu = None;
-                cx.notify();
-            });
-        self.context_menu_position = event.position;
-        self.context_menu = Some(menu.clone());
-        self._context_menu_subscription = Some(subscription);
-        self.pause_blink_cursor(cx);
-        menu.focus_handle(cx).focus(window);
-        cx.notify();
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -583,6 +561,43 @@ impl EntityInputHandler for ComposerInput {
     }
 }
 
+pub fn preserve_composer_focus_for_context_menu(
+    composer: &Entity<ComposerInput>,
+    mut menu: PopupMenu,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    if let Some(action_context) = window.focused(cx) {
+        menu = menu.action_context(action_context);
+    }
+
+    let preserves_composer_focus = composer.update(cx, |composer, cx| {
+        composer.preserve_visual_focus_for_context_menu(window, cx)
+    });
+    if preserves_composer_focus {
+        let composer = composer.clone();
+        let menu_entity = cx.entity();
+        window
+            .subscribe(&menu_entity, cx, move |_, _: &DismissEvent, window, cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.release_visual_focus_for_context_menu(window, cx);
+                });
+            })
+            .detach();
+    }
+
+    menu
+}
+
+fn cursor_should_be_visible(
+    window_active: bool,
+    input_focused: bool,
+    context_menu_preserves_focus: bool,
+    blink_visible: bool,
+) -> bool {
+    window_active && (context_menu_preserves_focus || (input_focused && blink_visible))
+}
+
 struct InputElement {
     input: Entity<ComposerInput>,
 }
@@ -639,10 +654,12 @@ impl Element for InputElement {
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
-        let cursor_visible = window.is_window_active()
-            && (input.context_menu.is_some()
-                || (input.focus_handle.is_focused(window)
-                    && input.blink_cursor.read(cx).visible()));
+        let cursor_visible = cursor_should_be_visible(
+            window.is_window_active(),
+            input.focus_handle.is_focused(window),
+            input.context_menu_preserves_visual_focus(),
+            input.blink_cursor.read(cx).visible(),
+        );
         let style = window.text_style();
         let theme = Theme::dark();
         let (display_text, text_color) = if content.is_empty() {
@@ -764,8 +781,8 @@ impl Element for InputElement {
 impl Render for ComposerInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
-        let context_menu = self.context_menu.clone();
-        let context_menu_position = self.context_menu_position;
+        let input = cx.entity();
+        let context_menu_input = input.clone();
         div()
             .key_context("ComposerInput")
             .track_focus(&self.focus_handle(cx))
@@ -793,21 +810,63 @@ impl Render for ComposerInput {
             .line_height(px(22.0))
             .text_size(px(13.5))
             .text_color(theme.text)
-            .child(InputElement { input: cx.entity() })
-            .children(context_menu.map(|menu| {
-                deferred(
-                    anchored()
-                        .snap_to_window_with_margin(px(8.0))
-                        .anchor(Corner::TopLeft)
-                        .position(context_menu_position)
-                        .child(div().cursor_default().child(menu)),
-                )
-            }))
+            .child(InputElement { input })
+            .context_menu_with_id("composer-context-menu", move |menu, window, cx| {
+                let (has_selection, has_content, all_selected) = {
+                    let input = context_menu_input.read(cx);
+                    let has_selection = !input.selected_range.is_empty();
+                    let has_content = !input.content.is_empty();
+                    let all_selected = has_content
+                        && input.selected_range.start == 0
+                        && input.selected_range.end == input.content.len();
+                    (has_selection, has_content, all_selected)
+                };
+                let can_paste = cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .is_some();
+
+                preserve_composer_focus_for_context_menu(&context_menu_input, menu, window, cx)
+                    .min_w(px(150.0))
+                    .item(
+                        PopupMenuItem::new("Cut")
+                            .action(Box::new(Cut))
+                            .disabled(!has_selection),
+                    )
+                    .item(
+                        PopupMenuItem::new("Copy")
+                            .action(Box::new(Copy))
+                            .disabled(!has_selection),
+                    )
+                    .item(
+                        PopupMenuItem::new("Paste")
+                            .action(Box::new(Paste))
+                            .disabled(!can_paste),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Select All")
+                            .action(Box::new(SelectAll))
+                            .disabled(!has_content || all_selected),
+                    )
+            })
     }
 }
 
 impl Focusable for ComposerInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cursor_should_be_visible;
+
+    #[test]
+    fn context_menu_keeps_cursor_visible_while_it_owns_focus() {
+        assert!(cursor_should_be_visible(true, false, true, false));
+        assert!(!cursor_should_be_visible(true, false, false, true));
+        assert!(!cursor_should_be_visible(false, false, true, true));
     }
 }
