@@ -24,7 +24,8 @@ use crate::model::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
-use gpui_component::text::{TextView, TextViewStyle};
+use gpui_component::scroll::ScrollableElement;
+use gpui_component::text::{TextView, TextViewState, TextViewStyle};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::persistence::{PersistedState, StateStore};
@@ -176,6 +177,7 @@ pub struct Waku {
     toast: Option<String>,
     pending_revert: Option<(Uuid, usize)>,
     transcript_rows: ListState,
+    message_text_states: HashMap<Uuid, Entity<TextViewState>>,
 }
 
 impl Waku {
@@ -326,6 +328,7 @@ impl Waku {
                 toast: None,
                 pending_revert: None,
                 transcript_rows: ListState::new(0, ListAlignment::Bottom, px(512.0)),
+                message_text_states: HashMap::new(),
             }
         })
     }
@@ -2239,17 +2242,17 @@ impl Waku {
             .flex_1()
             .min_h_0()
             .w_full()
+            .relative()
             .child(
-                list(self.transcript_rows.clone(), move |index, window, cx| {
+                list(self.transcript_rows.clone(), move |index, _window, cx| {
                     entity
                         .upgrade()
-                        .map(|entity| {
-                            entity.update(cx, |this, cx| this.transcript_row(index, window, cx))
-                        })
+                        .map(|entity| entity.update(cx, |this, cx| this.transcript_row(index, cx)))
                         .unwrap_or_else(|| div().into_any_element())
                 })
                 .size_full(),
             )
+            .vertical_scrollbar(&self.transcript_rows)
             .into_any_element()
     }
 
@@ -2320,12 +2323,7 @@ impl Waku {
         })
     }
 
-    fn transcript_row(
-        &self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn transcript_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::dark();
         let composer = self.composer.clone();
         let waku = cx.entity().downgrade();
@@ -2355,14 +2353,22 @@ impl Waku {
             TranscriptRowKind::Message(message_index) => self
                 .selected_session()
                 .and_then(|session| session.messages.get(message_index))
+                .cloned()
                 .map(|message| {
+                    let checkpoint_action = self.checkpoint_action_for_message(message_index);
+                    let text_state = self
+                        .message_text_states
+                        .entry(message.id)
+                        .or_insert_with(|| cx.new(TextViewState::new))
+                        .clone();
                     render_message(
                         &theme,
-                        message,
-                        self.checkpoint_action_for_message(message_index),
+                        &message,
+                        checkpoint_action,
+                        self.transcript_rows.clone(),
+                        text_state,
                         waku,
                         composer,
-                        window,
                         cx,
                     )
                 })
@@ -3789,9 +3795,10 @@ fn render_message(
     theme: &Theme,
     message: &Message,
     checkpoint_action: Option<CheckpointAction>,
+    transcript_rows: ListState,
+    text_state: Entity<TextViewState>,
     waku: gpui::WeakEntity<Waku>,
     composer: Entity<ComposerInput>,
-    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let content = message.content.clone();
@@ -3811,12 +3818,15 @@ fn render_message(
                 .line_height(px(20.0))
                 .text_color(theme.text)
                 .whitespace_normal()
-                .child(selectable_plain_text(
-                    SharedString::from(format!("message-{message_id}-user")),
-                    &content,
-                    window,
-                    cx,
-                )),
+                .child(
+                    selectable_plain_text(
+                        SharedString::from(format!("message-{message_id}-user")),
+                        &content,
+                        text_state,
+                        cx,
+                    )
+                    .selection_scroll_handle(&transcript_rows),
+                ),
         ),
         MessageRole::Assistant => {
             let mut column = div()
@@ -3829,15 +3839,16 @@ fn render_message(
                 .line_height(px(21.0))
                 .text_color(theme.text)
                 .child(
-                    TextView::markdown(
+                    TextView::markdown_with_state(
                         SharedString::from(format!("message-{message_id}-assistant")),
                         content,
-                        window,
+                        text_state,
                         cx,
                     )
                     .update_delay(STREAM_MARKDOWN_DELAY)
                     .style(assistant_markdown_style(theme))
                     .selectable(true)
+                    .selection_scroll_handle(&transcript_rows)
                     .w_full()
                     .cursor_text(),
                 );
@@ -3921,12 +3932,15 @@ fn render_message(
                 .text_size(px(11.0))
                 .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
-                .child(selectable_plain_text(
-                    SharedString::from(format!("message-{message_id}-system")),
-                    &content,
-                    window,
-                    cx,
-                )),
+                .child(
+                    selectable_plain_text(
+                        SharedString::from(format!("message-{message_id}-system")),
+                        &content,
+                        text_state,
+                        cx,
+                    )
+                    .selection_scroll_handle(&transcript_rows),
+                ),
         ),
     };
 
@@ -4016,7 +4030,7 @@ fn assistant_markdown_style(theme: &Theme) -> TextViewStyle {
 fn selectable_plain_text(
     id: impl Into<gpui::ElementId>,
     content: &str,
-    window: &mut Window,
+    state: Entity<TextViewState>,
     cx: &mut App,
 ) -> TextView {
     let html = if content.is_empty() {
@@ -4027,7 +4041,7 @@ fn selectable_plain_text(
             .map(|line| format!("<p>{}</p>", escape_html(line)))
             .collect::<String>()
     };
-    TextView::html(id, html, window, cx)
+    TextView::html_with_state(id, html, state, cx)
         .style(TextViewStyle::default().paragraph_gap(rems(0.0)))
         .selectable(true)
         .w_full()

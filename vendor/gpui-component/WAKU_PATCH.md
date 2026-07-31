@@ -24,6 +24,14 @@ duplicate source update on every scroll frame.
 Selectable text now follows Zed's document-level interaction model: one hitbox
 on the `TextView`, while inline hitboxes and mouse handlers are created only for
 actual links. Plain long responses no longer register interaction work per line.
+`TextView::selection_scroll_handle` also keeps the drag endpoint in window
+coordinates and scrolls the owning transcript list near its viewport edges, so
+selection can continue beyond the currently visible portion of a message. Waku
+owns each message's `TextViewState` so a virtualized row remount cannot discard
+the range, and identical style updates no longer enqueue redundant reparses.
+The list scrollbar offset is clamped to its measured maximum when a bottom-
+aligned transcript snaps to its pinned-tail state. This keeps the thumb valid
+and visible through the normal idle delay at the end of the transcript.
 
 Long, simple Markdown lists are rendered as small multiline text chunks inside
 the same `TextView`. This removes hundreds of flex/layout subtrees without

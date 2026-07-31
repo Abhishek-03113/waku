@@ -99,7 +99,10 @@ impl ScrollbarHandle for UniformListScrollHandle {
 
 impl ScrollbarHandle for ListState {
     fn offset(&self) -> Point<Pixels> {
-        self.scroll_px_offset_for_scrollbar()
+        clamp_scrollbar_offset(
+            self.scroll_px_offset_for_scrollbar(),
+            self.max_offset_for_scrollbar(),
+        )
     }
 
     fn set_offset(&self, offset: Point<Pixels>) {
@@ -116,6 +119,30 @@ impl ScrollbarHandle for ListState {
 
     fn end_drag(&self) {
         self.scrollbar_drag_ended();
+    }
+}
+
+fn clamp_scrollbar_offset(offset: Point<Pixels>, max_offset: Size<Pixels>) -> Point<Pixels> {
+    point(
+        offset.x.clamp(-max_offset.width, Pixels::ZERO),
+        offset.y.clamp(-max_offset.height, Pixels::ZERO),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bottom_aligned_list_offset_stays_within_scrollbar_range() {
+        assert_eq!(
+            clamp_scrollbar_offset(point(px(0.0), px(-1_000.0)), size(px(0.0), px(600.0)),),
+            point(px(0.0), px(-600.0))
+        );
+        assert_eq!(
+            clamp_scrollbar_offset(point(px(0.0), px(20.0)), size(px(0.0), px(600.0))),
+            point(px(0.0), px(0.0))
+        );
     }
 }
 

@@ -97,6 +97,7 @@ pub struct TextView {
     style: StyleRefinement,
     selectable: bool,
     scrollable: bool,
+    selection_scroll_handle: Option<ListState>,
     update_delay: Duration,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
 }
@@ -219,10 +220,11 @@ enum InitState {
     },
     Initialized {
         tx: smol::channel::Sender<Update>,
+        current_style: TextViewStyle,
     },
 }
 
-pub(crate) struct TextViewState {
+pub struct TextViewState {
     parent_entity: Option<EntityId>,
     tx: Option<smol::channel::Sender<Update>>,
     parsed_result: Option<Result<ParsedContent, SharedString>>,
@@ -231,15 +233,20 @@ pub(crate) struct TextViewState {
     bounds: Bounds<Pixels>,
     /// The local (in TextView) position of the selection.
     selection_positions: (Option<Point<Pixels>>, Option<Point<Pixels>>),
+    /// Current drag position in window coordinates. Keeping this lets a
+    /// selection continue growing while its parent scrolls under the pointer.
+    selection_pointer: Option<Point<Pixels>>,
+    selection_autoscroll_active: bool,
     /// Is current in selection.
     is_selecting: bool,
     is_selectable: bool,
     list_state: ListState,
     current_text: SharedString,
+    current_style: TextViewStyle,
 }
 
 impl TextViewState {
-    fn new(cx: &mut Context<TextViewState>) -> Self {
+    pub fn new(cx: &mut Context<TextViewState>) -> Self {
         let focus_handle = cx.focus_handle();
         Self {
             parent_entity: None,
@@ -248,18 +255,27 @@ impl TextViewState {
             focus_handle: Some(focus_handle),
             bounds: Bounds::default(),
             selection_positions: (None, None),
+            selection_pointer: None,
+            selection_autoscroll_active: false,
             is_selecting: false,
             is_selectable: false,
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
             current_text: SharedString::default(),
+            current_style: TextViewStyle::default(),
         }
     }
 }
 
 impl TextViewState {
-    /// Save bounds and unselect if bounds changed.
+    /// Save bounds and unselect only when width changes can reflow text.
+    /// Height-only changes are normal while a variable-height parent list
+    /// settles its measurements and do not invalidate document coordinates.
     fn update_bounds(&mut self, bounds: Bounds<Pixels>) {
-        if self.bounds.size != bounds.size {
+        if self.bounds.size.width > Pixels::ZERO
+            && bounds.size.width > Pixels::ZERO
+            && self.bounds.size.width != bounds.size.width
+            && self.selection_pointer.is_none()
+        {
             self.clear_selection();
         }
         self.bounds = bounds;
@@ -267,23 +283,43 @@ impl TextViewState {
 
     fn clear_selection(&mut self) {
         self.selection_positions = (None, None);
+        self.selection_pointer = None;
+        self.selection_autoscroll_active = false;
         self.is_selecting = false;
     }
 
     fn start_selection(&mut self, pos: Point<Pixels>) {
         let pos = pos - self.bounds.origin;
         self.selection_positions = (Some(pos), Some(pos));
+        self.selection_pointer = Some(pos + self.bounds.origin);
+        self.selection_autoscroll_active = false;
         self.is_selecting = true;
     }
 
     fn update_selection(&mut self, pos: Point<Pixels>) {
-        let pos = pos - self.bounds.origin;
+        self.selection_pointer = Some(pos);
+        self.update_selection_from_pointer();
+    }
+
+    fn update_selection_from_pointer(&mut self) {
+        let Some(pointer) = self.selection_pointer else {
+            return;
+        };
+        let pos = pointer - self.bounds.origin;
         if let (Some(start), Some(_)) = self.selection_positions {
             self.selection_positions = (Some(start), Some(pos))
         }
     }
 
+    fn advance_selection_for_scroll(&mut self, delta: Pixels) {
+        if let (Some(start), Some(mut end)) = self.selection_positions {
+            end.y += delta;
+            self.selection_positions = (Some(start), Some(end));
+        }
+    }
+
     fn end_selection(&mut self) {
+        self.selection_autoscroll_active = false;
         self.is_selecting = false;
     }
 
@@ -395,7 +431,10 @@ impl TextView {
     ) -> InitState {
         let state = state.read(cx);
         if let Some(tx) = &state.tx {
-            InitState::Initialized { tx: tx.clone() }
+            InitState::Initialized {
+                tx: tx.clone(),
+                current_style: state.current_style.clone(),
+            }
         } else {
             InitState::Initializing {
                 type_,
@@ -415,11 +454,25 @@ impl TextView {
     ) -> Self {
         let id: ElementId = id.into();
         let markdown = markdown.into();
-        let highlight_theme = cx.theme().highlight_theme.clone();
         let state =
             window.use_keyed_state(SharedString::from(format!("{}/state", id)), cx, |_, cx| {
                 TextViewState::new(cx)
             });
+        Self::markdown_with_state(id, markdown, state, cx)
+    }
+
+    /// Create a Markdown view backed by state owned outside the element tree.
+    /// This keeps selection and parsed content alive when a virtualized parent
+    /// temporarily remounts the view while scrolling.
+    pub fn markdown_with_state(
+        id: impl Into<ElementId>,
+        markdown: impl Into<SharedString>,
+        state: Entity<TextViewState>,
+        cx: &mut App,
+    ) -> Self {
+        let id: ElementId = id.into();
+        let markdown = markdown.into();
+        let highlight_theme = cx.theme().highlight_theme.clone();
         let init_state = Self::create_init_state(
             TextViewType::Markdown,
             &markdown,
@@ -448,6 +501,7 @@ impl TextView {
             state,
             selectable: false,
             scrollable: false,
+            selection_scroll_handle: None,
             update_delay: Duration::from_millis(200),
             code_block_actions: None,
         }
@@ -462,11 +516,23 @@ impl TextView {
     ) -> Self {
         let id: ElementId = id.into();
         let html = html.into();
-        let highlight_theme = cx.theme().highlight_theme.clone();
         let state =
             window.use_keyed_state(SharedString::from(format!("{}/state", id)), cx, |_, cx| {
                 TextViewState::new(cx)
             });
+        Self::html_with_state(id, html, state, cx)
+    }
+
+    /// Create an HTML view backed by state owned outside the element tree.
+    pub fn html_with_state(
+        id: impl Into<ElementId>,
+        html: impl Into<SharedString>,
+        state: Entity<TextViewState>,
+        cx: &mut App,
+    ) -> Self {
+        let id: ElementId = id.into();
+        let html = html.into();
+        let highlight_theme = cx.theme().highlight_theme.clone();
         let init_state =
             Self::create_init_state(TextViewType::Html, &html, &highlight_theme, &state, cx);
         if let Some(tx) = state.read(cx).tx.clone() {
@@ -490,6 +556,7 @@ impl TextView {
             raw: html,
             selectable: false,
             scrollable: false,
+            selection_scroll_handle: None,
             update_delay: Duration::from_millis(200),
             code_block_actions: None,
         }
@@ -501,7 +568,7 @@ impl TextView {
         if let Some(init_state) = &mut self.init_state {
             match init_state {
                 InitState::Initializing { text, .. } => *text = raw.clone(),
-                InitState::Initialized { tx } => {
+                InitState::Initialized { tx, .. } => {
                     let _ = tx.try_send(Update::Text(raw.clone()));
                 }
             }
@@ -515,8 +582,11 @@ impl TextView {
         if let Some(init_state) = &mut self.init_state {
             match init_state {
                 InitState::Initializing { style: s, .. } => **s = style,
-                InitState::Initialized { tx } => {
-                    let _ = tx.try_send(Update::Style(Box::new(style)));
+                InitState::Initialized { tx, current_style } => {
+                    if *current_style != style {
+                        *current_style = style.clone();
+                        let _ = tx.try_send(Update::Style(Box::new(style)));
+                    }
                 }
             }
         }
@@ -526,6 +596,13 @@ impl TextView {
     /// Set the text view to be selectable, default is false.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
+        self
+    }
+
+    /// Scroll this parent list while dragging a text selection near or beyond
+    /// its viewport edge.
+    pub fn selection_scroll_handle(mut self, scroll_handle: &ListState) -> Self {
+        self.selection_scroll_handle = Some(scroll_handle.clone());
         self
     }
 
@@ -633,6 +710,7 @@ impl Element for TextView {
                     state.parsed_result = Some(parsed_result);
                     state.tx = Some(tx);
                     state.current_text = text.clone();
+                    state.current_style = style.clone();
                 }
             });
 
@@ -670,7 +748,10 @@ impl Element for TextView {
             ))
             .detach();
 
-            self.init_state = Some(InitState::Initialized { tx });
+            self.init_state = Some(InitState::Initialized {
+                tx,
+                current_style: self.state.read(cx).current_style.clone(),
+            });
         }
 
         let list_state = &self.state.read(cx).list_state;
@@ -742,6 +823,15 @@ impl Element for TextView {
         self.state.update(cx, |state, _| {
             state.parent_entity = Some(entity_id);
             state.update_bounds(bounds);
+            if state.selection_pointer.is_some() {
+                state.update_selection_from_pointer();
+                if !state.is_selecting {
+                    // Mouse-up may arrive before the list paints its final
+                    // autoscroll offset. Retain the pointer until this paint,
+                    // then keep only the settled document-local endpoint.
+                    state.selection_pointer = None;
+                }
+            }
             state.is_selectable = is_selectable;
         });
 
@@ -754,6 +844,22 @@ impl Element for TextView {
         if self.selectable {
             let is_selecting = self.state.read(cx).is_selecting;
             let has_selection = self.state.read(cx).has_selection();
+
+            if is_selecting
+                && let Some(scroll_handle) = &self.selection_scroll_handle
+                && let Some(pointer) = self.state.read(cx).selection_pointer
+            {
+                let delta = selection_autoscroll_delta(pointer.y, scroll_handle.viewport_bounds());
+                if delta != Pixels::ZERO {
+                    let scrolled = scroll_list_for_selection(scroll_handle, delta);
+                    if scrolled != Pixels::ZERO {
+                        self.state.update(cx, |state, _| {
+                            state.advance_selection_for_scroll(scrolled);
+                        });
+                        window.request_animation_frame();
+                    }
+                }
+            }
 
             window.on_mouse_event({
                 let state = self.state.clone();
@@ -769,37 +875,56 @@ impl Element for TextView {
                 }
             });
 
-            if is_selecting {
-                // move to update end position.
-                window.on_mouse_event({
-                    let state = self.state.clone();
-                    move |event: &MouseMoveEvent, phase, _, cx| {
-                        if !phase.bubble() {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.update_selection(event.position);
-                        });
-                        cx.notify(entity_id);
+            // Keep these handlers installed before selection starts. A fast
+            // drag can deliver down, move, and up before the next paint.
+            window.on_mouse_event({
+                let state = self.state.clone();
+                let scroll_handle = self.selection_scroll_handle.clone();
+                move |event: &MouseMoveEvent, _, _, cx| {
+                    if !state.read(cx).is_selecting {
+                        return;
                     }
-                });
 
-                // up to end selection
-                window.on_mouse_event({
-                    let state = self.state.clone();
-                    move |_: &MouseUpEvent, phase, _, cx| {
-                        if !phase.bubble() {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.end_selection();
+                    let delta = scroll_handle
+                        .as_ref()
+                        .map_or(Pixels::ZERO, |scroll_handle| {
+                            selection_autoscroll_delta(
+                                event.position.y,
+                                scroll_handle.viewport_bounds(),
+                            )
                         });
-                        cx.notify(entity_id);
+                    let should_scroll_now = state.update(cx, |state, _| {
+                        state.update_selection(event.position);
+                        let should_scroll_now =
+                            delta != Pixels::ZERO && !state.selection_autoscroll_active;
+                        state.selection_autoscroll_active = delta != Pixels::ZERO;
+                        should_scroll_now
+                    });
+                    if should_scroll_now && let Some(scroll_handle) = &scroll_handle {
+                        let scrolled = scroll_list_for_selection(scroll_handle, delta);
+                        if scrolled != Pixels::ZERO {
+                            state.update(cx, |state, _| {
+                                state.advance_selection_for_scroll(scrolled);
+                            });
+                        }
                     }
-                });
-            }
+                    cx.notify(entity_id);
+                }
+            });
+
+            window.on_mouse_event({
+                let state = self.state.clone();
+                move |_: &MouseUpEvent, _, _, cx| {
+                    if !state.read(cx).is_selecting {
+                        return;
+                    }
+
+                    state.update(cx, |state, _| {
+                        state.end_selection();
+                    });
+                    cx.notify(entity_id);
+                }
+            });
 
             if has_selection {
                 // down outside to clear selection
@@ -865,6 +990,42 @@ fn selection_bounds(
     }
 
     Bounds::default()
+}
+
+fn selection_autoscroll_delta(pointer_y: Pixels, viewport: Bounds<Pixels>) -> Pixels {
+    if viewport.size.height <= Pixels::ZERO {
+        return Pixels::ZERO;
+    }
+
+    const EDGE_SIZE: Pixels = px(32.0);
+    const MIN_SPEED: Pixels = px(4.0);
+    const MAX_SPEED: Pixels = px(36.0);
+
+    let top_edge = viewport.top() + EDGE_SIZE;
+    if pointer_y < top_edge {
+        let strength = ((top_edge - pointer_y) / EDGE_SIZE).clamp(0.0, 1.0);
+        return -(MIN_SPEED + (MAX_SPEED - MIN_SPEED) * strength);
+    }
+
+    let bottom_edge = viewport.bottom() - EDGE_SIZE;
+    if pointer_y > bottom_edge {
+        let strength = ((pointer_y - bottom_edge) / EDGE_SIZE).clamp(0.0, 1.0);
+        return MIN_SPEED + (MAX_SPEED - MIN_SPEED) * strength;
+    }
+
+    Pixels::ZERO
+}
+
+fn scroll_list_for_selection(scroll_handle: &ListState, delta: Pixels) -> Pixels {
+    const PINNED_TAIL_EPSILON: Pixels = px(0.5);
+
+    let max_offset = scroll_handle.max_offset_for_scrollbar().height;
+    let selection_max = (max_offset - PINNED_TAIL_EPSILON).max(Pixels::ZERO);
+    let current =
+        (-scroll_handle.scroll_px_offset_for_scrollbar().y).clamp(Pixels::ZERO, selection_max);
+    let target = (current + delta).clamp(Pixels::ZERO, selection_max);
+    scroll_handle.set_offset_from_scrollbar(Point::new(Pixels::ZERO, -target));
+    target - current
 }
 
 #[cfg(test)]
@@ -951,5 +1112,22 @@ mod tests {
                 size: size(px(40.), px(40.))
             }
         );
+    }
+
+    #[test]
+    fn selection_autoscroll_uses_viewport_edges_and_direction() {
+        let viewport = Bounds {
+            origin: point(px(0.0), px(100.0)),
+            size: size(px(500.0), px(400.0)),
+        };
+
+        assert_eq!(
+            selection_autoscroll_delta(px(300.0), viewport),
+            Pixels::ZERO
+        );
+        assert!(selection_autoscroll_delta(px(100.0), viewport) < Pixels::ZERO);
+        assert!(selection_autoscroll_delta(px(500.0), viewport) > Pixels::ZERO);
+        assert_eq!(selection_autoscroll_delta(px(0.0), viewport), -px(36.0));
+        assert_eq!(selection_autoscroll_delta(px(600.0), viewport), px(36.0));
     }
 }
