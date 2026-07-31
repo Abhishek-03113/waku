@@ -81,7 +81,10 @@ pub fn start_window_move(window: &Window) {
         let Some(event) = app.currentEvent() else {
             return;
         };
+        let was_movable = native_window.isMovable();
+        native_window.setMovable(true);
         native_window.performWindowDragWithEvent(&event);
+        native_window.setMovable(was_movable);
     }
 }
 

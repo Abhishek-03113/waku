@@ -117,6 +117,9 @@ fn main() {
                             appears_transparent: true,
                             traffic_light_position: Some(point(px(16.0), px(18.0))),
                         }),
+                        // Waku owns titlebar gestures so controls embedded in the header
+                        // never inherit AppKit's implicit drag/double-click behavior.
+                        is_movable: false,
                         window_background: WindowBackgroundAppearance::Blurred,
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         window_min_size: Some(size(px(980.0), px(680.0))),
