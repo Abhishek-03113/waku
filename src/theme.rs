@@ -1,4 +1,4 @@
-use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb};
+use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb, transparent_black};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -42,11 +42,10 @@ impl ThemePreference {
 }
 
 /// Waku's visual language, take two: neutral graphite surfaces in the spirit
-/// of Cursor — color is reserved for meaning. Layers go `sidebar` (a
-/// translucent tint over macOS vibrancy) → `surface` (content pane) →
-/// `raised` (bubbles and cards), with dedicated `composer` and `inset` (code
-/// well) surfaces. The coral accent appears only where the brand or live
-/// activity earns it; everything else is a gray with a job.
+/// of Cursor — color is reserved for meaning. On macOS the sidebar's semantic
+/// tint is installed as a native layer above Sidebar vibrancy; keeping this
+/// GPUI surface clear avoids incorrectly accumulating the alpha of nested Metal
+/// backgrounds. Selected, hovered, and pressed rows remain a 6% neutral layer.
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub is_dark: bool,
@@ -62,6 +61,7 @@ pub struct Theme {
 
     pub border: Hsla,
     pub border_strong: Hsla,
+    pub sidebar_border: Hsla,
 
     pub text: Hsla,
     pub text_secondary: Hsla,
@@ -94,8 +94,8 @@ impl Theme {
         Self {
             is_dark: true,
             canvas: rgb(0x1A1A1A).into(),
-            sidebar: hsla(210.0 / 360.0, 0.04, 0.098, 0.95),
-            sidebar_item_background: rgb(0x323334).into(),
+            sidebar: transparent_black(),
+            sidebar_item_background: hsla(0.0, 0.0, 0.941, 0.06),
             surface: rgb(0x1A1A1A).into(),
             raised: rgb(0x232323).into(),
             composer: rgb(0x212121).into(),
@@ -105,6 +105,7 @@ impl Theme {
 
             border: hsla(220.0 / 360.0, 0.10, 0.90, 0.07),
             border_strong: hsla(220.0 / 360.0, 0.10, 0.90, 0.14),
+            sidebar_border: hsla(126.93 / 360.0, 0.000_000_1, 0.16077, 1.0),
 
             text: rgb(0xE2E2E2).into(),
             text_secondary: rgb(0xA3A3A3).into(),
@@ -127,8 +128,8 @@ impl Theme {
         Self {
             is_dark: false,
             canvas: rgb(0xF6F5F6).into(),
-            sidebar: hsla(200.0 / 360.0, 0.08, 0.92, 0.94),
-            sidebar_item_background: hsla(0.0, 0.0, 0.0, 0.03),
+            sidebar: transparent_black(),
+            sidebar_item_background: hsla(0.0, 0.0, 0.078, 0.06),
             surface: rgb(0xF6F5F6).into(),
             raised: rgb(0xECECEC).into(),
             composer: rgb(0xFFFFFF).into(),
@@ -138,6 +139,7 @@ impl Theme {
 
             border: hsla(220.0 / 360.0, 0.10, 0.12, 0.08),
             border_strong: hsla(220.0 / 360.0, 0.10, 0.12, 0.15),
+            sidebar_border: hsla(0.0, 0.0, 0.078, 0.12),
 
             text: rgb(0x242424).into(),
             text_secondary: rgb(0x666666).into(),
@@ -227,6 +229,6 @@ pub fn apply_theme_preference(preference: ThemePreference, window: &mut Window, 
         Some(window),
         cx,
     );
-    crate::platform::configure_sidebar_material(window);
+    crate::platform::configure_sidebar_material(window, is_dark);
     window.refresh();
 }

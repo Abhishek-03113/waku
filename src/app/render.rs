@@ -36,7 +36,7 @@ impl Render for Waku {
                     .flex_col()
                     .bg(theme.surface)
                     .when(self.sidebar_visible, |element| {
-                        element.border_l_1().border_color(theme.border)
+                        element.border_l_1().border_color(theme.sidebar_border)
                     })
                     .child(self.render_header(cx))
                     .child(if empty {

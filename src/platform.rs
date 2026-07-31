@@ -1,5 +1,14 @@
 use gpui::Window;
 
+#[cfg(target_os = "macos")]
+thread_local! {
+    static SIDEBAR_TINT_VIEW: std::cell::RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSView>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(target_os = "macos")]
+const SIDEBAR_WIDTH: f64 = 252.0;
+
 // crates.io GPUI 0.2.2 leaves `start_window_move` as a no-op on macOS.
 #[cfg(target_os = "macos")]
 pub fn start_window_move(window: &Window) {
@@ -37,14 +46,16 @@ pub fn start_window_move(window: &Window) {
     window.start_window_move();
 }
 
-/// Give GPUI's window-wide blur view the semantic material macOS uses for
-/// sidebars. Opaque Waku surfaces cover the effect everywhere else.
+/// Match Cursor's macOS glass window stack without asking GPUI's transparent
+/// Metal target to blend two translucent quads. The semantic tint is a native
+/// view above active Sidebar vibrancy; GPUI paints clear sidebar chrome and one
+/// translucent interaction layer above it.
 #[cfg(target_os = "macos")]
-pub fn configure_sidebar_material(window: &Window) {
-    use objc2::MainThreadMarker;
+pub fn configure_sidebar_material(window: &Window, dark: bool) {
+    use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-        NSVisualEffectView,
+        NSAutoresizingMaskOptions, NSColor, NSView, NSVisualEffectBlendingMode,
+        NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindowOrderingMode,
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -54,7 +65,7 @@ pub fn configure_sidebar_material(window: &Window) {
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
         return;
     };
-    let Some(_main_thread) = MainThreadMarker::new() else {
+    let Some(main_thread) = MainThreadMarker::new() else {
         return;
     };
 
@@ -65,10 +76,18 @@ pub fn configure_sidebar_material(window: &Window) {
         let Some(native_window) = view.window() else {
             return;
         };
+        let background = if dark {
+            NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.25)
+        } else {
+            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.0)
+        };
+        native_window.setBackgroundColor(Some(&background));
+
         let Some(content_view) = native_window.contentView() else {
             return;
         };
 
+        let mut configured_effect = false;
         for subview in content_view.subviews().iter() {
             let Some(effect_view) = subview.downcast_ref::<NSVisualEffectView>() else {
                 continue;
@@ -76,12 +95,45 @@ pub fn configure_sidebar_material(window: &Window) {
             effect_view.setMaterial(NSVisualEffectMaterial::Sidebar);
             effect_view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
             effect_view.setState(NSVisualEffectState::Active);
+            configured_effect = true;
         }
+        if !configured_effect {
+            return;
+        }
+
+        let channel = if dark { 0x18 } else { 0xF3 } as f64 / 255.0;
+        let tint = NSColor::colorWithSRGBRed_green_blue_alpha(channel, channel, channel, 0.92);
+
+        SIDEBAR_TINT_VIEW.with_borrow_mut(|slot| {
+            let needs_new_view = slot.as_ref().is_none_or(|tint_view| {
+                tint_view
+                    .window()
+                    .as_deref()
+                    .is_none_or(|window| !std::ptr::eq(window, native_window.as_ref()))
+            });
+            if needs_new_view {
+                let mut frame = content_view.bounds();
+                frame.size.width = SIDEBAR_WIDTH;
+                let tint_view = NSView::initWithFrame(NSView::alloc(main_thread), frame);
+                tint_view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
+                tint_view.setWantsLayer(true);
+                content_view.addSubview_positioned_relativeTo(
+                    &tint_view,
+                    NSWindowOrderingMode::Below,
+                    Some(view),
+                );
+                *slot = Some(tint_view);
+            }
+
+            if let Some(layer) = slot.as_ref().and_then(|tint_view| tint_view.layer()) {
+                layer.setBackgroundColor(Some(&tint.CGColor()));
+            }
+        });
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn configure_sidebar_material(_: &Window) {}
+pub fn configure_sidebar_material(_: &Window, _: bool) {}
 
 /// Follow macOS when `dark` is `None`, otherwise force the native titlebar,
 /// traffic lights, menus, and vibrancy to the selected appearance.

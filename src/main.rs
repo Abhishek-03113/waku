@@ -115,7 +115,10 @@ fn main() {
 
             window
                 .update(cx, |_, window, cx| {
-                    crate::platform::configure_sidebar_material(window);
+                    crate::platform::configure_sidebar_material(
+                        window,
+                        crate::theme::Theme::current(cx).is_dark,
+                    );
                     cx.activate(true);
                 })
                 .ok();

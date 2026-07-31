@@ -152,7 +152,7 @@ impl Waku {
             .flex()
             .flex_col()
             .border_l_1()
-            .border_color(theme.border)
+            .border_color(theme.sidebar_border)
             .bg(theme.surface)
             .child(self.render_settings_drag_region("settings-content-titlebar", cx))
             .child(
