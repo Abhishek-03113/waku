@@ -95,18 +95,18 @@ impl Waku {
 
     // ── Composer ───────────────────────────────────────────────────────────
 
-    pub(super) fn render_provider_model_control(
-        &self,
-        fresh_session: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn render_provider_model_control(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::dark();
         let session = self.selected_session();
         let provider = session.map(|session| session.provider).unwrap_or_default();
         let selected_model = session.and_then(|session| self.model_for_session(session));
         let selected_model_name = self.model_display_name(provider, selected_model);
+        let locked_provider = session
+            .filter(|session| !session.messages.is_empty())
+            .map(|session| session.provider);
+        let picker_enabled = session.is_some_and(|session| session.can_choose_model(provider));
 
-        if !fresh_session {
+        if !picker_enabled {
             return div()
                 .h(px(24.0))
                 .px(px(7.0))
@@ -184,6 +184,7 @@ impl Waku {
                             .cloned()
                             .map(move |model| (probe.provider, model))
                     })
+                    .filter(|(kind, _)| locked_provider.is_none() || locked_provider == Some(*kind))
                     .filter(|(kind, model)| {
                         if searching {
                             let searchable = format!(
@@ -272,6 +273,7 @@ impl Waku {
                         .find(|probe| probe.provider == kind)
                         .map(|probe| probe.installed)
                         .unwrap_or(false);
+                    let allowed = locked_provider.is_none() || locked_provider == Some(kind);
                     let selected = selected_tab == ModelPickerTab::Provider(kind) && !searching;
                     let tab_weak = weak.clone();
                     sidebar = sidebar.child(
@@ -285,8 +287,8 @@ impl Waku {
                             .justify_center()
                             .cursor_default()
                             .when(selected, |element| element.bg(theme.overlay_strong))
-                            .when(!installed, |element| element.opacity(0.35))
-                            .when(installed, |element| {
+                            .when(!installed || !allowed, |element| element.opacity(0.35))
+                            .when(installed && allowed, |element| {
                                 element.hover(|element| element.bg(theme.overlay)).on_click(
                                     move |_, _, cx| {
                                         let _ = tab_weak.update(cx, |this, cx| {
@@ -764,9 +766,6 @@ impl Waku {
                 )
             })
             .unwrap_or(false);
-        let fresh_session = session
-            .map(|session| session.messages.is_empty())
-            .unwrap_or(false);
         let has_draft = !self.composer.read(cx).content().trim().is_empty();
         div().flex_none().px(px(20.0)).child(
             div()
@@ -793,7 +792,7 @@ impl Waku {
                         .gap(px(4.0))
                         .text_size(px(11.5))
                         .line_height(px(14.0))
-                        .child(self.render_provider_model_control(fresh_session, cx))
+                        .child(self.render_provider_model_control(cx))
                         .children(self.render_model_traits_control(cx))
                         .child(self.render_access_control(cx))
                         .child(self.render_interaction_mode_control(cx))

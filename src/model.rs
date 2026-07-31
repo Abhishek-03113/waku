@@ -508,6 +508,13 @@ impl AgentSession {
         }
     }
 
+    pub fn can_choose_model(&self, provider: ProviderKind) -> bool {
+        !matches!(
+            self.status,
+            SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
+        ) && (self.messages.is_empty() || self.provider == provider)
+    }
+
     pub fn migrate_pre_access_modes(&mut self) {
         match self.runtime_mode {
             RuntimeMode::Plan => {
@@ -903,6 +910,37 @@ mod tests {
             session.title,
             "build a really polished local agent interface"
         );
+    }
+
+    #[test]
+    fn model_selection_keeps_started_sessions_on_their_provider() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+
+        assert!(session.can_choose_model(ProviderKind::Claude));
+
+        session.push_message(MessageRole::User, "first turn");
+        assert!(session.can_choose_model(ProviderKind::Codex));
+        assert!(!session.can_choose_model(ProviderKind::Claude));
+    }
+
+    #[test]
+    fn model_selection_waits_for_the_active_turn_to_finish() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.push_message(MessageRole::User, "first turn");
+
+        for status in [
+            SessionStatus::Connecting,
+            SessionStatus::Working,
+            SessionStatus::Waiting,
+        ] {
+            session.status = status;
+            assert!(!session.can_choose_model(ProviderKind::Codex));
+        }
+
+        session.status = SessionStatus::Idle;
+        assert!(session.can_choose_model(ProviderKind::Codex));
     }
 
     #[test]

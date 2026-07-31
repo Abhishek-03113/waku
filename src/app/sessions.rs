@@ -172,7 +172,8 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         if let Some(session) = self.selected_session_mut()
-            && session.messages.is_empty()
+            && session.can_choose_model(provider)
+            && (session.provider != provider || session.model.as_deref() != Some(model.as_str()))
         {
             let session_id = session.id;
             session.provider = provider;
