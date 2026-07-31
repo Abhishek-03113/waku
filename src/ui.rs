@@ -17,23 +17,23 @@ pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
         .text_color(color)
 }
 
-/// Muted brand hue for each provider's mark.
+/// Brand hue for each provider's official mark.
 pub fn provider_color(provider: ProviderKind) -> Hsla {
     match provider {
-        ProviderKind::Claude => rgb(0xCC7B5E).into(),
-        ProviderKind::Codex => rgb(0xA9B1BC).into(),
-        ProviderKind::OpenCode => rgb(0x94BBA4).into(),
-        ProviderKind::Grok => rgb(0xB3B9C3).into(),
+        ProviderKind::Claude => rgb(0xD97757).into(),
+        ProviderKind::Codex => rgb(0xF1F1F1).into(),
+        ProviderKind::OpenCode => rgb(0xF1ECEC).into(),
+        ProviderKind::Grok => rgb(0xF5F5F5).into(),
     }
 }
 
-/// Simple geometric mark per provider, drawn from the embedded icon set.
+/// Recognizable provider marks, matching the model picker vocabulary.
 pub fn provider_icon(provider: ProviderKind) -> &'static str {
     match provider {
-        ProviderKind::Claude => "icons/sparkle.svg",
-        ProviderKind::Codex => "icons/hexagon.svg",
-        ProviderKind::OpenCode => "icons/block.svg",
-        ProviderKind::Grok => "icons/slash.svg",
+        ProviderKind::Claude => "icons/provider-claude.svg",
+        ProviderKind::Codex => "icons/provider-openai.svg",
+        ProviderKind::OpenCode => "icons/provider-opencode.svg",
+        ProviderKind::Grok => "icons/provider-grok.svg",
     }
 }
 
@@ -268,6 +268,7 @@ mod tests {
             "icons/chevron-right.svg",
             "icons/folder.svg",
             "icons/alert.svg",
+            "icons/star.svg",
             "icons/sparkle.svg",
         ];
         for provider in ProviderKind::ALL {

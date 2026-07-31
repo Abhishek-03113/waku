@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::model::{AgentSession, Project, ProviderKind};
+use crate::model::{AgentSession, FavoriteModel, Project, ProviderKind};
 
 const STATE_VERSION: u32 = 2;
 const OLDEST_SUPPORTED_STATE_VERSION: u32 = 1;
@@ -18,6 +18,8 @@ pub struct PersistedState {
     pub selected_project: Option<Uuid>,
     pub selected_session: Option<Uuid>,
     pub last_provider: ProviderKind,
+    #[serde(default)]
+    pub favorite_models: Vec<FavoriteModel>,
 }
 
 impl PersistedState {
@@ -29,6 +31,7 @@ impl PersistedState {
             selected_project: None,
             selected_session: None,
             last_provider: ProviderKind::Codex,
+            favorite_models: Vec::new(),
         }
     }
 
@@ -42,6 +45,7 @@ impl PersistedState {
             projects: vec![project],
             sessions: vec![session],
             last_provider: ProviderKind::Codex,
+            favorite_models: Vec::new(),
         }
     }
 }
@@ -111,7 +115,8 @@ fn temporary_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::model::{
-        ActivityItem, ActivityKind, ReasoningBlock, TranscriptBlock, TranscriptBlockContent,
+        ActivityItem, ActivityKind, FavoriteModel, ReasoningBlock, TranscriptBlock,
+        TranscriptBlockContent,
     };
 
     #[test]
@@ -119,6 +124,11 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("waku-state-{}", Uuid::new_v4()));
         let store = StateStore::new(directory.join("state.json"));
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].model = Some("gpt-5.6-luna".into());
+        state.favorite_models.push(FavoriteModel {
+            provider: ProviderKind::Codex,
+            model: "gpt-5.6-luna".into(),
+        });
         state.sessions[0].transcript_blocks.extend([
             TranscriptBlock {
                 after_message: 1,
@@ -145,6 +155,8 @@ mod tests {
         let restored = store.load().unwrap();
         assert_eq!(restored.projects[0].name, "project");
         assert_eq!(restored.sessions.len(), 1);
+        assert_eq!(restored.sessions[0].model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(restored.favorite_models, state.favorite_models);
         assert_eq!(restored.sessions[0].transcript_blocks.len(), 2);
         assert!(matches!(
             &restored.sessions[0].transcript_blocks[0].content,
@@ -180,6 +192,11 @@ mod tests {
             "hi",
         ));
         let mut value = serde_json::to_value(&state).unwrap();
+        value.as_object_mut().unwrap().remove("favorite_models");
+        value["sessions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("model");
         value["sessions"][0]["provider_session_id"] =
             serde_json::Value::String("thread-123".into());
         fs::create_dir_all(&directory).unwrap();
@@ -187,6 +204,8 @@ mod tests {
 
         let restored = store.load().unwrap();
         assert_eq!(restored.version, STATE_VERSION);
+        assert!(restored.favorite_models.is_empty());
+        assert!(restored.sessions[0].model.is_none());
         assert_eq!(
             restored.sessions[0]
                 .provider_cursor

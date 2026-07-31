@@ -43,6 +43,7 @@ pub fn start(
     binary: PathBuf,
     cwd: PathBuf,
     mode: RuntimeMode,
+    model: Option<String>,
     provider_cursor: Option<ProviderResumeCursor>,
     events: Sender<DriverEvent>,
 ) -> anyhow::Result<DriverHandle> {
@@ -51,12 +52,21 @@ pub fn start(
             binary,
             cwd,
             mode,
+            model,
             provider_cursor,
             events,
         )?),
-        ProviderKind::Claude | ProviderKind::OpenCode | ProviderKind::Grok => Arc::new(
-            headless::HeadlessDriver::start(provider, binary, cwd, mode, provider_cursor, events)?,
-        ),
+        ProviderKind::Claude | ProviderKind::OpenCode | ProviderKind::Grok => {
+            Arc::new(headless::HeadlessDriver::start(
+                provider,
+                binary,
+                cwd,
+                mode,
+                model,
+                provider_cursor,
+                events,
+            )?)
+        }
     };
     Ok(DriverHandle { inner })
 }

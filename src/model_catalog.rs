@@ -1,0 +1,372 @@
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+
+use crate::model::{ProviderKind, ProviderModel};
+
+const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
+    match provider {
+        ProviderKind::Codex => vec![
+            ProviderModel::new("gpt-5.6-sol", "GPT-5.6-Sol").default(),
+            ProviderModel::new("gpt-5.6-terra", "GPT-5.6-Terra"),
+            ProviderModel::new("gpt-5.6-luna", "GPT-5.6-Luna"),
+            ProviderModel::new("gpt-5.5", "GPT-5.5"),
+            ProviderModel::new("gpt-5.4", "GPT-5.4"),
+        ],
+        ProviderKind::Claude => vec![
+            ProviderModel::new("claude-fable-5", "Claude Fable 5"),
+            ProviderModel::new("claude-opus-5", "Claude Opus 5"),
+            ProviderModel::new("claude-opus-4-8", "Claude Opus 4.8"),
+            ProviderModel::new("claude-opus-4-7", "Claude Opus 4.7"),
+            ProviderModel::new("claude-opus-4-6", "Claude Opus 4.6"),
+            ProviderModel::new("claude-opus-4-5", "Claude Opus 4.5"),
+            ProviderModel::new("claude-sonnet-5", "Claude Sonnet 5").default(),
+            ProviderModel::new("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
+        ],
+        ProviderKind::OpenCode => Vec::new(),
+        ProviderKind::Grok => {
+            vec![ProviderModel::new("grok-build", "Grok Build").default()]
+        }
+    }
+}
+
+pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderModel> {
+    let discovered = match provider {
+        ProviderKind::Codex => discover_codex_models(binary),
+        // Claude Code accepts model aliases and full IDs but does not expose a
+        // model inventory command. Keep this catalog aligned with the
+        // version-gated list used by T3 Code.
+        ProviderKind::Claude => Vec::new(),
+        ProviderKind::OpenCode => discover_opencode_models(binary),
+        ProviderKind::Grok => discover_grok_models(binary),
+    };
+    if discovered.is_empty() {
+        fallback_models(provider)
+    } else {
+        deduplicate(discovered)
+    }
+}
+
+fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(output) = Command::new(binary).arg("models").output() else {
+        return Vec::new();
+    };
+    parse_opencode_models(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_opencode_models(output: &str) -> Vec<ProviderModel> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let id = strip_ansi(line).trim().to_owned();
+            if id.is_empty() || id.split_whitespace().count() != 1 || !id.contains('/') {
+                return None;
+            }
+            let (provider, model) = id.split_once('/')?;
+            if provider.is_empty() || model.is_empty() {
+                return None;
+            }
+            Some(
+                ProviderModel::new(id.clone(), display_name_from_slug(model))
+                    .sub_provider(display_name_from_slug(provider)),
+            )
+        })
+        .collect()
+}
+
+fn discover_grok_models(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(output) = Command::new(binary).arg("models").output() else {
+        return Vec::new();
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_grok_models(&combined)
+}
+
+fn parse_grok_models(output: &str) -> Vec<ProviderModel> {
+    let cleaned = strip_ansi(output);
+    let default_model = cleaned.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Default model:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    });
+    let mut in_models = false;
+    cleaned
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line == "Available models:" {
+                in_models = true;
+                return None;
+            }
+            if !in_models {
+                return None;
+            }
+            let id = line
+                .strip_prefix('*')
+                .map(str::trim)?
+                .strip_suffix(" (default)")
+                .unwrap_or_else(|| line.strip_prefix('*').unwrap_or(line).trim())
+                .trim();
+            if id.is_empty() || id.chars().any(char::is_whitespace) {
+                return None;
+            }
+            let mut model = ProviderModel::new(id, display_name_from_slug(id));
+            model.is_default = default_model.as_deref() == Some(id);
+            Some(model)
+        })
+        .collect()
+}
+
+fn discover_codex_models(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(mut child) = Command::new(binary)
+        .args(["app-server", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        return Vec::new();
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return Vec::new();
+    };
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                let _ = tx.send(value);
+            }
+        }
+    });
+
+    let initialize = json!({
+        "method": "initialize",
+        "id": 0,
+        "params": {
+            "clientInfo": {
+                "name": "waku",
+                "title": "Waku",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "capabilities": {
+                "experimentalApi": true
+            }
+        }
+    });
+    if write_json_line(&mut stdin, &initialize).is_err()
+        || recv_rpc_response(&rx, 0, CODEX_RPC_TIMEOUT).is_none()
+        || write_json_line(&mut stdin, &json!({"method": "initialized", "params": {}})).is_err()
+    {
+        let _ = child.kill();
+        return Vec::new();
+    }
+
+    let mut models = Vec::new();
+    let mut cursor: Option<String> = None;
+    for request_id in 1..=32_u64 {
+        let params = cursor
+            .as_ref()
+            .map_or_else(|| json!({}), |cursor| json!({"cursor": cursor}));
+        if write_json_line(
+            &mut stdin,
+            &json!({"method": "model/list", "id": request_id, "params": params}),
+        )
+        .is_err()
+        {
+            break;
+        }
+        let Some(response) = recv_rpc_response(&rx, request_id, CODEX_RPC_TIMEOUT) else {
+            break;
+        };
+        models.extend(parse_codex_model_response(&response));
+        cursor = response
+            .pointer("/result/nextCursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    models
+}
+
+fn parse_codex_model_response(response: &Value) -> Vec<ProviderModel> {
+    response
+        .pointer("/result/data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let id = value.get("model").and_then(Value::as_str)?;
+            let name = value
+                .get("displayName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| display_name_from_slug(id));
+            let mut model = ProviderModel::new(id, normalize_codex_name(&name));
+            model.is_default = value
+                .get("isDefault")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(model)
+        })
+        .collect()
+}
+
+fn recv_rpc_response(rx: &Receiver<Value>, id: u64, timeout: Duration) -> Option<Value> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let value = rx.recv_timeout(remaining).ok()?;
+        if value.get("id").and_then(Value::as_u64) == Some(id) {
+            return Some(value);
+        }
+    }
+}
+
+fn write_json_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+fn normalize_codex_name(name: &str) -> String {
+    let name = if name
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("gpt"))
+    {
+        format!("GPT{}", &name[3..])
+    } else {
+        name.to_owned()
+    };
+    let mut capitalize_next = false;
+    name.chars()
+        .flat_map(|char| {
+            if capitalize_next {
+                capitalize_next = false;
+                char.to_uppercase().collect::<Vec<_>>()
+            } else {
+                capitalize_next = char == '-';
+                vec![char]
+            }
+        })
+        .collect()
+}
+
+fn display_name_from_slug(slug: &str) -> String {
+    let words = slug
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.to_ascii_lowercase().as_str() {
+            "gpt" => "GPT".to_owned(),
+            "ai" => "AI".to_owned(),
+            "xai" => "xAI".to_owned(),
+            _ if part
+                .chars()
+                .all(|char| char.is_ascii_digit() || char == '.') =>
+            {
+                part.to_owned()
+            }
+            _ => {
+                let mut chars = part.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().collect::<String>() + chars.as_str()
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    if words.first().is_some_and(|word| word == "GPT") {
+        words.join("-")
+    } else {
+        words.join(" ")
+    }
+}
+
+fn strip_ansi(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(char) = chars.next() {
+        if char == '\u{1b}' {
+            for code in chars.by_ref() {
+                if code.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            output.push(char);
+        }
+    }
+    output
+}
+
+fn deduplicate(models: Vec<ProviderModel>) -> Vec<ProviderModel> {
+    let mut seen = std::collections::HashSet::new();
+    models
+        .into_iter()
+        .filter(|model| seen.insert(model.id.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_opencode_provider_qualified_models() {
+        let models = parse_opencode_models(
+            "opencode/big-pickle\n\u{1b}[32mgithub-copilot/gpt-5.4\u{1b}[0m\nnoise here\n",
+        );
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1].id, "github-copilot/gpt-5.4");
+        assert_eq!(models[1].name, "GPT-5.4");
+        assert_eq!(models[1].sub_provider.as_deref(), Some("Github Copilot"));
+    }
+
+    #[test]
+    fn parses_grok_default_and_available_models() {
+        let models = parse_grok_models(
+            "Default model: grok-4.5\n\nAvailable models:\n  * grok-4.5 (default)\n",
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "grok-4.5");
+        assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn parses_codex_model_list_metadata() {
+        let response = json!({
+            "id": 1,
+            "result": {
+                "data": [{
+                    "model": "gpt-5.6-luna",
+                    "displayName": "gpt-5.6-luna",
+                    "isDefault": true
+                }]
+            }
+        });
+        let models = parse_codex_model_response(&response);
+        assert_eq!(models[0].name, "GPT-5.6-Luna");
+        assert!(models[0].is_default);
+    }
+}

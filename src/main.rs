@@ -4,13 +4,14 @@ mod checkpoint;
 mod driver;
 mod input;
 mod model;
+mod model_catalog;
 mod persistence;
 mod theme;
 mod ui;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
-    WindowOptions, actions, point, px, size,
+    App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
+    WindowBounds, WindowOptions, actions, point, px, size,
 };
 
 use crate::app::Waku;
@@ -89,7 +90,7 @@ fn main() {
                         let waku = Waku::new(window, cx);
                         let composer_focus = waku.read(cx).composer_focus(cx);
                         window.focus(&composer_focus);
-                        waku
+                        cx.new(|cx| gpui_component::Root::new(waku, window, cx))
                     },
                 )
                 .expect("failed to open Waku window");

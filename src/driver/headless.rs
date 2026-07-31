@@ -30,6 +30,7 @@ impl HeadlessDriver {
         binary: PathBuf,
         cwd: PathBuf,
         mode: RuntimeMode,
+        model: Option<String>,
         existing_cursor: Option<ProviderResumeCursor>,
         events: Sender<DriverEvent>,
     ) -> anyhow::Result<Self> {
@@ -75,6 +76,7 @@ impl HeadlessDriver {
                                 &binary,
                                 &cwd,
                                 mode,
+                                model.as_deref(),
                                 provider_session_id.as_deref(),
                                 can_resume,
                                 prompt,
@@ -137,6 +139,7 @@ fn run_prompt(
     binary: &PathBuf,
     cwd: &PathBuf,
     mode: RuntimeMode,
+    model: Option<&str>,
     provider_session_id: Option<&str>,
     resume: bool,
     prompt: String,
@@ -162,6 +165,9 @@ fn run_prompt(
                     RuntimeMode::Auto => "acceptEdits",
                 },
             ]);
+            if let Some(model) = model {
+                command.args(["--model", model]);
+            }
             if let Some(session_id) = provider_session_id {
                 if resume {
                     command.args(["--resume", session_id]);
@@ -172,6 +178,9 @@ fn run_prompt(
         }
         ProviderKind::OpenCode => {
             command.args(["run", "--format", "json", "--thinking"]);
+            if let Some(model) = model {
+                command.args(["--model", model]);
+            }
             match mode {
                 RuntimeMode::Plan => {
                     command.args(["--agent", "plan"]);
@@ -194,6 +203,9 @@ fn run_prompt(
                 "--output-format",
                 "streaming-json",
             ]);
+            if let Some(model) = model {
+                command.args(["--model", model]);
+            }
             match mode {
                 RuntimeMode::Plan => {
                     command.args(["--permission-mode", "plan"]);

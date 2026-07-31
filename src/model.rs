@@ -132,17 +132,68 @@ impl RuntimeMode {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderModel {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_provider: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FavoriteModel {
+    pub provider: ProviderKind,
+    pub model: String,
+}
+
+impl ProviderModel {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            sub_provider: None,
+            is_default: false,
+        }
+    }
+
+    pub fn default(mut self) -> Self {
+        self.is_default = true;
+        self
+    }
+
+    pub fn sub_provider(mut self, sub_provider: impl Into<String>) -> Self {
+        self.sub_provider = Some(sub_provider.into());
+        self
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProviderProbe {
     pub provider: ProviderKind,
     pub installed: bool,
     pub path: Option<PathBuf>,
     pub version: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ProviderModel>,
 }
 
 impl ProviderProbe {
-    pub fn detect(provider: ProviderKind) -> Self {
+    pub fn pending(provider: ProviderKind) -> Self {
         let path = find_in_path(provider.command());
+        Self {
+            provider,
+            installed: path.is_some(),
+            path,
+            version: None,
+            models: crate::model_catalog::fallback_models(provider),
+        }
+    }
+
+    pub fn detect(provider: ProviderKind) -> Self {
+        let mut probe = Self::pending(provider);
+        let path = probe.path.clone();
         let version = path.as_ref().and_then(|path| {
             std::process::Command::new(path)
                 .arg("--version")
@@ -158,12 +209,18 @@ impl ProviderProbe {
                         .map(|line| line.trim().to_owned())
                 })
         });
-        Self {
-            provider,
-            installed: path.is_some(),
-            path,
-            version,
+        if let Some(path) = path.as_deref() {
+            probe.models = crate::model_catalog::discover_models(provider, path);
         }
+        probe.version = version;
+        probe
+    }
+
+    pub fn preferred_model(&self) -> Option<&ProviderModel> {
+        self.models
+            .iter()
+            .find(|model| model.is_default)
+            .or_else(|| self.models.first())
     }
 }
 
@@ -281,6 +338,8 @@ pub struct AgentSession {
     pub title: String,
     pub project_id: Uuid,
     pub provider: ProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub runtime_mode: RuntimeMode,
     pub status: SessionStatus,
     pub created_at: u64,
@@ -305,6 +364,7 @@ impl AgentSession {
             title: "New task".to_owned(),
             project_id,
             provider,
+            model: None,
             runtime_mode: RuntimeMode::Ask,
             status: SessionStatus::Idle,
             created_at: now,

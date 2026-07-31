@@ -56,7 +56,8 @@ open target/release/Waku.app
 
 - Add local project folders from the sidebar.
 - Start independent sessions with `⌘N`.
-- Select the provider before the first message.
+- Search and select a provider model before the first message; favorite models
+  stay available in the picker.
 - Cycle Plan, Ask, and Auto execution modes from the composer.
 - Stop the active turn with `Escape`.
 - In a Git project, revert a completed Codex turn from its checkpoint action.
@@ -74,8 +75,8 @@ state and never parses a provider wire format.
 
 The MVP keeps the Codex transport alive for a session. Claude Code, OpenCode,
 and Grok use resumable per-turn processes, preserving their native session IDs.
-The next product layer is richer provider-native configuration: model pickers,
-structured diffs, file attachments, and OpenCode's managed server API.
+The next product layer is richer provider-native configuration: structured
+diffs, file attachments, and OpenCode's managed server API.
 
 ### Sessions and checkpoints
 

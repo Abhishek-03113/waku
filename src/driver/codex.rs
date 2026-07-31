@@ -39,6 +39,7 @@ impl CodexDriver {
         binary: PathBuf,
         cwd: PathBuf,
         mode: RuntimeMode,
+        model: Option<String>,
         provider_cursor: Option<ProviderResumeCursor>,
         events: Sender<DriverEvent>,
     ) -> anyhow::Result<Self> {
@@ -121,26 +122,34 @@ impl CodexDriver {
                     RuntimeMode::Auto => ("never", "workspace-write"),
                 };
                 let open_thread = if let Some(thread_id) = provider_session_id {
+                    let mut params = json!({
+                        "threadId": thread_id,
+                        "cwd": cwd_string,
+                        "approvalPolicy": approval_policy,
+                        "sandbox": sandbox
+                    });
+                    if let Some(model) = model.as_deref() {
+                        params["model"] = json!(model);
+                    }
                     json!({
                         "method": "thread/resume",
                         "id": 1,
-                        "params": {
-                            "threadId": thread_id,
-                            "cwd": cwd_string,
-                            "approvalPolicy": approval_policy,
-                            "sandbox": sandbox
-                        }
+                        "params": params
                     })
                 } else {
+                    let mut params = json!({
+                        "cwd": cwd_string,
+                        "approvalPolicy": approval_policy,
+                        "sandbox": sandbox,
+                        "serviceName": "waku"
+                    });
+                    if let Some(model) = model.as_deref() {
+                        params["model"] = json!(model);
+                    }
                     json!({
                         "method": "thread/start",
                         "id": 1,
-                        "params": {
-                            "cwd": cwd_string,
-                            "approvalPolicy": approval_policy,
-                            "sandbox": sandbox,
-                            "serviceName": "waku"
-                        }
+                        "params": params
                     })
                 };
                 let _ = write_json_line(&mut stdin, &open_thread);
@@ -156,13 +165,17 @@ impl CodexDriver {
                                 continue;
                             };
                             next_request_id += 1;
+                            let mut params = json!({
+                                "threadId": thread_id,
+                                "input": [{"type": "text", "text": text}]
+                            });
+                            if let Some(model) = model.as_deref() {
+                                params["model"] = json!(model);
+                            }
                             json!({
                                 "method": "turn/start",
                                 "id": next_request_id,
-                                "params": {
-                                    "threadId": thread_id,
-                                    "input": [{"type": "text", "text": text}]
-                                }
+                                "params": params
                             })
                         }
                         CommandMessage::Cancel => {

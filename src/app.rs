@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, unbounded};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, BoxShadow, ClipboardItem, Context, Corner, Div,
-    Entity, FocusHandle, FontWeight, Hsla, IntoElement, ListAlignment, ListState,
+    Entity, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListState,
     PathPromptOptions, Render, SharedString, StyleRefinement, Timer, Window, div, hsla, list,
     point, prelude::*, pulsating_between, px, rems,
 };
@@ -16,13 +16,14 @@ use crate::checkpoint;
 use crate::driver::{self, DriverHandle};
 use crate::input::{ComposerEvent, ComposerInput, preserve_composer_focus_for_context_menu};
 use crate::model::{
-    ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, Message, MessageRole,
-    PendingPermission, Project, ProviderKind, ProviderProbe, ReasoningBlock, RuntimeMode,
-    SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time,
-    unix_time_millis,
+    ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, FavoriteModel, Message,
+    MessageRole, PendingPermission, Project, ProviderKind, ProviderProbe, ReasoningBlock,
+    RuntimeMode, SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path,
+    unix_time, unix_time_millis,
 };
-use gpui_component::Icon as ComponentIcon;
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::popover::Popover;
 use gpui_component::text::{TextView, TextViewStyle};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -58,6 +59,12 @@ enum StreamDeltaKind {
     Reasoning,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModelPickerTab {
+    Favorites,
+    Provider(ProviderKind),
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CheckpointAction {
     session_id: Uuid,
@@ -71,7 +78,10 @@ pub struct Waku {
     state: PersistedState,
     store: StateStore,
     composer: Entity<ComposerInput>,
+    model_search: Entity<InputState>,
     probes: Vec<ProviderProbe>,
+    provider_probe_events: Receiver<ProviderProbe>,
+    model_picker_tab: ModelPickerTab,
     driver: Option<DriverHandle>,
     driver_session: Option<Uuid>,
     driver_events: Option<Receiver<DriverEvent>>,
@@ -96,6 +106,7 @@ pub struct Waku {
 impl Waku {
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
+        let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search models..."));
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
         let mut state = store.load_or_fresh(cwd);
@@ -157,8 +168,25 @@ impl Waku {
         }
         let probes = ProviderKind::ALL
             .into_iter()
-            .map(ProviderProbe::detect)
-            .collect();
+            .map(ProviderProbe::pending)
+            .collect::<Vec<_>>();
+        let (provider_probe_tx, provider_probe_events) = unbounded();
+        for provider in ProviderKind::ALL {
+            let provider_probe_tx = provider_probe_tx.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("waku-{}-probe", provider.id()))
+                .spawn(move || {
+                    let _ = provider_probe_tx.send(ProviderProbe::detect(provider));
+                });
+        }
+        drop(provider_probe_tx);
+        let model_picker_tab = ModelPickerTab::Provider(
+            state
+                .selected_session
+                .and_then(|id| state.sessions.iter().find(|session| session.id == id))
+                .map(|session| session.provider)
+                .unwrap_or(state.last_provider),
+        );
         let branch = state
             .selected_project
             .and_then(|project_id| {
@@ -179,13 +207,19 @@ impl Waku {
             .detach();
 
             cx.observe(&composer, |_, _, cx| cx.notify()).detach();
+            cx.subscribe(&model_search, |_: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            })
+            .detach();
 
             cx.spawn(async move |this, cx| {
                 loop {
                     Timer::after(STREAM_FRAME_INTERVAL).await;
                     if this
                         .update(cx, |this, cx| {
-                            if this.drain_driver_events() {
+                            if this.drain_driver_events() || this.drain_provider_probe_events() {
                                 cx.notify();
                             }
                         })
@@ -201,7 +235,10 @@ impl Waku {
                 state,
                 store,
                 composer,
+                model_search,
                 probes,
+                provider_probe_events,
+                model_picker_tab,
                 driver: None,
                 driver_session: None,
                 driver_events: None,
@@ -243,6 +280,28 @@ impl Waku {
             .sessions
             .iter_mut()
             .find(|session| session.id == id)
+    }
+
+    fn provider_probe(&self, provider: ProviderKind) -> Option<&ProviderProbe> {
+        self.probes.iter().find(|probe| probe.provider == provider)
+    }
+
+    fn model_for_session<'a>(&'a self, session: &'a AgentSession) -> Option<&'a str> {
+        session.model.as_deref().or_else(|| {
+            self.provider_probe(session.provider)
+                .and_then(ProviderProbe::preferred_model)
+                .map(|model| model.id.as_str())
+        })
+    }
+
+    fn model_display_name(&self, provider: ProviderKind, model: Option<&str>) -> String {
+        let Some(model) = model else {
+            return provider.short_name().to_owned();
+        };
+        self.provider_probe(provider)
+            .and_then(|probe| probe.models.iter().find(|candidate| candidate.id == model))
+            .map(|candidate| candidate.name.clone())
+            .unwrap_or_else(|| model.to_owned())
     }
 
     fn selected_transcript_blocks(&self) -> &[TranscriptBlock] {
@@ -526,12 +585,20 @@ impl Waku {
                     session.provider.display_name()
                 )
             })?;
+        let model = session.model.clone().or_else(|| {
+            self.probes
+                .iter()
+                .find(|probe| probe.provider == session.provider)
+                .and_then(ProviderProbe::preferred_model)
+                .map(|model| model.id.clone())
+        });
         let (event_tx, event_rx) = unbounded();
         let handle = driver::start(
             session.provider,
             binary,
             project.path.clone(),
             session.runtime_mode,
+            model,
             session.provider_cursor.clone(),
             event_tx,
         )?;
@@ -618,6 +685,23 @@ impl Waku {
                 self.pending_driver_events.push_back(event);
             }
         }
+    }
+
+    fn drain_provider_probe_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(probe) = self.provider_probe_events.try_recv() {
+            if let Some(existing) = self
+                .probes
+                .iter_mut()
+                .find(|existing| existing.provider == probe.provider)
+            {
+                *existing = probe;
+            } else {
+                self.probes.push(probe);
+            }
+            changed = true;
+        }
+        changed
     }
 
     fn drain_driver_events(&mut self) -> bool {
@@ -1161,11 +1245,58 @@ impl Waku {
             && session.messages.is_empty()
         {
             session.provider = provider;
+            // `None` follows the provider's live default. Choosing a concrete
+            // model in the picker pins that model on the task.
+            session.model = None;
             self.state.last_provider = provider;
+            self.model_picker_tab = ModelPickerTab::Provider(provider);
             self.reset_live_runtime();
             self.save();
             cx.notify();
         }
+    }
+
+    fn choose_model(&mut self, provider: ProviderKind, model: String, cx: &mut Context<Self>) {
+        if let Some(session) = self.selected_session_mut()
+            && session.messages.is_empty()
+        {
+            session.provider = provider;
+            session.model = Some(model);
+            self.state.last_provider = provider;
+            self.model_picker_tab = ModelPickerTab::Provider(provider);
+            self.reset_live_runtime();
+            self.save();
+            cx.notify();
+        }
+    }
+
+    fn select_model_picker_tab(&mut self, tab: ModelPickerTab, cx: &mut Context<Self>) {
+        if self.model_picker_tab != tab {
+            self.model_picker_tab = tab;
+            cx.notify();
+        }
+    }
+
+    fn toggle_favorite_model(
+        &mut self,
+        provider: ProviderKind,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(index) = self
+            .state
+            .favorite_models
+            .iter()
+            .position(|favorite| favorite.provider == provider && favorite.model == model)
+        {
+            self.state.favorite_models.remove(index);
+        } else {
+            self.state
+                .favorite_models
+                .push(FavoriteModel { provider, model });
+        }
+        self.save();
+        cx.notify();
     }
 
     fn set_runtime_mode(&mut self, mode: RuntimeMode, cx: &mut Context<Self>) {
@@ -2288,10 +2419,398 @@ impl Waku {
 
     // ── Composer ───────────────────────────────────────────────────────────
 
-    fn render_composer(&self, _window: &Window, cx: &mut Context<Self>) -> Div {
+    fn render_provider_model_control(
+        &self,
+        fresh_session: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::dark();
         let session = self.selected_session();
         let provider = session.map(|session| session.provider).unwrap_or_default();
+        let selected_model = session.and_then(|session| self.model_for_session(session));
+        let selected_model_name = self.model_display_name(provider, selected_model);
+
+        if !fresh_session {
+            return div()
+                .h(px(24.0))
+                .px(px(7.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon(
+                    provider_icon(provider),
+                    10.5,
+                    provider_color(provider).opacity(0.9),
+                ))
+                .child(
+                    div()
+                        .max_w(px(210.0))
+                        .truncate()
+                        .text_color(theme.text_secondary)
+                        .child(SharedString::from(selected_model_name)),
+                )
+                .into_any_element();
+        }
+
+        let search_query = self.model_search.read(cx).value().to_string();
+        let normalized_query = search_query.trim().to_ascii_lowercase();
+        let searching = !normalized_query.is_empty();
+        let selected_tab = self.model_picker_tab;
+        let selected_model = selected_model.map(str::to_owned);
+        let probes = self.probes.clone();
+        let favorites = self.state.favorite_models.clone();
+        let weak = cx.entity().downgrade();
+        let search = self.model_search.clone();
+        let search_focus = search.read(cx).focus_handle(cx);
+
+        let trigger = MenuChip::new("composer-provider-model")
+            .icon(
+                provider_icon(provider),
+                provider_color(provider).opacity(0.9),
+            )
+            .label(selected_model_name);
+
+        Popover::new("provider-model-picker")
+            .anchor(Corner::BottomLeft)
+            .appearance(false)
+            .track_focus(&search_focus)
+            .on_open_change({
+                let weak = weak.clone();
+                let search = search.clone();
+                move |open, window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        if *open {
+                            this.model_picker_tab = ModelPickerTab::Provider(
+                                this.selected_session()
+                                    .map(|session| session.provider)
+                                    .unwrap_or_default(),
+                            );
+                            search.update(cx, |search, cx| {
+                                search.set_value("", window, cx);
+                            });
+                        } else {
+                            window.focus(&this.composer.read(cx).focus());
+                        }
+                        cx.notify();
+                    });
+                }
+            })
+            .trigger(trigger)
+            .content(move |_state, _window, popover_cx| {
+                let popover = popover_cx.entity();
+                let mut available_models = probes
+                    .iter()
+                    .filter(|probe| probe.installed)
+                    .flat_map(|probe| {
+                        probe
+                            .models
+                            .iter()
+                            .cloned()
+                            .map(move |model| (probe.provider, model))
+                    })
+                    .filter(|(kind, model)| {
+                        if searching {
+                            let searchable = format!(
+                                "{} {} {} {}",
+                                model.name,
+                                model.id,
+                                kind.short_name(),
+                                model.sub_provider.as_deref().unwrap_or("")
+                            )
+                            .to_ascii_lowercase();
+                            return normalized_query
+                                .split_whitespace()
+                                .all(|token| searchable.contains(token));
+                        }
+                        match selected_tab {
+                            ModelPickerTab::Favorites => favorites.iter().any(|favorite| {
+                                favorite.provider == *kind && favorite.model == model.id
+                            }),
+                            ModelPickerTab::Provider(provider) => provider == *kind,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !searching && selected_tab == ModelPickerTab::Favorites {
+                    available_models.sort_by_key(|(kind, model)| {
+                        favorites
+                            .iter()
+                            .position(|favorite| {
+                                favorite.provider == *kind && favorite.model == model.id
+                            })
+                            .unwrap_or(usize::MAX)
+                    });
+                }
+
+                let mut sidebar = div()
+                    .w(px(50.0))
+                    .h_full()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(4.0))
+                    .p(px(5.0))
+                    .rounded_tl(px(12.0))
+                    .rounded_bl(px(12.0))
+                    .bg(theme.canvas)
+                    .border_r_1()
+                    .border_color(theme.border);
+
+                let favorites_selected = selected_tab == ModelPickerTab::Favorites && !searching;
+                let favorite_weak = weak.clone();
+                sidebar = sidebar
+                    .child(
+                        div()
+                            .id("model-tab-favorites")
+                            .w(px(38.0))
+                            .h(px(38.0))
+                            .rounded(px(7.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_default()
+                            .when(favorites_selected, |element| {
+                                element.bg(theme.overlay_strong)
+                            })
+                            .hover(|element| element.bg(theme.overlay))
+                            .child(icon(
+                                "icons/star.svg",
+                                17.0,
+                                if favorites_selected {
+                                    theme.text
+                                } else {
+                                    theme.text_tertiary
+                                },
+                            ))
+                            .on_click(move |_, _, cx| {
+                                let _ = favorite_weak.update(cx, |this, cx| {
+                                    this.select_model_picker_tab(ModelPickerTab::Favorites, cx);
+                                });
+                            }),
+                    )
+                    .child(div().w(px(34.0)).h(px(1.0)).my(px(3.0)).bg(theme.border));
+
+                for kind in ProviderKind::ALL {
+                    let installed = probes
+                        .iter()
+                        .find(|probe| probe.provider == kind)
+                        .map(|probe| probe.installed)
+                        .unwrap_or(false);
+                    let selected = selected_tab == ModelPickerTab::Provider(kind) && !searching;
+                    let tab_weak = weak.clone();
+                    sidebar = sidebar.child(
+                        div()
+                            .id(SharedString::from(format!("model-tab-{}", kind.id())))
+                            .w(px(38.0))
+                            .h(px(38.0))
+                            .rounded(px(7.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_default()
+                            .when(selected, |element| element.bg(theme.overlay_strong))
+                            .when(!installed, |element| element.opacity(0.35))
+                            .when(installed, |element| {
+                                element.hover(|element| element.bg(theme.overlay)).on_click(
+                                    move |_, _, cx| {
+                                        let _ = tab_weak.update(cx, |this, cx| {
+                                            this.select_model_picker_tab(
+                                                ModelPickerTab::Provider(kind),
+                                                cx,
+                                            );
+                                        });
+                                    },
+                                )
+                            })
+                            .child(icon(
+                                provider_icon(kind),
+                                18.0,
+                                provider_color(kind).opacity(if selected { 1.0 } else { 0.82 }),
+                            )),
+                    );
+                }
+
+                let search_input = div()
+                    .h(px(48.0))
+                    .mx(px(14.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border_strong)
+                    .child(
+                        Input::new(&search)
+                            .appearance(false)
+                            .bordered(false)
+                            .focus_bordered(false)
+                            .prefix(icon("icons/search.svg", 15.0, theme.text_tertiary)),
+                    );
+
+                let mut rows = div()
+                    .id("model-picker-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(9.0));
+                if available_models.is_empty() {
+                    let label = if searching {
+                        "No models found"
+                    } else if selected_tab == ModelPickerTab::Favorites {
+                        "Star a model to keep it here"
+                    } else {
+                        "No models reported by this provider"
+                    };
+                    rows = rows.child(
+                        div()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(11.5))
+                            .text_color(theme.text_ghost)
+                            .child(label),
+                    );
+                }
+
+                for (kind, model) in available_models {
+                    let is_selected =
+                        kind == provider && selected_model.as_deref() == Some(model.id.as_str());
+                    let is_favorite = favorites
+                        .iter()
+                        .any(|favorite| favorite.provider == kind && favorite.model == model.id);
+                    let model_id = model.id.clone();
+                    let select_weak = weak.clone();
+                    let select_popover = popover.clone();
+                    let favorite_model_id = model.id.clone();
+                    let favorite_weak = weak.clone();
+                    let subtitle = model.sub_provider.as_deref().map_or_else(
+                        || kind.short_name().to_owned(),
+                        |sub_provider| format!("{sub_provider} · {}", kind.short_name()),
+                    );
+                    rows = rows.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "model-row-{}-{}",
+                                kind.id(),
+                                model.id
+                            )))
+                            .h(px(58.0))
+                            .px(px(12.0))
+                            .rounded(px(9.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .cursor_default()
+                            .when(is_selected, |element| element.bg(theme.overlay_strong))
+                            .hover(|element| element.bg(theme.overlay))
+                            .active(|element| element.opacity(0.85))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(model.name)),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt(px(4.0))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .child(icon(
+                                                provider_icon(kind),
+                                                10.5,
+                                                provider_color(kind).opacity(0.85),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .truncate()
+                                                    .text_size(px(11.0))
+                                                    .text_color(theme.text_tertiary)
+                                                    .child(SharedString::from(subtitle)),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "favorite-model-{}-{}",
+                                        kind.id(),
+                                        model.id
+                                    )))
+                                    .w(px(28.0))
+                                    .h(px(28.0))
+                                    .rounded(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(|element| element.bg(theme.overlay_strong))
+                                    .child(icon(
+                                        "icons/star.svg",
+                                        14.0,
+                                        if is_favorite {
+                                            theme.text_secondary
+                                        } else {
+                                            theme.text_ghost
+                                        },
+                                    ))
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let _ = favorite_weak.update(cx, |this, cx| {
+                                            this.toggle_favorite_model(
+                                                kind,
+                                                favorite_model_id.clone(),
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                            )
+                            .on_click(move |_, window, cx| {
+                                let _ = select_weak.update(cx, |this, cx| {
+                                    this.choose_model(kind, model_id.clone(), cx);
+                                });
+                                let _ = select_popover.update(cx, |popover, cx| {
+                                    popover.dismiss(window, cx);
+                                });
+                            }),
+                    );
+                }
+
+                div()
+                    .w(px(460.0))
+                    .h(px(390.0))
+                    .rounded(px(13.0))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(theme.raised)
+                    .shadow_lg()
+                    .flex()
+                    .child(sidebar)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .rounded_tr(px(12.0))
+                            .rounded_br(px(12.0))
+                            .bg(theme.surface)
+                            .child(search_input)
+                            .child(rows),
+                    )
+            })
+            .into_any_element()
+    }
+
+    fn render_composer(&self, _window: &Window, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::dark();
+        let session = self.selected_session();
         let mode = session
             .map(|session| session.runtime_mode)
             .unwrap_or_default();
@@ -2308,20 +2827,6 @@ impl Waku {
             .unwrap_or(false);
         let has_draft = !self.composer.read(cx).content().trim().is_empty();
         let weak = cx.entity().downgrade();
-        let provider_options = ProviderKind::ALL
-            .iter()
-            .map(|kind| {
-                (
-                    *kind,
-                    self.probes
-                        .iter()
-                        .find(|probe| probe.provider == *kind)
-                        .map(|probe| probe.installed)
-                        .unwrap_or(false),
-                    *kind == provider,
-                )
-            })
-            .collect::<Vec<_>>();
         div().flex_none().px(px(20.0)).child(
             div()
                 .w_full()
@@ -2347,66 +2852,7 @@ impl Waku {
                         .gap(px(4.0))
                         .text_size(px(11.5))
                         .line_height(px(14.0))
-                        .child(if fresh_session {
-                            // The provider is a real select while the session
-                            // has no history; afterwards it is locked in.
-                            let weak = weak.clone();
-                            let composer = self.composer.clone();
-                            MenuChip::new("composer-provider")
-                                .icon(
-                                    provider_icon(provider),
-                                    provider_color(provider).opacity(0.9),
-                                )
-                                .label(provider.short_name())
-                                .dropdown_menu(move |mut menu, _window, cx| {
-                                    menu = menu
-                                        .action_context(composer.read(cx).focus())
-                                        .min_w(px(190.0));
-                                    for (kind, installed, checked) in
-                                        provider_options.iter().copied()
-                                    {
-                                        let weak = weak.clone();
-                                        menu = menu.item(
-                                            PopupMenuItem::new(if installed {
-                                                kind.short_name().to_owned()
-                                            } else {
-                                                format!("{} — not installed", kind.short_name())
-                                            })
-                                            .icon(
-                                                ComponentIcon::default().path(provider_icon(kind)),
-                                            )
-                                            .checked(checked)
-                                            .disabled(!installed)
-                                            .on_click(move |_, _, cx| {
-                                                let _ = weak.update(cx, |this, cx| {
-                                                    this.choose_provider(kind, cx);
-                                                });
-                                            }),
-                                        );
-                                    }
-                                    menu
-                                })
-                                .anchor(Corner::BottomLeft)
-                                .into_any_element()
-                        } else {
-                            div()
-                                .h(px(24.0))
-                                .px(px(7.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(icon(
-                                    provider_icon(provider),
-                                    10.5,
-                                    provider_color(provider).opacity(0.9),
-                                ))
-                                .child(
-                                    div()
-                                        .text_color(theme.text_secondary)
-                                        .child(provider.short_name()),
-                                )
-                                .into_any_element()
-                        })
+                        .child(self.render_provider_model_control(fresh_session, cx))
                         .child({
                             let weak = weak.clone();
                             let composer = self.composer.clone();
