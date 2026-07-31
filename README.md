@@ -45,14 +45,14 @@ Requirements:
 For development, run:
 
 ```sh
-scripts/dev.sh
+bun scripts/dev.ts
 ```
 
 This builds and signs `target/debug/Waku Debug.app`, launches the bundled
 executable, and watches Rust sources, embedded assets, resources, and Cargo
 manifests. After a successful rebuild it restarts the app automatically. A
 failed build leaves the last working app open. Press `Ctrl-C` to stop the
-watcher and app.
+watcher and app; quitting the app also exits the watcher.
 
 Debug builds use the app name `Waku Debug`, bundle identifier `codes.waku.dev`,
 and their own `Waku Debug/state.json` local data directory. Release builds use
