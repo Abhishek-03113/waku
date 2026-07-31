@@ -5,7 +5,7 @@ impl Waku {
 
     pub(super) fn render_permission(&self, cx: &mut Context<Self>) -> Option<Div> {
         let permission = self.selected_runtime()?.pending_permission.as_ref()?;
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let request_id = permission.request_id.clone();
         let mut buttons = div().flex().items_center().gap(px(8.0)).mt(px(10.0));
         for option in &permission.options {
@@ -96,7 +96,7 @@ impl Waku {
     // ── Composer ───────────────────────────────────────────────────────────
 
     pub(super) fn render_provider_model_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let session = self.selected_session();
         let provider = session.map(|session| session.provider).unwrap_or_default();
         let selected_model = session.and_then(|session| self.model_for_session(session));
@@ -116,7 +116,7 @@ impl Waku {
                 .child(icon(
                     provider_icon(provider),
                     10.5,
-                    provider_color(provider).opacity(0.9),
+                    provider_color(&theme, provider).opacity(0.9),
                 ))
                 .child(
                     div()
@@ -142,7 +142,7 @@ impl Waku {
         let trigger = MenuChip::new("composer-provider-model")
             .icon(
                 provider_icon(provider),
-                provider_color(provider).opacity(0.9),
+                provider_color(&theme, provider).opacity(0.9),
             )
             .label(selected_model_name);
 
@@ -303,7 +303,11 @@ impl Waku {
                             .child(icon(
                                 provider_icon(kind),
                                 18.0,
-                                provider_color(kind).opacity(if selected { 1.0 } else { 0.82 }),
+                                provider_color(&theme, kind).opacity(if selected {
+                                    1.0
+                                } else {
+                                    0.82
+                                }),
                             )),
                     );
                 }
@@ -405,7 +409,7 @@ impl Waku {
                                             .child(icon(
                                                 provider_icon(kind),
                                                 10.5,
-                                                provider_color(kind).opacity(0.85),
+                                                provider_color(&theme, kind).opacity(0.85),
                                             ))
                                             .child(
                                                 div()
@@ -493,6 +497,7 @@ impl Waku {
     }
 
     pub(super) fn render_model_traits_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = Theme::current(cx);
         let session = self.selected_session()?;
         let model = self.model_metadata_for_session(session)?;
         if model.reasoning_efforts.is_empty() && model.service_tiers.is_empty() {
@@ -560,7 +565,7 @@ impl Waku {
         let composer = self.composer.clone();
         let trigger = MenuChip::new("model-traits")
             .when(fast, |trigger| {
-                trigger.icon("icons/zap.svg", Theme::dark().text_secondary)
+                trigger.icon("icons/zap.svg", theme.text_secondary)
             })
             .label(trigger_label);
 
@@ -572,24 +577,19 @@ impl Waku {
                         .min_w(px(208.0))
                         .max_w(px(208.0));
                     if !reasoning_efforts.is_empty() {
-                        menu = menu.item(traits_menu_label(Theme::dark(), "Reasoning"));
+                        menu = menu.item(traits_menu_label(theme, "Reasoning"));
                         for option in reasoning_efforts.clone() {
                             let checked = selected_effort.as_deref() == Some(option.id.as_str());
                             let is_default = default_effort.as_deref() == Some(option.id.as_str());
                             let effort = option.id;
                             let item_weak = weak.clone();
                             menu = menu.item(
-                                traits_menu_choice(
-                                    Theme::dark(),
-                                    option.label,
-                                    is_default,
-                                    checked,
-                                )
-                                .on_click(move |_, _, cx| {
-                                    let _ = item_weak.update(cx, |this, cx| {
-                                        this.set_reasoning_effort(effort.clone(), cx);
-                                    });
-                                }),
+                                traits_menu_choice(theme, option.label, is_default, checked)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = item_weak.update(cx, |this, cx| {
+                                            this.set_reasoning_effort(effort.clone(), cx);
+                                        });
+                                    }),
                             );
                         }
                     }
@@ -597,11 +597,11 @@ impl Waku {
                         if !reasoning_efforts.is_empty() {
                             menu = menu.separator();
                         }
-                        menu = menu.item(traits_menu_label(Theme::dark(), "Service Tier"));
+                        menu = menu.item(traits_menu_label(theme, "Service Tier"));
                         let standard_weak = weak.clone();
                         menu = menu.item(
                             traits_menu_choice(
-                                Theme::dark(),
+                                theme,
                                 "Standard".to_owned(),
                                 default_tier == "default",
                                 selected_tier == "default",
@@ -618,17 +618,12 @@ impl Waku {
                             let tier = option.id;
                             let item_weak = weak.clone();
                             menu = menu.item(
-                                traits_menu_choice(
-                                    Theme::dark(),
-                                    option.label,
-                                    is_default,
-                                    checked,
-                                )
-                                .on_click(move |_, _, cx| {
-                                    let _ = item_weak.update(cx, |this, cx| {
-                                        this.set_service_tier(tier.clone(), cx);
-                                    });
-                                }),
+                                traits_menu_choice(theme, option.label, is_default, checked)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = item_weak.update(cx, |this, cx| {
+                                            this.set_service_tier(tier.clone(), cx);
+                                        });
+                                    }),
                             );
                         }
                     }
@@ -640,7 +635,7 @@ impl Waku {
     }
 
     pub(super) fn render_access_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let selected_mode = self
             .selected_session()
             .map(|session| session.runtime_mode)
@@ -711,7 +706,7 @@ impl Waku {
     }
 
     pub(super) fn render_interaction_mode_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let mode = self
             .selected_session()
             .map(|session| session.interaction_mode)
@@ -762,7 +757,7 @@ impl Waku {
     }
 
     pub(super) fn render_composer(&self, _window: &Window, cx: &mut Context<Self>) -> Div {
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let session = self.selected_session();
         let working = session
             .map(|session| {
@@ -781,13 +776,7 @@ impl Waku {
                 .rounded(px(13.0))
                 .border_1()
                 .border_color(theme.border)
-                .bg(theme.raised)
-                .shadow(vec![BoxShadow {
-                    color: hsla(0.0, 0.0, 0.0, 0.24),
-                    offset: point(px(0.0), px(6.0)),
-                    blur_radius: px(20.0),
-                    spread_radius: px(-6.0),
-                }])
+                .bg(theme.composer)
                 .p(px(10.0))
                 .child(div().px(px(4.0)).pt(px(2.0)).child(self.composer.clone()))
                 .child(
@@ -861,8 +850,8 @@ impl Waku {
         )
     }
 
-    pub(super) fn render_workspace_footer(&self) -> Div {
-        let theme = Theme::dark();
+    pub(super) fn render_workspace_footer(&self, cx: &App) -> Div {
+        let theme = Theme::current(cx);
         let path = self
             .selected_project()
             .map(|project| compact_path(&project.path))

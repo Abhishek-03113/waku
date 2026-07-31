@@ -1,17 +1,60 @@
-use gpui::{App, Hsla, hsla, rgb};
+use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemePreference {
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    fn resolves_to_dark(self, system_appearance: WindowAppearance) -> bool {
+        match self {
+            Self::System => matches!(
+                system_appearance,
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            ),
+            Self::Light => false,
+            Self::Dark => true,
+        }
+    }
+
+    fn native_override(self) -> Option<bool> {
+        match self {
+            Self::System => None,
+            Self::Light => Some(false),
+            Self::Dark => Some(true),
+        }
+    }
+}
 
 /// Waku's visual language, take two: neutral graphite surfaces in the spirit
 /// of Cursor — color is reserved for meaning. Layers go `sidebar` (a
 /// translucent tint over macOS vibrancy) → `surface` (content pane) →
-/// `raised` (composer, bubbles, cards) → `inset` (code wells). The coral
-/// accent appears only where the brand or live activity earns it; everything
-/// else is a gray with a job.
+/// `raised` (bubbles and cards), with dedicated `composer` and `inset` (code
+/// well) surfaces. The coral accent appears only where the brand or live
+/// activity earns it; everything else is a gray with a job.
 #[derive(Clone, Copy)]
 pub struct Theme {
+    pub is_dark: bool,
     pub canvas: Hsla,
     pub sidebar: Hsla,
     pub surface: Hsla,
     pub raised: Hsla,
+    pub composer: Hsla,
     pub inset: Hsla,
     pub overlay: Hsla,
     pub overlay_strong: Hsla,
@@ -38,23 +81,33 @@ pub struct Theme {
 }
 
 impl Theme {
+    pub fn current(cx: &App) -> Self {
+        if cx.has_global::<ActiveWakuTheme>() {
+            cx.global::<ActiveWakuTheme>().0
+        } else {
+            Self::dark()
+        }
+    }
+
     pub fn dark() -> Self {
         Self {
-            canvas: rgb(0x121316).into(),
-            sidebar: hsla(220.0 / 360.0, 0.10, 0.08, 0.92),
-            surface: rgb(0x1A1C20).into(),
-            raised: rgb(0x24262C).into(),
-            inset: rgb(0x0D0E11).into(),
+            is_dark: true,
+            canvas: rgb(0x1A1A1A).into(),
+            sidebar: rgb(0x232426).into(),
+            surface: rgb(0x1A1A1A).into(),
+            raised: rgb(0x232323).into(),
+            composer: rgb(0x212121).into(),
+            inset: rgb(0x151515).into(),
             overlay: hsla(220.0 / 360.0, 0.10, 0.90, 0.05),
             overlay_strong: hsla(220.0 / 360.0, 0.10, 0.90, 0.09),
 
             border: hsla(220.0 / 360.0, 0.10, 0.90, 0.07),
             border_strong: hsla(220.0 / 360.0, 0.10, 0.90, 0.14),
 
-            text: rgb(0xE9EAED).into(),
-            text_secondary: rgb(0xA2A7B0).into(),
-            text_tertiary: rgb(0x757B85).into(),
-            text_ghost: rgb(0x50555D).into(),
+            text: rgb(0xE2E2E2).into(),
+            text_secondary: rgb(0xA3A3A3).into(),
+            text_tertiary: rgb(0x7D7D7D).into(),
+            text_ghost: rgb(0x575757).into(),
 
             accent: rgb(0xE2795B).into(),
 
@@ -67,23 +120,110 @@ impl Theme {
             danger_soft: hsla(4.0 / 360.0, 0.55, 0.63, 0.10),
         }
     }
+
+    pub fn light() -> Self {
+        Self {
+            is_dark: false,
+            canvas: rgb(0xF6F5F6).into(),
+            sidebar: rgb(0xEBECEE).into(),
+            surface: rgb(0xF6F5F6).into(),
+            raised: rgb(0xECECEC).into(),
+            composer: rgb(0xFFFFFF).into(),
+            inset: rgb(0xE6E6E6).into(),
+            overlay: hsla(220.0 / 360.0, 0.10, 0.12, 0.05),
+            overlay_strong: hsla(220.0 / 360.0, 0.10, 0.12, 0.09),
+
+            border: hsla(220.0 / 360.0, 0.10, 0.12, 0.08),
+            border_strong: hsla(220.0 / 360.0, 0.10, 0.12, 0.15),
+
+            text: rgb(0x242424).into(),
+            text_secondary: rgb(0x666666).into(),
+            text_tertiary: rgb(0x858585).into(),
+            text_ghost: rgb(0xA4A4A4).into(),
+
+            accent: rgb(0xC85F44).into(),
+
+            inverse: rgb(0x202227).into(),
+            on_inverse: rgb(0xF8F8F9).into(),
+
+            warning: rgb(0xA66B20).into(),
+            favorite: rgb(0xCA8A04).into(),
+            danger: rgb(0xC64A42).into(),
+            danger_soft: hsla(4.0 / 360.0, 0.55, 0.52, 0.10),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ActiveWakuTheme(Theme);
+
+impl Global for ActiveWakuTheme {}
+
+fn apply_component_theme(theme: Theme, window: Option<&mut Window>, cx: &mut App) {
+    use gpui_component::theme::{Theme as ComponentTheme, ThemeMode};
+
+    ComponentTheme::change(
+        if theme.is_dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        },
+        window,
+        cx,
+    );
+    let component = ComponentTheme::global_mut(cx);
+    component.background = theme.surface;
+    component.foreground = theme.text;
+    component.popover = theme.raised;
+    component.popover_foreground = theme.text;
+    component.muted = theme.overlay;
+    component.muted_foreground = theme.text_tertiary;
+    component.accent = theme.overlay_strong;
+    component.accent_foreground = theme.text;
+    component.border = theme.border_strong;
+    component.input = theme.border_strong;
+    component.primary = theme.inverse;
+    component.primary_foreground = theme.on_inverse;
+    component.secondary = theme.raised;
+    component.secondary_foreground = theme.text_secondary;
+    component.secondary_hover = theme.overlay;
+    component.secondary_active = theme.overlay_strong;
+    component.ring = theme.accent;
+    component.selection = theme.overlay_strong;
+    component.sidebar = theme.sidebar;
+    component.sidebar_foreground = theme.text_secondary;
+    component.sidebar_accent = theme.overlay;
+    component.sidebar_accent_foreground = theme.text;
+    component.sidebar_border = theme.border;
+    component.title_bar = theme.surface;
+    component.title_bar_border = theme.border;
+    cx.set_global(ActiveWakuTheme(theme));
 }
 
 /// Bridges Waku's palette into `gpui-component`'s global theme so its
 /// components (popup menus, etc.) render in the same graphite language.
 pub fn init_component_theme(cx: &mut App) {
-    use gpui_component::theme::{Theme as ComponentTheme, ThemeMode};
+    let system_appearance = cx.window_appearance();
+    let theme = if ThemePreference::System.resolves_to_dark(system_appearance) {
+        Theme::dark()
+    } else {
+        Theme::light()
+    };
+    apply_component_theme(theme, None, cx);
+}
 
-    ComponentTheme::change(ThemeMode::Dark, None, cx);
-    let ours = Theme::dark();
-    let theme = ComponentTheme::global_mut(cx);
-    theme.background = ours.surface;
-    theme.foreground = ours.text;
-    theme.popover = ours.raised;
-    theme.popover_foreground = ours.text_secondary;
-    theme.muted = ours.overlay;
-    theme.muted_foreground = ours.text_tertiary;
-    theme.accent = ours.overlay_strong;
-    theme.accent_foreground = ours.text;
-    theme.border = ours.border_strong;
+pub fn apply_theme_preference(preference: ThemePreference, window: &mut Window, cx: &mut App) {
+    crate::platform::set_window_appearance(window, preference.native_override());
+    let is_dark = preference.resolves_to_dark(cx.window_appearance());
+    apply_component_theme(
+        if is_dark {
+            Theme::dark()
+        } else {
+            Theme::light()
+        },
+        Some(window),
+        cx,
+    );
+    crate::platform::configure_sidebar_material(window);
+    window.refresh();
 }

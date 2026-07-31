@@ -17,6 +17,8 @@ macro_rules! icons {
 
 const ICONS: &[(&str, &[u8])] = icons![
     "alert",
+    "appearance",
+    "arrow-left",
     "arrow-up",
     "block",
     "check",
@@ -37,6 +39,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "provider-opencode",
     "provider-pi",
     "search",
+    "settings",
     "slash",
     "sparkle",
     "star",

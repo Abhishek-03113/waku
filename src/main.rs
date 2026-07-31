@@ -26,7 +26,14 @@ use crate::input::{
 
 actions!(
     waku,
-    [Quit, NewSession, ToggleSidebar, FocusComposer, CancelTurn]
+    [
+        Quit,
+        NewSession,
+        OpenSettings,
+        ToggleSidebar,
+        FocusComposer,
+        CancelTurn
+    ]
 );
 
 fn main() {
@@ -40,6 +47,8 @@ fn main() {
                     name: APP_NAME.into(),
                     items: vec![
                         MenuItem::action("New Session", NewSession),
+                        MenuItem::separator(),
+                        MenuItem::action("Settings…", OpenSettings),
                         MenuItem::separator(),
                         MenuItem::action(format!("Quit {APP_NAME}"), Quit),
                     ],
@@ -56,6 +65,7 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("cmd-n", NewSession, None),
+                KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("cmd-shift-s", ToggleSidebar, None),
                 KeyBinding::new("cmd-l", FocusComposer, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),

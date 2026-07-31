@@ -18,13 +18,16 @@ pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
 }
 
 /// Brand hue for each provider's official mark.
-pub fn provider_color(provider: ProviderKind) -> Hsla {
+pub fn provider_color(theme: &Theme, provider: ProviderKind) -> Hsla {
     match provider {
         ProviderKind::Claude => rgb(0xD97757).into(),
-        ProviderKind::Codex => rgb(0xF1F1F1).into(),
-        ProviderKind::OpenCode => rgb(0xF1ECEC).into(),
-        ProviderKind::Grok => rgb(0xF5F5F5).into(),
-        ProviderKind::Pi => rgb(0xF5F5F5).into(),
+        ProviderKind::Codex | ProviderKind::OpenCode | ProviderKind::Grok | ProviderKind::Pi => {
+            if theme.is_dark {
+                rgb(0xF3F3F3).into()
+            } else {
+                rgb(0x34363B).into()
+            }
+        }
     }
 }
 
@@ -103,6 +106,7 @@ pub struct MenuChip {
     icon: Option<(&'static str, Hsla)>,
     label: SharedString,
     caret: bool,
+    outlined: bool,
     selected: bool,
 }
 
@@ -113,6 +117,7 @@ impl MenuChip {
             icon: None,
             label: SharedString::default(),
             caret: true,
+            outlined: false,
             selected: false,
         }
     }
@@ -124,6 +129,11 @@ impl MenuChip {
 
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    pub fn outlined(mut self) -> Self {
+        self.outlined = true;
         self
     }
 }
@@ -154,18 +164,24 @@ impl Selectable for MenuChip {
 impl DropdownMenu for MenuChip {}
 
 impl RenderOnce for MenuChip {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let theme = Theme::dark();
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = Theme::current(cx);
         self.base
-            .h(px(24.0))
-            .px(px(7.0))
-            .rounded(px(6.0))
+            .h(if self.outlined { px(30.0) } else { px(24.0) })
+            .px(if self.outlined { px(10.0) } else { px(7.0) })
+            .rounded(if self.outlined { px(7.0) } else { px(6.0) })
             .flex()
             .items_center()
             .gap(px(6.0))
             .text_size(px(11.5))
             .line_height(px(14.0))
             .cursor_default()
+            .when(self.outlined, |element| {
+                element
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(theme.raised)
+            })
             .when(self.selected, |element| element.bg(theme.overlay))
             .hover(|element| element.bg(theme.overlay))
             .when_some(self.icon, |element, (path, color)| {

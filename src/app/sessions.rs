@@ -114,9 +114,20 @@ impl Waku {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.settings_page = None;
         if let Some(project_id) = self.state.selected_project {
             self.create_session_for(project_id, self.state.last_provider, cx);
         }
+    }
+
+    pub(super) fn open_settings_action(
+        &mut self,
+        _: &OpenSettings,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_page = Some(SettingsPage::Appearance);
+        cx.notify();
     }
 
     pub(super) fn toggle_sidebar_action(
@@ -144,6 +155,10 @@ impl Waku {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.settings_page.take().is_some() {
+            cx.notify();
+            return;
+        }
         self.cancel_turn(cx);
     }
 

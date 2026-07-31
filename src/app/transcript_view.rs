@@ -176,7 +176,7 @@ impl Waku {
             cx.notify();
         }
 
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let composer = self.composer.clone();
         let waku = cx.entity().downgrade();
         let row_count = self.transcript_row_count();

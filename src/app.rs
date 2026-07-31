@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, unbounded};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, BoxShadow, ClipboardItem, Context, Corner, Div,
-    Entity, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListOffset,
-    ListState, MouseButton, PathPromptOptions, Pixels, Point, Render, SharedString, Size,
-    StyleRefinement, Timer, Window, div, hsla, list, point, prelude::*, pulsating_between, px,
-    rems, size,
+    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Corner, Div, Entity,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListOffset, ListState,
+    MouseButton, PathPromptOptions, Pixels, Point, Render, SharedString, Size, Stateful,
+    StyleRefinement, Timer, Window, div, list, point, prelude::*, pulsating_between, px, rems,
+    size,
 };
 use uuid::Uuid;
 
@@ -35,12 +35,12 @@ use gpui_component::text::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::persistence::{PersistedState, StateStore};
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemePreference};
 use crate::ui::{
     MenuChip, activity_icon, activity_noun, icon, key_hint, provider_color, provider_icon,
     relative_time, section_label, status_color, status_label,
 };
-use crate::{CancelTurn, FocusComposer, NewSession, ToggleSidebar};
+use crate::{CancelTurn, FocusComposer, NewSession, OpenSettings, ToggleSidebar};
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
@@ -71,6 +71,12 @@ enum StreamDeltaKind {
 enum ModelPickerTab {
     Favorites,
     Provider(ProviderKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsPage {
+    General,
+    Appearance,
 }
 
 fn traits_menu_label(theme: Theme, label: &'static str) -> PopupMenuItem {
@@ -317,6 +323,7 @@ pub struct Waku {
     store: StateStore,
     composer: Entity<ComposerInput>,
     model_search: Entity<InputState>,
+    settings_search: Entity<InputState>,
     probes: Vec<ProviderProbe>,
     provider_probe_events: Receiver<ProviderProbe>,
     model_picker_tab: ModelPickerTab,
@@ -329,6 +336,7 @@ pub struct Waku {
     /// Individual tool rows the user has opened to read their full detail.
     expanded_activity_items: HashSet<Uuid>,
     sidebar_visible: bool,
+    settings_page: Option<SettingsPage>,
     header_drag_armed: bool,
     branch: Option<String>,
     toast: Option<String>,
@@ -359,6 +367,7 @@ mod composer;
 mod render;
 mod runtime;
 mod sessions;
+mod settings;
 mod sidebar;
 mod streaming;
 mod transcript;
@@ -376,9 +385,15 @@ impl Waku {
                 .placeholder("Search models...")
                 .clean_on_escape()
         });
+        let settings_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search Settings")
+                .clean_on_escape()
+        });
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
         let mut state = store.load_or_fresh(cwd);
+        crate::theme::apply_theme_preference(state.theme, window, cx);
         let project_paths = state
             .projects
             .iter()
@@ -489,6 +504,14 @@ impl Waku {
         let (transcript_resize_tx, transcript_resize_rx) = unbounded();
 
         let entity = cx.new(|cx| {
+            cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
+                if this.state.theme == ThemePreference::System {
+                    crate::theme::apply_theme_preference(this.state.theme, window, cx);
+                    cx.notify();
+                }
+            })
+            .detach();
+
             cx.subscribe(
                 &composer,
                 |this: &mut Self, _, event: &ComposerEvent, cx| match event {
@@ -503,6 +526,15 @@ impl Waku {
                     cx.notify();
                 }
             })
+            .detach();
+            cx.subscribe(
+                &settings_search,
+                |_: &mut Self, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                },
+            )
             .detach();
 
             cx.spawn(async move |this, cx| {
@@ -527,6 +559,7 @@ impl Waku {
                 store,
                 composer,
                 model_search,
+                settings_search,
                 probes,
                 provider_probe_events,
                 model_picker_tab,
@@ -537,6 +570,7 @@ impl Waku {
                 activities_expanded: HashMap::new(),
                 expanded_activity_items: HashSet::new(),
                 sidebar_visible: true,
+                settings_page: None,
                 header_drag_armed: false,
                 branch,
                 toast: None,

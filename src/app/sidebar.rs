@@ -1,10 +1,88 @@
 use super::*;
 
 impl Waku {
+    fn window_drag_region(&self, region: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        region
+            .on_click(|event, window, _| {
+                if event.click_count() == 2 {
+                    window.titlebar_double_click();
+                }
+            })
+            .on_mouse_down_out(cx.listener(|this, _, _, _| {
+                this.header_drag_armed = false;
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.header_drag_armed = true;
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.header_drag_armed = false;
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if this.header_drag_armed {
+                    this.header_drag_armed = false;
+                    crate::platform::start_window_move(window);
+                }
+            }))
+    }
     // ── Sidebar ────────────────────────────────────────────────────────────
 
+    fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = Theme::current(cx);
+        div()
+            .id("toggle-sidebar")
+            .w(px(26.0))
+            .h(px(26.0))
+            .flex_none()
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .hover(|element| element.bg(theme.overlay))
+            .active(|element| element.bg(theme.overlay_strong))
+            .child(icon("icons/panel-left.svg", 14.0, theme.text_tertiary))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.sidebar_visible = !this.sidebar_visible;
+                cx.notify();
+            }))
+    }
+
+    fn render_sidebar_titlebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id("sidebar-titlebar")
+            .h(px(48.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(
+                self.window_drag_region(
+                    div()
+                        .id("sidebar-traffic-light-drag-region")
+                        .w(px(TRAFFIC_LIGHT_CLEARANCE))
+                        .h_full()
+                        .flex_none(),
+                    cx,
+                ),
+            )
+            .child(self.render_sidebar_toggle(cx))
+            .child(self.window_drag_region(
+                div().id("sidebar-titlebar-drag-region").h_full().flex_1(),
+                cx,
+            ))
+    }
+
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let selected_project = self.state.selected_project;
         let selected_session = self.state.selected_session;
 
@@ -129,7 +207,7 @@ impl Waku {
                                 .child(icon(
                                     provider_icon(session.provider),
                                     10.0,
-                                    provider_color(session.provider).opacity(0.8),
+                                    provider_color(&theme, session.provider).opacity(0.8),
                                 ))
                                 .child(
                                     div()
@@ -168,7 +246,7 @@ impl Waku {
             .flex()
             .flex_col()
             .bg(theme.sidebar)
-            .child(div().h(px(48.0)).flex_none())
+            .child(self.render_sidebar_titlebar(cx))
             .child(
                 div().px(px(10.0)).child(
                     div()
@@ -234,29 +312,12 @@ impl Waku {
                     .child(section_label(&theme, "Sessions"))
                     .child(sessions),
             )
-            .child(
-                div()
-                    .h(px(40.0))
-                    .flex_none()
-                    .px(px(18.0))
-                    .flex()
-                    .items_center()
-                    .line_height(px(13.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(10.5))
-                            .text_color(theme.text_ghost)
-                            .child("Local only"),
-                    )
-                    .child(key_hint(&theme, "⌘⇧S")),
-            )
     }
 
     // ── Header ─────────────────────────────────────────────────────────────
 
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let session = self.selected_session();
         let provider = session.map(|session| session.provider).unwrap_or_default();
         let status = session.map(|session| session.status).unwrap_or_default();
@@ -270,74 +331,51 @@ impl Waku {
             .pl(if self.sidebar_visible {
                 px(10.0)
             } else {
-                px(TRAFFIC_LIGHT_CLEARANCE)
+                px(0.0)
             })
             .pr(px(14.0))
             .border_b_1()
             .border_color(theme.border)
-            .on_click(|event, window, _| {
-                if event.click_count() == 2 {
-                    window.titlebar_double_click();
-                }
+            .when(!self.sidebar_visible, |element| {
+                element
+                    .child(
+                        self.window_drag_region(
+                            div()
+                                .id("header-traffic-light-drag-region")
+                                .w(px(TRAFFIC_LIGHT_CLEARANCE - 8.0))
+                                .h_full()
+                                .flex_none(),
+                            cx,
+                        ),
+                    )
+                    .child(self.render_sidebar_toggle(cx))
             })
-            .on_mouse_down_out(cx.listener(|this, _, _, _| {
-                this.header_drag_armed = false;
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| {
-                    this.header_drag_armed = true;
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| {
-                    this.header_drag_armed = false;
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, _, window, _| {
-                if this.header_drag_armed {
-                    this.header_drag_armed = false;
-                    crate::platform::start_window_move(window);
-                }
-            }))
             .child(
-                div()
-                    .id("toggle-sidebar")
-                    .w(px(26.0))
-                    .h(px(26.0))
-                    .flex_none()
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_default()
-                    .hover(|element| element.bg(theme.overlay))
-                    .active(|element| element.bg(theme.overlay_strong))
-                    .child(icon("icons/panel-left.svg", 14.0, theme.text_tertiary))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.sidebar_visible = !this.sidebar_visible;
-                        cx.notify();
-                    })),
+                self.window_drag_region(
+                    div()
+                        .id("header-title-drag-region")
+                        .h_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .truncate()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(SharedString::from(
+                            session
+                                .map(|session| session.title.clone())
+                                .unwrap_or_else(|| "New task".into()),
+                        )),
+                    cx,
+                ),
             )
             .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(SharedString::from(
-                        session
-                            .map(|session| session.title.clone())
-                            .unwrap_or_else(|| "New task".into()),
-                    )),
+                self.window_drag_region(
+                    div().id("header-center-drag-region").h_full().flex_1(),
+                    cx,
+                ),
             )
-            .child(div().flex_1())
             .when(status != SessionStatus::Idle, |element| {
                 element.child(
                     div()
@@ -374,7 +412,7 @@ impl Waku {
                     .child(icon(
                         provider_icon(provider),
                         11.0,
-                        provider_color(provider).opacity(0.9),
+                        provider_color(&theme, provider).opacity(0.9),
                     ))
                     .child(
                         div()
@@ -387,7 +425,7 @@ impl Waku {
     // ── Empty states ───────────────────────────────────────────────────────
 
     pub(super) fn render_empty_state(&self, cx: &mut Context<Self>) -> Div {
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         if self.selected_project().is_none() {
             return div()
                 .flex_1()

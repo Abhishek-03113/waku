@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{AgentSession, FavoriteModel, Project, ProviderKind};
+use crate::theme::ThemePreference;
 
 const STATE_VERSION: u32 = 3;
 const OLDEST_SUPPORTED_STATE_VERSION: u32 = 1;
@@ -27,6 +28,8 @@ pub struct PersistedState {
     pub last_service_tier: Option<String>,
     #[serde(default)]
     pub favorite_models: Vec<FavoriteModel>,
+    #[serde(default)]
+    pub theme: ThemePreference,
 }
 
 impl PersistedState {
@@ -42,6 +45,7 @@ impl PersistedState {
             last_reasoning_effort: None,
             last_service_tier: None,
             favorite_models: Vec::new(),
+            theme: ThemePreference::System,
         }
     }
 
@@ -59,6 +63,7 @@ impl PersistedState {
             last_reasoning_effort: None,
             last_service_tier: None,
             favorite_models: Vec::new(),
+            theme: ThemePreference::System,
         }
     }
 
@@ -196,6 +201,7 @@ mod tests {
             provider: ProviderKind::Codex,
             model: "gpt-5.6-luna".into(),
         });
+        state.theme = ThemePreference::Light;
         state.sessions[0].transcript_blocks.extend([
             TranscriptBlock {
                 after_message: 1,
@@ -236,6 +242,7 @@ mod tests {
             crate::model::RuntimeMode::Auto
         );
         assert_eq!(restored.favorite_models, state.favorite_models);
+        assert_eq!(restored.theme, ThemePreference::Light);
         assert_eq!(restored.sessions[0].transcript_blocks.len(), 2);
         assert!(matches!(
             &restored.sessions[0].transcript_blocks[0].content,
@@ -272,6 +279,7 @@ mod tests {
         ));
         let mut value = serde_json::to_value(&state).unwrap();
         value.as_object_mut().unwrap().remove("favorite_models");
+        value.as_object_mut().unwrap().remove("theme");
         value.as_object_mut().unwrap().remove("last_model");
         value
             .as_object_mut()
@@ -290,6 +298,7 @@ mod tests {
         let restored = store.load().unwrap();
         assert_eq!(restored.version, STATE_VERSION);
         assert!(restored.favorite_models.is_empty());
+        assert_eq!(restored.theme, ThemePreference::System);
         assert!(restored.last_model.is_none());
         assert!(restored.last_reasoning_effort.is_none());
         assert!(restored.last_service_tier.is_none());

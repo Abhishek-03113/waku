@@ -4,10 +4,10 @@ use std::time::Duration;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, DismissEvent, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, StyledText, Subscription,
     Task, TextLayout, TextRun, Timer, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
-    hsla, point, prelude::*, px, size,
+    point, prelude::*, px, size,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use unicode_segmentation::UnicodeSegmentation;
@@ -622,6 +622,7 @@ fn input_text_runs(
     base_run: TextRun,
     selected_range: Option<&Range<usize>>,
     marked_range: Option<&Range<usize>>,
+    selection_color: Hsla,
 ) -> Vec<TextRun> {
     let mut boundaries = vec![0, display_len];
     for range in [selected_range, marked_range].into_iter().flatten() {
@@ -640,7 +641,7 @@ fn input_text_runs(
                 len: end - start,
                 background_color: selected_range
                     .filter(|range| range.start < end && range.end > start)
-                    .map(|_| hsla(220.0 / 360.0, 0.10, 0.90, 0.18)),
+                    .map(|_| selection_color),
                 underline: marked_range
                     .filter(|range| range.start < end && range.end > start)
                     .map(|_| UnderlineStyle {
@@ -684,7 +685,7 @@ impl Element for InputElement {
         let input = self.input.read(cx);
         let content = input.content.clone();
         let style = window.text_style();
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let (display_text, text_color, selected_range, marked_range) = if content.is_empty() {
             (input.placeholder.clone(), theme.text_ghost, None, None)
         } else {
@@ -703,7 +704,13 @@ impl Element for InputElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = input_text_runs(display_text.len(), base_run, selected_range, marked_range);
+        let runs = input_text_runs(
+            display_text.len(),
+            base_run,
+            selected_range,
+            marked_range,
+            theme.inverse.opacity(0.18),
+        );
         let mut text = StyledText::new(display_text).with_runs(runs);
         let (layout_id, text_layout_state) = text.request_layout(id, inspector_id, window, cx);
         (
@@ -740,7 +747,7 @@ impl Element for InputElement {
             input.context_menu_preserves_visual_focus(),
             input.blink_cursor.read(cx).visible(),
         );
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let layout = layout_state.text.layout();
         let cursor = (input.selected_range.is_empty() && cursor_visible)
             .then(|| layout.position_for_index(cursor))
@@ -793,7 +800,7 @@ impl Element for InputElement {
 
 impl Render for ComposerInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = Theme::current(cx);
         let input = cx.entity();
         let context_menu_input = input.clone();
         div()
@@ -901,6 +908,7 @@ mod tests {
             },
             Some(&selection),
             Some(&marked),
+            hsla(0.0, 0.0, 1.0, 0.18),
         );
 
         assert_eq!(

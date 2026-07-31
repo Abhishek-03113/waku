@@ -2,7 +2,11 @@ use super::*;
 
 impl Render for Waku {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        if self.settings_page.is_some() {
+            return self.render_settings(cx).into_any_element();
+        }
+
+        let theme = Theme::current(cx);
         let empty = self
             .selected_session()
             .map(|session| session.messages.is_empty())
@@ -12,6 +16,7 @@ impl Render for Waku {
         div()
             .key_context("Waku")
             .on_action(cx.listener(Self::new_session_action))
+            .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::focus_composer_action))
             .on_action(cx.listener(Self::cancel_turn_action))
@@ -69,8 +74,9 @@ impl Render for Waku {
                     .when(self.selected_project().is_some(), |element| {
                         element
                             .child(self.render_composer(window, cx))
-                            .child(self.render_workspace_footer())
+                            .child(self.render_workspace_footer(cx))
                     }),
             )
+            .into_any_element()
     }
 }
