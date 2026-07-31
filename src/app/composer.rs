@@ -309,19 +309,21 @@ impl Waku {
                 }
 
                 let search_input = div()
-                    .h(px(48.0))
-                    .mx(px(14.0))
+                    .h(px(52.0))
+                    .px(px(12.0))
+                    .pt(px(10.0))
+                    .pb(px(8.0))
                     .flex_none()
                     .flex()
                     .items_center()
-                    .border_b_1()
-                    .border_color(theme.border_strong)
                     .child(
                         Input::new(&search)
                             .appearance(false)
                             .bordered(false)
                             .focus_bordered(false)
-                            .prefix(icon("icons/search.svg", 15.0, theme.text_tertiary)),
+                            .bg(theme.raised)
+                            .rounded(px(9.0))
+                            .prefix(icon("icons/search.svg", 15.0, theme.text_secondary)),
                     );
 
                 let mut rows = div()

@@ -695,7 +695,8 @@ impl InputState {
         cx.notify();
     }
 
-    /// Set true to clear the input by pressing Escape key.
+    /// Set true to clear a non-empty input by pressing Escape. When the input
+    /// is already empty, Escape continues propagating to its parent.
     pub fn clean_on_escape(mut self) -> Self {
         self.clean_on_escape = true;
         self
@@ -1191,7 +1192,7 @@ impl InputState {
             self.unmark_text(window, cx);
         }
 
-        if self.clean_on_escape {
+        if self.clean_on_escape && self.text.len() != 0 {
             return self.clean(window, cx);
         }
 

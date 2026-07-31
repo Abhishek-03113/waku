@@ -371,7 +371,11 @@ use transcript::*;
 impl Waku {
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
-        let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search models..."));
+        let model_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search models...")
+                .clean_on_escape()
+        });
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
         let mut state = store.load_or_fresh(cwd);
