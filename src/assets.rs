@@ -26,6 +26,8 @@ const ICONS: &[(&str, &[u8])] = icons![
     "git-branch",
     "hexagon",
     "list",
+    "lock",
+    "lock-open",
     "panel-left",
     "pencil",
     "plus",
@@ -40,6 +42,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "stop",
     "terminal",
     "wrench",
+    "zap",
 ];
 
 impl AssetSource for Assets {

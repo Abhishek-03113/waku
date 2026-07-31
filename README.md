@@ -58,7 +58,10 @@ open target/release/Waku.app
 - Start independent sessions with `⌘N`.
 - Search and select a provider model before the first message; favorite models
   stay available in the picker.
-- Cycle Plan, Ask, and Auto execution modes from the composer.
+- Tune provider-advertised reasoning effort and speed from one compact model
+  traits menu.
+- Choose Supervised, Auto-accept edits, Auto, or Full access independently from
+  the Build/Plan interaction mode.
 - Stop the active turn with `Escape`.
 - In a Git project, revert a completed Codex turn from its checkpoint action.
 - Toggle the sidebar with `⌘⇧S` and focus the composer with `⌘L`.

@@ -38,6 +38,7 @@ pub enum PopupMenuItem {
         label: SharedString,
         disabled: bool,
         checked: bool,
+        selected: bool,
         is_link: bool,
         action: Option<Box<dyn Action>>,
         // For link item
@@ -48,6 +49,7 @@ pub enum PopupMenuItem {
         icon: Option<Icon>,
         disabled: bool,
         checked: bool,
+        selected: bool,
         action: Option<Box<dyn Action>>,
         render: Box<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>,
         handler: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
@@ -73,6 +75,7 @@ impl PopupMenuItem {
             label: label.into(),
             disabled: false,
             checked: false,
+            selected: false,
             action: None,
             is_link: false,
             handler: None,
@@ -90,6 +93,7 @@ impl PopupMenuItem {
             icon: None,
             disabled: false,
             checked: false,
+            selected: false,
             action: None,
             render: Box::new(move |window, cx| builder(window, cx).into_any_element()),
             handler: None,
@@ -189,6 +193,23 @@ impl PopupMenuItem {
         self
     }
 
+    /// Set the persistent selected state for the menu item.
+    ///
+    /// Unlike [`Self::checked`], this uses the same full-row highlight as
+    /// keyboard and pointer selection without reserving an indicator column.
+    pub fn selected(mut self, selected: bool) -> Self {
+        match &mut self {
+            PopupMenuItem::Item { selected: s, .. } => {
+                *s = selected;
+            }
+            PopupMenuItem::ElementItem { selected: s, .. } => {
+                *s = selected;
+            }
+            _ => {}
+        }
+        self
+    }
+
     /// Add a click handler for the menu item.
     ///
     /// Only works for [`PopupMenuItem::Item`] and [`PopupMenuItem::ElementItem`].
@@ -217,6 +238,7 @@ impl PopupMenuItem {
             label: label.into(),
             disabled: false,
             checked: false,
+            selected: false,
             action: None,
             is_link: true,
             handler: Some(Rc::new(move |_, _, cx| cx.open_url(&href))),
@@ -267,6 +289,15 @@ impl PopupMenuItem {
             _ => false,
         }
     }
+
+    #[inline]
+    fn is_selected(&self) -> bool {
+        match self {
+            PopupMenuItem::Item { selected, .. } => *selected,
+            PopupMenuItem::ElementItem { selected, .. } => *selected,
+            _ => false,
+        }
+    }
 }
 
 pub struct PopupMenu {
@@ -281,6 +312,9 @@ pub struct PopupMenu {
     bounds: Bounds<Pixels>,
     size: Size,
     check_side: Side,
+    content_padding_x: Pixels,
+    content_padding_y: Pixels,
+    item_inset_x: Pixels,
 
     /// The parent menu of this menu, if this is a submenu
     parent_menu: Option<WeakEntity<Self>>,
@@ -311,6 +345,9 @@ impl PopupMenu {
             external_link_icon: true,
             size: Size::default(),
             submenu_anchor: (Corner::TopLeft, Pixels::ZERO),
+            content_padding_x: Pixels::ZERO,
+            content_padding_y: px(4.),
+            item_inset_x: px(4.),
             _subscriptions: vec![],
         }
     }
@@ -348,6 +385,29 @@ impl PopupMenu {
     /// Set max height of the popup menu, default is half of the window height
     pub fn max_h(mut self, height: impl Into<Pixels>) -> Self {
         self.max_height = Some(height.into());
+        self
+    }
+
+    /// Set the horizontal and vertical padding around the menu items.
+    ///
+    /// Horizontal padding defaults to 0px and vertical padding to 4px.
+    /// Together with the default 4px row inset, this produces a consistent
+    /// visible 4px gap around the interactive rows.
+    pub fn content_padding(
+        mut self,
+        horizontal: impl Into<Pixels>,
+        vertical: impl Into<Pixels>,
+    ) -> Self {
+        self.content_padding_x = horizontal.into();
+        self.content_padding_y = vertical.into();
+        self
+    }
+
+    /// Inset each interactive row while preserving its content alignment.
+    ///
+    /// Defaults to 4px.
+    pub fn item_inset_x(mut self, inset: impl Into<Pixels>) -> Self {
+        self.item_inset_x = inset.into().max(Pixels::ZERO).min(px(8.));
         self
     }
 
@@ -1027,9 +1087,10 @@ impl PopupMenu {
             None
         };
 
-        let selected = self.selected_index == Some(ix);
+        let selected = self.selected_index == Some(ix) || item.is_selected();
         const EDGE_PADDING: Pixels = px(4.);
         const INNER_PADDING: Pixels = px(8.);
+        let item_inset_x = self.item_inset_x;
 
         let is_submenu = matches!(item, PopupMenuItem::Submenu { .. });
         let group_name = format!("popup-menu-item-{}", ix);
@@ -1043,7 +1104,8 @@ impl PopupMenu {
             .relative()
             .text_sm()
             .py_0()
-            .px(INNER_PADDING)
+            .mx(item_inset_x)
+            .px((INNER_PADDING - item_inset_x).max(Pixels::ZERO))
             .rounded(radius)
             .items_center()
             .selected(selected)
@@ -1063,7 +1125,7 @@ impl PopupMenu {
                 .h_auto()
                 .p_0()
                 .my_0p5()
-                .mx_neg_1()
+                .mx(Pixels::ZERO - self.content_padding_x)
                 .h(px(1.))
                 .bg(cx.theme().border)
                 .disabled(true),
@@ -1277,7 +1339,8 @@ impl Render for PopupMenu {
             .child(
                 v_flex()
                     .id("items")
-                    .p_1()
+                    .px(self.content_padding_x)
+                    .py(self.content_padding_y)
                     .gap_y_0p5()
                     .min_w(rems(8.))
                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))

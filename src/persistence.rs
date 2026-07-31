@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::model::{AgentSession, FavoriteModel, Project, ProviderKind};
 
-const STATE_VERSION: u32 = 2;
+const STATE_VERSION: u32 = 3;
 const OLDEST_SUPPORTED_STATE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -86,6 +86,11 @@ impl StateStore {
                 "unsupported Waku state version",
             ));
         }
+        if state.version < 3 {
+            for session in &mut state.sessions {
+                session.migrate_pre_access_modes();
+            }
+        }
         state.version = STATE_VERSION;
         for session in &mut state.sessions {
             session.migrate_legacy_state();
@@ -125,6 +130,9 @@ mod tests {
         let store = StateStore::new(directory.join("state.json"));
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].model = Some("gpt-5.6-luna".into());
+        state.sessions[0].reasoning_effort = Some("xhigh".into());
+        state.sessions[0].service_tier = Some("fast".into());
+        state.sessions[0].runtime_mode = crate::model::RuntimeMode::Auto;
         state.favorite_models.push(FavoriteModel {
             provider: ProviderKind::Codex,
             model: "gpt-5.6-luna".into(),
@@ -156,6 +164,15 @@ mod tests {
         assert_eq!(restored.projects[0].name, "project");
         assert_eq!(restored.sessions.len(), 1);
         assert_eq!(restored.sessions[0].model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(
+            restored.sessions[0].reasoning_effort.as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(restored.sessions[0].service_tier.as_deref(), Some("fast"));
+        assert_eq!(
+            restored.sessions[0].runtime_mode,
+            crate::model::RuntimeMode::Auto
+        );
         assert_eq!(restored.favorite_models, state.favorite_models);
         assert_eq!(restored.sessions[0].transcript_blocks.len(), 2);
         assert!(matches!(
@@ -219,6 +236,43 @@ mod tests {
                 .messages
                 .iter()
                 .all(|message| message.turn_id.is_some())
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn version_two_combined_modes_migrate_to_access_and_interaction_settings() {
+        let directory = std::env::temp_dir().join(format!("waku-v2-{}", Uuid::new_v4()));
+        let path = directory.join("state.json");
+        let store = StateStore::new(path.clone());
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.version = 2;
+        state.sessions[0].runtime_mode = crate::model::RuntimeMode::Plan;
+        let mut auto_session =
+            AgentSession::new(state.projects[0].id, crate::model::ProviderKind::Codex);
+        auto_session.runtime_mode = crate::model::RuntimeMode::Auto;
+        state.sessions.push(auto_session);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let restored = store.load().unwrap();
+        assert_eq!(restored.version, STATE_VERSION);
+        assert_eq!(
+            restored.sessions[0].runtime_mode,
+            crate::model::RuntimeMode::Ask
+        );
+        assert_eq!(
+            restored.sessions[0].interaction_mode,
+            crate::model::InteractionMode::Plan
+        );
+        assert_eq!(
+            restored.sessions[1].runtime_mode,
+            crate::model::RuntimeMode::AutoAcceptEdits
+        );
+        assert_eq!(
+            restored.sessions[1].interaction_mode,
+            crate::model::InteractionMode::Build
         );
 
         fs::remove_dir_all(directory).ok();

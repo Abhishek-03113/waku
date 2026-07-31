@@ -6,28 +6,42 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::model::{ProviderKind, ProviderModel};
+use crate::model::{ProviderKind, ProviderModel, ProviderModelOption};
 
 const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     match provider {
-        ProviderKind::Codex => vec![
+        ProviderKind::Codex => [
             ProviderModel::new("gpt-5.6-sol", "GPT-5.6-Sol").default(),
             ProviderModel::new("gpt-5.6-terra", "GPT-5.6-Terra"),
             ProviderModel::new("gpt-5.6-luna", "GPT-5.6-Luna"),
             ProviderModel::new("gpt-5.5", "GPT-5.5"),
             ProviderModel::new("gpt-5.4", "GPT-5.4"),
-        ],
+        ]
+        .into_iter()
+        .map(|model| {
+            model
+                .reasoning(
+                    reasoning_options(["low", "medium", "high", "xhigh"]),
+                    "medium",
+                )
+                .service_tiers(
+                    [ProviderModelOption::new("fast", "Fast")
+                        .description("Faster responses at a higher usage rate.")],
+                    "default",
+                )
+        })
+        .collect(),
         ProviderKind::Claude => vec![
-            ProviderModel::new("claude-fable-5", "Claude Fable 5"),
-            ProviderModel::new("claude-opus-5", "Claude Opus 5"),
-            ProviderModel::new("claude-opus-4-8", "Claude Opus 4.8"),
-            ProviderModel::new("claude-opus-4-7", "Claude Opus 4.7"),
-            ProviderModel::new("claude-opus-4-6", "Claude Opus 4.6"),
-            ProviderModel::new("claude-opus-4-5", "Claude Opus 4.5"),
-            ProviderModel::new("claude-sonnet-5", "Claude Sonnet 5").default(),
-            ProviderModel::new("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            claude_reasoning_model("claude-fable-5", "Claude Fable 5"),
+            claude_reasoning_model("claude-opus-5", "Claude Opus 5"),
+            claude_reasoning_model("claude-opus-4-8", "Claude Opus 4.8"),
+            claude_reasoning_model("claude-opus-4-7", "Claude Opus 4.7"),
+            claude_reasoning_model("claude-opus-4-6", "Claude Opus 4.6"),
+            claude_reasoning_model("claude-opus-4-5", "Claude Opus 4.5"),
+            claude_reasoning_model("claude-sonnet-5", "Claude Sonnet 5").default(),
+            claude_reasoning_model("claude-sonnet-4-6", "Claude Sonnet 4.6"),
             ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
         ],
         ProviderKind::OpenCode => Vec::new(),
@@ -229,9 +243,102 @@ fn parse_codex_model_response(response: &Value) -> Vec<ProviderModel> {
                 .get("isDefault")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            model.reasoning_efforts = value
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| {
+                    let id = option.get("reasoningEffort").and_then(Value::as_str)?;
+                    let description = option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    Some(
+                        ProviderModelOption::new(id, reasoning_effort_label(id))
+                            .description(description),
+                    )
+                })
+                .collect();
+            model.default_reasoning_effort = value
+                .get("defaultReasoningEffort")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            model.service_tiers = value
+                .get("serviceTiers")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|tier| {
+                    let id = tier.get("id").and_then(Value::as_str)?;
+                    let name = tier
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or(id);
+                    let description = tier
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    Some(ProviderModelOption::new(id, name).description(description))
+                })
+                .collect();
+            if model.service_tiers.is_empty() {
+                model.service_tiers = value
+                    .get("additionalSpeedTiers")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|id| {
+                        ProviderModelOption::new(
+                            id,
+                            if id == "fast" {
+                                "Fast".to_owned()
+                            } else {
+                                display_name_from_slug(id)
+                            },
+                        )
+                    })
+                    .collect();
+            }
+            model.default_service_tier = value
+                .get("defaultServiceTier")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| (!model.service_tiers.is_empty()).then(|| "default".to_owned()));
             Some(model)
         })
         .collect()
+}
+
+fn reasoning_effort_label(effort: &str) -> String {
+    match effort {
+        "none" => "None",
+        "minimal" => "Minimal",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Extra High",
+        "max" => "Max",
+        "ultra" => "Ultra",
+        other => return display_name_from_slug(other),
+    }
+    .to_owned()
+}
+
+fn reasoning_options<const N: usize>(efforts: [&str; N]) -> Vec<ProviderModelOption> {
+    efforts
+        .into_iter()
+        .map(|effort| ProviderModelOption::new(effort, reasoning_effort_label(effort)))
+        .collect()
+}
+
+fn claude_reasoning_model(id: &str, name: &str) -> ProviderModel {
+    ProviderModel::new(id, name).reasoning(
+        reasoning_options(["low", "medium", "high", "xhigh", "max"]),
+        "high",
+    )
 }
 
 fn recv_rpc_response(rx: &Receiver<Value>, id: u64, timeout: Duration) -> Option<Value> {
@@ -361,12 +468,30 @@ mod tests {
                 "data": [{
                     "model": "gpt-5.6-luna",
                     "displayName": "gpt-5.6-luna",
-                    "isDefault": true
+                    "isDefault": true,
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Quick responses"},
+                        {"reasoningEffort": "xhigh", "description": "Deep reasoning"}
+                    ],
+                    "defaultReasoningEffort": "xhigh",
+                    "serviceTiers": [{
+                        "id": "fast",
+                        "name": "Fast",
+                        "description": "Priority processing"
+                    }],
+                    "defaultServiceTier": "default"
                 }]
             }
         });
         let models = parse_codex_model_response(&response);
         assert_eq!(models[0].name, "GPT-5.6-Luna");
         assert!(models[0].is_default);
+        assert_eq!(models[0].reasoning_efforts[1].label, "Extra High");
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(models[0].service_tiers[0].id, "fast");
+        assert_eq!(
+            models[0].service_tiers[0].description.as_deref(),
+            Some("Priority processing")
+        );
     }
 }

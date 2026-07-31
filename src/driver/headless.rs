@@ -11,8 +11,10 @@ use crossbeam_channel::{Sender, unbounded};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::driver::DriverControl;
-use crate::model::{ActivityKind, DriverEvent, ProviderKind, ProviderResumeCursor, RuntimeMode};
+use crate::driver::{DriverControl, DriverStartOptions};
+use crate::model::{
+    ActivityKind, DriverEvent, InteractionMode, ProviderKind, ProviderResumeCursor, RuntimeMode,
+};
 
 enum CommandMessage {
     Prompt(String),
@@ -27,13 +29,19 @@ pub struct HeadlessDriver {
 impl HeadlessDriver {
     pub fn start(
         provider: ProviderKind,
-        binary: PathBuf,
-        cwd: PathBuf,
-        mode: RuntimeMode,
-        model: Option<String>,
-        existing_cursor: Option<ProviderResumeCursor>,
+        options: DriverStartOptions,
         events: Sender<DriverEvent>,
     ) -> anyhow::Result<Self> {
+        let DriverStartOptions {
+            binary,
+            cwd,
+            mode,
+            interaction_mode,
+            model,
+            reasoning_effort,
+            service_tier: _,
+            provider_cursor: existing_cursor,
+        } = options;
         let existing_session_id = match existing_cursor {
             Some(cursor) if cursor.provider() == provider => Some(cursor.native_id().to_owned()),
             Some(cursor) => {
@@ -76,7 +84,9 @@ impl HeadlessDriver {
                                 &binary,
                                 &cwd,
                                 mode,
+                                interaction_mode,
                                 model.as_deref(),
+                                reasoning_effort.as_deref(),
                                 provider_session_id.as_deref(),
                                 can_resume,
                                 prompt,
@@ -139,7 +149,9 @@ fn run_prompt(
     binary: &PathBuf,
     cwd: &PathBuf,
     mode: RuntimeMode,
+    interaction_mode: InteractionMode,
     model: Option<&str>,
+    reasoning_effort: Option<&str>,
     provider_session_id: Option<&str>,
     resume: bool,
     prompt: String,
@@ -159,14 +171,26 @@ fn run_prompt(
                 "--verbose",
                 "--include-partial-messages",
                 "--permission-mode",
-                match mode {
-                    RuntimeMode::Plan => "plan",
-                    RuntimeMode::Ask => "auto",
-                    RuntimeMode::Auto => "acceptEdits",
+                if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
+                    "plan"
+                } else {
+                    match mode {
+                        RuntimeMode::Ask => "default",
+                        RuntimeMode::AutoAcceptEdits => "acceptEdits",
+                        RuntimeMode::Auto => "auto",
+                        RuntimeMode::FullAccess => "bypassPermissions",
+                        RuntimeMode::Plan => unreachable!("handled above"),
+                    }
                 },
             ]);
+            if mode == RuntimeMode::FullAccess && interaction_mode != InteractionMode::Plan {
+                command.arg("--dangerously-skip-permissions");
+            }
             if let Some(model) = model {
                 command.args(["--model", model]);
+            }
+            if let Some(reasoning_effort) = reasoning_effort {
+                command.args(["--effort", reasoning_effort]);
             }
             if let Some(session_id) = provider_session_id {
                 if resume {
@@ -181,14 +205,16 @@ fn run_prompt(
             if let Some(model) = model {
                 command.args(["--model", model]);
             }
-            match mode {
-                RuntimeMode::Plan => {
-                    command.args(["--agent", "plan"]);
+            if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
+                command.args(["--agent", "plan"]);
+            } else {
+                match mode {
+                    RuntimeMode::AutoAcceptEdits | RuntimeMode::Auto | RuntimeMode::FullAccess => {
+                        command.arg("--auto");
+                    }
+                    RuntimeMode::Ask => {}
+                    RuntimeMode::Plan => unreachable!("handled above"),
                 }
-                RuntimeMode::Auto => {
-                    command.arg("--auto");
-                }
-                RuntimeMode::Ask => {}
             }
             if let Some(session_id) = provider_session_id {
                 command.args(["--session", session_id]);
@@ -206,18 +232,20 @@ fn run_prompt(
             if let Some(model) = model {
                 command.args(["--model", model]);
             }
-            match mode {
-                RuntimeMode::Plan => {
-                    command.args(["--permission-mode", "plan"]);
-                }
-                RuntimeMode::Ask => {
-                    // Grok's headless stream has no interactive permission
-                    // response channel. Deny unapproved tools instead of
-                    // blocking on a terminal prompt that Waku cannot answer.
-                    command.args(["--permission-mode", "dontAsk"]);
-                }
-                RuntimeMode::Auto => {
-                    command.arg("--always-approve");
+            if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
+                command.args(["--permission-mode", "plan"]);
+            } else {
+                match mode {
+                    RuntimeMode::Ask => {
+                        // Grok's headless stream has no interactive permission
+                        // response channel. Deny unapproved tools instead of
+                        // blocking on a terminal prompt that Waku cannot answer.
+                        command.args(["--permission-mode", "dontAsk"]);
+                    }
+                    RuntimeMode::AutoAcceptEdits | RuntimeMode::Auto | RuntimeMode::FullAccess => {
+                        command.arg("--always-approve");
+                    }
+                    RuntimeMode::Plan => unreachable!("handled above"),
                 }
             }
             if let Some(session_id) = provider_session_id {

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
@@ -11,9 +10,9 @@ use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use crate::driver::DriverControl;
+use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{
-    ActivityKind, DriverEvent, PermissionOption, ProviderResumeCursor, RuntimeMode,
+    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
 };
 
 enum CommandMessage {
@@ -35,14 +34,17 @@ pub struct CodexDriver {
 }
 
 impl CodexDriver {
-    pub fn start(
-        binary: PathBuf,
-        cwd: PathBuf,
-        mode: RuntimeMode,
-        model: Option<String>,
-        provider_cursor: Option<ProviderResumeCursor>,
-        events: Sender<DriverEvent>,
-    ) -> anyhow::Result<Self> {
+    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+        let DriverStartOptions {
+            binary,
+            cwd,
+            mode,
+            interaction_mode,
+            model,
+            reasoning_effort,
+            service_tier,
+            provider_cursor,
+        } = options;
         let provider_session_id = match provider_cursor {
             Some(ProviderResumeCursor::Codex { thread_id }) => Some(thread_id),
             Some(cursor) => {
@@ -97,6 +99,9 @@ impl CodexDriver {
                             "name": "waku",
                             "title": "Waku",
                             "version": env!("CARGO_PKG_VERSION")
+                        },
+                        "capabilities": {
+                            "experimentalApi": true
                         }
                     }
                 });
@@ -116,20 +121,21 @@ impl CodexDriver {
                     return;
                 }
 
-                let (approval_policy, sandbox) = match mode {
-                    RuntimeMode::Plan => ("never", "read-only"),
-                    RuntimeMode::Ask => ("on-request", "workspace-write"),
-                    RuntimeMode::Auto => ("never", "workspace-write"),
-                };
+                let (approval_policy, sandbox, approvals_reviewer) =
+                    codex_permissions(mode, interaction_mode);
                 let open_thread = if let Some(thread_id) = provider_session_id {
                     let mut params = json!({
                         "threadId": thread_id,
                         "cwd": cwd_string,
                         "approvalPolicy": approval_policy,
-                        "sandbox": sandbox
+                        "sandbox": sandbox,
+                        "approvalsReviewer": approvals_reviewer
                     });
                     if let Some(model) = model.as_deref() {
                         params["model"] = json!(model);
+                    }
+                    if let Some(service_tier) = service_tier.as_deref() {
+                        params["serviceTier"] = json!(service_tier);
                     }
                     json!({
                         "method": "thread/resume",
@@ -141,10 +147,14 @@ impl CodexDriver {
                         "cwd": cwd_string,
                         "approvalPolicy": approval_policy,
                         "sandbox": sandbox,
+                        "approvalsReviewer": approvals_reviewer,
                         "serviceName": "waku"
                     });
                     if let Some(model) = model.as_deref() {
                         params["model"] = json!(model);
+                    }
+                    if let Some(service_tier) = service_tier.as_deref() {
+                        params["serviceTier"] = json!(service_tier);
                     }
                     json!({
                         "method": "thread/start",
@@ -167,10 +177,19 @@ impl CodexDriver {
                             next_request_id += 1;
                             let mut params = json!({
                                 "threadId": thread_id,
-                                "input": [{"type": "text", "text": text}]
+                                "input": [{"type": "text", "text": text}],
+                                "approvalPolicy": approval_policy,
+                                "approvalsReviewer": approvals_reviewer,
+                                "sandboxPolicy": codex_sandbox_policy(sandbox)
                             });
                             if let Some(model) = model.as_deref() {
                                 params["model"] = json!(model);
+                            }
+                            if let Some(reasoning_effort) = reasoning_effort.as_deref() {
+                                params["effort"] = json!(reasoning_effort);
+                            }
+                            if let Some(service_tier) = service_tier.as_deref() {
+                                params["serviceTier"] = json!(service_tier);
                             }
                             json!({
                                 "method": "turn/start",
@@ -219,14 +238,12 @@ impl CodexDriver {
                                     "numTurns": turns
                                 }
                             });
-                            if let Err(error) = write_json_line(&mut stdin, &message) {
-                                if let Some(response) =
+                            if let Err(error) = write_json_line(&mut stdin, &message)
+                                && let Some(response) =
                                     writer_pending_responses.lock().remove(&request_id)
-                                {
-                                    let _ = response.send(Err(format!(
-                                        "Codex transport write failed: {error}"
-                                    )));
-                                }
+                            {
+                                let _ = response
+                                    .send(Err(format!("Codex transport write failed: {error}")));
                             }
                             continue;
                         }
@@ -289,6 +306,30 @@ impl CodexDriver {
             })?;
 
         Ok(Self { commands })
+    }
+}
+
+fn codex_permissions(
+    mode: RuntimeMode,
+    interaction_mode: InteractionMode,
+) -> (&'static str, &'static str, &'static str) {
+    if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
+        return ("never", "read-only", "user");
+    }
+    match mode {
+        RuntimeMode::Ask => ("untrusted", "read-only", "user"),
+        RuntimeMode::AutoAcceptEdits => ("on-request", "workspace-write", "user"),
+        RuntimeMode::Auto => ("on-request", "workspace-write", "auto_review"),
+        RuntimeMode::FullAccess => ("never", "danger-full-access", "user"),
+        RuntimeMode::Plan => unreachable!("handled above"),
+    }
+}
+
+fn codex_sandbox_policy(sandbox: &str) -> Value {
+    match sandbox {
+        "read-only" => json!({"type": "readOnly"}),
+        "danger-full-access" => json!({"type": "dangerFullAccess"}),
+        _ => json!({"type": "workspaceWrite"}),
     }
 }
 
@@ -598,6 +639,30 @@ fn is_visible_stderr_notice(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_modes_match_codex_permission_profiles() {
+        assert_eq!(
+            codex_permissions(RuntimeMode::Ask, InteractionMode::Build),
+            ("untrusted", "read-only", "user")
+        );
+        assert_eq!(
+            codex_permissions(RuntimeMode::AutoAcceptEdits, InteractionMode::Build),
+            ("on-request", "workspace-write", "user")
+        );
+        assert_eq!(
+            codex_permissions(RuntimeMode::Auto, InteractionMode::Build),
+            ("on-request", "workspace-write", "auto_review")
+        );
+        assert_eq!(
+            codex_permissions(RuntimeMode::FullAccess, InteractionMode::Build),
+            ("never", "danger-full-access", "user")
+        );
+        assert_eq!(
+            codex_permissions(RuntimeMode::FullAccess, InteractionMode::Plan),
+            ("never", "read-only", "user")
+        );
+    }
 
     #[test]
     fn rollback_rpc_responses_are_routed_to_the_waiting_request() {

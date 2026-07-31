@@ -116,19 +116,93 @@ impl ProviderResumeCursor {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeMode {
+    /// Legacy combined mode. State migration moves this to `interaction_mode`.
     Plan,
-    #[default]
     Ask,
+    AutoAcceptEdits,
     Auto,
+    #[default]
+    FullAccess,
 }
 
 impl RuntimeMode {
+    pub const ACCESS_OPTIONS: [Self; 4] = [
+        Self::Ask,
+        Self::AutoAcceptEdits,
+        Self::Auto,
+        Self::FullAccess,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Plan => "Plan",
-            Self::Ask => "Ask",
+            Self::Ask => "Supervised",
+            Self::AutoAcceptEdits => "Auto-accept edits",
             Self::Auto => "Auto",
+            Self::FullAccess => "Full access",
         }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Plan => "Inspect and plan without making changes.",
+            Self::Ask => "Ask before commands and file changes.",
+            Self::AutoAcceptEdits => "Auto-approve edits, ask before other actions.",
+            Self::Auto => "An AI reviewer approves routine actions; risky ones still ask.",
+            Self::FullAccess => "Allow commands and edits without prompts.",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Plan | Self::Ask => "icons/lock.svg",
+            Self::AutoAcceptEdits => "icons/pencil.svg",
+            Self::Auto => "icons/sparkle.svg",
+            Self::FullAccess => "icons/lock-open.svg",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InteractionMode {
+    #[default]
+    Build,
+    Plan,
+}
+
+impl InteractionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Build => "Build",
+            Self::Plan => "Plan",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderModelOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl ProviderModelOption {
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            description: None,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        let description = description.into();
+        if !description.trim().is_empty() {
+            self.description = Some(description);
+        }
+        self
     }
 }
 
@@ -140,6 +214,14 @@ pub struct ProviderModel {
     pub sub_provider: Option<String>,
     #[serde(default)]
     pub is_default: bool,
+    #[serde(default)]
+    pub reasoning_efforts: Vec<ProviderModelOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub service_tiers: Vec<ProviderModelOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_service_tier: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -155,6 +237,10 @@ impl ProviderModel {
             name: name.into(),
             sub_provider: None,
             is_default: false,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
+            service_tiers: Vec::new(),
+            default_service_tier: None,
         }
     }
 
@@ -165,6 +251,26 @@ impl ProviderModel {
 
     pub fn sub_provider(mut self, sub_provider: impl Into<String>) -> Self {
         self.sub_provider = Some(sub_provider.into());
+        self
+    }
+
+    pub fn reasoning(
+        mut self,
+        efforts: impl IntoIterator<Item = ProviderModelOption>,
+        default: impl Into<String>,
+    ) -> Self {
+        self.reasoning_efforts = efforts.into_iter().collect();
+        self.default_reasoning_effort = Some(default.into());
+        self
+    }
+
+    pub fn service_tiers(
+        mut self,
+        tiers: impl IntoIterator<Item = ProviderModelOption>,
+        default: impl Into<String>,
+    ) -> Self {
+        self.service_tiers = tiers.into_iter().collect();
+        self.default_service_tier = Some(default.into());
         self
     }
 }
@@ -341,6 +447,12 @@ pub struct AgentSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub runtime_mode: RuntimeMode,
+    #[serde(default)]
+    pub interaction_mode: InteractionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
     pub status: SessionStatus,
     pub created_at: u64,
     pub updated_at: u64,
@@ -365,7 +477,10 @@ impl AgentSession {
             project_id,
             provider,
             model: None,
-            runtime_mode: RuntimeMode::Ask,
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Build,
+            reasoning_effort: None,
+            service_tier: None,
             status: SessionStatus::Idle,
             created_at: now,
             updated_at: now,
@@ -394,7 +509,25 @@ impl AgentSession {
         }
     }
 
+    pub fn migrate_pre_access_modes(&mut self) {
+        match self.runtime_mode {
+            RuntimeMode::Plan => {
+                self.runtime_mode = RuntimeMode::Ask;
+                self.interaction_mode = InteractionMode::Plan;
+            }
+            // Waku's old Auto mode wrote inside the workspace without asking.
+            // Auto-accept edits is the closest safe equivalent in the split
+            // access model.
+            RuntimeMode::Auto => self.runtime_mode = RuntimeMode::AutoAcceptEdits,
+            _ => {}
+        }
+    }
+
     pub fn migrate_legacy_state(&mut self) {
+        if self.runtime_mode == RuntimeMode::Plan {
+            self.runtime_mode = RuntimeMode::Ask;
+            self.interaction_mode = InteractionMode::Plan;
+        }
         if self.provider_cursor.is_none()
             && let Some(id) = self.provider_session_id.take()
         {
