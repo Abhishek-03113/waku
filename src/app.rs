@@ -40,7 +40,7 @@ use crate::ui::{
     MenuChip, activity_icon, activity_noun, icon, key_hint, provider_color, provider_icon,
     relative_time, section_label, status_color, status_label,
 };
-use crate::{CancelTurn, FocusComposer, NewSession, OpenSettings, ToggleSidebar};
+use crate::{CancelTurn, CloseWindow, FocusComposer, NewSession, OpenSettings, ToggleSidebar};
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;

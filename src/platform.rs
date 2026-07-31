@@ -1,5 +1,49 @@
 use gpui::Window;
 
+/// Keep Waku's single main window alive when the user closes it. This preserves
+/// the current session and lets a Dock activation reveal the same GPUI window.
+#[cfg(target_os = "macos")]
+pub fn configure_main_window_close_behavior(window: &Window, cx: &gpui::App) {
+    window.on_window_should_close(cx, |window, _| {
+        hide_window(window);
+        false
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn configure_main_window_close_behavior(_: &Window, _: &gpui::App) {}
+
+#[cfg(target_os = "macos")]
+pub fn hide_window(window: &mut Window) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSView;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let Some(_main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+
+    // GPUI owns this view and its NSWindow. AppKit access stays on the main
+    // thread, and orderOut hides without triggering GPUI's close callback.
+    unsafe {
+        let view = handle.ns_view.cast::<NSView>().as_ref();
+        if let Some(native_window) = view.window() {
+            native_window.orderOut(None);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn hide_window(window: &mut Window) {
+    window.remove_window();
+}
+
 #[cfg(target_os = "macos")]
 thread_local! {
     static SIDEBAR_TINT_VIEW: std::cell::RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSView>>> =

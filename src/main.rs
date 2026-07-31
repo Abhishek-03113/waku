@@ -28,6 +28,7 @@ actions!(
     waku,
     [
         Quit,
+        CloseWindow,
         NewSession,
         OpenSettings,
         ToggleSidebar,
@@ -36,9 +37,28 @@ actions!(
     ]
 );
 
+trait WakuApplicationExt {
+    fn with_main_window_reopen(self) -> Self;
+}
+
+impl WakuApplicationExt for Application {
+    fn with_main_window_reopen(self) -> Self {
+        self.on_reopen(|cx| {
+            if let Some(window) = cx.windows().into_iter().next() {
+                window
+                    .update(cx, |_, window, _| window.activate_window())
+                    .ok();
+            }
+            cx.activate(true);
+        });
+        self
+    }
+}
+
 fn main() {
     Application::new()
         .with_assets(crate::assets::Assets)
+        .with_main_window_reopen()
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             crate::theme::init_component_theme(cx);
@@ -64,6 +84,7 @@ fn main() {
 
             cx.bind_keys([
                 KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-w", CloseWindow, None),
                 KeyBinding::new("cmd-n", NewSession, None),
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("cmd-shift-s", ToggleSidebar, None),
@@ -102,6 +123,7 @@ fn main() {
                         ..Default::default()
                     },
                     |window, cx| {
+                        crate::platform::configure_main_window_close_behavior(window, cx);
                         let waku = Waku::new(window, cx);
                         let composer_focus = waku.read(cx).composer_focus(cx);
                         window.focus(&composer_focus);
