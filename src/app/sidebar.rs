@@ -499,10 +499,64 @@ impl Waku {
                         .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
                 );
         }
+        let selected_project_id = self.state.selected_project;
         let project_name = self
             .selected_project()
-            .map(|project| project.name.as_str())
-            .unwrap_or("your project");
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| "your project".to_owned());
+        let project_options = self
+            .state
+            .projects
+            .iter()
+            .filter(|project| Some(project.id) == selected_project_id)
+            .chain(
+                self.state
+                    .projects
+                    .iter()
+                    .filter(|project| Some(project.id) != selected_project_id),
+            )
+            .map(|project| (project.id, project.name.clone()))
+            .collect::<Vec<_>>();
+        let weak = cx.entity().downgrade();
+        let composer = self.composer.clone();
+        let project_selector = ProjectNameSelector::new("empty-state-project", project_name)
+            .dropdown_menu(move |mut menu, _window, cx| {
+                menu = menu
+                    .action_context(composer.read(cx).focus())
+                    .min_w(px(160.0))
+                    .max_w(px(256.0))
+                    .max_h(px(320.0))
+                    .scrollable(true);
+                for (project_id, project_name) in project_options.clone() {
+                    let item_weak = weak.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(project_name)
+                            .checked(Some(project_id) == selected_project_id)
+                            .on_click(move |_, _, cx| {
+                                if Some(project_id) == selected_project_id {
+                                    return;
+                                }
+                                let _ = item_weak.update(cx, |this, cx| {
+                                    this.select_project(project_id, cx);
+                                });
+                            }),
+                    );
+                }
+                let add_project_weak = weak.clone();
+                menu.separator().item(
+                    PopupMenuItem::element(move |_, _| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(icon("icons/folder-new.svg", 13.0, theme.text_tertiary))
+                            .child("New project…")
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = add_project_weak.update(cx, |this, cx| this.add_project(cx));
+                    }),
+                )
+            });
         div()
             .flex_1()
             .flex()
@@ -515,12 +569,14 @@ impl Waku {
             .child(
                 div()
                     .mt(px(14.0))
+                    .flex()
+                    .items_baseline()
                     .text_size(px(20.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(SharedString::from(format!(
-                        "What should we build in {project_name}?"
-                    ))),
+                    .child("What should we build in\u{00a0}")
+                    .child(project_selector)
+                    .child("?"),
             )
     }
 }

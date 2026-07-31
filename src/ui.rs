@@ -1,6 +1,7 @@
 use gpui::{
-    App, Div, ElementId, Hsla, InteractiveElement, Interactivity, RenderOnce, SharedString,
-    Stateful, StyleRefinement, Styled, Svg, Window, div, prelude::*, px, rgb, svg,
+    App, Div, ElementId, Hsla, InteractiveElement, Interactivity, PathBuilder, RenderOnce,
+    SharedString, Stateful, StyleRefinement, Styled, Svg, Window, canvas, div, point, prelude::*,
+    px, rgb, svg,
 };
 use gpui_component::{Selectable, menu::DropdownMenu};
 
@@ -178,6 +179,84 @@ impl RenderOnce for MenuChip {
             .when(self.caret, |element| {
                 element.child(icon("icons/chevron-down.svg", 9.0, theme.text_ghost))
             })
+    }
+}
+
+/// An inline, link-like dropdown trigger used for the project name in the
+/// empty-state headline.
+#[derive(IntoElement)]
+pub struct ProjectNameSelector {
+    base: Stateful<Div>,
+    label: SharedString,
+    selected: bool,
+}
+
+impl ProjectNameSelector {
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self {
+            base: div().id(id),
+            label: label.into(),
+            selected: false,
+        }
+    }
+}
+
+impl Styled for ProjectNameSelector {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.base.style()
+    }
+}
+
+impl InteractiveElement for ProjectNameSelector {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.base.interactivity()
+    }
+}
+
+impl Selectable for ProjectNameSelector {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl DropdownMenu for ProjectNameSelector {}
+
+impl RenderOnce for ProjectNameSelector {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = Theme::current(cx);
+        let underline_color = if self.selected {
+            theme.text_secondary
+        } else {
+            theme.text_tertiary
+        };
+
+        self.base
+            .relative()
+            .flex_none()
+            .cursor_default()
+            .child(self.label)
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let y = bounds.origin.y + bounds.size.height - px(0.5);
+                        let mut builder =
+                            PathBuilder::stroke(px(1.0)).dash_array(&[px(1.0), px(2.0)]);
+                        builder.move_to(point(bounds.origin.x, y));
+                        builder.line_to(point(bounds.origin.x + bounds.size.width, y));
+                        if let Ok(line) = builder.build() {
+                            window.paint_path(line, underline_color);
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
     }
 }
 
