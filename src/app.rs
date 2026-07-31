@@ -144,6 +144,15 @@ struct CheckpointAction {
     confirmed: bool,
 }
 
+struct SessionRuntime {
+    driver: DriverHandle,
+    events: Receiver<DriverEvent>,
+    pending_events: VecDeque<DriverEvent>,
+    stream_phase: Option<StreamPhase>,
+    stream_remeasure_pending: bool,
+    pending_permission: Option<PendingPermission>,
+}
+
 pub struct Waku {
     state: PersistedState,
     store: StateStore,
@@ -152,20 +161,14 @@ pub struct Waku {
     probes: Vec<ProviderProbe>,
     provider_probe_events: Receiver<ProviderProbe>,
     model_picker_tab: ModelPickerTab,
-    driver: Option<DriverHandle>,
-    driver_session: Option<Uuid>,
-    driver_events: Option<Receiver<DriverEvent>>,
-    pending_driver_events: VecDeque<DriverEvent>,
+    runtimes: HashMap<Uuid, SessionRuntime>,
     stream_state_dirty: bool,
-    stream_remeasure_pending: bool,
     last_stream_save: Instant,
-    stream_phase: Option<StreamPhase>,
     /// User expansion overrides keyed by persisted transcript block index.
     reasoning_expanded: HashMap<usize, bool>,
     activities_expanded: HashMap<usize, bool>,
     /// Individual tool rows the user has opened to read their full detail.
     expanded_activity_items: HashSet<Uuid>,
-    pending_permission: Option<PendingPermission>,
     sidebar_visible: bool,
     header_drag_armed: bool,
     branch: Option<String>,
@@ -310,18 +313,12 @@ impl Waku {
                 probes,
                 provider_probe_events,
                 model_picker_tab,
-                driver: None,
-                driver_session: None,
-                driver_events: None,
-                pending_driver_events: VecDeque::new(),
+                runtimes: HashMap::new(),
                 stream_state_dirty: false,
-                stream_remeasure_pending: false,
                 last_stream_save: Instant::now(),
-                stream_phase: None,
                 reasoning_expanded: HashMap::new(),
                 activities_expanded: HashMap::new(),
                 expanded_activity_items: HashSet::new(),
-                pending_permission: None,
                 sidebar_visible: true,
                 header_drag_armed: false,
                 branch,
@@ -352,6 +349,10 @@ impl Waku {
             .sessions
             .iter_mut()
             .find(|session| session.id == id)
+    }
+
+    fn selected_runtime(&self) -> Option<&SessionRuntime> {
+        self.runtimes.get(&self.state.selected_session?)
     }
 
     fn provider_probe(&self, provider: ProviderKind) -> Option<&ProviderProbe> {
@@ -400,13 +401,23 @@ impl Waku {
     }
 
     fn capture_latest_turn_checkpoint(&mut self) {
-        let Some((session_id, project_id, turn_count)) =
-            self.selected_session().and_then(|session| {
+        if let Some(session_id) = self.state.selected_session {
+            self.capture_latest_turn_checkpoint_for(session_id);
+        }
+    }
+
+    fn capture_latest_turn_checkpoint_for(&mut self, session_id: Uuid) {
+        let Some((project_id, turn_count)) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| {
                 session
                     .turns
                     .last()
                     .filter(|turn| turn.status != TurnStatus::Running)
-                    .map(|turn| (session.id, session.project_id, turn.turn_count))
+                    .map(|turn| (session.project_id, turn.turn_count))
             })
         else {
             return;
@@ -620,13 +631,15 @@ impl Waku {
             session.truncate_after_turn(turn_count);
             session.status = SessionStatus::Idle;
         }
-        self.pending_driver_events.clear();
-        self.stream_remeasure_pending = false;
-        self.stream_phase = None;
+        if let Some(runtime) = self.runtimes.get_mut(&session_id) {
+            runtime.pending_events.clear();
+            runtime.stream_remeasure_pending = false;
+            runtime.stream_phase = None;
+            runtime.pending_permission = None;
+        }
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
-        self.pending_permission = None;
         self.transcript_rows.reset(self.transcript_row_count());
         self.toast = Some(match cleanup_result {
             Ok(()) => format!("Restored checkpoint after turn {turn_count}."),
@@ -643,10 +656,8 @@ impl Waku {
             .selected_session()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("No session selected"))?;
-        if self.driver_session == Some(session.id)
-            && let Some(driver) = &self.driver
-        {
-            return Ok(driver.clone());
+        if let Some(runtime) = self.runtimes.get(&session.id) {
+            return Ok(runtime.driver.clone());
         }
         let project = self
             .state
@@ -702,9 +713,17 @@ impl Waku {
             },
             event_tx,
         )?;
-        self.driver = Some(handle.clone());
-        self.driver_session = Some(session.id);
-        self.driver_events = Some(event_rx);
+        self.runtimes.insert(
+            session.id,
+            SessionRuntime {
+                driver: handle.clone(),
+                events: event_rx,
+                pending_events: VecDeque::new(),
+                stream_phase: None,
+                stream_remeasure_pending: false,
+                pending_permission: None,
+            },
+        );
         Ok(handle)
     }
 
@@ -749,13 +768,15 @@ impl Waku {
             session.status = SessionStatus::Connecting;
             session.updated_at = unix_time();
         }
-        self.pending_driver_events.clear();
-        self.stream_remeasure_pending = false;
-        self.stream_phase = None;
+        if let Some(runtime) = self.runtimes.get_mut(&session_id) {
+            runtime.pending_events.clear();
+            runtime.stream_remeasure_pending = false;
+            runtime.stream_phase = None;
+            runtime.pending_permission = None;
+        }
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
-        self.pending_permission = None;
         self.pending_revert = None;
         self.toast = checkpoint_warning;
         self.transcript_rows.reset(self.transcript_row_count());
@@ -779,11 +800,9 @@ impl Waku {
         cx.notify();
     }
 
-    fn collect_driver_events(&mut self) {
-        if let Some(receiver) = self.driver_events.clone() {
-            while let Ok(event) = receiver.try_recv() {
-                self.pending_driver_events.push_back(event);
-            }
+    fn collect_runtime_events(runtime: &mut SessionRuntime) {
+        while let Ok(event) = runtime.events.try_recv() {
+            runtime.pending_events.push_back(event);
         }
     }
 
@@ -805,53 +824,74 @@ impl Waku {
     }
 
     fn drain_driver_events(&mut self) -> bool {
-        let follow_up_remeasure = std::mem::take(&mut self.stream_remeasure_pending);
-        self.collect_driver_events();
+        let session_ids = self.runtimes.keys().copied().collect::<Vec<_>>();
         let mut changed = false;
         let mut force_save = false;
-        let mut markdown_changed = false;
-        let mut revealed_stream_chunk = false;
-        while let Some(event) = self.pending_driver_events.front() {
-            let kind = stream_delta_kind(event);
-            if kind.is_some() && revealed_stream_chunk {
-                break;
-            }
+        let mut selected_changed = false;
+        for session_id in session_ids {
+            let Some(mut runtime) = self.runtimes.remove(&session_id) else {
+                continue;
+            };
+            let follow_up_remeasure = std::mem::take(&mut runtime.stream_remeasure_pending);
+            Self::collect_runtime_events(&mut runtime);
+            let mut runtime_changed = false;
+            let mut markdown_changed = false;
+            let mut revealed_stream_chunk = false;
+            let mut keep_runtime = true;
+            while let Some(event) = runtime.pending_events.front() {
+                let kind = stream_delta_kind(event);
+                if kind.is_some() && revealed_stream_chunk {
+                    break;
+                }
 
-            let event = if let Some(kind) = kind {
-                revealed_stream_chunk = true;
-                pop_stream_chunk(&mut self.pending_driver_events, kind)
-            } else {
-                self.pending_driver_events.pop_front()
-            };
-            let Some(event) = event else {
-                break;
-            };
-            force_save |= matches!(
-                event,
-                DriverEvent::Connected { .. }
-                    | DriverEvent::Permission { .. }
-                    | DriverEvent::TurnFinished { .. }
-                    | DriverEvent::Error(_)
-                    | DriverEvent::ProcessExited
-            );
-            markdown_changed |= matches!(event, DriverEvent::TextDelta(_));
-            changed = true;
-            self.handle_driver_event(event);
+                let event = if let Some(kind) = kind {
+                    revealed_stream_chunk = true;
+                    pop_stream_chunk(&mut runtime.pending_events, kind)
+                } else {
+                    runtime.pending_events.pop_front()
+                };
+                let Some(event) = event else {
+                    break;
+                };
+                force_save |= matches!(
+                    event,
+                    DriverEvent::Connected { .. }
+                        | DriverEvent::Permission { .. }
+                        | DriverEvent::TurnFinished { .. }
+                        | DriverEvent::Error(_)
+                        | DriverEvent::ProcessExited
+                );
+                markdown_changed |= matches!(event, DriverEvent::TextDelta(_));
+                runtime_changed = true;
+                keep_runtime &= self.handle_driver_event(session_id, &mut runtime, event);
+                if !keep_runtime {
+                    break;
+                }
+            }
+            runtime.stream_remeasure_pending = markdown_changed;
+            if keep_runtime {
+                self.runtimes.insert(session_id, runtime);
+            }
+            changed |= runtime_changed;
+            if self.state.selected_session == Some(session_id)
+                && (runtime_changed || follow_up_remeasure)
+            {
+                selected_changed = true;
+            }
         }
 
         if changed {
             self.stream_state_dirty = true;
         }
-        if changed || follow_up_remeasure {
+        if selected_changed {
             self.remeasure_transcript_tail();
         }
-        self.stream_remeasure_pending = markdown_changed;
         if self.stream_state_dirty
             && (force_save || self.last_stream_save.elapsed() >= STREAM_SAVE_INTERVAL)
         {
             self.save();
         }
-        changed || follow_up_remeasure
+        changed || selected_changed
     }
 
     /// One list row per message plus each ordered non-message turn block.
@@ -891,8 +931,13 @@ impl Waku {
         }
     }
 
-    fn finish_streaming_assistant(&mut self) {
-        if let Some(session) = self.selected_session_mut() {
+    fn finish_streaming_assistant(&mut self, session_id: Uuid) {
+        if let Some(session) = self
+            .state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
             for message in &mut session.messages {
                 if message.role == MessageRole::Assistant && message.streaming {
                     message.streaming = false;
@@ -901,46 +946,32 @@ impl Waku {
         }
     }
 
-    fn append_text_delta(&mut self, delta: String) {
-        let continuing = self.stream_phase == Some(StreamPhase::Text);
-        if !continuing {
-            self.finish_streaming_assistant();
-        }
-        if let Some(session) = self.selected_session_mut() {
-            let existing = continuing.then(|| {
-                session
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find(|message| message.role == MessageRole::Assistant && message.streaming)
-            });
-            if let Some(Some(message)) = existing {
-                message.content.push_str(&delta);
-            } else {
-                let mut message = session
-                    .active_turn_id()
-                    .map(|turn_id| {
-                        Message::new_for_turn(MessageRole::Assistant, delta.clone(), turn_id)
-                    })
-                    .unwrap_or_else(|| Message::new(MessageRole::Assistant, delta));
-                message.streaming = true;
-                session.messages.push(message);
-            }
-            session.updated_at = unix_time();
-        }
-        self.stream_phase = Some(StreamPhase::Text);
+    fn append_text_delta(&mut self, session_id: Uuid, runtime: &mut SessionRuntime, delta: String) {
+        let continuing = runtime.stream_phase == Some(StreamPhase::Text);
+        append_text_delta_to_session(&mut self.state.sessions, session_id, continuing, delta);
+        runtime.stream_phase = Some(StreamPhase::Text);
     }
 
-    fn append_reasoning_delta(&mut self, delta: String) {
-        let continuing = self.stream_phase == Some(StreamPhase::Reasoning);
+    fn append_reasoning_delta(
+        &mut self,
+        session_id: Uuid,
+        runtime: &mut SessionRuntime,
+        delta: String,
+    ) {
+        let continuing = runtime.stream_phase == Some(StreamPhase::Reasoning);
         if !continuing && delta.trim().is_empty() {
             return;
         }
         let now = unix_time_millis();
         if !continuing {
-            self.finish_streaming_assistant();
+            self.finish_streaming_assistant(session_id);
         }
-        if let Some(session) = self.selected_session_mut() {
+        if let Some(session) = self
+            .state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
             if continuing
                 && let Some(TranscriptBlock {
                     content: TranscriptBlockContent::Reasoning(reasoning),
@@ -962,48 +993,52 @@ impl Waku {
             }
             session.updated_at = unix_time();
         }
-        self.stream_phase = Some(StreamPhase::Reasoning);
+        runtime.stream_phase = Some(StreamPhase::Reasoning);
     }
 
     fn update_activity(
         &mut self,
-        source_id: Option<String>,
-        kind: crate::model::ActivityKind,
-        title: String,
-        detail: Option<String>,
-        complete: bool,
+        session_id: Uuid,
+        runtime: &mut SessionRuntime,
+        item: ActivityItem,
     ) {
-        if self.stream_phase == Some(StreamPhase::Text) {
-            self.finish_streaming_assistant();
+        if runtime.stream_phase == Some(StreamPhase::Text) {
+            self.finish_streaming_assistant(session_id);
         }
 
-        let continuing = self.stream_phase == Some(StreamPhase::Activity);
-        if let Some(session) = self.selected_session_mut() {
+        let continuing = runtime.stream_phase == Some(StreamPhase::Activity);
+        if let Some(session) = self
+            .state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
             for block in session.transcript_blocks.iter_mut().rev() {
                 let TranscriptBlockContent::Activities(activities) = &mut block.content else {
                     continue;
                 };
                 let matching = activities.iter_mut().rev().find(|activity| {
-                    source_id
+                    item.source_id
                         .as_ref()
                         .is_some_and(|id| activity.source_id.as_ref() == Some(id))
-                        || (source_id.is_none() && activity.title == title && !activity.complete)
+                        || (item.source_id.is_none()
+                            && activity.title == item.title
+                            && !activity.complete)
                 });
                 if let Some(activity) = matching {
-                    activity.kind = kind;
-                    activity.title = title;
-                    activity.complete = complete;
-                    if detail.is_some() {
-                        activity.detail = detail;
+                    activity.kind = item.kind;
+                    activity.title = item.title;
+                    activity.complete = item.complete;
+                    if item.detail.is_some() {
+                        activity.detail = item.detail;
                     }
                     session.updated_at = unix_time();
-                    self.stream_phase = Some(StreamPhase::Activity);
+                    runtime.stream_phase = Some(StreamPhase::Activity);
                     return;
                 }
             }
 
             let after_message = session.messages.len();
-            let item = ActivityItem::new(source_id, kind, title, detail, complete);
             if continuing
                 && let Some(TranscriptBlock {
                     after_message: anchor,
@@ -1022,11 +1057,16 @@ impl Waku {
             }
             session.updated_at = unix_time();
         }
-        self.stream_phase = Some(StreamPhase::Activity);
+        runtime.stream_phase = Some(StreamPhase::Activity);
     }
 
-    fn complete_turn_blocks(&mut self) {
-        if let Some(session) = self.selected_session_mut() {
+    fn complete_turn_blocks(&mut self, session_id: Uuid) {
+        if let Some(session) = self
+            .state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
             for block in &mut session.transcript_blocks {
                 if let TranscriptBlockContent::Activities(activities) = &mut block.content {
                     for activity in activities {
@@ -1037,31 +1077,50 @@ impl Waku {
         }
     }
 
-    fn turn_has_assistant_message(&self) -> bool {
-        self.selected_session().is_some_and(|session| {
-            let Some(turn_id) = session.active_turn_id() else {
-                return false;
-            };
-            session.messages.iter().any(|message| {
-                message.role == MessageRole::Assistant && message.turn_id == Some(turn_id)
+    fn turn_has_assistant_message(&self, session_id: Uuid) -> bool {
+        self.state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .is_some_and(|session| {
+                let Some(turn_id) = session.active_turn_id() else {
+                    return false;
+                };
+                session.messages.iter().any(|message| {
+                    message.role == MessageRole::Assistant && message.turn_id == Some(turn_id)
+                })
             })
-        })
     }
 
-    fn accepts_turn_output(&self) -> bool {
-        self.selected_session().is_some_and(|session| {
-            session.active_turn_id().is_some()
-                && matches!(
-                    session.status,
-                    SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
-                )
-        })
+    fn accepts_turn_output(&self, session_id: Uuid) -> bool {
+        self.state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .is_some_and(|session| {
+                session.active_turn_id().is_some()
+                    && matches!(
+                        session.status,
+                        SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
+                    )
+            })
     }
 
-    fn handle_driver_event(&mut self, event: DriverEvent) {
+    /// Returns whether the runtime should remain attached after this event.
+    fn handle_driver_event(
+        &mut self,
+        session_id: Uuid,
+        runtime: &mut SessionRuntime,
+        event: DriverEvent,
+    ) -> bool {
         match event {
             DriverEvent::Connected { provider_cursor } => {
-                if let Some(session) = self.selected_session_mut() {
+                if let Some(session) = self
+                    .state
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                {
                     session.provider_cursor = provider_cursor;
                     if session.status == SessionStatus::Connecting {
                         session.status = SessionStatus::Working;
@@ -1069,7 +1128,11 @@ impl Waku {
                 }
             }
             DriverEvent::TurnStarted => {
-                if let Some(session) = self.selected_session_mut()
+                if let Some(session) = self
+                    .state
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
                     && session.active_turn_id().is_some()
                 {
                     session.mark_active_turn_provider_started();
@@ -1077,13 +1140,13 @@ impl Waku {
                 }
             }
             DriverEvent::TextDelta(delta) => {
-                if self.accepts_turn_output() {
-                    self.append_text_delta(delta);
+                if self.accepts_turn_output(session_id) {
+                    self.append_text_delta(session_id, runtime, delta);
                 }
             }
             DriverEvent::ReasoningDelta(delta) => {
-                if self.accepts_turn_output() {
-                    self.append_reasoning_delta(delta);
+                if self.accepts_turn_output(session_id) {
+                    self.append_reasoning_delta(session_id, runtime, delta);
                 }
             }
             DriverEvent::Activity {
@@ -1093,8 +1156,12 @@ impl Waku {
                 detail,
                 complete,
             } => {
-                if self.accepts_turn_output() {
-                    self.update_activity(id, kind, title, detail, complete);
+                if self.accepts_turn_output(session_id) {
+                    self.update_activity(
+                        session_id,
+                        runtime,
+                        ActivityItem::new(id, kind, title, detail, complete),
+                    );
                 }
             }
             DriverEvent::Permission {
@@ -1103,31 +1170,44 @@ impl Waku {
                 detail,
                 options,
             } => {
-                if self.accepts_turn_output() {
-                    self.pending_permission = Some(PendingPermission {
+                if self.accepts_turn_output(session_id) {
+                    runtime.pending_permission = Some(PendingPermission {
                         request_id,
                         title,
                         detail,
                         options,
                     });
-                    if let Some(session) = self.selected_session_mut() {
+                    if let Some(session) = self
+                        .state
+                        .sessions
+                        .iter_mut()
+                        .find(|session| session.id == session_id)
+                    {
                         session.status = SessionStatus::Waiting;
                     }
                 }
             }
             DriverEvent::TurnFinished { success, summary } => {
                 if self
-                    .selected_session()
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
                     .and_then(AgentSession::active_turn_id)
                     .is_none()
                 {
-                    return;
+                    return true;
                 }
-                self.finish_streaming_assistant();
-                self.complete_turn_blocks();
-                self.stream_phase = None;
-                let needs_fallback = !self.turn_has_assistant_message();
-                if let Some(session) = self.selected_session_mut() {
+                self.finish_streaming_assistant(session_id);
+                self.complete_turn_blocks(session_id);
+                runtime.stream_phase = None;
+                let needs_fallback = !self.turn_has_assistant_message(session_id);
+                if let Some(session) = self
+                    .state
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                {
                     session.status = if success {
                         SessionStatus::Idle
                     } else {
@@ -1151,21 +1231,33 @@ impl Waku {
                         TurnStatus::Failed
                     });
                 }
-                self.pending_permission = None;
-                self.capture_latest_turn_checkpoint();
+                runtime.pending_permission = None;
+                self.capture_latest_turn_checkpoint_for(session_id);
             }
             DriverEvent::Error(error) => {
-                self.toast = Some(error.clone());
+                if self.state.selected_session == Some(session_id) {
+                    self.toast = Some(error.clone());
+                }
                 let has_active_turn = self
-                    .selected_session()
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
                     .and_then(AgentSession::active_turn_id)
                     .is_some();
                 let should_append = has_active_turn
-                    && !self.turn_has_assistant_message()
+                    && !self.turn_has_assistant_message(session_id)
                     && self
-                        .selected_session()
+                        .state
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == session_id)
                         .is_some_and(|session| session.status != SessionStatus::Working);
-                if let Some(session) = self.selected_session_mut()
+                if let Some(session) = self
+                    .state
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
                     && has_active_turn
                 {
                     if session.status != SessionStatus::Working {
@@ -1177,15 +1269,16 @@ impl Waku {
                 }
             }
             DriverEvent::ProcessExited => {
-                self.driver = None;
-                self.driver_session = None;
-                self.driver_events = None;
-                self.finish_streaming_assistant();
-                self.complete_turn_blocks();
-                self.stream_phase = None;
-                self.pending_permission = None;
+                self.finish_streaming_assistant(session_id);
+                self.complete_turn_blocks(session_id);
+                runtime.stream_phase = None;
+                runtime.pending_permission = None;
                 let mut finished_turn = false;
-                if let Some(session) = self.selected_session_mut()
+                if let Some(session) = self
+                    .state
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
                     && matches!(
                         session.status,
                         SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
@@ -1196,10 +1289,12 @@ impl Waku {
                     finished_turn = session.finish_active_turn(TurnStatus::Failed).is_some();
                 }
                 if finished_turn {
-                    self.capture_latest_turn_checkpoint();
+                    self.capture_latest_turn_checkpoint_for(session_id);
                 }
+                return false;
             }
         }
+        true
     }
 
     fn select_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
@@ -1227,7 +1322,7 @@ impl Waku {
             self.state.selected_project = Some(project_id);
             self.state.last_provider = provider;
         }
-        self.reset_live_runtime();
+        self.reset_visible_state();
         self.branch = self
             .selected_project()
             .and_then(|project| git_branch(&project.path));
@@ -1248,7 +1343,7 @@ impl Waku {
         self.state.selected_project = Some(project_id);
         self.state.selected_session = Some(id);
         self.state.last_provider = provider;
-        self.reset_live_runtime();
+        self.reset_visible_state();
         self.transcript_rows.reset(0);
         self.save();
         cx.notify();
@@ -1272,6 +1367,7 @@ impl Waku {
             .find(|project| project.id == project_id)
             .map(|project| project.path.clone());
         let was_selected = self.state.selected_session == Some(session_id);
+        self.reset_session_runtime(session_id);
         self.state.sessions.remove(index);
         if let Some(project_path) = project_path {
             let _ = checkpoint::delete_session_refs(&project_path, session_id, last_turn_count);
@@ -1322,28 +1418,25 @@ impl Waku {
         self.cancel_turn(cx);
     }
 
-    fn reset_live_runtime(&mut self) {
-        if let Some(driver) = &self.driver {
-            driver.cancel();
-        }
-        self.driver = None;
-        self.driver_session = None;
-        self.driver_events = None;
-        self.pending_driver_events.clear();
-        self.stream_remeasure_pending = false;
-        self.stream_phase = None;
+    fn reset_visible_state(&mut self) {
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
-        self.pending_permission = None;
         self.pending_revert = None;
         self.toast = None;
+    }
+
+    fn reset_session_runtime(&mut self, session_id: Uuid) {
+        if let Some(runtime) = self.runtimes.remove(&session_id) {
+            runtime.driver.cancel();
+        }
     }
 
     fn choose_provider(&mut self, provider: ProviderKind, cx: &mut Context<Self>) {
         if let Some(session) = self.selected_session_mut()
             && session.messages.is_empty()
         {
+            let session_id = session.id;
             session.provider = provider;
             // `None` follows the provider's live default. Choosing a concrete
             // model in the picker pins that model on the task.
@@ -1352,7 +1445,7 @@ impl Waku {
             session.service_tier = None;
             self.state.last_provider = provider;
             self.model_picker_tab = ModelPickerTab::Provider(provider);
-            self.reset_live_runtime();
+            self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
         }
@@ -1362,13 +1455,14 @@ impl Waku {
         if let Some(session) = self.selected_session_mut()
             && session.messages.is_empty()
         {
+            let session_id = session.id;
             session.provider = provider;
             session.model = Some(model);
             session.reasoning_effort = None;
             session.service_tier = None;
             self.state.last_provider = provider;
             self.model_picker_tab = ModelPickerTab::Provider(provider);
-            self.reset_live_runtime();
+            self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
         }
@@ -1410,8 +1504,9 @@ impl Waku {
         if let Some(session) = self.selected_session_mut()
             && session.runtime_mode != mode
         {
+            let session_id = session.id;
             session.runtime_mode = mode;
-            self.reset_live_runtime();
+            self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
         }
@@ -1421,8 +1516,9 @@ impl Waku {
         if let Some(session) = self.selected_session_mut()
             && session.interaction_mode != mode
         {
+            let session_id = session.id;
             session.interaction_mode = mode;
-            self.reset_live_runtime();
+            self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
         }
@@ -1432,8 +1528,9 @@ impl Waku {
         if let Some(session) = self.selected_session_mut()
             && session.reasoning_effort.as_deref() != Some(effort.as_str())
         {
+            let session_id = session.id;
             session.reasoning_effort = Some(effort);
-            self.reset_live_runtime();
+            self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
         }
@@ -1443,34 +1540,56 @@ impl Waku {
         if let Some(session) = self.selected_session_mut()
             && session.service_tier.as_deref() != Some(tier.as_str())
         {
+            let session_id = session.id;
             session.service_tier = Some(tier);
-            self.reset_live_runtime();
+            self.reset_session_runtime(session_id);
             self.save();
             cx.notify();
         }
     }
 
     fn cancel_turn(&mut self, cx: &mut Context<Self>) {
-        if let Some(driver) = &self.driver {
-            driver.cancel();
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let mut runtime = self.runtimes.remove(&session_id);
+        if let Some(runtime) = runtime.as_ref() {
+            runtime.driver.cancel();
         }
         // Do not leave already-received text in the smoothing queue: once the
         // message is marked complete, a later delta would otherwise create a
         // second assistant bubble. Show the received portion immediately.
-        self.collect_driver_events();
-        while let Some(event) = self.pending_driver_events.pop_front() {
-            self.handle_driver_event(event);
+        let mut keep_runtime = true;
+        if let Some(runtime) = runtime.as_mut() {
+            Self::collect_runtime_events(runtime);
+            while let Some(event) = runtime.pending_events.pop_front() {
+                keep_runtime &= self.handle_driver_event(session_id, runtime, event);
+                if !keep_runtime {
+                    break;
+                }
+            }
         }
         let has_active_turn = self
-            .selected_session()
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
             .and_then(AgentSession::active_turn_id)
             .is_some();
-        self.finish_streaming_assistant();
-        self.complete_turn_blocks();
-        self.stream_phase = None;
+        self.finish_streaming_assistant(session_id);
+        self.complete_turn_blocks(session_id);
+        if let Some(runtime) = runtime.as_mut() {
+            runtime.stream_phase = None;
+            runtime.pending_permission = None;
+        }
         if has_active_turn {
-            let needs_fallback = !self.turn_has_assistant_message();
-            if let Some(session) = self.selected_session_mut() {
+            let needs_fallback = !self.turn_has_assistant_message(session_id);
+            if let Some(session) = self
+                .state
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+            {
                 session.status = SessionStatus::Idle;
                 if needs_fallback {
                     session.push_message(MessageRole::Assistant, "Stopped.");
@@ -1478,9 +1597,11 @@ impl Waku {
                 session.finish_active_turn(TurnStatus::Interrupted);
             }
         }
-        self.pending_permission = None;
         if has_active_turn {
-            self.capture_latest_turn_checkpoint();
+            self.capture_latest_turn_checkpoint_for(session_id);
+        }
+        if keep_runtime && let Some(runtime) = runtime {
+            self.runtimes.insert(session_id, runtime);
         }
         self.remeasure_transcript_tail();
         self.save();
@@ -1493,10 +1614,13 @@ impl Waku {
         option_id: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(driver) = &self.driver {
-            driver.respond(request_id, option_id);
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        if let Some(runtime) = self.runtimes.get_mut(&session_id) {
+            runtime.driver.respond(request_id, option_id);
+            runtime.pending_permission = None;
         }
-        self.pending_permission = None;
         if let Some(session) = self.selected_session_mut() {
             session.status = SessionStatus::Working;
         }
@@ -2114,7 +2238,8 @@ impl Waku {
 
     /// The provider's latest ordered block is still reasoning.
     fn reasoning_live(&self) -> bool {
-        self.stream_phase == Some(StreamPhase::Reasoning)
+        self.selected_runtime()
+            .is_some_and(|runtime| runtime.stream_phase == Some(StreamPhase::Reasoning))
             && self
                 .selected_session()
                 .is_some_and(|session| session.status == SessionStatus::Working)
@@ -2499,7 +2624,7 @@ impl Waku {
     // ── Permission ─────────────────────────────────────────────────────────
 
     fn render_permission(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let permission = self.pending_permission.as_ref()?;
+        let permission = self.selected_runtime()?.pending_permission.as_ref()?;
         let theme = Theme::dark();
         let request_id = permission.request_id.clone();
         let mut buttons = div().flex().items_center().gap(px(8.0)).mt(px(10.0));
@@ -3939,6 +4064,42 @@ fn activity_summary(activities: &[ActivityItem]) -> String {
     )
 }
 
+fn append_text_delta_to_session(
+    sessions: &mut [AgentSession],
+    session_id: Uuid,
+    continuing: bool,
+    delta: String,
+) {
+    let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
+        return;
+    };
+    if !continuing {
+        for message in &mut session.messages {
+            if message.role == MessageRole::Assistant && message.streaming {
+                message.streaming = false;
+            }
+        }
+    }
+    let existing = continuing.then(|| {
+        session
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|message| message.role == MessageRole::Assistant && message.streaming)
+    });
+    if let Some(Some(message)) = existing {
+        message.content.push_str(&delta);
+    } else {
+        let mut message = session
+            .active_turn_id()
+            .map(|turn_id| Message::new_for_turn(MessageRole::Assistant, delta.clone(), turn_id))
+            .unwrap_or_else(|| Message::new(MessageRole::Assistant, delta));
+        message.streaming = true;
+        session.messages.push(message);
+    }
+    session.updated_at = unix_time();
+}
+
 fn git_branch(path: &std::path::Path) -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
@@ -3952,10 +4113,13 @@ fn git_branch(path: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        StreamDeltaKind, TranscriptRowKind::*, escape_html, fenced_code,
-        message_starts_followup_turn, pop_stream_chunk, take_stream_prefix, transcript_row_kinds,
+        StreamDeltaKind, TranscriptRowKind::*, append_text_delta_to_session, escape_html,
+        fenced_code, message_starts_followup_turn, pop_stream_chunk, take_stream_prefix,
+        transcript_row_kinds,
     };
-    use crate::model::{ActivityKind, DriverEvent, Message, MessageRole};
+    use crate::model::{
+        ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind, SessionStatus,
+    };
     use std::collections::VecDeque;
 
     #[test]
@@ -4034,6 +4198,29 @@ mod tests {
             Some(DriverEvent::TextDelta(text)) if text == "second line"
         ));
         assert!(matches!(events.front(), Some(DriverEvent::Activity { .. })));
+    }
+
+    #[test]
+    fn stream_parts_keep_targeting_the_running_session_after_selection_changes() {
+        let project_id = uuid::Uuid::new_v4();
+        let mut running = AgentSession::new(project_id, ProviderKind::Codex);
+        running.begin_turn("background task");
+        running.status = SessionStatus::Working;
+        let running_id = running.id;
+        let visible = AgentSession::new(project_id, ProviderKind::Claude);
+        let visible_id = visible.id;
+        let mut sessions = vec![running, visible];
+
+        append_text_delta_to_session(&mut sessions, running_id, false, "first".into());
+        // Navigation changes only which task is rendered. The runtime keeps
+        // emitting with its own task ID while another task is visible.
+        let selected_session = visible_id;
+        append_text_delta_to_session(&mut sessions, running_id, true, " second".into());
+
+        assert_eq!(selected_session, visible_id);
+        assert_eq!(sessions[0].messages[1].content, "first second");
+        assert!(sessions[0].messages[1].streaming);
+        assert!(sessions[1].messages.is_empty());
     }
 
     #[test]
