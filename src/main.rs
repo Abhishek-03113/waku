@@ -115,7 +115,7 @@ fn main() {
                         titlebar: Some(TitlebarOptions {
                             title: Some(APP_NAME.into()),
                             appears_transparent: true,
-                            traffic_light_position: Some(point(px(16.0), px(18.0))),
+                            traffic_light_position: Some(point(px(16.0), px(17.0))),
                         }),
                         // Waku owns titlebar gestures so controls embedded in the header
                         // never inherit AppKit's implicit drag/double-click behavior.
