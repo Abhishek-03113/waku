@@ -2598,6 +2598,9 @@ impl Render for Waku {
                                 .justify_center()
                                 .child(
                                     div()
+                                        .w_full()
+                                        .max_w(px(CONTENT_MAX_WIDTH))
+                                        .min_w_0()
                                         .px(px(12.0))
                                         .py(px(6.0))
                                         .rounded_full()
@@ -2607,6 +2610,7 @@ impl Render for Waku {
                                         .shadow_sm()
                                         .text_size(px(11.0))
                                         .text_color(theme.danger)
+                                        .whitespace_normal()
                                         .child(SharedString::from(toast)),
                                 ),
                         )

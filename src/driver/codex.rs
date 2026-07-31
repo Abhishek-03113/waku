@@ -116,9 +116,9 @@ impl CodexDriver {
                 }
 
                 let (approval_policy, sandbox) = match mode {
-                    RuntimeMode::Plan => ("never", "readOnly"),
-                    RuntimeMode::Ask => ("on-request", "workspaceWrite"),
-                    RuntimeMode::Auto => ("never", "workspaceWrite"),
+                    RuntimeMode::Plan => ("never", "read-only"),
+                    RuntimeMode::Ask => ("on-request", "workspace-write"),
+                    RuntimeMode::Auto => ("never", "workspace-write"),
                 };
                 let open_thread = if let Some(thread_id) = provider_session_id {
                     json!({
@@ -269,7 +269,7 @@ impl CodexDriver {
             .name("waku-codex-stderr".into())
             .spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    if line.contains(" ERROR ") || line.to_ascii_lowercase().contains("fatal") {
+                    if is_visible_stderr_notice(&line) {
                         let _ = events.send(DriverEvent::Error(clean_stderr(&line)));
                     }
                 }
@@ -434,6 +434,14 @@ fn handle_codex_message(
                 let _ = events.send(DriverEvent::Error(message.to_owned()));
             }
         }
+        "mcpServer/startupStatus/updated"
+            if params.get("status").and_then(Value::as_str) == Some("failed") =>
+        {
+            if let Some(message) = params.get("error").and_then(Value::as_str) {
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("MCP");
+                let _ = events.send(DriverEvent::Error(format!("{name}: {message}")));
+            }
+        }
         method if value.get("id").is_some() && method.contains("requestApproval") => {
             let request_id = rpc_id_string(value.get("id").unwrap());
             let (title, detail) = approval_copy(method, &params);
@@ -558,6 +566,20 @@ fn clean_stderr(line: &str) -> String {
     line.split_once(": ")
         .map(|(_, message)| message.to_owned())
         .unwrap_or_else(|| line.to_owned())
+}
+
+fn is_visible_stderr_notice(line: &str) -> bool {
+    let lowercase = line.to_ascii_lowercase();
+    if lowercase.contains("transport channel closed")
+        || lowercase.contains("missing authorization header")
+    {
+        return false;
+    }
+    line.contains(" ERROR ")
+        || line.contains('⚠')
+        || lowercase.contains("fatal")
+        || lowercase.contains("warning")
+        || lowercase.contains("mcp startup incomplete")
 }
 
 #[cfg(test)]
