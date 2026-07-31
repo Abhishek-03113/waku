@@ -351,10 +351,8 @@ impl Waku {
                 div()
                     .id("sidebar-scroll")
                     .flex_1()
-                    .overflow_y_scroll()
-                    .px(px(10.0))
-                    .pt(px(2.0))
-                    .child(sessions),
+                    .child(div().px(px(10.0)).pt(px(2.0)).child(sessions))
+                    .overflow_y_scrollbar(),
             )
     }
 
