@@ -9,7 +9,9 @@ license = "MIT"
 anyhow = "1.0"
 crossbeam-channel = "0.5"
 dirs = "6.0"
-gpui = { version = "0.2.2", features = ["macos-blade"] }
+# GPUI's native Metal renderer is the macOS default. Enabling `macos-blade`
+# replaces it with BladeRenderer.
+gpui = "0.2.2"
 gpui-component = { path = "vendor/gpui-component" }
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }

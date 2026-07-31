@@ -1,0 +1,4 @@
+[env]
+# Xcode ships the Metal compiler as an optional toolchain. GPUI's build script
+# invokes `xcrun metal`, so select that toolchain for precompiled shaders.
+TOOLCHAINS = "Metal"
