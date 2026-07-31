@@ -24,6 +24,7 @@ pub fn provider_color(provider: ProviderKind) -> Hsla {
         ProviderKind::Codex => rgb(0xF1F1F1).into(),
         ProviderKind::OpenCode => rgb(0xF1ECEC).into(),
         ProviderKind::Grok => rgb(0xF5F5F5).into(),
+        ProviderKind::Pi => rgb(0xF5F5F5).into(),
     }
 }
 
@@ -34,6 +35,7 @@ pub fn provider_icon(provider: ProviderKind) -> &'static str {
         ProviderKind::Codex => "icons/provider-openai.svg",
         ProviderKind::OpenCode => "icons/provider-opencode.svg",
         ProviderKind::Grok => "icons/provider-grok.svg",
+        ProviderKind::Pi => "icons/provider-pi.svg",
     }
 }
 

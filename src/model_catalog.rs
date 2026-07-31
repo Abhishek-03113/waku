@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use crate::model::{ProviderKind, ProviderModel, ProviderModelOption};
 
 const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+const PI_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     match provider {
@@ -48,6 +49,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::Grok => {
             vec![ProviderModel::new("grok-build", "Grok Build").default()]
         }
+        // Pi's catalog depends on the user's configured LLM providers. A
+        // fabricated fallback would make unavailable models look selectable.
+        ProviderKind::Pi => Vec::new(),
     }
 }
 
@@ -60,6 +64,7 @@ pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderMod
         ProviderKind::Claude => Vec::new(),
         ProviderKind::OpenCode => discover_opencode_models(binary),
         ProviderKind::Grok => discover_grok_models(binary),
+        ProviderKind::Pi => discover_pi_models(binary),
     };
     if discovered.is_empty() {
         fallback_models(provider)
@@ -141,6 +146,140 @@ fn parse_grok_models(output: &str) -> Vec<ProviderModel> {
             model.is_default = default_model.as_deref() == Some(id);
             Some(model)
         })
+        .collect()
+}
+
+fn discover_pi_models(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(mut child) = crate::command_env::command(binary)
+        .args([
+            "--mode",
+            "rpc",
+            "--no-session",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-context-files",
+        ])
+        .env("PI_SKIP_VERSION_CHECK", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        return Vec::new();
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return Vec::new();
+    };
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                let _ = tx.send(value);
+            }
+        }
+    });
+
+    let state_request = json!({"id": "waku-state", "type": "get_state"});
+    let models_request = json!({"id": "waku-models", "type": "get_available_models"});
+    let result = if write_json_line(&mut stdin, &state_request).is_ok()
+        && let Some(state) = recv_pi_rpc_response(&rx, "waku-state", PI_RPC_TIMEOUT)
+        && write_json_line(&mut stdin, &models_request).is_ok()
+        && let Some(models) = recv_pi_rpc_response(&rx, "waku-models", PI_RPC_TIMEOUT)
+    {
+        parse_pi_model_response(&state, &models)
+    } else {
+        Vec::new()
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn parse_pi_model_response(state: &Value, response: &Value) -> Vec<ProviderModel> {
+    let default_provider = state
+        .pointer("/data/model/provider")
+        .and_then(Value::as_str);
+    let default_model = state.pointer("/data/model/id").and_then(Value::as_str);
+    let default_slug = default_provider
+        .zip(default_model)
+        .map(|(provider, model)| format!("{provider}/{model}"));
+    let current_thinking = state.pointer("/data/thinkingLevel").and_then(Value::as_str);
+
+    response
+        .pointer("/data/models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let provider = value.get("provider").and_then(Value::as_str)?;
+            let model_id = value.get("id").and_then(Value::as_str)?;
+            if provider.trim().is_empty() || model_id.trim().is_empty() {
+                return None;
+            }
+            let slug = format!("{provider}/{model_id}");
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| display_name_from_slug(model_id));
+            let mut model = ProviderModel::new(slug.clone(), name)
+                .sub_provider(display_name_from_slug(provider));
+            model.is_default = default_slug.as_deref() == Some(slug.as_str());
+            model.reasoning_efforts = pi_reasoning_options(value);
+            if !model.reasoning_efforts.is_empty() {
+                let preferred = model
+                    .is_default
+                    .then_some(current_thinking)
+                    .flatten()
+                    .filter(|effort| {
+                        model
+                            .reasoning_efforts
+                            .iter()
+                            .any(|option| option.id == **effort)
+                    })
+                    .or_else(|| {
+                        model
+                            .reasoning_efforts
+                            .iter()
+                            .any(|option| option.id == "medium")
+                            .then_some("medium")
+                    })
+                    .or_else(|| {
+                        model
+                            .reasoning_efforts
+                            .first()
+                            .map(|option| option.id.as_str())
+                    });
+                model.default_reasoning_effort = preferred.map(str::to_owned);
+            }
+            Some(model)
+        })
+        .collect()
+}
+
+fn pi_reasoning_options(model: &Value) -> Vec<ProviderModelOption> {
+    if model.get("reasoning").and_then(Value::as_bool) != Some(true) {
+        return Vec::new();
+    }
+    let level_map = model.get("thinkingLevelMap").and_then(Value::as_object);
+    ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+        .into_iter()
+        .filter(|level| {
+            let mapped = level_map.and_then(|map| map.get(*level));
+            if matches!(*level, "xhigh" | "max") {
+                mapped.is_some_and(|value| !value.is_null())
+            } else {
+                mapped.is_none_or(|value| !value.is_null())
+            }
+        })
+        .map(|level| ProviderModelOption::new(level, reasoning_effort_label(level)))
         .collect()
 }
 
@@ -352,6 +491,17 @@ fn recv_rpc_response(rx: &Receiver<Value>, id: u64, timeout: Duration) -> Option
     }
 }
 
+fn recv_pi_rpc_response(rx: &Receiver<Value>, id: &str, timeout: Duration) -> Option<Value> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let value = rx.recv_timeout(remaining).ok()?;
+        if value.get("id").and_then(Value::as_str) == Some(id) {
+            return (value.get("success").and_then(Value::as_bool) == Some(true)).then_some(value);
+        }
+    }
+}
+
 fn write_json_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
     serde_json::to_writer(&mut *writer, value)?;
     writer.write_all(b"\n")?;
@@ -493,5 +643,55 @@ mod tests {
             models[0].service_tiers[0].description.as_deref(),
             Some("Priority processing")
         );
+    }
+
+    #[test]
+    fn parses_pi_models_and_model_specific_thinking_levels() {
+        let state = json!({
+            "id": "waku-state",
+            "type": "response",
+            "success": true,
+            "data": {
+                "model": {"provider": "github-copilot", "id": "gpt-5.6-terra"},
+                "thinkingLevel": "xhigh"
+            }
+        });
+        let response = json!({
+            "id": "waku-models",
+            "type": "response",
+            "success": true,
+            "data": {"models": [
+                {
+                    "provider": "github-copilot",
+                    "id": "gpt-5.6-terra",
+                    "name": "GPT-5.6 Terra",
+                    "reasoning": true,
+                    "thinkingLevelMap": {"off": null, "xhigh": "xhigh", "max": "max"}
+                },
+                {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                    "name": "GPT-4o mini",
+                    "reasoning": false
+                }
+            ]}
+        });
+
+        let models = parse_pi_model_response(&state, &response);
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "github-copilot/gpt-5.6-terra");
+        assert_eq!(models[0].sub_provider.as_deref(), Some("Github Copilot"));
+        assert!(models[0].is_default);
+        assert_eq!(
+            models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("xhigh"));
+        assert!(models[1].reasoning_efforts.is_empty());
     }
 }

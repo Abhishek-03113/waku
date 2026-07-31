@@ -35,6 +35,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "provider-grok",
     "provider-openai",
     "provider-opencode",
+    "provider-pi",
     "search",
     "slash",
     "sparkle",

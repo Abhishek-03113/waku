@@ -1,5 +1,6 @@
 mod codex;
 mod headless;
+mod pi;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,6 +57,7 @@ pub fn start(
 ) -> anyhow::Result<DriverHandle> {
     let inner: Arc<dyn DriverControl> = match provider {
         ProviderKind::Codex => Arc::new(codex::CodexDriver::start(options, events)?),
+        ProviderKind::Pi => Arc::new(pi::PiDriver::start(options, events)?),
         ProviderKind::Claude | ProviderKind::OpenCode | ProviderKind::Grok => {
             Arc::new(headless::HeadlessDriver::start(provider, options, events)?)
         }

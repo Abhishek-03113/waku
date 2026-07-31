@@ -13,6 +13,7 @@ The first MVP supports:
 | Codex CLI | `app-server` JSON-RPC | `thread/start` and `thread/resume` | `thread/rollback` |
 | OpenCode | Native JSON events | Native OpenCode session cursor | Not exposed by this transport |
 | Grok Build | Native `streaming-json` | Native Grok session cursor | Not exposed by this transport |
+| Pi | Native RPC JSONL | Pi session file and ID | Not exposed by this transport |
 
 Each provider is connected through its strongest structured interface and
 translated into Waku's small, provider-neutral event model. Grok uses its
@@ -62,8 +63,10 @@ Running `cargo run` directly is useful for quick terminal debugging, but it
 launches a bare executable without the macOS app-bundle identity used by
 accessibility tools.
 
-Waku detects `claude`, `codex`, `opencode`, and `grok` at launch. Existing CLI
-authentication and configuration remain owned by each provider.
+Waku detects `claude`, `codex`, `opencode`, `grok`, and `pi` at launch. Existing
+CLI authentication and configuration remain owned by each provider. Pi models
+are read from its live RPC catalog, including model-specific thinking levels;
+Waku does not invent fallback Pi models.
 
 To produce a native app bundle:
 
@@ -109,6 +112,8 @@ notarization options.
   traits menu.
 - Choose Supervised, Auto-accept edits, Auto, or Full access independently from
   the Build/Plan interaction mode.
+- Pi currently supports Build with Full access; unsupported Pi access modes
+  fail explicitly instead of pretending to provide approval semantics.
 - Stop the active turn with `Escape`.
 - In a Git project, revert a completed Codex turn from its checkpoint action.
 - Toggle the sidebar with `⌘⇧S` and focus the composer with `⌘L`.
@@ -123,10 +128,10 @@ data directory described above. No telemetry or remote Waku service is involved.
 activity, permissions, completion, and errors. `src/app.rs` owns the GPUI view
 state and never parses a provider wire format.
 
-The MVP keeps the Codex transport alive for a session. Claude Code, OpenCode,
-and Grok use resumable per-turn processes, preserving their native session IDs.
-The next product layer is richer provider-native configuration: structured
-diffs, file attachments, and OpenCode's managed server API.
+The MVP keeps the Codex and Pi transports alive for a session. Claude Code,
+OpenCode, and Grok use resumable per-turn processes, preserving their native
+session IDs. The next product layer is richer provider-native configuration:
+structured diffs, file attachments, and OpenCode's managed server API.
 
 ### Sessions and checkpoints
 

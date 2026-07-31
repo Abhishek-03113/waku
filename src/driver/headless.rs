@@ -256,7 +256,7 @@ fn run_prompt(
                 }
             }
         }
-        ProviderKind::Codex => return None,
+        ProviderKind::Codex | ProviderKind::Pi => return None,
     }
     let result = command
         .stdout(Stdio::piped())
@@ -306,7 +306,7 @@ fn run_prompt(
                     ProviderKind::Claude => parser.parse_claude(value, events),
                     ProviderKind::OpenCode => parser.parse_opencode(value, events),
                     ProviderKind::Grok => parser.parse_grok(value, events),
-                    ProviderKind::Codex => {}
+                    ProviderKind::Codex | ProviderKind::Pi => {}
                 }
             }
         }

@@ -12,10 +12,17 @@ pub enum ProviderKind {
     Codex,
     OpenCode,
     Grok,
+    Pi,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::OpenCode, Self::Grok];
+    pub const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::OpenCode,
+        Self::Grok,
+        Self::Pi,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -23,6 +30,7 @@ impl ProviderKind {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
+            Self::Pi => "pi",
         }
     }
 
@@ -32,6 +40,7 @@ impl ProviderKind {
             Self::Codex => "Codex CLI",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
+            Self::Pi => "Pi",
         }
     }
 
@@ -41,6 +50,7 @@ impl ProviderKind {
             Self::Codex => "Codex",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
+            Self::Pi => "Pi",
         }
     }
 
@@ -50,6 +60,7 @@ impl ProviderKind {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
+            Self::Pi => "pi",
         }
     }
 
@@ -79,6 +90,11 @@ pub enum ProviderResumeCursor {
     Grok {
         session_id: String,
     },
+    Pi {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_file: Option<PathBuf>,
+    },
 }
 
 impl ProviderResumeCursor {
@@ -91,6 +107,10 @@ impl ProviderResumeCursor {
             ProviderKind::Codex => Self::Codex { thread_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::Grok => Self::Grok { session_id: id },
+            ProviderKind::Pi => Self::Pi {
+                session_id: id,
+                session_file: None,
+            },
         }
     }
 
@@ -100,6 +120,7 @@ impl ProviderResumeCursor {
             Self::Codex { .. } => ProviderKind::Codex,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
+            Self::Pi { .. } => ProviderKind::Pi,
         }
     }
 
@@ -107,7 +128,8 @@ impl ProviderResumeCursor {
         match self {
             Self::Claude { session_id, .. }
             | Self::OpenCode { session_id }
-            | Self::Grok { session_id } => session_id,
+            | Self::Grok { session_id }
+            | Self::Pi { session_id, .. } => session_id,
             Self::Codex { thread_id } => thread_id,
         }
     }
@@ -889,6 +911,7 @@ mod tests {
         assert_eq!(ProviderKind::Codex.command(), "codex");
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
+        assert_eq!(ProviderKind::Pi.command(), "pi");
     }
 
     #[test]
