@@ -353,7 +353,7 @@ impl Waku {
                     .flex_1()
                     .overflow_y_scroll()
                     .px(px(10.0))
-                    .pt(px(12.0))
+                    .pt(px(2.0))
                     .child(sessions),
             )
     }
