@@ -52,6 +52,65 @@ impl ProviderKind {
             Self::Grok => "grok",
         }
     }
+
+    pub fn supports_conversation_rollback(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "provider"
+)]
+pub enum ProviderResumeCursor {
+    Claude {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_at: Option<String>,
+    },
+    Codex {
+        thread_id: String,
+    },
+    OpenCode {
+        session_id: String,
+    },
+    Grok {
+        session_id: String,
+    },
+}
+
+impl ProviderResumeCursor {
+    pub fn from_session_id(provider: ProviderKind, id: String) -> Self {
+        match provider {
+            ProviderKind::Claude => Self::Claude {
+                session_id: id,
+                resume_at: None,
+            },
+            ProviderKind::Codex => Self::Codex { thread_id: id },
+            ProviderKind::OpenCode => Self::OpenCode { session_id: id },
+            ProviderKind::Grok => Self::Grok { session_id: id },
+        }
+    }
+
+    pub fn provider(&self) -> ProviderKind {
+        match self {
+            Self::Claude { .. } => ProviderKind::Claude,
+            Self::Codex { .. } => ProviderKind::Codex,
+            Self::OpenCode { .. } => ProviderKind::OpenCode,
+            Self::Grok { .. } => ProviderKind::Grok,
+        }
+    }
+
+    pub fn native_id(&self) -> &str {
+        match self {
+            Self::Claude { session_id, .. }
+            | Self::OpenCode { session_id }
+            | Self::Grok { session_id } => session_id,
+            Self::Codex { thread_id } => thread_id,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -169,6 +228,53 @@ pub enum SessionStatus {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TurnStatus {
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckpointStatus {
+    Ready,
+    Unavailable,
+    Error,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CheckpointFile {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Checkpoint {
+    pub turn_count: usize,
+    pub git_ref: String,
+    pub status: CheckpointStatus,
+    #[serde(default)]
+    pub files: Vec<CheckpointFile>,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AgentTurn {
+    pub id: Uuid,
+    pub turn_count: usize,
+    pub status: TurnStatus,
+    #[serde(default)]
+    pub provider_turn_started: bool,
+    pub started_at: u64,
+    pub completed_at: Option<u64>,
+    #[serde(default)]
+    pub checkpoint: Option<Checkpoint>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentSession {
     pub id: Uuid,
@@ -179,10 +285,16 @@ pub struct AgentSession {
     pub status: SessionStatus,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(default)]
+    pub provider_cursor: Option<ProviderResumeCursor>,
+    /// Read-only compatibility field for v1 state files. New saves omit it.
+    #[serde(default, skip_serializing)]
     pub provider_session_id: Option<String>,
     pub messages: Vec<Message>,
     #[serde(default)]
     pub transcript_blocks: Vec<TranscriptBlock>,
+    #[serde(default)]
+    pub turns: Vec<AgentTurn>,
 }
 
 impl AgentSession {
@@ -197,9 +309,11 @@ impl AgentSession {
             status: SessionStatus::Idle,
             created_at: now,
             updated_at: now,
+            provider_cursor: None,
             provider_session_id: None,
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
+            turns: Vec::new(),
         }
     }
 
@@ -219,6 +333,147 @@ impl AgentSession {
             self.title = title;
         }
     }
+
+    pub fn migrate_legacy_state(&mut self) {
+        if self.provider_cursor.is_none()
+            && let Some(id) = self.provider_session_id.take()
+        {
+            self.provider_cursor = Some(ProviderResumeCursor::from_session_id(self.provider, id));
+        }
+
+        if !self.turns.is_empty()
+            || !self
+                .messages
+                .iter()
+                .any(|message| message.role == MessageRole::User)
+        {
+            return;
+        }
+
+        let user_indexes = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| (message.role == MessageRole::User).then_some(index))
+            .collect::<Vec<_>>();
+        for (offset, start) in user_indexes.iter().copied().enumerate() {
+            let end = user_indexes
+                .get(offset + 1)
+                .copied()
+                .unwrap_or(self.messages.len());
+            let id = Uuid::new_v4();
+            let started_at = self.messages[start].created_at;
+            let completed_at = self.messages[start..end]
+                .iter()
+                .map(|message| message.created_at)
+                .max()
+                .unwrap_or(started_at);
+            for message in &mut self.messages[start..end] {
+                message.turn_id = Some(id);
+            }
+            for block in &mut self.transcript_blocks {
+                if block.after_message > start && block.after_message <= end {
+                    block.turn_id = Some(id);
+                }
+            }
+            self.turns.push(AgentTurn {
+                id,
+                turn_count: offset + 1,
+                status: TurnStatus::Completed,
+                provider_turn_started: true,
+                started_at,
+                completed_at: Some(completed_at),
+                checkpoint: None,
+            });
+        }
+    }
+
+    pub fn begin_turn(&mut self, prompt: impl Into<String>) -> Uuid {
+        let id = Uuid::new_v4();
+        let now = unix_time();
+        self.turns.push(AgentTurn {
+            id,
+            turn_count: self.turns.len() + 1,
+            status: TurnStatus::Running,
+            provider_turn_started: false,
+            started_at: now,
+            completed_at: None,
+            checkpoint: None,
+        });
+        self.messages
+            .push(Message::new_for_turn(MessageRole::User, prompt, id));
+        id
+    }
+
+    pub fn active_turn_id(&self) -> Option<Uuid> {
+        self.turns
+            .last()
+            .filter(|turn| turn.status == TurnStatus::Running)
+            .map(|turn| turn.id)
+    }
+
+    pub fn mark_active_turn_provider_started(&mut self) {
+        if let Some(turn) = self
+            .turns
+            .last_mut()
+            .filter(|turn| turn.status == TurnStatus::Running)
+        {
+            turn.provider_turn_started = true;
+        }
+    }
+
+    pub fn provider_turns_after(&self, turn_count: usize) -> usize {
+        self.turns
+            .iter()
+            .skip(turn_count)
+            .filter(|turn| turn.provider_turn_started)
+            .count()
+    }
+
+    pub fn finish_active_turn(&mut self, status: TurnStatus) -> Option<(Uuid, usize)> {
+        let turn = self
+            .turns
+            .last_mut()
+            .filter(|turn| turn.status == TurnStatus::Running)?;
+        turn.status = status;
+        turn.completed_at = Some(unix_time());
+        Some((turn.id, turn.turn_count))
+    }
+
+    pub fn push_message(&mut self, role: MessageRole, content: impl Into<String>) -> Uuid {
+        let message = match self.active_turn_id() {
+            Some(turn_id) => Message::new_for_turn(role, content, turn_id),
+            None => Message::new(role, content),
+        };
+        let id = message.id;
+        self.messages.push(message);
+        id
+    }
+
+    pub fn truncate_after_turn(&mut self, turn_count: usize) {
+        let retained = self
+            .turns
+            .iter()
+            .take(turn_count)
+            .map(|turn| turn.id)
+            .collect::<std::collections::HashSet<_>>();
+        self.turns.truncate(turn_count);
+        self.messages.retain(|message| {
+            message
+                .turn_id
+                .is_none_or(|turn_id| retained.contains(&turn_id))
+        });
+        self.transcript_blocks.retain(|block| {
+            block
+                .turn_id
+                .is_none_or(|turn_id| retained.contains(&turn_id))
+        });
+        let message_count = self.messages.len();
+        for block in &mut self.transcript_blocks {
+            block.after_message = block.after_message.min(message_count);
+        }
+        self.updated_at = unix_time();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -232,6 +487,8 @@ pub enum MessageRole {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Message {
     pub id: Uuid,
+    #[serde(default)]
+    pub turn_id: Option<Uuid>,
     pub role: MessageRole,
     pub content: String,
     pub created_at: u64,
@@ -242,10 +499,18 @@ impl Message {
     pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4(),
+            turn_id: None,
             role,
             content: content.into(),
             created_at: unix_time(),
             streaming: false,
+        }
+    }
+
+    pub fn new_for_turn(role: MessageRole, content: impl Into<String>, turn_id: Uuid) -> Self {
+        Self {
+            turn_id: Some(turn_id),
+            ..Self::new(role, content)
         }
     }
 }
@@ -264,7 +529,7 @@ pub enum ActivityKind {
 #[derive(Clone, Debug)]
 pub enum DriverEvent {
     Connected {
-        provider_session_id: Option<String>,
+        provider_cursor: Option<ProviderResumeCursor>,
     },
     TurnStarted,
     TextDelta(String),
@@ -345,6 +610,8 @@ pub enum TranscriptBlockContent {
 pub struct TranscriptBlock {
     /// Render this block immediately after this many persisted messages.
     pub after_message: usize,
+    #[serde(default)]
+    pub turn_id: Option<Uuid>,
     pub content: TranscriptBlockContent,
 }
 
@@ -416,5 +683,75 @@ mod tests {
         session.set_title_from_prompt(&prompt);
         assert_eq!(session.title.chars().count(), 54);
         assert!(session.title.ends_with('…'));
+    }
+
+    #[test]
+    fn turn_truncation_removes_owned_messages_and_blocks() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+
+        let first_turn = session.begin_turn("first");
+        session.push_message(MessageRole::Assistant, "first answer");
+        session.transcript_blocks.push(TranscriptBlock {
+            after_message: 2,
+            turn_id: Some(first_turn),
+            content: TranscriptBlockContent::Activities(Vec::new()),
+        });
+        session.finish_active_turn(TurnStatus::Completed);
+
+        let second_turn = session.begin_turn("second");
+        session.push_message(MessageRole::Assistant, "second answer");
+        session.transcript_blocks.push(TranscriptBlock {
+            after_message: 4,
+            turn_id: Some(second_turn),
+            content: TranscriptBlockContent::Activities(Vec::new()),
+        });
+        session.finish_active_turn(TurnStatus::Completed);
+
+        session.truncate_after_turn(1);
+
+        assert_eq!(session.turns.len(), 1);
+        assert_eq!(session.turns[0].id, first_turn);
+        assert_eq!(session.messages.len(), 2);
+        assert!(
+            session
+                .messages
+                .iter()
+                .all(|message| message.turn_id == Some(first_turn))
+        );
+        assert_eq!(session.transcript_blocks.len(), 1);
+        assert_eq!(session.transcript_blocks[0].turn_id, Some(first_turn));
+        assert_eq!(session.transcript_blocks[0].after_message, 2);
+    }
+
+    #[test]
+    fn provider_resume_cursor_is_explicitly_tagged() {
+        let cursor = ProviderResumeCursor::Claude {
+            session_id: "session-1".into(),
+            resume_at: Some("message-9".into()),
+        };
+        let value = serde_json::to_value(&cursor).unwrap();
+        assert_eq!(value["provider"], "claude");
+        assert_eq!(value["sessionId"], "session-1");
+        assert_eq!(value["resumeAt"], "message-9");
+    }
+
+    #[test]
+    fn native_rollback_count_ignores_turns_that_never_reached_the_provider() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+
+        session.begin_turn("first");
+        session.mark_active_turn_provider_started();
+        session.finish_active_turn(TurnStatus::Completed);
+        session.begin_turn("failed locally");
+        session.finish_active_turn(TurnStatus::Failed);
+        session.begin_turn("third");
+        session.mark_active_turn_provider_started();
+        session.finish_active_turn(TurnStatus::Completed);
+
+        assert_eq!(session.provider_turns_after(1), 1);
+        assert_eq!(session.provider_turns_after(2), 1);
+        assert_eq!(session.provider_turns_after(3), 0);
     }
 }

@@ -1,5 +1,6 @@
 mod app;
 mod assets;
+mod checkpoint;
 mod driver;
 mod input;
 mod model;

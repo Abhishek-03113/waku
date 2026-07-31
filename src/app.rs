@@ -12,12 +12,14 @@ use gpui::{
 };
 use uuid::Uuid;
 
+use crate::checkpoint;
 use crate::driver::{self, DriverHandle};
 use crate::input::{ComposerEvent, ComposerInput, preserve_composer_focus_for_context_menu};
 use crate::model::{
-    ActivityItem, AgentSession, DriverEvent, Message, MessageRole, PendingPermission, Project,
-    ProviderKind, ProviderProbe, ReasoningBlock, RuntimeMode, SessionStatus, TranscriptBlock,
-    TranscriptBlockContent, compact_path, unix_time, unix_time_millis,
+    ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, Message, MessageRole,
+    PendingPermission, Project, ProviderKind, ProviderProbe, ReasoningBlock, RuntimeMode,
+    SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time,
+    unix_time_millis,
 };
 use gpui_component::Icon as ComponentIcon;
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -56,6 +58,15 @@ enum StreamDeltaKind {
     Reasoning,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CheckpointAction {
+    session_id: Uuid,
+    turn_count: usize,
+    file_count: usize,
+    can_revert: bool,
+    confirmed: bool,
+}
+
 pub struct Waku {
     state: PersistedState,
     store: StateStore,
@@ -78,6 +89,7 @@ pub struct Waku {
     sidebar_visible: bool,
     branch: Option<String>,
     toast: Option<String>,
+    pending_revert: Option<(Uuid, usize)>,
     transcript_rows: ListState,
 }
 
@@ -87,9 +99,43 @@ impl Waku {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
         let mut state = store.load_or_fresh(cwd);
+        let project_paths = state
+            .projects
+            .iter()
+            .map(|project| (project.id, project.path.clone()))
+            .collect::<HashMap<_, _>>();
         for session in &mut state.sessions {
+            session.migrate_legacy_state();
             if session.status != SessionStatus::Idle {
                 session.status = SessionStatus::Idle;
+            }
+            let interrupted_turn = if let Some(turn) = session
+                .turns
+                .last_mut()
+                .filter(|turn| turn.status == TurnStatus::Running)
+            {
+                turn.status = TurnStatus::Interrupted;
+                turn.completed_at = Some(unix_time());
+                Some(turn.turn_count)
+            } else {
+                None
+            };
+            if let Some(turn_count) = interrupted_turn
+                && let Some(project_path) = project_paths.get(&session.project_id)
+            {
+                let turn_checkpoint =
+                    checkpoint::capture_turn(project_path, session.id, turn_count).unwrap_or_else(
+                        |_| Checkpoint {
+                            turn_count,
+                            git_ref: checkpoint::checkpoint_ref(session.id, turn_count),
+                            status: CheckpointStatus::Error,
+                            files: Vec::new(),
+                            created_at: unix_time(),
+                        },
+                    );
+                if let Some(turn) = session.turns.last_mut() {
+                    turn.checkpoint = Some(turn_checkpoint);
+                }
             }
             for message in &mut session.messages {
                 message.streaming = false;
@@ -171,6 +217,7 @@ impl Waku {
                 sidebar_visible: true,
                 branch,
                 toast: None,
+                pending_revert: None,
                 transcript_rows: ListState::new(0, ListAlignment::Bottom, px(512.0)),
             }
         })
@@ -213,6 +260,245 @@ impl Waku {
         }
     }
 
+    fn capture_latest_turn_checkpoint(&mut self) {
+        let Some((session_id, project_id, turn_count)) =
+            self.selected_session().and_then(|session| {
+                session
+                    .turns
+                    .last()
+                    .filter(|turn| turn.status != TurnStatus::Running)
+                    .map(|turn| (session.id, session.project_id, turn.turn_count))
+            })
+        else {
+            return;
+        };
+        let Some(project_path) = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| project.path.clone())
+        else {
+            return;
+        };
+
+        let checkpoint = match checkpoint::capture_turn(&project_path, session_id, turn_count) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                self.toast = Some(format!("Could not capture the turn checkpoint: {error}"));
+                Checkpoint {
+                    turn_count,
+                    git_ref: checkpoint::checkpoint_ref(session_id, turn_count),
+                    status: CheckpointStatus::Error,
+                    files: Vec::new(),
+                    created_at: unix_time(),
+                }
+            }
+        };
+        if let Some(session) = self
+            .state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            && let Some(turn) = session
+                .turns
+                .iter_mut()
+                .find(|turn| turn.turn_count == turn_count)
+        {
+            turn.checkpoint = Some(checkpoint);
+        }
+    }
+
+    fn request_checkpoint_revert(
+        &mut self,
+        session_id: Uuid,
+        turn_count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_revert == Some((session_id, turn_count)) {
+            self.pending_revert = None;
+            self.revert_to_checkpoint(session_id, turn_count, cx);
+            return;
+        }
+
+        let discarded_turns = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| session.turns.len().saturating_sub(turn_count))
+            .unwrap_or_default();
+        self.pending_revert = Some((session_id, turn_count));
+        self.toast = Some(if discarded_turns == 0 {
+            "Click “Confirm revert” to restore the workspace to this checkpoint.".into()
+        } else {
+            format!(
+                "Click “Confirm revert” to restore the workspace and discard {discarded_turns} later turn(s)."
+            )
+        });
+        cx.notify();
+    }
+
+    fn revert_to_checkpoint(
+        &mut self,
+        session_id: Uuid,
+        turn_count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((
+            project_id,
+            provider,
+            status,
+            provider_cursor,
+            previous_turn_count,
+            rollback_turns,
+            checkpoint,
+        )) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| {
+                session
+                    .turns
+                    .iter()
+                    .find(|turn| turn.turn_count == turn_count)
+                    .and_then(|turn| turn.checkpoint.clone())
+                    .map(|checkpoint| {
+                        (
+                            session.project_id,
+                            session.provider,
+                            session.status,
+                            session.provider_cursor.clone(),
+                            session.turns.len(),
+                            session.provider_turns_after(turn_count),
+                            checkpoint,
+                        )
+                    })
+            })
+        else {
+            self.toast = Some("That checkpoint is no longer available.".into());
+            cx.notify();
+            return;
+        };
+        if self.state.selected_session != Some(session_id) {
+            self.toast = Some("Select the task before reverting its checkpoint.".into());
+            cx.notify();
+            return;
+        }
+        if status != SessionStatus::Idle {
+            self.toast = Some("Stop the current turn before reverting a checkpoint.".into());
+            cx.notify();
+            return;
+        }
+        if checkpoint.status != CheckpointStatus::Ready {
+            self.toast = Some("This turn does not have a restorable Git checkpoint.".into());
+            cx.notify();
+            return;
+        }
+        if !provider.supports_conversation_rollback() || provider_cursor.is_none() {
+            self.toast = Some(format!(
+                "{} cannot safely roll back its native conversation yet.",
+                provider.display_name()
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(project_path) = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| project.path.clone())
+        else {
+            self.toast = Some("The task's project could not be found.".into());
+            cx.notify();
+            return;
+        };
+        if !checkpoint::has_ref(&project_path, &checkpoint.git_ref) {
+            self.toast = Some("The checkpoint's hidden Git ref is missing.".into());
+            cx.notify();
+            return;
+        }
+
+        let safety_ref = format!("refs/waku/revert-backup-{session_id}-{}", Uuid::new_v4());
+        if let Err(error) = checkpoint::capture_ref(&project_path, &safety_ref) {
+            self.toast = Some(format!(
+                "Could not create a revert safety snapshot: {error}"
+            ));
+            cx.notify();
+            return;
+        }
+        if let Err(error) = checkpoint::restore_ref(&project_path, &checkpoint.git_ref) {
+            self.toast = Some(match checkpoint::restore_ref(&project_path, &safety_ref) {
+                Ok(()) => {
+                    let _ = checkpoint::delete_ref(&project_path, &safety_ref);
+                    format!("Could not restore the checkpoint: {error}")
+                }
+                Err(restore_error) => format!(
+                    "Checkpoint restore failed ({error}); safety restore also failed ({restore_error}). Recovery ref retained at {safety_ref}."
+                ),
+            });
+            cx.notify();
+            return;
+        }
+
+        if rollback_turns > 0 {
+            let rollback_result = self
+                .ensure_driver()
+                .and_then(|driver| driver.rollback(rollback_turns));
+            if let Err(error) = rollback_result {
+                let restore_result = checkpoint::restore_ref(&project_path, &safety_ref);
+                self.toast = Some(match restore_result {
+                    Ok(()) => {
+                        let _ = checkpoint::delete_ref(&project_path, &safety_ref);
+                        format!(
+                            "The provider rejected the rollback, so the workspace was restored: {error}"
+                        )
+                    }
+                    Err(restore_error) => format!(
+                        "Provider rollback failed ({error}) and the safety snapshot could not be restored ({restore_error}). Recovery ref retained at {safety_ref}."
+                    ),
+                });
+                cx.notify();
+                return;
+            }
+        }
+
+        let _ = checkpoint::delete_ref(&project_path, &safety_ref);
+        let cleanup_result = checkpoint::delete_turn_refs_after(
+            &project_path,
+            session_id,
+            turn_count,
+            previous_turn_count,
+        );
+        if let Some(session) = self
+            .state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.truncate_after_turn(turn_count);
+            session.status = SessionStatus::Idle;
+        }
+        self.pending_driver_events.clear();
+        self.stream_remeasure_pending = false;
+        self.stream_phase = None;
+        self.reasoning_expanded.clear();
+        self.activities_expanded.clear();
+        self.expanded_activity_items.clear();
+        self.pending_permission = None;
+        self.transcript_rows.reset(self.transcript_row_count());
+        self.toast = Some(match cleanup_result {
+            Ok(()) => format!("Restored checkpoint after turn {turn_count}."),
+            Err(error) => {
+                format!("Restored checkpoint after turn {turn_count}; stale refs remain: {error}")
+            }
+        });
+        self.save();
+        cx.notify();
+    }
+
     fn ensure_driver(&mut self) -> anyhow::Result<DriverHandle> {
         let session = self
             .selected_session()
@@ -246,7 +532,7 @@ impl Waku {
             binary,
             project.path.clone(),
             session.runtime_mode,
-            session.provider_session_id.clone(),
+            session.provider_cursor.clone(),
             event_tx,
         )?;
         self.driver = Some(handle.clone());
@@ -256,23 +542,46 @@ impl Waku {
     }
 
     fn submit_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session_mut() else {
+        let Some((session_id, project_id, status, next_turn_count)) =
+            self.selected_session().map(|session| {
+                (
+                    session.id,
+                    session.project_id,
+                    session.status,
+                    session.turns.len() + 1,
+                )
+            })
+        else {
             return;
         };
         if matches!(
-            session.status,
-            SessionStatus::Working | SessionStatus::Connecting
+            status,
+            SessionStatus::Working | SessionStatus::Connecting | SessionStatus::Waiting
         ) {
             self.toast = Some("The agent is already working. Stop it before sending again.".into());
             cx.notify();
             return;
         }
-        session.set_title_from_prompt(&prompt);
-        session
-            .messages
-            .push(Message::new(MessageRole::User, &prompt));
-        session.status = SessionStatus::Connecting;
-        session.updated_at = unix_time();
+        let project_path = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| project.path.clone());
+        let checkpoint_warning = project_path.as_deref().and_then(|path| {
+            let baseline_count = next_turn_count - 1;
+            let git_ref = checkpoint::checkpoint_ref(session_id, baseline_count);
+            (!checkpoint::has_ref(path, &git_ref))
+                .then(|| checkpoint::capture_turn(path, session_id, baseline_count).err())
+                .flatten()
+                .map(|error| format!("Could not capture the pre-turn checkpoint: {error}"))
+        });
+        if let Some(session) = self.selected_session_mut() {
+            session.set_title_from_prompt(&prompt);
+            session.begin_turn(&prompt);
+            session.status = SessionStatus::Connecting;
+            session.updated_at = unix_time();
+        }
         self.pending_driver_events.clear();
         self.stream_remeasure_pending = false;
         self.stream_phase = None;
@@ -280,19 +589,24 @@ impl Waku {
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.pending_permission = None;
-        self.toast = None;
+        self.pending_revert = None;
+        self.toast = checkpoint_warning;
         self.transcript_rows.reset(self.transcript_row_count());
+        let mut failed_to_start = false;
         match self.ensure_driver() {
             Ok(driver) => driver.prompt(prompt),
             Err(error) => {
+                failed_to_start = true;
                 let message = format!("Could not start the agent: {error}");
                 if let Some(session) = self.selected_session_mut() {
                     session.status = SessionStatus::Failed;
-                    session
-                        .messages
-                        .push(Message::new(MessageRole::Assistant, message));
+                    session.push_message(MessageRole::Assistant, message);
+                    session.finish_active_turn(TurnStatus::Failed);
                 }
             }
+        }
+        if failed_to_start {
+            self.capture_latest_turn_checkpoint();
         }
         self.save();
         cx.notify();
@@ -419,7 +733,12 @@ impl Waku {
             if let Some(Some(message)) = existing {
                 message.content.push_str(&delta);
             } else {
-                let mut message = Message::new(MessageRole::Assistant, delta);
+                let mut message = session
+                    .active_turn_id()
+                    .map(|turn_id| {
+                        Message::new_for_turn(MessageRole::Assistant, delta.clone(), turn_id)
+                    })
+                    .unwrap_or_else(|| Message::new(MessageRole::Assistant, delta));
                 message.streaming = true;
                 session.messages.push(message);
             }
@@ -449,6 +768,7 @@ impl Waku {
             } else {
                 session.transcript_blocks.push(TranscriptBlock {
                     after_message: session.messages.len(),
+                    turn_id: session.active_turn_id(),
                     content: TranscriptBlockContent::Reasoning(ReasoningBlock {
                         content: delta,
                         started_at_ms: now,
@@ -504,6 +824,7 @@ impl Waku {
                 && let Some(TranscriptBlock {
                     after_message: anchor,
                     content: TranscriptBlockContent::Activities(activities),
+                    ..
                 }) = session.transcript_blocks.last_mut()
                 && *anchor == after_message
             {
@@ -511,6 +832,7 @@ impl Waku {
             } else {
                 session.transcript_blocks.push(TranscriptBlock {
                     after_message,
+                    turn_id: session.active_turn_id(),
                     content: TranscriptBlockContent::Activities(vec![item]),
                 });
             }
@@ -532,44 +854,41 @@ impl Waku {
     }
 
     fn turn_has_assistant_message(&self) -> bool {
-        self.selected_session()
-            .and_then(|session| {
-                let last_user = session
-                    .messages
-                    .iter()
-                    .rposition(|message| message.role == MessageRole::User)?;
-                Some(
-                    session.messages[last_user + 1..]
-                        .iter()
-                        .any(|message| message.role == MessageRole::Assistant),
-                )
+        self.selected_session().is_some_and(|session| {
+            let Some(turn_id) = session.active_turn_id() else {
+                return false;
+            };
+            session.messages.iter().any(|message| {
+                message.role == MessageRole::Assistant && message.turn_id == Some(turn_id)
             })
-            .unwrap_or(false)
+        })
     }
 
     fn accepts_turn_output(&self) -> bool {
         self.selected_session().is_some_and(|session| {
-            matches!(
-                session.status,
-                SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
-            )
+            session.active_turn_id().is_some()
+                && matches!(
+                    session.status,
+                    SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
+                )
         })
     }
 
     fn handle_driver_event(&mut self, event: DriverEvent) {
         match event {
-            DriverEvent::Connected {
-                provider_session_id,
-            } => {
+            DriverEvent::Connected { provider_cursor } => {
                 if let Some(session) = self.selected_session_mut() {
-                    session.provider_session_id = provider_session_id;
+                    session.provider_cursor = provider_cursor;
                     if session.status == SessionStatus::Connecting {
                         session.status = SessionStatus::Working;
                     }
                 }
             }
             DriverEvent::TurnStarted => {
-                if let Some(session) = self.selected_session_mut() {
+                if let Some(session) = self.selected_session_mut()
+                    && session.active_turn_id().is_some()
+                {
+                    session.mark_active_turn_provider_started();
                     session.status = SessionStatus::Working;
                 }
             }
@@ -613,6 +932,13 @@ impl Waku {
                 }
             }
             DriverEvent::TurnFinished { success, summary } => {
+                if self
+                    .selected_session()
+                    .and_then(AgentSession::active_turn_id)
+                    .is_none()
+                {
+                    return;
+                }
                 self.finish_streaming_assistant();
                 self.complete_turn_blocks();
                 self.stream_phase = None;
@@ -624,7 +950,7 @@ impl Waku {
                         SessionStatus::Failed
                     };
                     if needs_fallback {
-                        session.messages.push(Message::new(
+                        session.push_message(
                             MessageRole::Assistant,
                             summary.unwrap_or_else(|| {
                                 if success {
@@ -633,33 +959,48 @@ impl Waku {
                                     "The agent stopped before returning a response.".into()
                                 }
                             }),
-                        ));
+                        );
                     }
+                    session.finish_active_turn(if success {
+                        TurnStatus::Completed
+                    } else {
+                        TurnStatus::Failed
+                    });
                 }
                 self.pending_permission = None;
+                self.capture_latest_turn_checkpoint();
             }
             DriverEvent::Error(error) => {
                 self.toast = Some(error.clone());
-                let should_append = !self.turn_has_assistant_message()
+                let has_active_turn = self
+                    .selected_session()
+                    .and_then(AgentSession::active_turn_id)
+                    .is_some();
+                let should_append = has_active_turn
+                    && !self.turn_has_assistant_message()
                     && self
                         .selected_session()
                         .is_some_and(|session| session.status != SessionStatus::Working);
-                if let Some(session) = self.selected_session_mut() {
+                if let Some(session) = self.selected_session_mut()
+                    && has_active_turn
+                {
                     if session.status != SessionStatus::Working {
                         session.status = SessionStatus::Failed;
                     }
                     if should_append {
-                        session
-                            .messages
-                            .push(Message::new(MessageRole::Assistant, error));
+                        session.push_message(MessageRole::Assistant, error);
                     }
                 }
             }
             DriverEvent::ProcessExited => {
+                self.driver = None;
+                self.driver_session = None;
+                self.driver_events = None;
                 self.finish_streaming_assistant();
                 self.complete_turn_blocks();
                 self.stream_phase = None;
                 self.pending_permission = None;
+                let mut finished_turn = false;
                 if let Some(session) = self.selected_session_mut()
                     && matches!(
                         session.status,
@@ -668,6 +1009,10 @@ impl Waku {
                 {
                     session.status = SessionStatus::Failed;
                     session.updated_at = unix_time();
+                    finished_turn = session.finish_active_turn(TurnStatus::Failed).is_some();
+                }
+                if finished_turn {
+                    self.capture_latest_turn_checkpoint();
                 }
             }
         }
@@ -735,8 +1080,18 @@ impl Waku {
             return;
         };
         let project_id = self.state.sessions[index].project_id;
+        let last_turn_count = self.state.sessions[index].turns.len();
+        let project_path = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| project.path.clone());
         let was_selected = self.state.selected_session == Some(session_id);
         self.state.sessions.remove(index);
+        if let Some(project_path) = project_path {
+            let _ = checkpoint::delete_session_refs(&project_path, session_id, last_turn_count);
+        }
 
         if !was_selected {
             self.save();
@@ -797,6 +1152,7 @@ impl Waku {
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.pending_permission = None;
+        self.pending_revert = None;
         self.toast = None;
     }
 
@@ -834,19 +1190,27 @@ impl Waku {
         while let Some(event) = self.pending_driver_events.pop_front() {
             self.handle_driver_event(event);
         }
+        let has_active_turn = self
+            .selected_session()
+            .and_then(AgentSession::active_turn_id)
+            .is_some();
         self.finish_streaming_assistant();
         self.complete_turn_blocks();
         self.stream_phase = None;
-        let needs_fallback = !self.turn_has_assistant_message();
-        if let Some(session) = self.selected_session_mut() {
-            session.status = SessionStatus::Idle;
-            if needs_fallback {
-                session
-                    .messages
-                    .push(Message::new(MessageRole::Assistant, "Stopped."));
+        if has_active_turn {
+            let needs_fallback = !self.turn_has_assistant_message();
+            if let Some(session) = self.selected_session_mut() {
+                session.status = SessionStatus::Idle;
+                if needs_fallback {
+                    session.push_message(MessageRole::Assistant, "Stopped.");
+                }
+                session.finish_active_turn(TurnStatus::Interrupted);
             }
         }
         self.pending_permission = None;
+        if has_active_turn {
+            self.capture_latest_turn_checkpoint();
+        }
         self.remeasure_transcript_tail();
         self.save();
         cx.notify();
@@ -1478,6 +1842,32 @@ impl Waku {
     /// list can measure it at its true wrap width. Current-turn reasoning and
     /// activity blocks are anchored at the exact boundary between assistant
     /// text segments where their provider events arrived.
+    fn checkpoint_action_for_message(&self, message_index: usize) -> Option<CheckpointAction> {
+        let session = self.selected_session()?;
+        let message = session.messages.get(message_index)?;
+        let turn_id = message.turn_id?;
+        if session.messages[message_index + 1..]
+            .iter()
+            .any(|later| later.turn_id == Some(turn_id))
+        {
+            return None;
+        }
+        let turn = session.turns.iter().find(|turn| turn.id == turn_id)?;
+        let checkpoint = turn
+            .checkpoint
+            .as_ref()
+            .filter(|checkpoint| checkpoint.status == CheckpointStatus::Ready)?;
+        Some(CheckpointAction {
+            session_id: session.id,
+            turn_count: turn.turn_count,
+            file_count: checkpoint.files.len(),
+            can_revert: session.status == SessionStatus::Idle
+                && session.provider.supports_conversation_rollback()
+                && session.provider_cursor.is_some(),
+            confirmed: self.pending_revert == Some((session.id, turn.turn_count)),
+        })
+    }
+
     fn transcript_row(
         &self,
         index: usize,
@@ -1486,6 +1876,7 @@ impl Waku {
     ) -> AnyElement {
         let theme = Theme::dark();
         let composer = self.composer.clone();
+        let waku = cx.entity().downgrade();
         let row_count = self.transcript_row_count();
         let message_count = self
             .selected_session()
@@ -1512,7 +1903,17 @@ impl Waku {
             TranscriptRowKind::Message(message_index) => self
                 .selected_session()
                 .and_then(|session| session.messages.get(message_index))
-                .map(|message| render_message(&theme, message, composer, window, cx))
+                .map(|message| {
+                    render_message(
+                        &theme,
+                        message,
+                        self.checkpoint_action_for_message(message_index),
+                        waku,
+                        composer,
+                        window,
+                        cx,
+                    )
+                })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnBlock(block_index) => self
                 .selected_transcript_blocks()
@@ -2375,6 +2776,8 @@ fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement 
 fn render_message(
     theme: &Theme,
     message: &Message,
+    checkpoint_action: Option<CheckpointAction>,
+    waku: gpui::WeakEntity<Waku>,
     composer: Entity<ComposerInput>,
     window: &mut Window,
     cx: &mut App,
@@ -2433,6 +2836,68 @@ fn render_message(
                     theme.accent,
                 ));
             }
+            if let Some(action) = checkpoint_action {
+                let checkpoint_label = if action.file_count == 0 {
+                    format!("Checkpoint {} · no file changes", action.turn_count)
+                } else {
+                    format!(
+                        "Checkpoint {} · {} file(s)",
+                        action.turn_count, action.file_count
+                    )
+                };
+                let weak = waku.clone();
+                column = column.child(
+                    div()
+                        .mt(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(10.5))
+                        .line_height(px(16.0))
+                        .text_color(theme.text_tertiary)
+                        .child(icon("icons/check.svg", 10.0, theme.text_tertiary))
+                        .child(SharedString::from(checkpoint_label))
+                        .when(action.can_revert, |element| {
+                            element.child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "revert-checkpoint-{}-{}",
+                                        action.session_id, action.turn_count
+                                    )))
+                                    .ml(px(2.0))
+                                    .px(px(7.0))
+                                    .py(px(2.0))
+                                    .rounded(px(5.0))
+                                    .cursor_default()
+                                    .text_color(if action.confirmed {
+                                        theme.danger
+                                    } else {
+                                        theme.text_secondary
+                                    })
+                                    .bg(if action.confirmed {
+                                        theme.danger_soft
+                                    } else {
+                                        theme.overlay
+                                    })
+                                    .hover(|element| element.bg(theme.overlay_strong))
+                                    .child(if action.confirmed {
+                                        "Confirm revert"
+                                    } else {
+                                        "Revert"
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        let _ = weak.update(cx, |this, cx| {
+                                            this.request_checkpoint_revert(
+                                                action.session_id,
+                                                action.turn_count,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                            )
+                        }),
+                );
+            }
             column
         }
         MessageRole::System => div().w_full().flex().justify_center().child(
@@ -2487,6 +2952,26 @@ fn render_message(
                     menu = menu.item(PopupMenuItem::new("Copy Code").on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
                     }));
+                }
+
+                if let Some(action) = checkpoint_action.filter(|action| action.can_revert) {
+                    let weak = waku.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(if action.confirmed {
+                            "Confirm Revert to Checkpoint"
+                        } else {
+                            "Revert to Checkpoint"
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.request_checkpoint_revert(
+                                    action.session_id,
+                                    action.turn_count,
+                                    cx,
+                                );
+                            });
+                        }),
+                    );
                 }
 
                 menu

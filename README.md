@@ -7,12 +7,12 @@ machine.
 
 The first MVP supports:
 
-| Provider | Transport | Session continuity |
-| --- | --- | --- |
-| Claude Code | `stream-json` | Native Claude session ID |
-| Codex CLI | `app-server` JSON-RPC | `thread/start` and `thread/resume` |
-| OpenCode | Native JSON events | Native OpenCode session ID |
-| Grok Build | Native `streaming-json` | Native Grok session ID |
+| Provider | Transport | Session continuity | Checkpoint rollback |
+| --- | --- | --- | --- |
+| Claude Code | `stream-json` | Native Claude session cursor | Not exposed by this transport |
+| Codex CLI | `app-server` JSON-RPC | `thread/start` and `thread/resume` | `thread/rollback` |
+| OpenCode | Native JSON events | Native OpenCode session cursor | Not exposed by this transport |
+| Grok Build | Native `streaming-json` | Native Grok session cursor | Not exposed by this transport |
 
 Each provider is connected through its strongest structured interface and
 translated into Waku's small, provider-neutral event model. Grok uses its
@@ -59,6 +59,7 @@ open target/release/Waku.app
 - Select the provider before the first message.
 - Cycle Plan, Ask, and Auto execution modes from the composer.
 - Stop the active turn with `Escape`.
+- In a Git project, revert a completed Codex turn from its checkpoint action.
 - Toggle the sidebar with `⌘⇧S` and focus the composer with `⌘L`.
 
 State is written atomically to the platform-local application data directory as
@@ -76,10 +77,35 @@ and Grok use resumable per-turn processes, preserving their native session IDs.
 The next product layer is richer provider-native configuration: model pickers,
 structured diffs, file attachments, and OpenCode's managed server API.
 
+### Sessions and checkpoints
+
+Waku follows [T3 Code](https://github.com/pingdotgg/t3code)'s
+split-responsibility design: Waku's own state is the canonical UI timeline,
+while each task also stores a typed provider resume cursor (`threadId`,
+`sessionId`, and provider-specific extensions). Resuming a task starts or
+reconnects the provider transport with that cursor; Waku does not reconstruct
+the provider conversation by replaying transcript text.
+
+Every submitted prompt creates a durable turn record. In Git projects, Waku
+captures the full working tree in an isolated temporary index and stores the
+snapshot under a hidden ref:
+
+```text
+refs/waku/session-<session-id>-turn-<turn-number>
+```
+
+Reverting restores that ref, asks the provider to roll back the same number of
+native turns, then truncates Waku's turn-owned messages and activity blocks.
+Before any restore, Waku creates a temporary safety ref; if provider rollback
+fails, it restores the original working tree and leaves the local timeline
+unchanged. The revert action is capability-gated, so providers whose current
+transport cannot roll back native conversation state never offer a
+filesystem-only revert.
+
 ## Verify
 
 ```sh
-cargo fmt --all --check
+cargo fmt --package waku -- --check
 cargo check
 cargo test
 ```

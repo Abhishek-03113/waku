@@ -6,13 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
-use anyhow::Context as _;
+use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, unbounded};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::driver::DriverControl;
-use crate::model::{ActivityKind, DriverEvent, ProviderKind, RuntimeMode};
+use crate::model::{ActivityKind, DriverEvent, ProviderKind, ProviderResumeCursor, RuntimeMode};
 
 enum CommandMessage {
     Prompt(String),
@@ -30,9 +30,20 @@ impl HeadlessDriver {
         binary: PathBuf,
         cwd: PathBuf,
         mode: RuntimeMode,
-        existing_session_id: Option<String>,
+        existing_cursor: Option<ProviderResumeCursor>,
         events: Sender<DriverEvent>,
     ) -> anyhow::Result<Self> {
+        let existing_session_id = match existing_cursor {
+            Some(cursor) if cursor.provider() == provider => Some(cursor.native_id().to_owned()),
+            Some(cursor) => {
+                return Err(anyhow!(
+                    "cannot resume {} from a {} cursor",
+                    provider.display_name(),
+                    cursor.provider().display_name()
+                ));
+            }
+            None => None,
+        };
         let (commands, command_rx) = unbounded();
         let active_pid = Arc::new(AtomicU32::new(0));
         let worker_pid = active_pid.clone();
@@ -51,7 +62,9 @@ impl HeadlessDriver {
                 let mut can_resume = had_existing_session;
                 if provider_session_id.is_some() {
                     let _ = events.send(DriverEvent::Connected {
-                        provider_session_id: provider_session_id.clone(),
+                        provider_cursor: provider_session_id
+                            .clone()
+                            .map(|id| ProviderResumeCursor::from_session_id(provider, id)),
                     });
                 }
                 while let Ok(message) = command_rx.recv() {
@@ -103,6 +116,12 @@ impl DriverControl for HeadlessDriver {
     }
 
     fn respond(&self, _request_id: String, _option_id: String) {}
+
+    fn rollback(&self, _turns: usize) -> anyhow::Result<()> {
+        Err(anyhow!(
+            "conversation rollback is not supported by this provider transport"
+        ))
+    }
 }
 
 impl Drop for HeadlessDriver {
@@ -286,7 +305,10 @@ impl StreamParser {
                 if let Some(id) = value.get("session_id").and_then(Value::as_str) {
                     self.provider_session_id = Some(id.to_owned());
                     let _ = events.send(DriverEvent::Connected {
-                        provider_session_id: Some(id.to_owned()),
+                        provider_cursor: Some(ProviderResumeCursor::Claude {
+                            session_id: id.to_owned(),
+                            resume_at: None,
+                        }),
                     });
                 }
             }
@@ -404,7 +426,9 @@ impl StreamParser {
         {
             self.provider_session_id = Some(id.to_owned());
             let _ = events.send(DriverEvent::Connected {
-                provider_session_id: Some(id.to_owned()),
+                provider_cursor: Some(ProviderResumeCursor::OpenCode {
+                    session_id: id.to_owned(),
+                }),
             });
         }
         let event_type = value
@@ -569,7 +593,9 @@ impl StreamParser {
                 {
                     self.provider_session_id = Some(id.to_owned());
                     let _ = events.send(DriverEvent::Connected {
-                        provider_session_id: Some(id.to_owned()),
+                        provider_cursor: Some(ProviderResumeCursor::Grok {
+                            session_id: id.to_owned(),
+                        }),
                     });
                 }
             }
@@ -643,8 +669,8 @@ mod tests {
         assert!(matches!(
             receiver.recv().unwrap(),
             DriverEvent::Connected {
-                provider_session_id: Some(id)
-            } if id == "ses_native"
+                provider_cursor: Some(ProviderResumeCursor::OpenCode { session_id })
+            } if session_id == "ses_native"
         ));
         assert!(matches!(
             receiver.recv().unwrap(),
@@ -855,8 +881,8 @@ mod tests {
         assert!(matches!(
             receiver.recv().unwrap(),
             DriverEvent::Connected {
-                provider_session_id: Some(id)
-            } if id == "c26f9cf7-dc11-4075-b0f4-544e65105469"
+                provider_cursor: Some(ProviderResumeCursor::Grok { session_id })
+            } if session_id == "c26f9cf7-dc11-4075-b0f4-544e65105469"
         ));
     }
 }

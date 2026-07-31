@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::model::{AgentSession, Project, ProviderKind};
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
+const OLDEST_SUPPORTED_STATE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PersistedState {
@@ -73,13 +74,17 @@ impl StateStore {
 
     pub fn load(&self) -> io::Result<PersistedState> {
         let bytes = fs::read(&self.path)?;
-        let state = serde_json::from_slice::<PersistedState>(&bytes)
+        let mut state = serde_json::from_slice::<PersistedState>(&bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if state.version != STATE_VERSION {
+        if !(OLDEST_SUPPORTED_STATE_VERSION..=STATE_VERSION).contains(&state.version) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported Waku state version",
             ));
+        }
+        state.version = STATE_VERSION;
+        for session in &mut state.sessions {
+            session.migrate_legacy_state();
         }
         Ok(state)
     }
@@ -117,6 +122,7 @@ mod tests {
         state.sessions[0].transcript_blocks.extend([
             TranscriptBlock {
                 after_message: 1,
+                turn_id: None,
                 content: TranscriptBlockContent::Reasoning(ReasoningBlock {
                     content: "Checking the source".into(),
                     started_at_ms: 1_000,
@@ -125,6 +131,7 @@ mod tests {
             },
             TranscriptBlock {
                 after_message: 1,
+                turn_id: None,
                 content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
                     Some("tool-1".into()),
                     ActivityKind::Search,
@@ -155,6 +162,47 @@ mod tests {
 
         let restored = serde_json::from_value::<AgentSession>(value).unwrap();
         assert!(restored.transcript_blocks.is_empty());
+    }
+
+    #[test]
+    fn version_one_sessions_migrate_provider_ids_and_turns() {
+        let directory = std::env::temp_dir().join(format!("waku-v1-state-{}", Uuid::new_v4()));
+        let path = directory.join("state.json");
+        let store = StateStore::new(path.clone());
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.version = 1;
+        state.sessions[0].messages.push(crate::model::Message::new(
+            crate::model::MessageRole::User,
+            "hello",
+        ));
+        state.sessions[0].messages.push(crate::model::Message::new(
+            crate::model::MessageRole::Assistant,
+            "hi",
+        ));
+        let mut value = serde_json::to_value(&state).unwrap();
+        value["sessions"][0]["provider_session_id"] =
+            serde_json::Value::String("thread-123".into());
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let restored = store.load().unwrap();
+        assert_eq!(restored.version, STATE_VERSION);
+        assert_eq!(
+            restored.sessions[0]
+                .provider_cursor
+                .as_ref()
+                .map(crate::model::ProviderResumeCursor::native_id),
+            Some("thread-123")
+        );
+        assert_eq!(restored.sessions[0].turns.len(), 1);
+        assert!(
+            restored.sessions[0]
+                .messages
+                .iter()
+                .all(|message| message.turn_id.is_some())
+        );
+
+        fs::remove_dir_all(directory).ok();
     }
 
     #[test]

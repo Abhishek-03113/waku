@@ -1,16 +1,20 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
-use crossbeam_channel::{Sender, unbounded};
+use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use crate::driver::DriverControl;
-use crate::model::{ActivityKind, DriverEvent, PermissionOption, RuntimeMode};
+use crate::model::{
+    ActivityKind, DriverEvent, PermissionOption, ProviderResumeCursor, RuntimeMode,
+};
 
 enum CommandMessage {
     Prompt(String),
@@ -18,6 +22,10 @@ enum CommandMessage {
     Respond {
         request_id: String,
         option_id: String,
+    },
+    Rollback {
+        turns: usize,
+        response: Sender<Result<(), String>>,
     },
     Shutdown,
 }
@@ -31,9 +39,19 @@ impl CodexDriver {
         binary: PathBuf,
         cwd: PathBuf,
         mode: RuntimeMode,
-        provider_session_id: Option<String>,
+        provider_cursor: Option<ProviderResumeCursor>,
         events: Sender<DriverEvent>,
     ) -> anyhow::Result<Self> {
+        let provider_session_id = match provider_cursor {
+            Some(ProviderResumeCursor::Codex { thread_id }) => Some(thread_id),
+            Some(cursor) => {
+                return Err(anyhow!(
+                    "cannot resume Codex from a {} cursor",
+                    cursor.provider().display_name()
+                ));
+            }
+            None => None,
+        };
         let mut child = Command::new(binary)
             .args(["app-server", "--stdio"])
             .current_dir(&cwd)
@@ -58,9 +76,12 @@ impl CodexDriver {
         let (commands, command_rx) = unbounded();
         let thread_id = Arc::new(Mutex::new(None::<String>));
         let turn_id = Arc::new(Mutex::new(None::<String>));
+        let pending_responses =
+            Arc::new(Mutex::new(HashMap::<u64, Sender<Result<(), String>>>::new()));
 
         let writer_thread_id = thread_id.clone();
         let writer_turn_id = turn_id.clone();
+        let writer_pending_responses = pending_responses.clone();
         let writer_events = events.clone();
         let cwd_string = cwd.display().to_string();
         thread::Builder::new()
@@ -128,9 +149,9 @@ impl CodexDriver {
                 while let Ok(command) = command_rx.recv() {
                     let message = match command {
                         CommandMessage::Prompt(text) => {
-                            let Some(thread_id) = writer_thread_id.lock().clone() else {
+                            let Some(thread_id) = wait_for_thread_id(&writer_thread_id) else {
                                 let _ = writer_events.send(DriverEvent::Error(
-                                    "Codex is still connecting. Try again in a moment.".into(),
+                                    "Codex did not finish opening its thread.".into(),
                                 ));
                                 continue;
                             };
@@ -168,6 +189,34 @@ impl CodexDriver {
                                 "result": {"decision": option_id}
                             })
                         }
+                        CommandMessage::Rollback { turns, response } => {
+                            let Some(thread_id) = wait_for_thread_id(&writer_thread_id) else {
+                                let _ = response
+                                    .send(Err("Codex did not finish opening its thread.".into()));
+                                continue;
+                            };
+                            next_request_id += 1;
+                            let request_id = next_request_id;
+                            writer_pending_responses.lock().insert(request_id, response);
+                            let message = json!({
+                                "method": "thread/rollback",
+                                "id": request_id,
+                                "params": {
+                                    "threadId": thread_id,
+                                    "numTurns": turns
+                                }
+                            });
+                            if let Err(error) = write_json_line(&mut stdin, &message) {
+                                if let Some(response) =
+                                    writer_pending_responses.lock().remove(&request_id)
+                                {
+                                    let _ = response.send(Err(format!(
+                                        "Codex transport write failed: {error}"
+                                    )));
+                                }
+                            }
+                            continue;
+                        }
                         CommandMessage::Shutdown => break,
                     };
                     if let Err(error) = write_json_line(&mut stdin, &message) {
@@ -181,6 +230,7 @@ impl CodexDriver {
 
         let reader_thread_id = thread_id.clone();
         let reader_turn_id = turn_id.clone();
+        let reader_pending_responses = pending_responses.clone();
         let reader_events = events.clone();
         thread::Builder::new()
             .name("waku-codex-reader".into())
@@ -193,6 +243,7 @@ impl CodexDriver {
                                     value,
                                     &reader_thread_id,
                                     &reader_turn_id,
+                                    &reader_pending_responses,
                                     &reader_events,
                                 ),
                                 Err(error) => {
@@ -243,6 +294,23 @@ impl DriverControl for CodexDriver {
             option_id,
         });
     }
+
+    fn rollback(&self, turns: usize) -> anyhow::Result<()> {
+        if turns == 0 {
+            return Ok(());
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(CommandMessage::Rollback {
+                turns,
+                response: response_tx,
+            })
+            .context("Codex driver stopped before rollback")?;
+        response_rx
+            .recv_timeout(Duration::from_secs(15))
+            .context("timed out waiting for Codex conversation rollback")?
+            .map_err(anyhow::Error::msg)
+    }
 }
 
 impl Drop for CodexDriver {
@@ -257,17 +325,42 @@ fn write_json_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()
     writer.flush()
 }
 
+fn wait_for_thread_id(thread_id: &Mutex<Option<String>>) -> Option<String> {
+    for _ in 0..500 {
+        if let Some(thread_id) = thread_id.lock().clone() {
+            return Some(thread_id);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
 fn handle_codex_message(
     value: Value,
     thread_id: &Mutex<Option<String>>,
     turn_id: &Mutex<Option<String>>,
+    pending_responses: &Mutex<HashMap<u64, Sender<Result<(), String>>>>,
     events: &Sender<DriverEvent>,
 ) {
+    if let Some(id) = value.get("id").and_then(Value::as_u64)
+        && id != 1
+        && let Some(response) = pending_responses.lock().remove(&id)
+    {
+        let result = value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .map_or_else(|| Ok(()), |error| Err(error.to_owned()));
+        let _ = response.send(result);
+        return;
+    }
+
     if value.get("id").and_then(Value::as_u64) == Some(1) {
         if let Some(id) = value.pointer("/result/thread/id").and_then(Value::as_str) {
             *thread_id.lock() = Some(id.to_owned());
             let _ = events.send(DriverEvent::Connected {
-                provider_session_id: Some(id.to_owned()),
+                provider_cursor: Some(ProviderResumeCursor::Codex {
+                    thread_id: id.to_owned(),
+                }),
             });
         } else if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
             let _ = events.send(DriverEvent::Error(error.to_owned()));
@@ -465,4 +558,55 @@ fn clean_stderr(line: &str) -> String {
     line.split_once(": ")
         .map(|(_, message)| message.to_owned())
         .unwrap_or_else(|| line.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollback_rpc_responses_are_routed_to_the_waiting_request() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(None);
+        let pending = Mutex::new(HashMap::new());
+        let (response_tx, response_rx) = bounded(1);
+        pending.lock().insert(42, response_tx);
+        let (event_tx, event_rx) = unbounded();
+
+        handle_codex_message(
+            json!({"id": 42, "result": {}}),
+            &thread_id,
+            &turn_id,
+            &pending,
+            &event_tx,
+        );
+
+        assert_eq!(response_rx.recv().unwrap(), Ok(()));
+        assert!(pending.lock().is_empty());
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rollback_rpc_errors_are_returned_without_becoming_stream_errors() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(None);
+        let pending = Mutex::new(HashMap::new());
+        let (response_tx, response_rx) = bounded(1);
+        pending.lock().insert(43, response_tx);
+        let (event_tx, event_rx) = unbounded();
+
+        handle_codex_message(
+            json!({"id": 43, "error": {"message": "cannot roll back"}}),
+            &thread_id,
+            &turn_id,
+            &pending,
+            &event_tx,
+        );
+
+        assert_eq!(
+            response_rx.recv().unwrap(),
+            Err("cannot roll back".to_owned())
+        );
+        assert!(event_rx.try_recv().is_err());
+    }
 }

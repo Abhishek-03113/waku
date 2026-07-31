@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crossbeam_channel::Sender;
 
-use crate::model::{DriverEvent, ProviderKind, RuntimeMode};
+use crate::model::{DriverEvent, ProviderKind, ProviderResumeCursor, RuntimeMode};
 
 #[derive(Clone)]
 pub struct DriverHandle {
@@ -25,12 +25,17 @@ impl DriverHandle {
     pub fn respond(&self, request_id: String, option_id: String) {
         self.inner.respond(request_id, option_id);
     }
+
+    pub fn rollback(&self, turns: usize) -> anyhow::Result<()> {
+        self.inner.rollback(turns)
+    }
 }
 
 pub trait DriverControl: Send + Sync {
     fn prompt(&self, prompt: String);
     fn cancel(&self);
     fn respond(&self, request_id: String, option_id: String);
+    fn rollback(&self, turns: usize) -> anyhow::Result<()>;
 }
 
 pub fn start(
@@ -38,7 +43,7 @@ pub fn start(
     binary: PathBuf,
     cwd: PathBuf,
     mode: RuntimeMode,
-    provider_session_id: Option<String>,
+    provider_cursor: Option<ProviderResumeCursor>,
     events: Sender<DriverEvent>,
 ) -> anyhow::Result<DriverHandle> {
     let inner: Arc<dyn DriverControl> = match provider {
@@ -46,19 +51,12 @@ pub fn start(
             binary,
             cwd,
             mode,
-            provider_session_id,
+            provider_cursor,
             events,
         )?),
-        ProviderKind::Claude | ProviderKind::OpenCode | ProviderKind::Grok => {
-            Arc::new(headless::HeadlessDriver::start(
-                provider,
-                binary,
-                cwd,
-                mode,
-                provider_session_id,
-                events,
-            )?)
-        }
+        ProviderKind::Claude | ProviderKind::OpenCode | ProviderKind::Grok => Arc::new(
+            headless::HeadlessDriver::start(provider, binary, cwd, mode, provider_cursor, events)?,
+        ),
     };
     Ok(DriverHandle { inner })
 }
