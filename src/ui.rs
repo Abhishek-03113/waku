@@ -4,7 +4,7 @@ use gpui::{
 };
 use gpui_component::{Selectable, menu::DropdownMenu};
 
-use crate::model::{ActivityKind, ProviderKind, SessionStatus, unix_time};
+use crate::model::{ActivityKind, ProviderKind, SessionStatus};
 use crate::theme::Theme;
 
 /// A monochrome icon from the embedded set, tinted via text color.
@@ -81,19 +81,6 @@ pub fn activity_noun(kind: ActivityKind) -> (&'static str, &'static str) {
         ActivityKind::Plan => ("plan step", "plan steps"),
         ActivityKind::Tool => ("tool call", "tool calls"),
     }
-}
-
-/// Uppercase micro-label used for sidebar sections.
-pub fn section_label(theme: &Theme, label: &'static str) -> Div {
-    div()
-        .h(px(24.0))
-        .flex()
-        .items_center()
-        .px_2()
-        .text_size(px(10.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text_ghost)
-        .child(SharedString::from(label.to_ascii_uppercase()))
 }
 
 /// A compact composer chip that can act as a `gpui-component` dropdown-menu
@@ -194,80 +181,9 @@ impl RenderOnce for MenuChip {
     }
 }
 
-/// Small bordered keycap chip, e.g. `⌘N`.
-pub fn key_hint(theme: &Theme, keys: &'static str) -> Div {
-    div()
-        .h(px(17.0))
-        .px(px(5.0))
-        .flex()
-        .items_center()
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(theme.border)
-        .text_size(px(9.5))
-        .line_height(px(11.0))
-        .text_color(theme.text_ghost)
-        .child(SharedString::from(keys))
-}
-
-/// "5m", "2h", "3d", then "Jul 12" for anything older than a week.
-pub fn relative_time(timestamp: u64) -> String {
-    let now = unix_time();
-    let elapsed = now.saturating_sub(timestamp);
-    if elapsed < 60 {
-        return "now".into();
-    }
-    if elapsed < 3600 {
-        return format!("{}m", elapsed / 60);
-    }
-    if elapsed < 86_400 {
-        return format!("{}h", elapsed / 3600);
-    }
-    if elapsed < 7 * 86_400 {
-        return format!("{}d", elapsed / 86_400);
-    }
-    let (_, month, day) = civil_from_unix(timestamp);
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    format!("{} {}", MONTHS[(month - 1) as usize], day)
-}
-
-/// Gregorian civil date from a unix timestamp (Howard Hinnant's algorithm).
-fn civil_from_unix(timestamp: u64) -> (i64, u32, u32) {
-    let days = (timestamp / 86_400) as i64;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if month <= 2 { year + 1 } else { year }, month, day)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn relative_time_formats_buckets() {
-        let now = unix_time();
-        assert_eq!(relative_time(now), "now");
-        assert_eq!(relative_time(now - 90), "1m");
-        assert_eq!(relative_time(now - 7200), "2h");
-        assert_eq!(relative_time(now - 3 * 86_400), "3d");
-        assert!(relative_time(now - 30 * 86_400).contains(' '));
-    }
-
-    #[test]
-    fn civil_date_is_correct() {
-        // 2026-07-31 00:00:00 UTC
-        let (year, month, day) = civil_from_unix(1_785_456_000);
-        assert_eq!((year, month, day), (2026, 7, 31));
-    }
 
     #[test]
     fn every_referenced_icon_is_embedded() {

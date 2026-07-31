@@ -1,4 +1,97 @@
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
+
 use super::*;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionDateGroup {
+    Today,
+    Yesterday,
+    ThisWeek,
+    ThisMonth,
+    ThisYear,
+    More,
+}
+
+impl SessionDateGroup {
+    const ALL: [Self; 6] = [
+        Self::Today,
+        Self::Yesterday,
+        Self::ThisWeek,
+        Self::ThisMonth,
+        Self::ThisYear,
+        Self::More,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Today => 0,
+            Self::Yesterday => 1,
+            Self::ThisWeek => 2,
+            Self::ThisMonth => 3,
+            Self::ThisYear => 4,
+            Self::More => 5,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::Yesterday => "Yesterday",
+            Self::ThisWeek => "This Week",
+            Self::ThisMonth => "This Month",
+            Self::ThisYear => "This Year",
+            Self::More => "More",
+        }
+    }
+}
+
+fn session_date_group(timestamp: u64, today: NaiveDate) -> SessionDateGroup {
+    let session_date = i64::try_from(timestamp)
+        .ok()
+        .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
+        .map(|timestamp| timestamp.with_timezone(&Local).date_naive())
+        .unwrap_or(today);
+    session_date_group_for_dates(session_date, today)
+}
+
+fn session_date_group_for_dates(session_date: NaiveDate, today: NaiveDate) -> SessionDateGroup {
+    if session_date >= today {
+        return SessionDateGroup::Today;
+    }
+
+    if today.pred_opt() == Some(session_date) {
+        return SessionDateGroup::Yesterday;
+    }
+
+    let week_start = today
+        .checked_sub_days(Days::new(today.weekday().num_days_from_monday().into()))
+        .unwrap_or(today);
+    if session_date >= week_start {
+        return SessionDateGroup::ThisWeek;
+    }
+
+    if session_date.year() == today.year() && session_date.month() == today.month() {
+        return SessionDateGroup::ThisMonth;
+    }
+
+    if session_date.year() == today.year() {
+        return SessionDateGroup::ThisYear;
+    }
+
+    SessionDateGroup::More
+}
+
+fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
+    div()
+        .h(px(28.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.text_tertiary)
+        .child(group.label())
+}
 
 impl Waku {
     fn window_drag_region(&self, region: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -83,81 +176,68 @@ impl Waku {
 
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let selected_project = self.state.selected_project;
         let selected_session = self.state.selected_session;
 
-        let mut projects = div().flex().flex_col();
-        for project in &self.state.projects {
-            let project_id = project.id;
-            let selected = selected_project == Some(project.id);
-            projects = projects.child(
-                div()
-                    .id(SharedString::from(format!("project-{}", project.id)))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .text_size(px(12.5))
-                    .line_height(px(16.0))
-                    .rounded(px(7.0))
-                    .cursor_default()
-                    .when(selected, |element| {
-                        element.bg(theme.sidebar_item_background)
-                    })
-                    .hover(|element| element.bg(theme.sidebar_item_background))
-                    .active(|element| element.bg(theme.sidebar_item_background))
-                    .child(icon(
-                        "icons/folder.svg",
-                        13.0,
-                        if selected {
-                            theme.text_secondary
-                        } else {
-                            theme.text_tertiary
-                        },
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.5))
-                            .text_color(if selected {
-                                theme.text
-                            } else {
-                                theme.text_secondary
-                            })
-                            .child(SharedString::from(project.name.clone())),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_project(project_id, cx);
-                    })),
-            );
+        let today = Local::now().date_naive();
+        let mut grouped_sessions: [Vec<&AgentSession>; 6] = std::array::from_fn(|_| Vec::new());
+        let mut sorted_sessions = self.state.sessions.iter().collect::<Vec<_>>();
+        sorted_sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        for session in sorted_sessions {
+            grouped_sessions[session_date_group(session.updated_at, today).index()].push(session);
         }
 
-        let mut sessions = div().flex().flex_col().gap(px(1.0));
-        if let Some(project_id) = selected_project {
-            let mut project_sessions = self
-                .state
-                .sessions
-                .iter()
-                .filter(|session| session.project_id == project_id)
-                .collect::<Vec<_>>();
-            project_sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-            for session in project_sessions {
+        let mut sessions = div().flex().flex_col();
+        let mut is_first_group = true;
+        for group in SessionDateGroup::ALL {
+            let group_sessions = &grouped_sessions[group.index()];
+            if group_sessions.is_empty() {
+                continue;
+            }
+
+            let group_header = session_group_label(&theme, group).when(is_first_group, |element| {
+                element.justify_between().child(
+                    div()
+                        .id("new-session")
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .rounded(px(6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_default()
+                        .hover(|element| element.bg(theme.overlay))
+                        .active(|element| element.bg(theme.overlay_strong))
+                        .child(icon("icons/plus.svg", 15.0, theme.text_ghost))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(project_id) = this.state.selected_project {
+                                this.create_session_for(project_id, this.state.last_provider, cx);
+                            }
+                        })),
+                )
+            });
+            is_first_group = false;
+            let mut group_element = div().flex().flex_col().child(group_header);
+            for session in group_sessions {
                 let session_id = session.id;
                 let selected = selected_session == Some(session.id);
                 let active = !matches!(session.status, SessionStatus::Idle);
+                let project_name = self
+                    .state
+                    .projects
+                    .iter()
+                    .find(|project| project.id == session.project_id)
+                    .map(|project| project.name.clone())
+                    .unwrap_or_else(|| "Unknown project".to_owned());
                 let waku = cx.entity().downgrade();
                 let composer = self.composer.clone();
-                sessions = sessions.child(
+                group_element = group_element.child(
                     div()
                         .id(SharedString::from(format!("session-{}", session.id)))
                         .flex()
                         .flex_col()
-                        .gap(px(3.0))
+                        .gap(px(4.0))
                         .px(px(8.0))
-                        .py(px(6.0))
+                        .py(px(7.0))
                         .rounded(px(7.0))
                         .cursor_default()
                         .when(selected, |element| {
@@ -167,21 +247,22 @@ impl Waku {
                         .active(|element| element.bg(theme.sidebar_item_background))
                         .child(
                             div()
+                                .w_full()
                                 .flex()
                                 .items_center()
                                 .gap(px(6.0))
-                                .line_height(px(16.0))
+                                .overflow_hidden()
+                                .line_height(px(18.0))
                                 .child(
                                     div()
+                                        .w_full()
                                         .flex_1()
                                         .min_w_0()
-                                        .truncate()
-                                        .text_size(px(12.5))
-                                        .text_color(if selected {
-                                            theme.text
-                                        } else {
-                                            theme.text_secondary
-                                        })
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_overflow(gpui::TextOverflow::Truncate("...".into()))
+                                        .text_size(px(13.5))
+                                        .text_color(theme.text)
                                         .child(SharedString::from(session.title.clone())),
                                 )
                                 .when(active, |element| {
@@ -190,33 +271,22 @@ impl Waku {
                                         5.0,
                                         status_color(&theme, session.status),
                                     ))
-                                })
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(10.0))
-                                        .text_color(theme.text_ghost)
-                                        .child(SharedString::from(relative_time(
-                                            session.updated_at,
-                                        ))),
-                                ),
+                                }),
                         )
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(5.0))
-                                .text_size(px(10.5))
-                                .line_height(px(13.0))
-                                .child(icon(
-                                    provider_icon(session.provider),
-                                    10.0,
-                                    provider_color(&theme, session.provider).opacity(0.8),
-                                ))
+                                .text_size(px(11.5))
+                                .line_height(px(15.0))
+                                .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .truncate()
                                         .text_color(theme.text_tertiary)
-                                        .child(session.provider.short_name()),
+                                        .child(SharedString::from(project_name)),
                                 ),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -241,6 +311,7 @@ impl Waku {
                         ),
                 );
             }
+            sessions = sessions.child(group_element).child(div().h(px(10.0)));
         }
 
         div()
@@ -252,68 +323,12 @@ impl Waku {
             .bg(theme.sidebar)
             .child(self.render_sidebar_titlebar(cx))
             .child(
-                div().px(px(10.0)).child(
-                    div()
-                        .id("new-session")
-                        .h(px(30.0))
-                        .px(px(8.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .text_size(px(12.5))
-                        .line_height(px(16.0))
-                        .rounded(px(7.0))
-                        .cursor_default()
-                        .hover(|element| element.bg(theme.sidebar_item_background))
-                        .active(|element| element.bg(theme.sidebar_item_background))
-                        .child(icon("icons/plus.svg", 13.0, theme.text_secondary))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(12.5))
-                                .text_color(theme.text)
-                                .child("New session"),
-                        )
-                        .child(key_hint(&theme, "⌘N"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(project_id) = this.state.selected_project {
-                                this.create_session_for(project_id, this.state.last_provider, cx);
-                            }
-                        })),
-                ),
-            )
-            .child(
                 div()
                     .id("sidebar-scroll")
                     .flex_1()
                     .overflow_y_scroll()
                     .px(px(10.0))
-                    .pt(px(14.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(section_label(&theme, "Projects"))
-                            .child(
-                                div()
-                                    .id("add-project")
-                                    .w(px(20.0))
-                                    .h(px(20.0))
-                                    .rounded(px(6.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_default()
-                                    .hover(|element| element.bg(theme.overlay))
-                                    .active(|element| element.bg(theme.overlay_strong))
-                                    .child(icon("icons/plus.svg", 11.0, theme.text_ghost))
-                                    .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
-                            ),
-                    )
-                    .child(projects)
-                    .child(div().h(px(16.0)))
-                    .child(section_label(&theme, "Sessions"))
+                    .pt(px(12.0))
                     .child(sessions),
             )
     }
@@ -482,5 +497,38 @@ impl Waku {
                         "What should we build in {project_name}?"
                     ))),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_sessions_by_calendar_period() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+        let cases = [
+            ((2026, 8, 12), SessionDateGroup::Today),
+            ((2026, 8, 11), SessionDateGroup::Yesterday),
+            ((2026, 8, 10), SessionDateGroup::ThisWeek),
+            ((2026, 8, 1), SessionDateGroup::ThisMonth),
+            ((2026, 1, 1), SessionDateGroup::ThisYear),
+            ((2025, 12, 31), SessionDateGroup::More),
+        ];
+
+        for ((year, month, day), expected) in cases {
+            let session_date = NaiveDate::from_ymd_opt(year, month, day).unwrap();
+            assert_eq!(session_date_group_for_dates(session_date, today), expected);
+        }
+    }
+
+    #[test]
+    fn future_sessions_stay_in_today() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+        let tomorrow = NaiveDate::from_ymd_opt(2026, 8, 13).unwrap();
+        assert_eq!(
+            session_date_group_for_dates(tomorrow, today),
+            SessionDateGroup::Today
+        );
     }
 }

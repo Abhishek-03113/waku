@@ -37,8 +37,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::persistence::{PersistedState, StateStore};
 use crate::theme::{Theme, ThemePreference};
 use crate::ui::{
-    MenuChip, activity_icon, activity_noun, icon, key_hint, provider_color, provider_icon,
-    relative_time, section_label, status_color, status_label,
+    MenuChip, activity_icon, activity_noun, icon, provider_color, provider_icon, status_color,
+    status_label,
 };
 use crate::{CancelTurn, CloseWindow, FocusComposer, NewSession, OpenSettings, ToggleSidebar};
 
