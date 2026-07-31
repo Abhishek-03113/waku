@@ -152,6 +152,12 @@ struct CheckpointAction {
     confirmed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TranscriptAnchor {
+    session_id: Uuid,
+    turn_id: Uuid,
+}
+
 /// Presents a stable, estimated document length to the scrollbar while the
 /// virtualized list replaces provisional row heights with exact measurements.
 /// Offsets are normalized against the list's live range, so the thumb remains
@@ -160,6 +166,8 @@ struct CheckpointAction {
 struct StableListScrollbarHandle {
     list_state: ListState,
     estimated_content_height: Rc<Cell<Pixels>>,
+    anchor_end_space: Rc<Cell<Pixels>>,
+    anchor_following: Rc<Cell<bool>>,
     drag_estimated_height: Rc<Cell<Option<Pixels>>>,
     is_scrolled: Rc<Cell<bool>>,
 }
@@ -168,12 +176,16 @@ impl StableListScrollbarHandle {
     fn new(
         list_state: &ListState,
         estimated_content_height: &Rc<Cell<Pixels>>,
+        anchor_end_space: &Rc<Cell<Pixels>>,
+        anchor_following: &Rc<Cell<bool>>,
         drag_estimated_height: &Rc<Cell<Option<Pixels>>>,
         is_scrolled: &Rc<Cell<bool>>,
     ) -> Self {
         Self {
             list_state: list_state.clone(),
             estimated_content_height: estimated_content_height.clone(),
+            anchor_end_space: anchor_end_space.clone(),
+            anchor_following: anchor_following.clone(),
             drag_estimated_height: drag_estimated_height.clone(),
             is_scrolled: is_scrolled.clone(),
         }
@@ -182,7 +194,21 @@ impl StableListScrollbarHandle {
     fn effective_content_height(&self) -> Pixels {
         self.drag_estimated_height
             .get()
-            .unwrap_or_else(|| self.estimated_content_height.get())
+            .unwrap_or_else(|| self.estimated_content_height.get() + self.anchor_end_space.get())
+    }
+
+    fn actual_max_offset(&self) -> Size<Pixels> {
+        let viewport = self.list_state.viewport_bounds().size;
+        let base = self.list_state.max_offset_for_scrollbar();
+        let estimated_max = (self.effective_content_height() - viewport.height).max(Pixels::ZERO);
+        size(
+            base.width,
+            if base.height > Pixels::ZERO {
+                base.height + self.anchor_end_space.get()
+            } else {
+                estimated_max
+            },
+        )
     }
 }
 
@@ -221,7 +247,7 @@ fn scroll_top_after_row_invalidation(
 impl ScrollbarHandle for StableListScrollbarHandle {
     fn offset(&self) -> Point<Pixels> {
         let viewport = self.list_state.viewport_bounds().size;
-        let actual_max = self.list_state.max_offset_for_scrollbar();
+        let actual_max = self.actual_max_offset();
         let estimated_max = size(
             Pixels::ZERO,
             (self.effective_content_height() - viewport.height).max(Pixels::ZERO),
@@ -234,8 +260,9 @@ impl ScrollbarHandle for StableListScrollbarHandle {
     }
 
     fn set_offset(&self, offset: Point<Pixels>) {
+        self.anchor_following.set(false);
         let viewport = self.list_state.viewport_bounds().size;
-        let actual_max = self.list_state.max_offset_for_scrollbar();
+        let actual_max = self.actual_max_offset();
         let estimated_max = size(
             Pixels::ZERO,
             (self.effective_content_height() - viewport.height).max(Pixels::ZERO),
@@ -256,8 +283,9 @@ impl ScrollbarHandle for StableListScrollbarHandle {
     }
 
     fn start_drag(&self) {
-        self.drag_estimated_height
-            .set(Some(self.estimated_content_height.get()));
+        self.drag_estimated_height.set(Some(
+            self.estimated_content_height.get() + self.anchor_end_space.get(),
+        ));
         self.list_state.scrollbar_drag_started();
     }
 
@@ -306,12 +334,19 @@ pub struct Waku {
     toast: Option<String>,
     pending_revert: Option<(Uuid, usize)>,
     transcript_rows: ListState,
+    /// Active turns use top alignment so row remeasurement cannot invoke the
+    /// bottom-aligned list's implicit pin and displace the sent-message anchor.
+    anchored_transcript_rows: ListState,
     transcript_row_kinds: RefCell<Vec<TranscriptRowKind>>,
     transcript_row_estimates: RefCell<Vec<Pixels>>,
     transcript_row_height_adjustments: RefCell<HashMap<TranscriptRowKind, Pixels>>,
     transcript_estimated_height: Rc<Cell<Pixels>>,
+    transcript_anchor: Cell<Option<TranscriptAnchor>>,
+    transcript_anchor_end_space: Rc<Cell<Pixels>>,
+    transcript_anchor_following: Rc<Cell<bool>>,
     transcript_drag_estimated_height: Rc<Cell<Option<Pixels>>>,
     transcript_provisional_rows: RefCell<HashSet<usize>>,
+    transcript_exact_measurement_rows: RefCell<HashSet<usize>>,
     transcript_is_scrolled: Rc<Cell<bool>>,
     transcript_layout_width: Cell<Pixels>,
     transcript_resize_tx: crossbeam_channel::Sender<TranscriptMarkdownResize>,
@@ -413,10 +448,25 @@ impl Waku {
             })
             .and_then(|project| git_branch(&project.path));
         let transcript_rows = ListState::new(0, ListAlignment::Bottom, px(512.0)).measure_all();
+        let anchored_transcript_rows =
+            ListState::new(0, ListAlignment::Top, px(512.0)).measure_all();
         let transcript_is_scrolled = Rc::new(Cell::new(false));
+        let transcript_anchor_following = Rc::new(Cell::new(false));
         transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
-            move |event, _, _| transcript_is_scrolled.set(event.is_scrolled)
+            let transcript_anchor_following = transcript_anchor_following.clone();
+            move |event, _, _| {
+                transcript_is_scrolled.set(event.is_scrolled);
+                transcript_anchor_following.set(false);
+            }
+        });
+        anchored_transcript_rows.set_scroll_handler({
+            let transcript_is_scrolled = transcript_is_scrolled.clone();
+            let transcript_anchor_following = transcript_anchor_following.clone();
+            move |event, _, _| {
+                transcript_is_scrolled.set(event.is_scrolled);
+                transcript_anchor_following.set(false);
+            }
         });
         let (transcript_resize_tx, transcript_resize_rx) = unbounded();
 
@@ -474,12 +524,17 @@ impl Waku {
                 toast: None,
                 pending_revert: None,
                 transcript_rows,
+                anchored_transcript_rows,
                 transcript_row_kinds: RefCell::new(Vec::new()),
                 transcript_row_estimates: RefCell::new(Vec::new()),
                 transcript_row_height_adjustments: RefCell::new(HashMap::new()),
                 transcript_estimated_height: Rc::new(Cell::new(Pixels::ZERO)),
+                transcript_anchor: Cell::new(None),
+                transcript_anchor_end_space: Rc::new(Cell::new(Pixels::ZERO)),
+                transcript_anchor_following,
                 transcript_drag_estimated_height: Rc::new(Cell::new(None)),
                 transcript_provisional_rows: RefCell::new(HashSet::new()),
+                transcript_exact_measurement_rows: RefCell::new(HashSet::new()),
                 transcript_is_scrolled,
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 transcript_resize_tx,
@@ -925,12 +980,18 @@ impl Waku {
                 .flatten()
                 .map(|error| format!("Could not capture the pre-turn checkpoint: {error}"))
         });
-        if let Some(session) = self.selected_session_mut() {
+        let transcript_anchor = if let Some(session) = self.selected_session_mut() {
             session.set_title_from_prompt(&prompt);
-            session.begin_turn(&prompt);
+            let turn_id = session.begin_turn(&prompt);
             session.status = SessionStatus::Connecting;
             session.updated_at = unix_time();
-        }
+            Some(TranscriptAnchor {
+                session_id,
+                turn_id,
+            })
+        } else {
+            None
+        };
         if let Some(runtime) = self.runtimes.get_mut(&session_id) {
             runtime.pending_events.clear();
             runtime.stream_remeasure_pending = false;
@@ -942,7 +1003,11 @@ impl Waku {
         self.expanded_activity_items.clear();
         self.pending_revert = None;
         self.toast = checkpoint_warning;
+        self.transcript_anchor.set(transcript_anchor);
+        self.transcript_anchor_end_space.set(Pixels::ZERO);
+        self.transcript_anchor_following.set(true);
         self.reset_transcript_rows(self.transcript_row_count());
+        self.scroll_transcript_to_anchor();
         let mut failed_to_start = false;
         match self.ensure_driver() {
             Ok(driver) => driver.prompt(prompt),
@@ -1090,7 +1155,11 @@ impl Waku {
                 .selected_session()
                 .and_then(|session| session.messages.get(message_index))
                 .map(|message| {
-                    estimated_message_height(message, self.transcript_layout_width.get())
+                    estimated_message_height(
+                        message,
+                        self.transcript_layout_width.get(),
+                        self.checkpoint_action_for_message(message_index).is_some(),
+                    )
                 })
                 .unwrap_or(px(36.0)),
             TranscriptRowKind::TurnBlock(block_index) => self
@@ -1234,37 +1303,142 @@ impl Waku {
             .set(total.max(Pixels::ZERO));
     }
 
+    fn active_transcript_rows(&self) -> &ListState {
+        if self.transcript_anchor.get().is_some() {
+            &self.anchored_transcript_rows
+        } else {
+            &self.transcript_rows
+        }
+    }
+
     fn reset_transcript_rows(&self, count: usize) {
         // Row keys contain indices, so dynamic corrections from another
         // session must never bleed into the newly selected transcript.
         self.transcript_row_height_adjustments.borrow_mut().clear();
         self.rebuild_transcript_estimates();
         *self.transcript_provisional_rows.borrow_mut() = (0..count).collect();
+        self.transcript_exact_measurement_rows.borrow_mut().clear();
         let _ = self.transcript_rows.clone().measure_all();
         self.transcript_is_scrolled.set(false);
         self.transcript_rows.reset(count);
+        let _ = self.anchored_transcript_rows.clone().measure_all();
+        self.anchored_transcript_rows.reset(count);
+    }
+
+    fn selected_transcript_anchor_row(&self) -> Option<usize> {
+        let anchor = self.transcript_anchor.get()?;
+        let session = self.selected_session()?;
+        if session.id != anchor.session_id {
+            return None;
+        }
+        let message_index = session.messages.iter().position(|message| {
+            message.role == MessageRole::User && message.turn_id == Some(anchor.turn_id)
+        })?;
+        self.transcript_row_kinds
+            .borrow()
+            .iter()
+            .position(|kind| *kind == TranscriptRowKind::Message(message_index))
+    }
+
+    fn scroll_transcript_to_anchor(&self) {
+        let Some(item_ix) = self.selected_transcript_anchor_row() else {
+            return;
+        };
+        self.active_transcript_rows().scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: Pixels::ZERO,
+        });
+        self.transcript_is_scrolled.set(true);
+    }
+
+    fn update_transcript_anchor_end_space(&self, window: &Window) -> Pixels {
+        let Some(anchor_row) = self.selected_transcript_anchor_row() else {
+            self.transcript_anchor_end_space.set(Pixels::ZERO);
+            self.transcript_anchor_following.set(false);
+            return Pixels::ZERO;
+        };
+
+        let viewport_height = {
+            let measured = self.active_transcript_rows().viewport_bounds().size.height;
+            if measured > Pixels::ZERO {
+                measured
+            } else {
+                // The first sent message replaces the empty state, so the list
+                // has no prior bounds yet. The full window is a conservative
+                // first-frame fallback that still guarantees a top anchor.
+                window.viewport_size().height
+            }
+        };
+        let estimated_tail_height = self
+            .transcript_row_estimates
+            .borrow()
+            .iter()
+            .skip(anchor_row)
+            .copied()
+            .fold(Pixels::ZERO, |height, row| height + row);
+        let transcript_rows = self.active_transcript_rows();
+        let last_row = transcript_rows.item_count().checked_sub(1);
+        let measured_tail_height = last_row.and_then(|last_row| {
+            let anchor = transcript_rows.bounds_for_item(anchor_row)?;
+            let last = transcript_rows.bounds_for_item(last_row)?;
+            Some((last.bottom() - anchor.top()).max(Pixels::ZERO))
+        });
+        let tail_is_unmeasured = self
+            .transcript_provisional_rows
+            .borrow()
+            .iter()
+            .any(|row| *row >= anchor_row)
+            || self
+                .transcript_exact_measurement_rows
+                .borrow()
+                .iter()
+                .any(|row| *row >= anchor_row);
+        let anchored_tail_height = if tail_is_unmeasured {
+            // Bounds still describe the element that was just invalidated.
+            // The estimate already reflects the requested expanded/collapsed
+            // state, so use it to prevent a one-frame underfill on collapse.
+            estimated_tail_height
+        } else {
+            measured_tail_height.unwrap_or(estimated_tail_height)
+        };
+        let end_space = stabilized_transcript_anchor_end_space(
+            viewport_height,
+            anchored_tail_height,
+            self.transcript_anchor_end_space.get(),
+            tail_is_unmeasured,
+        );
+        self.transcript_anchor_end_space.set(end_space);
+        if maintain_transcript_anchor(
+            transcript_rows,
+            anchor_row,
+            self.transcript_anchor_following.get(),
+            end_space,
+        ) {
+            self.transcript_is_scrolled.set(true);
+        }
+        end_space
     }
 
     fn invalidate_transcript_rows(&self, range: Range<usize>, anchor_delta: Pixels) {
-        let count = self.transcript_rows.item_count();
+        let transcript_rows = self.active_transcript_rows();
+        let count = transcript_rows.item_count();
         let range = range.start.min(count)..range.end.min(count);
         if range.is_empty() {
             return;
         }
 
         let preserve_scroll = self.transcript_is_scrolled.get();
-        let previous_scroll_top =
-            preserve_scroll.then(|| self.transcript_rows.logical_scroll_top());
+        let previous_scroll_top = preserve_scroll.then(|| transcript_rows.logical_scroll_top());
         self.transcript_provisional_rows
             .borrow_mut()
             .extend(range.clone());
-        let _ = self.transcript_rows.clone().measure_all();
-        self.transcript_rows.splice(range.clone(), range.len());
+        let _ = transcript_rows.clone().measure_all();
+        transcript_rows.splice(range.clone(), range.len());
 
         if let Some(scroll_top) = previous_scroll_top.and_then(|scroll_top| {
             scroll_top_after_row_invalidation(scroll_top, range, anchor_delta)
         }) {
-            self.transcript_rows.scroll_to(scroll_top);
+            transcript_rows.scroll_to(scroll_top);
         }
     }
 
@@ -1285,7 +1459,7 @@ impl Waku {
         // for the new wrap width and let GPUI bulk-measure cheap placeholders
         // before it lays out the visible rows exactly.
         self.rebuild_transcript_estimates();
-        let count = self.transcript_rows.item_count();
+        let count = self.active_transcript_rows().item_count();
         self.invalidate_transcript_rows(0..count, Pixels::ZERO);
         true
     }
@@ -1354,7 +1528,8 @@ impl Waku {
     /// the reader's place (or the pinned tail); shrinking resets the view.
     fn sync_transcript_rows(&self) {
         let count = self.transcript_row_count();
-        let current = self.transcript_rows.item_count();
+        let transcript_rows = self.active_transcript_rows();
+        let current = transcript_rows.item_count();
         if count > current {
             if !self.append_transcript_estimates(current, count) {
                 self.reset_transcript_rows(count);
@@ -1363,9 +1538,8 @@ impl Waku {
             self.transcript_provisional_rows
                 .borrow_mut()
                 .extend(current..count);
-            let _ = self.transcript_rows.clone().measure_all();
-            self.transcript_rows
-                .splice(current..current, count - current);
+            let _ = transcript_rows.clone().measure_all();
+            transcript_rows.splice(current..current, count - current);
         } else if count < current {
             self.reset_transcript_rows(count);
         }
@@ -1376,7 +1550,7 @@ impl Waku {
     /// for responsive scrolling while a long answer is still growing.
     fn remeasure_transcript_tail(&self) {
         self.sync_transcript_rows();
-        let count = self.transcript_rows.item_count();
+        let count = self.active_transcript_rows().item_count();
         let from = count.saturating_sub(STREAM_REMEASURE_TAIL_ROWS);
         if from < count {
             self.update_transcript_estimates(from..count);
@@ -1890,6 +2064,10 @@ impl Waku {
         self.expanded_activity_items.clear();
         self.pending_revert = None;
         self.toast = None;
+        self.transcript_anchor.set(None);
+        self.transcript_anchor_end_space.set(Pixels::ZERO);
+        self.transcript_anchor_following.set(false);
+        self.transcript_exact_measurement_rows.borrow_mut().clear();
     }
 
     fn reset_session_runtime(&mut self, session_id: Uuid) {
@@ -2570,11 +2748,27 @@ impl Waku {
         } else {
             self.drain_transcript_resize_events();
         }
+        let transcript_rows = self.active_transcript_rows().clone();
+        let anchor_end_space = self.update_transcript_anchor_end_space(window);
+        if self.transcript_anchor_following.get()
+            && anchor_end_space <= Pixels::ZERO
+            && self
+                .selected_transcript_anchor_row()
+                .is_some_and(|anchor_row| anchor_row + 1 < transcript_rows.item_count())
+        {
+            transcript_rows.scroll_to(ListOffset {
+                item_ix: transcript_rows.item_count(),
+                offset_in_item: Pixels::ZERO,
+            });
+            self.transcript_is_scrolled.set(false);
+        }
         let entity = cx.entity().downgrade();
-        let transcript_viewport = TextViewScrollViewport::from_list(&self.transcript_rows);
+        let transcript_viewport = TextViewScrollViewport::from_list(&transcript_rows);
         let scrollbar_handle = StableListScrollbarHandle::new(
-            &self.transcript_rows,
+            &transcript_rows,
             &self.transcript_estimated_height,
+            &self.transcript_anchor_end_space,
+            &self.transcript_anchor_following,
             &self.transcript_drag_estimated_height,
             &self.transcript_is_scrolled,
         );
@@ -2584,7 +2778,7 @@ impl Waku {
             .w_full()
             .relative()
             .child(
-                list(self.transcript_rows.clone(), move |index, _window, cx| {
+                list(transcript_rows, move |index, _window, cx| {
                     entity
                         .upgrade()
                         .map(|entity| {
@@ -2594,7 +2788,8 @@ impl Waku {
                         })
                         .unwrap_or_else(|| div().into_any_element())
                 })
-                .size_full(),
+                .size_full()
+                .pb(anchor_end_space),
             )
             .vertical_scrollbar(&scrollbar_handle)
             .into_any_element()
@@ -2674,6 +2869,15 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.transcript_provisional_rows.borrow_mut().remove(&index) {
+            if self
+                .selected_transcript_anchor_row()
+                .is_some_and(|anchor_row| index >= anchor_row)
+            {
+                self.transcript_exact_measurement_rows
+                    .borrow_mut()
+                    .insert(index);
+                cx.notify();
+            }
             let estimated_height = self
                 .transcript_row_estimates
                 .borrow()
@@ -2685,6 +2889,16 @@ impl Waku {
                 .h(estimated_height)
                 .flex_none()
                 .into_any_element();
+        }
+        if self
+            .transcript_exact_measurement_rows
+            .borrow_mut()
+            .remove(&index)
+        {
+            // This render replaces the provisional element. Schedule one more
+            // pass so the anchor reservation reads the exact post-layout row
+            // bounds instead of leaving the estimate in place indefinitely.
+            cx.notify();
         }
 
         let theme = Theme::dark();
@@ -2724,7 +2938,7 @@ impl Waku {
                         self.state.selected_session.unwrap_or_default(),
                         self.transcript_resize_tx.clone(),
                         self.transcript_layout_width.get(),
-                        self.transcript_rows.clone(),
+                        self.active_transcript_rows().clone(),
                         transcript_viewport,
                         text_state,
                         waku,
@@ -4006,6 +4220,50 @@ enum TranscriptRowKind {
     TurnBlock(usize),
 }
 
+fn transcript_anchor_end_space(viewport_height: Pixels, anchored_tail_height: Pixels) -> Pixels {
+    (viewport_height - anchored_tail_height).max(Pixels::ZERO)
+}
+
+fn stabilized_transcript_anchor_end_space(
+    viewport_height: Pixels,
+    anchored_tail_height: Pixels,
+    previous_end_space: Pixels,
+    tail_is_unmeasured: bool,
+) -> Pixels {
+    let candidate = transcript_anchor_end_space(viewport_height, anchored_tail_height);
+    if tail_is_unmeasured && previous_end_space > Pixels::ZERO {
+        // Expansion needs the old (larger) spacer until its exact height is
+        // known; collapse needs the new estimated (larger) spacer immediately.
+        // Taking the maximum prevents GPUI's bottom-aligned list from ever
+        // seeing an underfilled frame in either direction.
+        previous_end_space.max(candidate)
+    } else {
+        candidate
+    }
+}
+
+fn maintain_transcript_anchor(
+    transcript_rows: &ListState,
+    anchor_row: usize,
+    anchor_following: bool,
+    end_space: Pixels,
+) -> bool {
+    if !anchor_following || end_space <= Pixels::ZERO {
+        return false;
+    }
+
+    // A bottom-aligned GPUI list represents its pinned tail as no logical
+    // scroll offset. While a response row is being remeasured, the retained
+    // end spacer and the newly expanded content briefly overflow together;
+    // without an explicit item offset that overflow is taken from the top of
+    // the user row. Reassert the turn anchor in the same layout pass.
+    transcript_rows.scroll_to(ListOffset {
+        item_ix: anchor_row,
+        offset_in_item: Pixels::ZERO,
+    });
+    true
+}
+
 fn estimated_text_height(text: &str, characters_per_line: usize, line_height: f32) -> Pixels {
     let visual_lines = text
         .split('\n')
@@ -4187,7 +4445,11 @@ fn html_numeric_attribute(tag: &str, name: &str) -> Option<f32> {
     value.trim_end_matches("px").parse().ok()
 }
 
-fn estimated_message_height(message: &Message, content_width: Pixels) -> Pixels {
+fn estimated_message_height(
+    message: &Message,
+    content_width: Pixels,
+    checkpoint_visible: bool,
+) -> Pixels {
     let assistant_columns = if content_width > Pixels::ZERO {
         (content_width / px(7.25)).max(20.0) as usize
     } else {
@@ -4202,7 +4464,7 @@ fn estimated_message_height(message: &Message, content_width: Pixels) -> Pixels 
     match message.role {
         MessageRole::User => estimated_text_height(&message.content, user_columns, 20.0) + px(16.0),
         MessageRole::Assistant => {
-            let checkpoint_height = if message.turn_id.is_some() {
+            let checkpoint_height = if checkpoint_visible {
                 px(28.0)
             } else {
                 Pixels::ZERO
@@ -4773,9 +5035,10 @@ mod tests {
     use super::{
         StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*,
         append_text_delta_to_session, escape_html, estimated_message_height, estimated_text_height,
-        fenced_code, markdown_estimation_source, message_starts_followup_turn, pop_stream_chunk,
-        scale_scrollbar_offset, scroll_top_after_row_invalidation, take_stream_prefix,
-        transcript_row_kinds,
+        fenced_code, maintain_transcript_anchor, markdown_estimation_source,
+        message_starts_followup_turn, pop_stream_chunk, scale_scrollbar_offset,
+        scroll_top_after_row_invalidation, stabilized_transcript_anchor_end_space,
+        take_stream_prefix, transcript_anchor_end_space, transcript_row_kinds,
     };
     use crate::model::{
         ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind, SessionStatus,
@@ -4811,16 +5074,88 @@ mod tests {
 
         let rows = gpui::ListState::new(0, gpui::ListAlignment::Bottom, gpui::px(0.0));
         let estimated = Rc::new(Cell::new(gpui::px(1_000.0)));
+        let anchor_end_space = Rc::new(Cell::new(gpui::px(300.0)));
+        let anchor_following = Rc::new(Cell::new(true));
         let drag_estimate = Rc::new(Cell::new(None));
         let is_scrolled = Rc::new(Cell::new(false));
-        let handle =
-            StableListScrollbarHandle::new(&rows, &estimated, &drag_estimate, &is_scrolled);
+        let handle = StableListScrollbarHandle::new(
+            &rows,
+            &estimated,
+            &anchor_end_space,
+            &anchor_following,
+            &drag_estimate,
+            &is_scrolled,
+        );
 
         handle.start_drag();
         estimated.set(gpui::px(2_000.0));
-        assert_eq!(handle.content_size().height, gpui::px(1_000.0));
+        anchor_end_space.set(gpui::px(0.0));
+        assert_eq!(handle.content_size().height, gpui::px(1_300.0));
         handle.end_drag();
         assert_eq!(handle.content_size().height, gpui::px(2_000.0));
+    }
+
+    #[test]
+    fn anchor_end_space_keeps_a_short_new_turn_at_the_viewport_top() {
+        assert_eq!(
+            transcript_anchor_end_space(gpui::px(700.0), gpui::px(180.0)),
+            gpui::px(520.0)
+        );
+        assert_eq!(
+            transcript_anchor_end_space(gpui::px(700.0), gpui::px(900.0)),
+            gpui::px(0.0)
+        );
+    }
+
+    #[test]
+    fn anchor_end_space_waits_for_exact_expanded_row_measurement() {
+        assert_eq!(
+            stabilized_transcript_anchor_end_space(
+                gpui::px(700.0),
+                gpui::px(260.0),
+                gpui::px(520.0),
+                true,
+            ),
+            gpui::px(520.0)
+        );
+        assert_eq!(
+            stabilized_transcript_anchor_end_space(
+                gpui::px(700.0),
+                gpui::px(260.0),
+                gpui::px(520.0),
+                false,
+            ),
+            gpui::px(440.0)
+        );
+        assert_eq!(
+            stabilized_transcript_anchor_end_space(
+                gpui::px(700.0),
+                gpui::px(180.0),
+                gpui::px(440.0),
+                true,
+            ),
+            gpui::px(520.0)
+        );
+    }
+
+    #[test]
+    fn pending_expansion_reasserts_the_user_message_anchor() {
+        let rows = gpui::ListState::new(3, gpui::ListAlignment::Bottom, gpui::px(0.0));
+        rows.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: gpui::px(42.0),
+        });
+
+        assert!(maintain_transcript_anchor(&rows, 0, true, gpui::px(320.0),));
+        let anchored = rows.logical_scroll_top();
+        assert_eq!(anchored.item_ix, 0);
+        assert_eq!(anchored.offset_in_item, gpui::Pixels::ZERO);
+        assert!(!maintain_transcript_anchor(
+            &rows,
+            0,
+            true,
+            gpui::Pixels::ZERO,
+        ));
     }
 
     #[test]
@@ -4855,7 +5190,16 @@ mod tests {
         assert_eq!(media_height, gpui::px(160.0));
 
         let message = Message::new(MessageRole::Assistant, markdown);
-        assert!(estimated_message_height(&message, gpui::px(720.0)) >= gpui::px(200.0));
+        assert!(estimated_message_height(&message, gpui::px(720.0), false) >= gpui::px(200.0));
+    }
+
+    #[test]
+    fn assistant_estimate_reserves_only_a_visible_checkpoint() {
+        let message = Message::new(MessageRole::Assistant, "A short response.");
+        let without_checkpoint = estimated_message_height(&message, gpui::px(720.0), false);
+        let with_checkpoint = estimated_message_height(&message, gpui::px(720.0), true);
+
+        assert_eq!(with_checkpoint - without_checkpoint, gpui::px(28.0));
     }
 
     #[test]
