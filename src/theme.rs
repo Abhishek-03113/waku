@@ -1,13 +1,15 @@
 use gpui::{App, Hsla, hsla, rgb};
 
 /// Waku's visual language, take two: neutral graphite surfaces in the spirit
-/// of Cursor — color is reserved for meaning. Layers go `canvas` (window +
-/// sidebar) → `surface` (content pane) → `raised` (composer, bubbles, cards)
-/// → `inset` (code wells). The coral accent appears only where the brand or
-/// live activity earns it; everything else is a gray with a job.
+/// of Cursor — color is reserved for meaning. Layers go `sidebar` (a
+/// translucent tint over macOS vibrancy) → `surface` (content pane) →
+/// `raised` (composer, bubbles, cards) → `inset` (code wells). The coral
+/// accent appears only where the brand or live activity earns it; everything
+/// else is a gray with a job.
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub canvas: Hsla,
+    pub sidebar: Hsla,
     pub surface: Hsla,
     pub raised: Hsla,
     pub inset: Hsla,
@@ -39,6 +41,7 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             canvas: rgb(0x121316).into(),
+            sidebar: hsla(220.0 / 360.0, 0.10, 0.08, 0.92),
             surface: rgb(0x1A1C20).into(),
             raised: rgb(0x24262C).into(),
             inset: rgb(0x0D0E11).into(),

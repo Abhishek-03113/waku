@@ -17,7 +17,6 @@ impl Render for Waku {
             .on_action(cx.listener(Self::cancel_turn_action))
             .size_full()
             .flex()
-            .bg(theme.canvas)
             .text_color(theme.text)
             .font_family(".SystemUIFont")
             .when(self.sidebar_visible, |root| {

@@ -14,7 +14,7 @@ mod ui;
 
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
-    WindowBounds, WindowOptions, actions, point, px, size,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, point, px, size,
 };
 
 use crate::app::Waku;
@@ -86,6 +86,7 @@ fn main() {
                             appears_transparent: true,
                             traffic_light_position: Some(point(px(16.0), px(18.0))),
                         }),
+                        window_background: WindowBackgroundAppearance::Blurred,
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         window_min_size: Some(size(px(980.0), px(680.0))),
                         ..Default::default()
@@ -94,13 +95,17 @@ fn main() {
                         let waku = Waku::new(window, cx);
                         let composer_focus = waku.read(cx).composer_focus(cx);
                         window.focus(&composer_focus);
-                        cx.new(|cx| gpui_component::Root::new(waku, window, cx))
+                        cx.new(|cx| {
+                            gpui_component::Root::new(waku, window, cx)
+                                .background(gpui::transparent_black())
+                        })
                     },
                 )
                 .expect("failed to open Waku window");
 
             window
-                .update(cx, |_, _, cx| {
+                .update(cx, |_, window, cx| {
+                    crate::platform::configure_sidebar_material(window);
                     cx.activate(true);
                 })
                 .ok();

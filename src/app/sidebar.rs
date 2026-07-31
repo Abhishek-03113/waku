@@ -167,6 +167,7 @@ impl Waku {
             .flex_none()
             .flex()
             .flex_col()
+            .bg(theme.sidebar)
             .child(div().h(px(48.0)).flex_none())
             .child(
                 div().px(px(10.0)).child(
