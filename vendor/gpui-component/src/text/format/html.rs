@@ -377,6 +377,49 @@ fn parse_node(
             ..
         } => match name.local {
             local_name!("br") => Some(node::Node::Break { html: true }),
+            local_name!("details") => {
+                let mut siblings = vec![];
+                consume_paragraph(&mut siblings, paragraph);
+
+                let open = attrs
+                    .borrow()
+                    .iter()
+                    .any(|attribute| attribute.name.local == local_name!("open"));
+                let mut summary = Paragraph::default();
+                let mut children = vec![];
+                let mut child_paragraph = Paragraph::default();
+                for child in node.children.borrow().iter() {
+                    if matches!(
+                        &child.data,
+                        NodeData::Element { name, .. }
+                            if name.local == local_name!("summary")
+                    ) {
+                        for summary_child in child.children.borrow().iter() {
+                            parse_paragraph(&mut summary, summary_child);
+                        }
+                        continue;
+                    }
+                    if matches!(&child.data, NodeData::Text { contents } if contents.borrow().trim().is_empty())
+                    {
+                        continue;
+                    }
+                    if let Some(child_node) = parse_node(child, &mut child_paragraph, cx) {
+                        children.push(child_node);
+                    }
+                    consume_paragraph(&mut children, &mut child_paragraph);
+                }
+                if summary.is_empty() {
+                    summary = Paragraph::new("Details".to_owned());
+                }
+
+                let details = node::Node::Details(node::Details::new(summary, children, open));
+                if siblings.is_empty() {
+                    Some(details)
+                } else {
+                    siblings.push(details);
+                    Some(node::Node::Root { children: siblings })
+                }
+            }
             local_name!("h1")
             | local_name!("h2")
             | local_name!("h3")
@@ -706,6 +749,22 @@ mod tests {
                 })],
                 ..Default::default()
             })
+        );
+    }
+
+    #[test]
+    fn test_details_disclosure() {
+        let mut cx = NodeContext::default();
+        let node = super::parse(
+            "<details open><summary>Diagnostics</summary><p>First</p><p>Second</p></details>",
+            &mut cx,
+        )
+        .unwrap();
+
+        assert!(matches!(node, Node::Details(_)));
+        assert_eq!(
+            node.to_markdown(),
+            "<details open>\n<summary>Diagnostics</summary>\n\nFirst\n\nSecond\n</details>"
         );
     }
 }

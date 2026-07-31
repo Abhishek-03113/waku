@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
@@ -8,7 +10,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
     Entity, EntityId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
-    InteractiveElement, IntoElement, KeyBinding, LayoutId, ListState, MouseDownEvent,
+    InteractiveElement, IntoElement, KeyBinding, LayoutId, ListState, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, RenderOnce, SharedString, Size,
     StyleRefinement, Styled, Timer, Window, div, px,
 };
@@ -41,29 +43,50 @@ pub(crate) fn init(cx: &mut App) {
 #[derive(IntoElement, Clone)]
 struct TextViewElement {
     list_state: Option<ListState>,
+    block_viewport: Option<TextViewScrollViewport>,
+    block_resize_handler: Option<Arc<BlockResizeFn>>,
     state: Entity<TextViewState>,
 }
 
 impl RenderOnce for TextViewElement {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let measure_state = self.state.clone();
         self.state.update(cx, |state, cx| {
-            v_flex()
-                .size_full()
-                .map(|this| match &mut state.parsed_result {
-                    Some(Ok(content)) => this.child(content.root_node.render_root(
-                        self.list_state.clone(),
-                        &content.node_cx,
-                        window,
-                        cx,
-                    )),
-                    Some(Err(err)) => this.child(
-                        v_flex()
-                            .gap_1()
-                            .child("Failed to parse content")
-                            .child(err.to_string()),
-                    ),
-                    None => this,
-                })
+            let block_count = state
+                .parsed_result
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .map_or(0, |content| content.root_node.root_block_count());
+            let block_virtualization = self.block_viewport.as_ref().and_then(|viewport| {
+                let mut virtualization = state.block_virtualization(
+                    *viewport,
+                    block_count,
+                    measure_state.clone(),
+                    self.block_resize_handler.clone(),
+                )?;
+                if state.is_selecting || state.selection_pointer.is_some() {
+                    state.rendered_block_count.set(block_count);
+                    virtualization.render_all = true;
+                }
+                Some(virtualization)
+            });
+
+            v_flex().size_full().map(|this| match &state.parsed_result {
+                Some(Ok(content)) => this.child(content.root_node.render_root(
+                    self.list_state.clone(),
+                    block_virtualization,
+                    &content.node_cx,
+                    window,
+                    cx,
+                )),
+                Some(Err(err)) => this.child(
+                    v_flex()
+                        .gap_1()
+                        .child("Failed to parse content")
+                        .child(err.to_string()),
+                ),
+                None => this,
+            })
         })
     }
 }
@@ -71,6 +94,23 @@ impl RenderOnce for TextViewElement {
 /// Type for code block actions generator function.
 pub(crate) type CodeBlockActionsFn =
     dyn Fn(&CodeBlock, &mut Window, &mut App) -> AnyElement + Send + Sync;
+
+/// A top-level Markdown block changed height after it had already been laid
+/// out. Initial measurements are deliberately excluded: consumers use this
+/// signal for real runtime changes (for example an image finishing loading or
+/// a disclosure opening), not for ordinary virtualization discovery.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextViewBlockResize {
+    /// Index in the parsed document's top-level block list.
+    pub block_index: usize,
+    /// New height minus the previously measured height.
+    pub delta: Pixels,
+    /// Whether the old block ended above the visible viewport. Consumers can
+    /// compensate their scroll anchor by `delta` in this case.
+    pub above_viewport: bool,
+}
+
+pub(crate) type BlockResizeFn = dyn Fn(TextViewBlockResize, &mut App) + Send + Sync;
 
 /// A text view that can render Markdown or HTML.
 ///
@@ -98,14 +138,59 @@ pub struct TextView {
     selectable: bool,
     scrollable: bool,
     selection_scroll_handle: Option<ListState>,
+    block_viewport: Option<TextViewScrollViewport>,
+    block_layout_width: Option<Pixels>,
+    block_resize_handler: Option<Arc<BlockResizeFn>>,
     update_delay: Duration,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TextViewScrollViewport {
+    bounds: Bounds<Pixels>,
+    scroll_offset: Pixels,
+}
+
+impl TextViewScrollViewport {
+    pub fn from_list(list_state: &ListState) -> Self {
+        Self {
+            bounds: list_state.viewport_bounds(),
+            scroll_offset: list_state.scroll_px_offset_for_scrollbar().y,
+        }
+    }
+}
+
+fn text_interaction_bounds(
+    bounds: Bounds<Pixels>,
+    viewport: Option<TextViewScrollViewport>,
+) -> Bounds<Pixels> {
+    viewport.map_or(bounds, |viewport| bounds.intersect(&viewport.bounds))
 }
 
 #[derive(PartialEq)]
 pub(crate) struct ParsedContent {
     pub(crate) root_node: node::Node,
     pub(crate) node_cx: node::NodeContext,
+}
+
+fn matching_root_block_prefix(
+    current: Option<&Result<ParsedContent, SharedString>>,
+    next: &Result<ParsedContent, SharedString>,
+) -> usize {
+    let (Some(Ok(current)), Ok(next)) = (current, next) else {
+        return 0;
+    };
+    if current.node_cx != next.node_cx {
+        return 0;
+    }
+
+    current
+        .root_node
+        .root_blocks()
+        .iter()
+        .zip(next.root_node.root_blocks())
+        .take_while(|(current, next)| current == next)
+        .count()
 }
 
 /// The type of the text view.
@@ -243,6 +328,13 @@ pub struct TextViewState {
     list_state: ListState,
     current_text: SharedString,
     current_style: TextViewStyle,
+    block_heights: Vec<Option<Pixels>>,
+    block_reported_deltas: Vec<Pixels>,
+    block_rebase_pending: Vec<bool>,
+    block_width: Pixels,
+    block_resize_handler: Option<Arc<BlockResizeFn>>,
+    parent_scroll_offset: Pixels,
+    rendered_block_count: Rc<Cell<usize>>,
 }
 
 impl TextViewState {
@@ -262,23 +354,194 @@ impl TextViewState {
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
             current_text: SharedString::default(),
             current_style: TextViewStyle::default(),
+            block_heights: Vec::new(),
+            block_reported_deltas: Vec::new(),
+            block_rebase_pending: Vec::new(),
+            block_width: Pixels::ZERO,
+            block_resize_handler: None,
+            parent_scroll_offset: Pixels::ZERO,
+            rendered_block_count: Rc::new(Cell::new(0)),
         }
     }
 }
 
 impl TextViewState {
+    fn invalidate_block_heights_for_width(&mut self) {
+        self.block_rebase_pending
+            .resize(self.block_reported_deltas.len(), false);
+        for (pending, reported) in self
+            .block_rebase_pending
+            .iter_mut()
+            .zip(&self.block_reported_deltas)
+        {
+            *pending = reported.abs() >= px(0.5);
+        }
+        self.block_heights.clear();
+    }
+
     /// Save bounds and unselect only when width changes can reflow text.
     /// Height-only changes are normal while a variable-height parent list
     /// settles its measurements and do not invalidate document coordinates.
     fn update_bounds(&mut self, bounds: Bounds<Pixels>) {
-        if self.bounds.size.width > Pixels::ZERO
+        let width_changed = self.bounds.size.width > Pixels::ZERO
             && bounds.size.width > Pixels::ZERO
-            && self.bounds.size.width != bounds.size.width
-            && self.selection_pointer.is_none()
-        {
-            self.clear_selection();
+            && self.bounds.size.width != bounds.size.width;
+        let width_was_prepared = self.block_width > Pixels::ZERO
+            && (self.block_width - bounds.size.width).abs() < px(2.0);
+        if width_changed && !width_was_prepared {
+            self.invalidate_block_heights_for_width();
+            if self.selection_pointer.is_none() {
+                self.clear_selection();
+            }
+        }
+        if bounds.size.width > Pixels::ZERO {
+            self.block_width = bounds.size.width;
         }
         self.bounds = bounds;
+    }
+
+    fn prepare_block_layout_width(&mut self, width: Pixels) {
+        if width <= Pixels::ZERO {
+            return;
+        }
+        if self.block_width > Pixels::ZERO && (self.block_width - width).abs() >= px(2.0) {
+            self.invalidate_block_heights_for_width();
+            if self.selection_pointer.is_none() {
+                self.clear_selection();
+            }
+        }
+        self.block_width = width;
+    }
+
+    fn replace_parsed_result(
+        &mut self,
+        mut parsed_result: Result<ParsedContent, SharedString>,
+    ) -> Option<TextViewBlockResize> {
+        let retained = matching_root_block_prefix(self.parsed_result.as_ref(), &parsed_result);
+        if let (Some(Ok(current)), Ok(next)) = (self.parsed_result.as_ref(), &mut parsed_result) {
+            for (next, current) in next
+                .root_node
+                .root_blocks_mut()
+                .iter_mut()
+                .zip(current.root_node.root_blocks())
+            {
+                next.reuse_interaction_state_from(current);
+            }
+        }
+        let block_count = parsed_result
+            .as_ref()
+            .ok()
+            .map_or(0, |content| content.root_node.root_block_count());
+        let removed_delta = self.block_reported_deltas
+            [retained.min(self.block_reported_deltas.len())..]
+            .iter()
+            .copied()
+            .fold(Pixels::ZERO, |total, delta| total + delta);
+        self.block_heights.truncate(retained);
+        self.block_heights.resize(block_count, None);
+        self.block_reported_deltas.truncate(retained);
+        self.block_reported_deltas.resize(block_count, Pixels::ZERO);
+        self.block_rebase_pending.truncate(retained);
+        self.block_rebase_pending.resize(block_count, false);
+        self.parsed_result = Some(parsed_result);
+        (removed_delta.abs() >= px(0.5)).then_some(TextViewBlockResize {
+            block_index: retained,
+            delta: -removed_delta,
+            above_viewport: false,
+        })
+    }
+
+    fn block_virtualization(
+        &mut self,
+        viewport: TextViewScrollViewport,
+        block_count: usize,
+        measure_state: Entity<TextViewState>,
+        resize_handler: Option<Arc<BlockResizeFn>>,
+    ) -> Option<node::BlockVirtualization> {
+        if block_count == 0 {
+            return None;
+        }
+
+        self.block_heights.resize(block_count, None);
+        self.block_rebase_pending.resize(block_count, false);
+        let content_width = if self.block_width > Pixels::ZERO {
+            self.block_width
+        } else if self.bounds.size.width > Pixels::ZERO {
+            self.bounds.size.width
+        } else {
+            viewport.bounds.size.width
+        };
+        if self.bounds.size.width <= Pixels::ZERO {
+            return Some(node::BlockVirtualization {
+                viewport: viewport.bounds,
+                // The row origin is not known until the first paint. Render a
+                // bounded window from the start of the estimated document,
+                // then request one follow-up frame with the real origin.
+                content_origin_y: viewport.bounds.origin.y,
+                content_width,
+                heights: self.block_heights.clone(),
+                measure_state,
+                resize_handler,
+                render_all: false,
+                rendered_block_count: self.rendered_block_count.clone(),
+            });
+        }
+
+        let scroll_offset = viewport.scroll_offset;
+        let predicted_origin_y = self.bounds.origin.y + (scroll_offset - self.parent_scroll_offset);
+        Some(node::BlockVirtualization {
+            viewport: viewport.bounds,
+            content_origin_y: predicted_origin_y,
+            content_width,
+            heights: self.block_heights.clone(),
+            measure_state,
+            resize_handler,
+            render_all: false,
+            rendered_block_count: self.rendered_block_count.clone(),
+        })
+    }
+
+    pub(crate) fn record_block_height(
+        &mut self,
+        index: usize,
+        height: Pixels,
+        estimated_height: Pixels,
+    ) -> Option<(Pixels, bool)> {
+        if self.block_heights.len() <= index {
+            self.block_heights.resize(index + 1, None);
+        }
+        let previous = self.block_heights[index];
+        self.block_heights[index] = Some(height);
+        if self
+            .block_rebase_pending
+            .get(index)
+            .copied()
+            .unwrap_or(false)
+        {
+            self.block_rebase_pending[index] = false;
+            let previous_reported = self.block_reported_deltas[index];
+            let next_reported = height - estimated_height;
+            self.block_reported_deltas[index] = next_reported;
+            let correction = next_reported - previous_reported;
+            return (correction.abs() >= px(0.5)).then_some((correction, true));
+        }
+        let delta = previous
+            .map(|previous| height - previous)
+            .filter(|delta| delta.abs() >= px(0.5));
+        if let Some(delta) = delta
+            && self.block_resize_handler.is_some()
+        {
+            if self.block_reported_deltas.len() <= index {
+                self.block_reported_deltas.resize(index + 1, Pixels::ZERO);
+            }
+            self.block_reported_deltas[index] += delta;
+        }
+        delta.map(|delta| (delta, false))
+    }
+
+    #[cfg(test)]
+    fn rendered_block_count(&self) -> usize {
+        self.rendered_block_count.get()
     }
 
     fn clear_selection(&mut self) {
@@ -502,6 +765,9 @@ impl TextView {
             selectable: false,
             scrollable: false,
             selection_scroll_handle: None,
+            block_viewport: None,
+            block_layout_width: None,
+            block_resize_handler: None,
             update_delay: Duration::from_millis(200),
             code_block_actions: None,
         }
@@ -557,6 +823,9 @@ impl TextView {
             selectable: false,
             scrollable: false,
             selection_scroll_handle: None,
+            block_viewport: None,
+            block_layout_width: None,
+            block_resize_handler: None,
             update_delay: Duration::from_millis(200),
             code_block_actions: None,
         }
@@ -603,6 +872,33 @@ impl TextView {
     /// its viewport edge.
     pub fn selection_scroll_handle(mut self, scroll_handle: &ListState) -> Self {
         self.selection_scroll_handle = Some(scroll_handle.clone());
+        self
+    }
+
+    /// Provide the parent transcript viewport captured before its list starts
+    /// layout. This lets Markdown virtualize blocks without re-borrowing the
+    /// parent `ListState` from inside a row render.
+    pub fn block_viewport(mut self, viewport: TextViewScrollViewport) -> Self {
+        self.block_viewport = Some(viewport);
+        self
+    }
+
+    /// Supply the width known by a virtualized parent before layout starts.
+    /// This invalidates stale wrap-dependent block heights before the visible
+    /// range is chosen, instead of one frame after the resize.
+    pub fn block_layout_width(mut self, width: Pixels) -> Self {
+        self.block_layout_width = Some(width);
+        self
+    }
+
+    /// Observe real post-layout height changes in a top-level Markdown block.
+    /// Virtualized parents use this to invalidate their cached row and keep
+    /// the scrollbar and visible-content anchor coherent.
+    pub fn on_block_resize(
+        mut self,
+        handler: impl Fn(TextViewBlockResize, &mut App) + Send + Sync + 'static,
+    ) -> Self {
+        self.block_resize_handler = Some(Arc::new(handler));
         self
     }
 
@@ -683,6 +979,13 @@ impl Element for TextView {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        self.state.update(cx, |state, _| {
+            state.block_resize_handler = self.block_resize_handler.clone();
+        });
+        if let Some(width) = self.block_layout_width {
+            self.state
+                .update(cx, |state, _| state.prepare_block_layout_width(width));
+        }
         if let Some(InitState::Initializing {
             type_,
             text,
@@ -704,15 +1007,21 @@ impl Element for TextView {
                 &code_block_actions,
             );
 
-            self.state.update(cx, {
+            let removed_resize = self.state.update(cx, {
                 let tx = tx.clone();
                 |state, _| {
-                    state.parsed_result = Some(parsed_result);
+                    let removed_resize = state.replace_parsed_result(parsed_result);
                     state.tx = Some(tx);
                     state.current_text = text.clone();
                     state.current_style = style.clone();
+                    removed_resize
                 }
             });
+            if let (Some(resize), Some(handler)) =
+                (removed_resize, self.block_resize_handler.as_ref())
+            {
+                handler(resize, cx);
+            }
 
             cx.spawn({
                 let state = self.state.downgrade();
@@ -720,7 +1029,12 @@ impl Element for TextView {
                     while let Ok(parsed_result) = rx_result.recv().await {
                         if let Some(state) = state.upgrade() {
                             _ = state.update(cx, |state, cx| {
-                                state.parsed_result = Some(parsed_result);
+                                let removed_resize = state.replace_parsed_result(parsed_result);
+                                if let (Some(resize), Some(handler)) =
+                                    (removed_resize, state.block_resize_handler.as_ref())
+                                {
+                                    handler(resize, &mut **cx);
+                                }
                                 if let Some(parent_entity) = state.parent_entity {
                                     let app = &mut **cx;
                                     app.notify(parent_entity);
@@ -780,6 +1094,8 @@ impl Element for TextView {
                 } else {
                     None
                 },
+                block_viewport: self.block_viewport,
+                block_resize_handler: self.block_resize_handler.clone(),
                 state: self.state.clone(),
             })
             .refine_style(&self.style)
@@ -798,7 +1114,10 @@ impl Element for TextView {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let hitbox = window.insert_hitbox(
+            text_interaction_bounds(bounds, self.block_viewport),
+            HitboxBehavior::Normal,
+        );
         request_layout.prepaint(window, cx);
         hitbox
     }
@@ -815,14 +1134,24 @@ impl Element for TextView {
     ) {
         let entity_id = window.current_view();
         let is_selectable = self.selectable;
+        let interaction_bounds = text_interaction_bounds(bounds, self.block_viewport);
 
         if is_selectable {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
 
-        self.state.update(cx, |state, _| {
+        let (selection_settled, first_layout) = self.state.update(cx, |state, _| {
+            let first_layout =
+                state.bounds.size.width <= Pixels::ZERO && bounds.size.width > Pixels::ZERO;
             state.parent_entity = Some(entity_id);
+            state.parent_scroll_offset = self
+                .selection_scroll_handle
+                .as_ref()
+                .map_or(Pixels::ZERO, |handle| {
+                    handle.scroll_px_offset_for_scrollbar().y
+                });
             state.update_bounds(bounds);
+            let mut selection_settled = false;
             if state.selection_pointer.is_some() {
                 state.update_selection_from_pointer();
                 if !state.is_selecting {
@@ -830,10 +1159,18 @@ impl Element for TextView {
                     // autoscroll offset. Retain the pointer until this paint,
                     // then keep only the settled document-local endpoint.
                     state.selection_pointer = None;
+                    selection_settled = true;
                 }
             }
             state.is_selectable = is_selectable;
+            (selection_settled, first_layout)
         });
+        if selection_settled || first_layout {
+            // Mouse-up renders the complete document once so the final
+            // selection endpoint is accurate. A first layout also needs one
+            // follow-up now that the row's real transcript origin is known.
+            cx.notify(entity_id);
+        }
 
         GlobalState::global_mut(cx)
             .text_view_state_stack
@@ -863,8 +1200,12 @@ impl Element for TextView {
 
             window.on_mouse_event({
                 let state = self.state.clone();
-                move |event: &MouseDownEvent, phase, _, cx| {
-                    if !bounds.contains(&event.position) || !phase.bubble() {
+                move |event: &MouseDownEvent, phase, window, cx| {
+                    if !interaction_bounds.contains(&event.position)
+                        || !phase.bubble()
+                        || event.button != MouseButton::Left
+                        || window.default_prevented()
+                    {
                         return;
                     }
 
@@ -914,8 +1255,8 @@ impl Element for TextView {
 
             window.on_mouse_event({
                 let state = self.state.clone();
-                move |_: &MouseUpEvent, _, _, cx| {
-                    if !state.read(cx).is_selecting {
+                move |event: &MouseUpEvent, _, _, cx| {
+                    if event.button != MouseButton::Left || !state.read(cx).is_selecting {
                         return;
                     }
 
@@ -931,7 +1272,9 @@ impl Element for TextView {
                 window.on_mouse_event({
                     let state = self.state.clone();
                     move |event: &MouseDownEvent, _, _, cx| {
-                        if bounds.contains(&event.position) {
+                        if event.button != MouseButton::Left
+                            || interaction_bounds.contains(&event.position)
+                        {
                             return;
                         }
 
@@ -1031,7 +1374,8 @@ fn scroll_list_for_selection(scroll_handle: &ListState, delta: Pixels) -> Pixels
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Bounds, point, px, size};
+    use gpui::{Bounds, ListAlignment, Modifiers, point, px, size};
+    use std::fmt::Write as _;
 
     #[test]
     fn test_text_view_state_selection_bounds() {
@@ -1129,5 +1473,468 @@ mod tests {
         assert!(selection_autoscroll_delta(px(500.0), viewport) > Pixels::ZERO);
         assert_eq!(selection_autoscroll_delta(px(0.0), viewport), -px(36.0));
         assert_eq!(selection_autoscroll_delta(px(600.0), viewport), px(36.0));
+    }
+
+    #[test]
+    fn text_interactions_are_clipped_to_the_transcript_viewport() {
+        let message_bounds = Bounds {
+            origin: point(px(220.0), px(-1_000.0)),
+            size: size(px(900.0), px(4_000.0)),
+        };
+        let transcript_bounds = Bounds {
+            origin: point(px(220.0), px(40.0)),
+            size: size(px(900.0), px(700.0)),
+        };
+        let interaction_bounds = text_interaction_bounds(
+            message_bounds,
+            Some(TextViewScrollViewport {
+                bounds: transcript_bounds,
+                scroll_offset: Pixels::ZERO,
+            }),
+        );
+
+        assert_eq!(interaction_bounds, transcript_bounds);
+        assert!(!interaction_bounds.contains(&point(px(700.0), px(20.0))));
+        assert!(interaction_bounds.contains(&point(px(700.0), px(400.0))));
+        assert_eq!(
+            text_interaction_bounds(message_bounds, None),
+            message_bounds
+        );
+    }
+
+    #[gpui::test]
+    fn secondary_mouse_down_preserves_an_existing_selection(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let text_state = cx.new(TextViewState::new);
+
+        struct SelectionView {
+            text_state: Entity<TextViewState>,
+        }
+
+        impl gpui::Render for SelectionView {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                TextView::markdown_with_state(
+                    "secondary-click-selection",
+                    "Selection must remain visible while its context menu opens.",
+                    self.text_state.clone(),
+                    cx,
+                )
+                .selectable(true)
+                .w(px(600.0))
+                .h(px(120.0))
+            }
+        }
+
+        let (_view, cx) = cx.add_window_view(|_, _| SelectionView {
+            text_state: text_state.clone(),
+        });
+        cx.update(|window, app| {
+            window.activate_window();
+            text_state.update(app, |state, _| {
+                state.selection_positions = (
+                    Some(point(px(12.0), px(8.0))),
+                    Some(point(px(260.0), px(8.0))),
+                );
+                state.is_selecting = false;
+                state.selection_pointer = None;
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        let (click_position, outside_position, selection_before) = cx.update(|_, app| {
+            let state = text_state.read(app);
+            (
+                state.bounds.origin + point(px(80.0), px(12.0)),
+                point(
+                    state.bounds.right() + px(10.0),
+                    state.bounds.top() + px(12.0),
+                ),
+                state.selection_positions,
+            )
+        });
+        cx.simulate_mouse_down(click_position, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_down(outside_position, MouseButton::Right, Modifiers::default());
+
+        cx.update(|_, app| {
+            let state = text_state.read(app);
+            assert_eq!(state.selection_positions, selection_before);
+            assert!(!state.is_selecting);
+            assert!(state.has_selection());
+        });
+    }
+
+    #[test]
+    fn streaming_updates_reuse_only_unchanged_block_heights() {
+        let parse = |text| {
+            parse_content(
+                TextViewType::Markdown,
+                text,
+                TextViewStyle::default(),
+                HighlightTheme::default_light().as_ref(),
+                &None,
+            )
+        };
+        let original = parse("# Heading\n\nParagraph\n\n```rust\nlet value = 1;\n```\n");
+        let appended =
+            parse("# Heading\n\nParagraph\n\n```rust\nlet value = 1;\n```\n\nAnother paragraph\n");
+        let changed_tail = parse("# Heading\n\nParagraph\n\n```rust\nlet value = 2;\n```\n");
+
+        assert_eq!(matching_root_block_prefix(Some(&original), &appended), 3);
+        assert_eq!(
+            matching_root_block_prefix(Some(&original), &changed_tail),
+            2
+        );
+    }
+
+    #[gpui::test]
+    fn block_height_changes_exclude_initial_measurement_and_subpixel_noise(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(TextViewState::new);
+        assert_eq!(
+            state.update(cx, |state, _| {
+                state.record_block_height(2, px(100.0), px(90.0))
+            }),
+            None
+        );
+        assert_eq!(
+            state.update(cx, |state, _| {
+                state.record_block_height(2, px(100.25), px(90.0))
+            }),
+            None
+        );
+        assert_eq!(
+            state.update(cx, |state, _| {
+                state.record_block_height(2, px(148.0), px(90.0))
+            }),
+            Some((px(47.75), false))
+        );
+    }
+
+    #[gpui::test]
+    fn width_changes_rebase_existing_runtime_height_corrections(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(TextViewState::new);
+        state.update(cx, |state, _| {
+            state.block_resize_handler = Some(Arc::new(|_, _| {}));
+            assert_eq!(state.record_block_height(0, px(100.0), px(90.0)), None);
+            assert_eq!(
+                state.record_block_height(0, px(148.0), px(90.0)),
+                Some((px(48.0), false))
+            );
+
+            state.invalidate_block_heights_for_width();
+            assert_eq!(
+                state.record_block_height(0, px(180.0), px(120.0)),
+                Some((px(12.0), true))
+            );
+            assert_eq!(state.block_reported_deltas, vec![px(60.0)]);
+        });
+    }
+
+    #[gpui::test]
+    fn reparsing_removes_resize_adjustments_from_the_changed_tail(cx: &mut gpui::TestAppContext) {
+        let parse = |text| {
+            parse_content(
+                TextViewType::Markdown,
+                text,
+                TextViewStyle::default(),
+                HighlightTheme::default_light().as_ref(),
+                &None,
+            )
+        };
+        let state = cx.new(TextViewState::new);
+        state.update(cx, |state, _| {
+            assert!(
+                state
+                    .replace_parsed_result(parse("First\n\nSecond"))
+                    .is_none()
+            );
+            state.block_reported_deltas = vec![px(12.0), px(48.0)];
+        });
+
+        let removed = state.update(cx, |state, _| {
+            state.replace_parsed_result(parse("First\n\nChanged"))
+        });
+        assert_eq!(
+            removed,
+            Some(TextViewBlockResize {
+                block_index: 1,
+                delta: px(-48.0),
+                above_viewport: false,
+            })
+        );
+        assert_eq!(
+            cx.update(|app| state.read(app).block_reported_deltas.clone()),
+            vec![px(12.0), px(0.0)]
+        );
+    }
+
+    #[gpui::test]
+    fn streaming_reparse_keeps_a_disclosure_open(cx: &mut gpui::TestAppContext) {
+        let parse = |body| {
+            parse_content(
+                TextViewType::Markdown,
+                &format!("<details><summary>Diagnostics</summary>\n\n{body}\n</details>"),
+                TextViewStyle::default(),
+                HighlightTheme::default_light().as_ref(),
+                &None,
+            )
+        };
+        let state = cx.new(TextViewState::new);
+        state.update(cx, |state, _| {
+            state.replace_parsed_result(parse("First line"));
+            let details = state
+                .parsed_result
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(|content| content.root_node.root_blocks().first())
+                .and_then(|node| match node {
+                    node::Node::Details(details) => Some(details),
+                    _ => None,
+                })
+                .expect("expected parsed details");
+            details.set_expanded(true);
+
+            state.replace_parsed_result(parse("First line\n\nStreamed line"));
+        });
+
+        let expanded = state.read_with(cx, |state, _| {
+            state
+                .parsed_result
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(|content| content.root_node.root_blocks().first())
+                .is_some_and(
+                    |node| matches!(node, node::Node::Details(details) if details.is_expanded()),
+                )
+        });
+        assert!(
+            expanded,
+            "streaming body updates must retain disclosure state"
+        );
+    }
+
+    #[gpui::test]
+    fn details_expand_and_collapse_emit_runtime_height_changes(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let text_state = cx.new(TextViewState::new);
+        let scroll_state = ListState::new(1, ListAlignment::Top, px(512.0));
+        let resize_events = Arc::new(std::sync::Mutex::new(Vec::<TextViewBlockResize>::new()));
+        let markdown: SharedString = indoc::indoc! {r#"
+            <details>
+            <summary>Diagnostics</summary>
+
+            First paragraph with enough text to occupy a line.
+
+            Second paragraph with enough text to occupy another line.
+            </details>
+        "#}
+        .into();
+
+        struct DisclosureView {
+            text_state: Entity<TextViewState>,
+            scroll_state: ListState,
+            resize_events: Arc<std::sync::Mutex<Vec<TextViewBlockResize>>>,
+            markdown: SharedString,
+        }
+
+        impl gpui::Render for DisclosureView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let viewport = TextViewScrollViewport::from_list(&self.scroll_state);
+                let text_state = self.text_state.clone();
+                let markdown = self.markdown.clone();
+                let events = self.resize_events.clone();
+                gpui::list(self.scroll_state.clone(), move |_, _, cx| {
+                    let events = events.clone();
+                    TextView::markdown_with_state(
+                        "dynamic-details",
+                        markdown.clone(),
+                        text_state.clone(),
+                        cx,
+                    )
+                    .block_viewport(viewport)
+                    .block_layout_width(px(700.0))
+                    .selectable(true)
+                    .on_block_resize(move |event, _| {
+                        events.lock().unwrap().push(event);
+                    })
+                    .w_full()
+                    .into_any_element()
+                })
+                .w(px(700.0))
+                .h(px(500.0))
+            }
+        }
+
+        let (_view, cx) = cx.add_window_view(|_, _| DisclosureView {
+            text_state: text_state.clone(),
+            scroll_state,
+            resize_events: resize_events.clone(),
+            markdown,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(resize_events.lock().unwrap().is_empty());
+        let summary = cx
+            .debug_bounds("markdown-details-summary")
+            .expect("details summary should be rendered");
+        cx.simulate_mouse_move(summary.center(), None, Modifiers::default());
+        cx.simulate_click(summary.center(), Modifiers::default());
+        let expanded = cx.update(|_, app| {
+            text_state
+                .read(app)
+                .parsed_result
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(|content| content.root_node.root_blocks().first())
+                .is_some_and(
+                    |node| matches!(node, node::Node::Details(details) if details.is_expanded()),
+                )
+        });
+        assert!(expanded, "click should open the parsed details node");
+        let is_selecting = cx.update(|_, app| text_state.read(app).is_selecting);
+        assert!(
+            !is_selecting,
+            "clicking a disclosure must not leave text selection active"
+        );
+        cx.run_until_parked();
+        let events_after_expand = resize_events.lock().unwrap().clone();
+        assert!(
+            events_after_expand
+                .last()
+                .is_some_and(|event| event.delta > Pixels::ZERO),
+            "expected a positive resize after expanding details, got {events_after_expand:?}"
+        );
+
+        let summary = cx
+            .debug_bounds("markdown-details-summary")
+            .expect("details summary should remain rendered");
+        cx.simulate_mouse_move(summary.center(), None, Modifiers::default());
+        cx.simulate_click(summary.center(), Modifiers::default());
+        cx.run_until_parked();
+        let events_after_collapse = resize_events.lock().unwrap().clone();
+        assert!(
+            events_after_collapse
+                .last()
+                .is_some_and(|event| event.delta < Pixels::ZERO),
+            "expected a negative resize after collapsing details, got {events_after_collapse:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn mixed_markdown_renders_a_bounded_block_window(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let text_state = cx.new(TextViewState::new);
+        let scroll_state = ListState::new(1, ListAlignment::Top, px(512.0));
+        let mut markdown = String::new();
+        for index in 0..80 {
+            writeln!(markdown, "# Heading {index}\n").unwrap();
+            writeln!(
+                markdown,
+                "Paragraph {index} contains **bold**, _italic_, and [linked](https://example.com) text.\n"
+            )
+            .unwrap();
+            writeln!(
+                markdown,
+                "> Quoted block {index} with a little more text.\n"
+            )
+            .unwrap();
+            writeln!(markdown, "- item {index}.1\n- item {index}.2\n").unwrap();
+            writeln!(
+                markdown,
+                "| Name | Value |\n| --- | --- |\n| row {index} | value {index} |\n"
+            )
+            .unwrap();
+            writeln!(markdown, "```\nlet value_{index} = {index};\n```\n").unwrap();
+        }
+        let markdown: SharedString = markdown.into();
+
+        struct StressView {
+            text_state: Entity<TextViewState>,
+            scroll_state: ListState,
+            markdown: SharedString,
+        }
+
+        impl gpui::Render for StressView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let block_viewport = TextViewScrollViewport::from_list(&self.scroll_state);
+                let text_state = self.text_state.clone();
+                let markdown = self.markdown.clone();
+                let text_scroll_state = self.scroll_state.clone();
+                gpui::list(self.scroll_state.clone(), move |_, _, cx| {
+                    TextView::markdown_with_state(
+                        "mixed-markdown-stress",
+                        markdown.clone(),
+                        text_state.clone(),
+                        cx,
+                    )
+                    .selectable(true)
+                    .selection_scroll_handle(&text_scroll_state)
+                    .block_viewport(block_viewport)
+                    .w_full()
+                    .into_any_element()
+                })
+                .size_full()
+            }
+        }
+
+        let view = cx.new(|_| StressView {
+            text_state: text_state.clone(),
+            scroll_state: scroll_state.clone(),
+            markdown,
+        });
+
+        let cx = cx.add_empty_window();
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(900.0), px(700.0)),
+                |_, _| view.clone(),
+            );
+        };
+
+        draw(cx);
+        let total_blocks = cx.update(|_, app| {
+            text_state
+                .read(app)
+                .parsed_result
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .map_or(0, |content| content.root_node.root_block_count())
+        });
+        assert!(total_blocks >= 400);
+        let first_frame_blocks = cx.update(|_, app| text_state.read(app).rendered_block_count());
+        assert!(first_frame_blocks > 0);
+        assert!(first_frame_blocks < total_blocks / 4);
+
+        draw(cx);
+        let rendered_blocks = cx.update(|_, app| text_state.read(app).rendered_block_count());
+        assert!(rendered_blocks > 0);
+        assert!(rendered_blocks < total_blocks / 4);
+
+        scroll_state.scroll_by(px(5_000.0));
+        draw(cx);
+        let rendered_after_scroll = cx.update(|_, app| text_state.read(app).rendered_block_count());
+        assert!(rendered_after_scroll > 0);
+        assert!(rendered_after_scroll < total_blocks / 4);
+
+        cx.update(|_, app| {
+            text_state.update(app, |state, _| {
+                state.start_selection(state.bounds.origin + point(px(20.0), px(20.0)));
+            });
+        });
+        draw(cx);
+        assert_eq!(
+            cx.update(|_, app| text_state.read(app).rendered_block_count()),
+            total_blocks
+        );
+
+        cx.update(|_, app| {
+            text_state.update(app, |state, _| state.end_selection());
+        });
+        draw(cx);
+        draw(cx);
+        assert!(cx.update(|_, app| text_state.read(app).rendered_block_count()) < total_blocks / 4);
     }
 }

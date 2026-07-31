@@ -314,6 +314,8 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                                 }
                             }
                         });
+                        window.prevent_default();
+                        cx.stop_propagation();
                     }
                 });
             },

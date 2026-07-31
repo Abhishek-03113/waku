@@ -1,23 +1,29 @@
 use std::{
+    cell::Cell,
     collections::HashMap,
     ops::Range,
-    sync::{Arc, Mutex},
+    rc::Rc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use gpui::{
-    AnyElement, App, DefiniteLength, Div, Element, ElementId, FontStyle, FontWeight, Half,
-    HighlightStyle, InteractiveElement as _, IntoElement, Length, ListState, ObjectFit,
-    ParentElement, SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _,
-    Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
+    AnyElement, App, Bounds, DefiniteLength, Div, Element, ElementId, Entity, FontStyle,
+    FontWeight, GlobalElementId, Half, HighlightStyle, InspectorElementId, InteractiveElement as _,
+    IntoElement, LayoutId, Length, ListState, MouseButton, ObjectFit, ParentElement, Pixels,
+    SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _, Window, div,
+    img, prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast;
 use ropey::Rope;
 
 use crate::{
-    ActiveTheme as _, Icon, IconName, StyledExt, h_flex,
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt, h_flex,
     highlighter::{HighlightTheme, SyntaxHighlighter},
     text::{
-        CodeBlockActionsFn,
+        BlockResizeFn, CodeBlockActionsFn, TextViewBlockResize, TextViewState,
         inline::{Inline, InlineState},
     },
     tooltip::Tooltip,
@@ -25,6 +31,10 @@ use crate::{
 };
 
 use super::{TextViewStyle, utils::list_item_prefix};
+
+const IMAGE_PLACEHOLDER_HEIGHT: Pixels = px(160.0);
+const IMAGE_MAX_AUTO_HEIGHT: Pixels = px(480.0);
+const IMAGE_MAX_EXPLICIT_HEIGHT: Pixels = px(720.0);
 
 #[allow(unused)]
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -264,7 +274,7 @@ impl Paragraph {
     }
 
     pub(crate) fn is_image(&self) -> bool {
-        false
+        self.children.iter().any(|child| child.image.is_some())
     }
 
     pub(crate) fn set_span(&mut self, span: Span) {
@@ -313,9 +323,45 @@ pub struct CodeBlock {
     state: Arc<Mutex<InlineState>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct Details {
+    pub(crate) summary: Paragraph,
+    pub(crate) children: Vec<Node>,
+    default_open: bool,
+    expanded: Arc<AtomicBool>,
+}
+
+impl Details {
+    pub(crate) fn new(summary: Paragraph, children: Vec<Node>, open: bool) -> Self {
+        Self {
+            summary,
+            children,
+            default_open: open,
+            expanded: Arc::new(AtomicBool::new(open)),
+        }
+    }
+
+    pub(crate) fn is_expanded(&self) -> bool {
+        self.expanded.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_expanded(&self, expanded: bool) {
+        self.expanded.store(expanded, Ordering::Relaxed);
+    }
+}
+
+impl PartialEq for Details {
+    fn eq(&self, other: &Self) -> bool {
+        self.summary == other.summary
+            && self.children == other.children
+            && self.default_open == other.default_open
+    }
+}
+
 impl PartialEq for CodeBlock {
     fn eq(&self, other: &Self) -> bool {
-        self.lang == other.lang && self.styles == other.styles
+        self.lang == other.lang && self.styles == other.styles && self.code() == other.code()
     }
 }
 
@@ -427,6 +473,126 @@ impl PartialEq for NodeContext {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct BlockVirtualization {
+    pub(crate) viewport: Bounds<Pixels>,
+    pub(crate) content_origin_y: Pixels,
+    pub(crate) content_width: Pixels,
+    pub(crate) heights: Vec<Option<Pixels>>,
+    pub(crate) measure_state: Entity<TextViewState>,
+    pub(crate) resize_handler: Option<Arc<BlockResizeFn>>,
+    pub(crate) render_all: bool,
+    pub(crate) rendered_block_count: Rc<Cell<usize>>,
+}
+
+struct MeasuredBlock {
+    index: usize,
+    child: AnyElement,
+    estimated_height: Pixels,
+    state: Entity<TextViewState>,
+    viewport: Bounds<Pixels>,
+    resize_handler: Option<Arc<BlockResizeFn>>,
+}
+
+fn visible_block_range(
+    heights: &[Pixels],
+    visible_top: Pixels,
+    visible_bottom: Pixels,
+) -> Range<usize> {
+    let mut block_top = Pixels::ZERO;
+    let mut start = None;
+    let mut end = 0;
+
+    for (index, height) in heights.iter().copied().enumerate() {
+        let block_bottom = block_top + height;
+        if block_bottom >= visible_top && block_top <= visible_bottom {
+            start.get_or_insert(index);
+            end = index + 1;
+        } else if start.is_some() && block_top > visible_bottom {
+            break;
+        }
+        block_top = block_bottom;
+    }
+
+    start.map_or(0..0, |start| start..end)
+}
+
+impl IntoElement for MeasuredBlock {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for MeasuredBlock {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.child.prepaint(window, cx);
+        let change = self.state.update(cx, |state, _| {
+            state.record_block_height(self.index, bounds.size.height, self.estimated_height)
+        });
+        if let Some((delta, rebased)) = change {
+            if let Some(handler) = &self.resize_handler {
+                let previous_height = bounds.size.height - delta;
+                handler(
+                    TextViewBlockResize {
+                        block_index: self.index,
+                        delta,
+                        above_viewport: !rebased
+                            && bounds.top() + previous_height <= self.viewport.top() + px(0.5),
+                    },
+                    cx,
+                );
+            }
+            // A shrinking block can expose blocks that were outside the range
+            // chosen before this layout. Always schedule one settled pass.
+            cx.notify(window.current_view());
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
 /// The AST Node of the rich text.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Node {
@@ -441,6 +607,8 @@ pub(crate) enum Node {
     Blockquote {
         children: Vec<Node>,
     },
+    /// Interactive HTML `<details>` disclosure embedded in Markdown.
+    Details(Details),
     List {
         /// Only contains ListItem, others will be ignored
         children: Vec<Node>,
@@ -492,6 +660,43 @@ impl Node {
         }
     }
 
+    /// Carry interactive state across reparses of unchanged streaming
+    /// prefixes. The parsed structure remains the source of truth; only
+    /// runtime UI state such as an open disclosure is retained.
+    pub(crate) fn reuse_interaction_state_from(&mut self, previous: &Node) {
+        match (self, previous) {
+            (Self::Root { children }, Self::Root { children: previous })
+            | (Self::Blockquote { children }, Self::Blockquote { children: previous })
+            | (
+                Self::List { children, .. },
+                Self::List {
+                    children: previous, ..
+                },
+            )
+            | (
+                Self::ListItem { children, .. },
+                Self::ListItem {
+                    children: previous, ..
+                },
+            ) => {
+                for (child, previous) in children.iter_mut().zip(previous) {
+                    child.reuse_interaction_state_from(previous);
+                }
+            }
+            (Self::Details(details), Self::Details(previous)) => {
+                if details.summary == previous.summary
+                    && details.default_open == previous.default_open
+                {
+                    details.expanded = previous.expanded.clone();
+                    for (child, previous) in details.children.iter_mut().zip(&previous.children) {
+                        child.reuse_interaction_state_from(previous);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Collapse long simple lists into multiline text chunks. This retains a
     /// single document/selection model while avoiding hundreds of Taffy nodes
     /// for line-oriented responses such as numbered enumerations.
@@ -509,6 +714,14 @@ impl Node {
                     .map(Self::optimize_for_rendering)
                     .collect(),
             },
+            Self::Details(mut details) => {
+                details.children = details
+                    .children
+                    .into_iter()
+                    .map(Self::optimize_for_rendering)
+                    .collect();
+                Self::Details(details)
+            }
             Self::List { children, ordered } => {
                 let children = children
                     .into_iter()
@@ -565,8 +778,7 @@ impl Node {
                 .map(|(chunk_index, paragraphs)| {
                     let mut chunk = Paragraph::default();
                     for (item_offset, paragraph) in paragraphs.iter().enumerate() {
-                        let item_index =
-                            chunk_index * Self::PLAIN_LIST_CHUNK_ITEMS + item_offset;
+                        let item_index = chunk_index * Self::PLAIN_LIST_CHUNK_ITEMS + item_offset;
                         if ordered {
                             chunk.push_str(&format!("{}. ", item_index + 1));
                         } else {
@@ -582,6 +794,110 @@ impl Node {
                 })
                 .collect(),
         )
+    }
+
+    pub(crate) fn root_block_count(&self) -> usize {
+        self.root_blocks().len()
+    }
+
+    pub(crate) fn root_blocks(&self) -> &[Node] {
+        match self {
+            Self::Root { children } => children,
+            node => std::slice::from_ref(node),
+        }
+    }
+
+    pub(crate) fn root_blocks_mut(&mut self) -> &mut [Node] {
+        match self {
+            Self::Root { children } => children,
+            node => std::slice::from_mut(node),
+        }
+    }
+
+    fn estimated_block_height(&self, content_width: Pixels) -> Pixels {
+        const BASE_LINE_HEIGHT: f32 = 21.0;
+        let chars_per_line = (content_width / px(7.25)).max(20.0) as usize;
+        let paragraph_height = |paragraph: &Paragraph| {
+            let image_height = paragraph
+                .children
+                .iter()
+                .filter_map(|child| child.image.as_ref())
+                .map(|image| {
+                    image.height.map_or(IMAGE_PLACEHOLDER_HEIGHT, |height| {
+                        height
+                            .to_pixels(content_width.into(), px(16.0))
+                            .clamp(px(1.0), IMAGE_MAX_EXPLICIT_HEIGHT)
+                    })
+                })
+                .fold(Pixels::ZERO, |total, height| total + height);
+            let hard_lines = paragraph
+                .children
+                .iter()
+                .map(|child| child.text.matches('\n').count())
+                .sum::<usize>()
+                + 1;
+            let wrapped_lines = paragraph.text_len().div_ceil(chars_per_line).max(1);
+            let text_height = if paragraph.text_len() == 0 {
+                Pixels::ZERO
+            } else {
+                px((hard_lines.max(wrapped_lines) as f32) * BASE_LINE_HEIGHT)
+            };
+            image_height + text_height + px(12.0)
+        };
+
+        match self {
+            Self::Root { children } => children
+                .iter()
+                .map(|child| child.estimated_block_height(content_width))
+                .fold(Pixels::ZERO, |height, child| height + child),
+            Self::Paragraph(paragraph) => paragraph_height(paragraph),
+            Self::Heading { level, children } => {
+                let scale = match level {
+                    1 => 1.5,
+                    2 => 1.3,
+                    3 => 1.15,
+                    _ => 1.05,
+                };
+                paragraph_height(children) * scale
+            }
+            Self::Blockquote { children } => children
+                .iter()
+                .map(|child| child.estimated_block_height(content_width - px(32.0)))
+                .fold(px(12.0), |height, child| height + child),
+            Self::Details(details) => {
+                let summary = paragraph_height(&details.summary).max(px(BASE_LINE_HEIGHT));
+                if details.is_expanded() {
+                    details
+                        .children
+                        .iter()
+                        .map(|child| child.estimated_block_height(content_width - px(20.0)))
+                        .fold(summary + px(8.0), |height, child| height + child)
+                } else {
+                    summary
+                }
+            }
+            Self::List { children, .. } => children
+                .iter()
+                .map(|child| child.estimated_block_height(content_width - px(24.0)))
+                .fold(Pixels::ZERO, |height, child| height + child),
+            Self::PlainList { chunks } => chunks
+                .iter()
+                .map(paragraph_height)
+                .fold(Pixels::ZERO, |height, chunk| height + chunk),
+            Self::ListItem { children, .. } => children
+                .iter()
+                .map(|child| child.estimated_block_height(content_width))
+                .fold(Pixels::ZERO, |height, child| height + child)
+                .max(px(BASE_LINE_HEIGHT)),
+            Self::CodeBlock(code_block) => {
+                let line_count = code_block.code().lines().count().max(1);
+                px(line_count as f32 * 18.0 + 32.0)
+            }
+            Self::Table(table) => px(table.children.len().max(1) as f32 * 30.0 + 16.0),
+            Self::Divider => px(18.0),
+            Self::Break { .. } => px(BASE_LINE_HEIGHT),
+            Self::Definition { .. } | Self::Unknown => Pixels::ZERO,
+        }
     }
 
     pub(super) fn selected_text(&self) -> String {
@@ -644,6 +960,14 @@ impl Node {
                     text.push('\n');
                 }
             }
+            Node::Details(details) => {
+                text.push_str(&details.summary.selected_text());
+                if details.is_expanded() {
+                    for child in &details.children {
+                        text.push_str(&child.selected_text());
+                    }
+                }
+            }
             Node::Table(table) => {
                 let mut block_text = String::new();
                 for row in table.children.iter() {
@@ -685,14 +1009,34 @@ mod tests {
             ordered: true,
             children: (1..=item_count)
                 .map(|index| Node::ListItem {
-                    children: vec![Node::Paragraph(Paragraph::new(format!(
-                        "Item {index}"
-                    )))],
+                    children: vec![Node::Paragraph(Paragraph::new(format!("Item {index}")))],
                     spread: false,
                     checked: None,
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn image_blocks_reserve_stable_placeholder_and_explicit_heights() {
+        let image = |height| {
+            let mut paragraph = Paragraph::default();
+            paragraph.push_image(ImageNode {
+                url: "https://example.com/image.png".into(),
+                height,
+                ..Default::default()
+            });
+            Node::Paragraph(paragraph)
+        };
+
+        assert_eq!(
+            image(None).estimated_block_height(px(720.0)),
+            IMAGE_PLACEHOLDER_HEIGHT + px(12.0)
+        );
+        assert_eq!(
+            image(Some(px(240.0).into())).estimated_block_height(px(720.0)),
+            px(252.0)
+        );
     }
 
     fn paragraph_text(paragraph: &Paragraph) -> String {
@@ -721,6 +1065,16 @@ mod tests {
             simple_ordered_list(Node::PLAIN_LIST_MIN_ITEMS - 1).optimize_for_rendering(),
             Node::List { .. }
         ));
+    }
+
+    #[test]
+    fn long_documents_only_render_the_visible_block_window() {
+        let heights = vec![px(30.0); 1_000];
+        let range = visible_block_range(&heights, px(14_000.0), px(16_000.0));
+
+        assert!(range.start > 400);
+        assert!(range.end < 600);
+        assert!(range.len() < 70);
     }
 }
 
@@ -763,12 +1117,57 @@ impl Paragraph {
                         .into_any_element(),
                     );
                 }
+                let alt = image
+                    .alt
+                    .clone()
+                    .filter(|alt| !alt.is_empty())
+                    .unwrap_or_else(|| "Image".into());
+                let loading_alt = alt.clone();
+                let fallback_alt = alt.clone();
+                let placeholder_height = image
+                    .height
+                    .unwrap_or_else(|| IMAGE_PLACEHOLDER_HEIGHT.into());
                 child_nodes.push(
                     img(image.url.clone())
                         .id(ix)
                         .object_fit(ObjectFit::Contain)
                         .max_w(relative(1.))
+                        .min_h(px(1.0))
+                        .max_h(IMAGE_MAX_EXPLICIT_HEIGHT)
                         .when_some(image.width, |this, width| this.w(width))
+                        .when_some(image.height, |this, height| this.h(height))
+                        .when(image.height.is_none(), |this| {
+                            // Loading reserves a stable placeholder, but the
+                            // decoded image may use its natural height. The
+                            // measured-block observer reconciles that change.
+                            this.max_h(IMAGE_MAX_AUTO_HEIGHT)
+                        })
+                        .with_loading(move || {
+                            div()
+                                .w_full()
+                                .h(placeholder_height)
+                                .min_h(px(1.0))
+                                .max_h(IMAGE_MAX_EXPLICIT_HEIGHT)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(gpui::transparent_black())
+                                .child(loading_alt.clone())
+                                .into_any_element()
+                        })
+                        .with_fallback(move || {
+                            div()
+                                .w_full()
+                                .h(placeholder_height)
+                                .min_h(px(1.0))
+                                .max_h(IMAGE_MAX_EXPLICIT_HEIGHT)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(gpui::red())
+                                .child(SharedString::from(format!("Could not load {fallback_alt}")))
+                                .into_any_element()
+                        })
                         .when_some(image.link.clone(), |this, link| {
                             let title = image.title();
                             this.cursor_pointer()
@@ -935,6 +1334,19 @@ impl Node {
                     .map(|line| format!("> {}", line))
                     .collect::<Vec<_>>()
                     .join("\n")
+            }
+            Node::Details(details) => {
+                let open = if details.default_open { " open" } else { "" };
+                let body = details
+                    .children
+                    .iter()
+                    .map(Node::to_markdown)
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                format!(
+                    "<details{open}>\n<summary>{}</summary>\n\n{body}\n</details>",
+                    details.summary.to_markdown().trim()
+                )
             }
             Node::List { children, ordered } => children
                 .iter()
@@ -1259,6 +1671,7 @@ impl Node {
     pub(super) fn render_root(
         &self,
         list_state: Option<ListState>,
+        block_virtualization: Option<BlockVirtualization>,
         node_cx: &NodeContext,
         window: &mut Window,
         cx: &mut App,
@@ -1269,6 +1682,18 @@ impl Node {
         };
 
         let Some(list_state) = list_state else {
+            if let (Node::Root { children }, Some(block_virtualization)) =
+                (self, block_virtualization)
+            {
+                return Self::render_virtualized_root(
+                    children,
+                    options,
+                    block_virtualization,
+                    node_cx,
+                    window,
+                    cx,
+                );
+            }
             return self
                 .render_block(options, node_cx, window, cx)
                 .into_any_element();
@@ -1294,6 +1719,92 @@ impl Node {
         })
         .size_full()
         .into_any()
+    }
+
+    fn render_virtualized_root(
+        children: &[Node],
+        options: NodeRenderOptions,
+        virtualization: BlockVirtualization,
+        node_cx: &NodeContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let viewport_height = virtualization.viewport.size.height;
+        let overscan = viewport_height;
+        let visible_top =
+            virtualization.viewport.top() - virtualization.content_origin_y - overscan;
+        let visible_bottom =
+            virtualization.viewport.bottom() - virtualization.content_origin_y + overscan;
+        let block_heights = children
+            .iter()
+            .enumerate()
+            .map(|(index, child)| {
+                virtualization
+                    .heights
+                    .get(index)
+                    .and_then(|height| *height)
+                    .unwrap_or_else(|| child.estimated_block_height(virtualization.content_width))
+            })
+            .collect::<Vec<_>>();
+        let visible_range = if virtualization.render_all {
+            0..children.len()
+        } else {
+            visible_block_range(&block_heights, visible_top, visible_bottom)
+        };
+        virtualization.rendered_block_count.set(visible_range.len());
+
+        let mut elements = Vec::with_capacity(visible_range.len() + 2);
+        let children_len = children.len();
+
+        let leading_height = block_heights[..visible_range.start]
+            .iter()
+            .copied()
+            .fold(Pixels::ZERO, |total, height| total + height);
+        if leading_height > Pixels::ZERO {
+            elements.push(
+                div()
+                    .w_full()
+                    .h(leading_height)
+                    .flex_none()
+                    .into_any_element(),
+            );
+        }
+
+        for index in visible_range.clone() {
+            elements.push(
+                MeasuredBlock {
+                    index,
+                    estimated_height: children[index]
+                        .estimated_block_height(virtualization.content_width),
+                    child: children[index].render_block(
+                        options.is_last(index + 1 == children_len),
+                        node_cx,
+                        window,
+                        cx,
+                    ),
+                    state: virtualization.measure_state.clone(),
+                    viewport: virtualization.viewport,
+                    resize_handler: virtualization.resize_handler.clone(),
+                }
+                .into_any_element(),
+            );
+        }
+
+        let trailing_height = block_heights[visible_range.end..]
+            .iter()
+            .copied()
+            .fold(Pixels::ZERO, |total, height| total + height);
+        if trailing_height > Pixels::ZERO {
+            elements.push(
+                div()
+                    .w_full()
+                    .h(trailing_height)
+                    .flex_none()
+                    .into_any_element(),
+            );
+        }
+
+        div().id("div").children(elements).into_any_element()
     }
 
     fn render_block(
@@ -1374,6 +1885,71 @@ impl Node {
                         }),
                 )
                 .into_any_element(),
+            Node::Details(details) => {
+                let expanded = details.is_expanded();
+                let expanded_state = details.expanded.clone();
+                let current_view = window.current_view();
+                let details_id = Arc::as_ptr(&details.expanded) as usize;
+                let focus_handle = window
+                    .use_keyed_state(("details-focus", details_id), cx, |_, cx| cx.focus_handle())
+                    .read(cx)
+                    .clone();
+                let click_focus_handle = focus_handle.clone();
+                div()
+                    .id(("details", details_id))
+                    .w_full()
+                    .pb(mb)
+                    .flex()
+                    .flex_col()
+                    .child(
+                        h_flex()
+                            .id(("details-summary", details_id))
+                            .debug_selector(|| "markdown-details-summary".to_owned())
+                            .track_focus(&focus_handle.tab_stop(true))
+                            .w_full()
+                            .gap_1()
+                            .cursor_pointer()
+                            .child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall()
+                                .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(details.summary.render(node_cx, window, cx))
+                            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                                // Disclosure clicks are controls, not the
+                                // beginning of a document text selection.
+                                window.focus(&click_focus_handle);
+                                window.prevent_default();
+                            })
+                            .on_click(move |_, _, cx| {
+                                expanded_state.fetch_xor(true, Ordering::Relaxed);
+                                cx.stop_propagation();
+                                cx.notify(current_view);
+                            }),
+                    )
+                    .when(expanded, |element| {
+                        element.child(div().ml_5().pt_2().children({
+                            let child_count = details.children.len();
+                            details
+                                .children
+                                .iter()
+                                .enumerate()
+                                .map(move |(index, child)| {
+                                    child.render_block(
+                                        options.is_last(index + 1 == child_count),
+                                        node_cx,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                        }))
+                    })
+                    .into_any_element()
+            }
             Node::List { children, ordered } => v_flex()
                 .id(if *ordered { "ol" } else { "ul" })
                 .pb(mb)
@@ -1408,11 +1984,7 @@ impl Node {
                 .children(
                     chunks
                         .iter()
-                        .map(|chunk| {
-                            chunk
-                                .render(node_cx, window, cx)
-                                .into_any_element()
-                        })
+                        .map(|chunk| chunk.render(node_cx, window, cx).into_any_element())
                         .collect::<Vec<_>>(),
                 )
                 .into_any_element(),

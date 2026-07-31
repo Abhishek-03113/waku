@@ -29,10 +29,54 @@ coordinates and scrolls the owning transcript list near its viewport edges, so
 selection can continue beyond the currently visible portion of a message. Waku
 owns each message's `TextViewState` so a virtualized row remount cannot discard
 the range, and identical style updates no longer enqueue redundant reparses.
+The text hitbox and selection start area are clipped to the transcript viewport,
+so an offscreen portion of a tall message cannot receive clicks behind the app
+header while an active drag can still leave the viewport to autoscroll.
+Secondary mouse input never starts, ends, or clears a text selection, and the
+custom context-menu trigger consumes the event after opening its menu. This
+keeps the selected range visibly highlighted while the menu is open.
 The list scrollbar offset is clamped to its measured maximum when a bottom-
 aligned transcript snaps to its pinned-tail state. This keeps the thumb valid
 and visible through the normal idle delay at the end of the transcript.
+Waku also seeds the outer transcript list with lightweight per-row height
+estimates and presents their total through a normalized scrollbar handle.
+Exact row measurements can replace those estimates as messages enter the
+viewport without resizing the thumb or parsing every offscreen message first.
 
 Long, simple Markdown lists are rendered as small multiline text chunks inside
 the same `TextView`. This removes hundreds of flex/layout subtrees without
 fragmenting the message or its selection model.
+
+Long heterogeneous documents use measured top-level block virtualization.
+`TextViewScrollViewport` captures the owning transcript viewport before the
+outer GPUI list begins row layout, avoiding a nested `ListState` borrow. The
+first layout uses estimated block heights and immediately builds only a bounded
+window; once the row origin is known, a corrective frame targets the actual
+visible window plus one viewport of overscan. There is no full-document warm-up
+layout. Streaming updates retain measurements for
+the unchanged AST prefix and invalidate only the changed tail, including code
+content changes. During a drag selection the complete document is rendered so
+selection and copy remain continuous across Markdown node types, then block
+virtualization resumes immediately after the endpoint settles.
+
+Measured blocks now report post-layout height changes to their virtualized
+parent. Initial discovery remains silent, while real changes such as an image
+finishing loading, an animated or custom element changing size, or a disclosure
+opening invalidate exactly one transcript row. Waku applies the measured delta
+to its stable scrollbar estimate, preserves the intra-message pixel anchor when
+the resized block is above the viewport, coalesces repeated changes, and freezes
+both the real and estimated document lengths during scrollbar drags. Reparsed
+tails retract previously reported resize adjustments so stale media dimensions
+cannot leak into a later document.
+
+Markdown and HTML images reserve a bounded placeholder, honor both explicit
+width and height, cap pathological heights, and keep a same-height loading or
+error fallback. Offscreen images remain unloaded. HTML `<details>` and
+`<summary>` are interactive, keyboard-focusable, retain their open state while
+their streamed body changes, and flow through the same resize notification
+path. Width changes invalidate wrap-dependent block measurements before
+visible-range selection and rebase prior media/disclosure height corrections,
+while the outer transcript bulk-measures only lightweight row placeholders so
+resizing a long session does not parse every offscreen message. Appending a row
+updates only the previous tail and new estimates rather than rescanning old
+Markdown, and image estimation avoids duplicating large data URLs.
