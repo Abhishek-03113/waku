@@ -52,6 +52,7 @@ pub struct Theme {
     pub is_dark: bool,
     pub canvas: Hsla,
     pub sidebar: Hsla,
+    pub sidebar_item_background: Hsla,
     pub surface: Hsla,
     pub raised: Hsla,
     pub composer: Hsla,
@@ -93,7 +94,8 @@ impl Theme {
         Self {
             is_dark: true,
             canvas: rgb(0x1A1A1A).into(),
-            sidebar: rgb(0x232426).into(),
+            sidebar: hsla(210.0 / 360.0, 0.04, 0.098, 0.95),
+            sidebar_item_background: rgb(0x323334).into(),
             surface: rgb(0x1A1A1A).into(),
             raised: rgb(0x232323).into(),
             composer: rgb(0x212121).into(),
@@ -125,7 +127,8 @@ impl Theme {
         Self {
             is_dark: false,
             canvas: rgb(0xF6F5F6).into(),
-            sidebar: rgb(0xEBECEE).into(),
+            sidebar: hsla(200.0 / 360.0, 0.08, 0.92, 0.94),
+            sidebar_item_background: hsla(0.0, 0.0, 0.0, 0.03),
             surface: rgb(0xF6F5F6).into(),
             raised: rgb(0xECECEC).into(),
             composer: rgb(0xFFFFFF).into(),

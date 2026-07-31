@@ -102,9 +102,11 @@ impl Waku {
                     .line_height(px(16.0))
                     .rounded(px(7.0))
                     .cursor_default()
-                    .when(selected, |element| element.bg(theme.overlay))
-                    .hover(|element| element.bg(theme.overlay))
-                    .active(|element| element.bg(theme.overlay_strong))
+                    .when(selected, |element| {
+                        element.bg(theme.sidebar_item_background)
+                    })
+                    .hover(|element| element.bg(theme.sidebar_item_background))
+                    .active(|element| element.bg(theme.sidebar_item_background))
                     .child(icon(
                         "icons/folder.svg",
                         13.0,
@@ -158,9 +160,11 @@ impl Waku {
                         .py(px(6.0))
                         .rounded(px(7.0))
                         .cursor_default()
-                        .when(selected, |element| element.bg(theme.overlay))
-                        .hover(|element| element.bg(theme.overlay))
-                        .active(|element| element.bg(theme.overlay_strong))
+                        .when(selected, |element| {
+                            element.bg(theme.sidebar_item_background)
+                        })
+                        .hover(|element| element.bg(theme.sidebar_item_background))
+                        .active(|element| element.bg(theme.sidebar_item_background))
                         .child(
                             div()
                                 .flex()
@@ -260,8 +264,8 @@ impl Waku {
                         .line_height(px(16.0))
                         .rounded(px(7.0))
                         .cursor_default()
-                        .hover(|element| element.bg(theme.overlay))
-                        .active(|element| element.bg(theme.overlay_strong))
+                        .hover(|element| element.bg(theme.sidebar_item_background))
+                        .active(|element| element.bg(theme.sidebar_item_background))
                         .child(icon("icons/plus.svg", 13.0, theme.text_secondary))
                         .child(
                             div()
@@ -334,8 +338,6 @@ impl Waku {
                 px(0.0)
             })
             .pr(px(14.0))
-            .border_b_1()
-            .border_color(theme.border)
             .when(!self.sidebar_visible, |element| {
                 element
                     .child(

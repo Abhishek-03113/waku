@@ -69,9 +69,11 @@ impl Waku {
                     } else {
                         theme.text_secondary
                     })
-                    .when(selected, |element| element.bg(theme.overlay_strong))
-                    .hover(|element| element.bg(theme.overlay))
-                    .active(|element| element.bg(theme.overlay_strong))
+                    .when(selected, |element| {
+                        element.bg(theme.sidebar_item_background)
+                    })
+                    .hover(|element| element.bg(theme.sidebar_item_background))
+                    .active(|element| element.bg(theme.sidebar_item_background))
                     .child(icon(
                         icon_path,
                         15.0,
