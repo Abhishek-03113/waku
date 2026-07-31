@@ -1,0 +1,787 @@
+use super::*;
+
+impl Waku {
+    /// One list row per message plus each ordered non-message turn block.
+    pub(super) fn transcript_row_count(&self) -> usize {
+        let messages = self
+            .selected_session()
+            .map(|session| session.messages.len())
+            .unwrap_or(0);
+        messages + self.selected_transcript_blocks().len()
+    }
+
+    pub(super) fn selected_transcript_row_kinds(&self) -> Vec<TranscriptRowKind> {
+        let message_count = self
+            .selected_session()
+            .map(|session| session.messages.len())
+            .unwrap_or(0);
+        let anchors = self
+            .selected_transcript_blocks()
+            .iter()
+            .map(|block| block.after_message)
+            .collect::<Vec<_>>();
+        transcript_row_kinds(message_count, &anchors)
+    }
+
+    pub(super) fn estimated_transcript_row_height(
+        &self,
+        row_index: usize,
+        kind: TranscriptRowKind,
+        row_count: usize,
+    ) -> Pixels {
+        let inner_height = match kind {
+            TranscriptRowKind::Message(message_index) => self
+                .selected_session()
+                .and_then(|session| session.messages.get(message_index))
+                .map(|message| {
+                    estimated_message_height(
+                        message,
+                        self.transcript_layout_width.get(),
+                        self.checkpoint_action_for_message(message_index).is_some(),
+                    )
+                })
+                .unwrap_or(px(36.0)),
+            TranscriptRowKind::TurnBlock(block_index) => self
+                .selected_transcript_blocks()
+                .get(block_index)
+                .map(|block| match &block.content {
+                    TranscriptBlockContent::Reasoning(reasoning) => {
+                        let live = self.reasoning_live()
+                            && self.selected_transcript_blocks().iter().rposition(|block| {
+                                matches!(block.content, TranscriptBlockContent::Reasoning(_))
+                            }) == Some(block_index);
+                        let expanded = self
+                            .reasoning_expanded
+                            .get(&block_index)
+                            .copied()
+                            .unwrap_or(live);
+                        px(22.0)
+                            + if expanded {
+                                px(6.0) + estimated_text_height(&reasoning.content, 88, 18.0)
+                            } else {
+                                Pixels::ZERO
+                            }
+                    }
+                    TranscriptBlockContent::Activities(activities) => {
+                        let running = activities.iter().any(|activity| !activity.complete);
+                        let expanded = self
+                            .activities_expanded
+                            .get(&block_index)
+                            .copied()
+                            .unwrap_or(running);
+                        if !expanded {
+                            px(22.0)
+                        } else {
+                            activities.iter().fold(px(22.0), |height, activity| {
+                                let detail_height = activity
+                                    .detail
+                                    .as_deref()
+                                    .filter(|detail| {
+                                        self.expanded_activity_items.contains(&activity.id)
+                                            && !detail.trim().is_empty()
+                                    })
+                                    .map_or(Pixels::ZERO, |detail| {
+                                        px(14.0) + estimated_text_height(detail, 76, 17.0)
+                                    });
+                                height + px(24.0) + detail_height
+                            })
+                        }
+                    }
+                })
+                .unwrap_or(px(22.0)),
+        };
+        let starts_followup_turn = matches!(kind, TranscriptRowKind::Message(message_index)
+            if message_index > 0
+                && self.selected_session().and_then(|session| session.messages.get(message_index)).is_some_and(|message| message.role == MessageRole::User));
+        inner_height
+            + estimated_transcript_row_padding(row_index, row_count, starts_followup_turn)
+            + self
+                .transcript_row_height_adjustments
+                .borrow()
+                .get(&kind)
+                .copied()
+                .unwrap_or(Pixels::ZERO)
+    }
+
+    pub(super) fn rebuild_transcript_estimates(&self) {
+        let kinds = self.selected_transcript_row_kinds();
+        let valid_kinds = kinds.iter().copied().collect::<HashSet<_>>();
+        self.transcript_row_height_adjustments
+            .borrow_mut()
+            .retain(|kind, _| valid_kinds.contains(kind));
+        let row_count = kinds.len();
+        let estimates = kinds
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, kind)| self.estimated_transcript_row_height(index, kind, row_count))
+            .collect::<Vec<_>>();
+        let total = estimates
+            .iter()
+            .copied()
+            .fold(Pixels::ZERO, |total, height| total + height);
+        *self.transcript_row_kinds.borrow_mut() = kinds;
+        *self.transcript_row_estimates.borrow_mut() = estimates;
+        self.transcript_estimated_height.set(total);
+    }
+
+    pub(super) fn append_transcript_estimates(&self, current: usize, count: usize) -> bool {
+        let kinds = self.selected_transcript_row_kinds();
+        if kinds.len() != count {
+            return false;
+        }
+        {
+            let previous = self.transcript_row_kinds.borrow();
+            if previous.len() != current || previous.as_slice() != &kinds[..current] {
+                return false;
+            }
+        }
+
+        let mut estimates = self.transcript_row_estimates.borrow_mut();
+        if estimates.len() != current {
+            return false;
+        }
+        let mut total = self.transcript_estimated_height.get();
+
+        // The old tail loses its special bottom padding once another row is
+        // appended. Recompute that one row, then estimate only the new tail.
+        if current > 0 {
+            let index = current - 1;
+            let next = self.estimated_transcript_row_height(index, kinds[index], count);
+            total += next - estimates[index];
+            estimates[index] = next;
+        }
+        for (index, kind) in kinds.iter().copied().enumerate().skip(current) {
+            let height = self.estimated_transcript_row_height(index, kind, count);
+            estimates.push(height);
+            total += height;
+        }
+
+        *self.transcript_row_kinds.borrow_mut() = kinds;
+        self.transcript_estimated_height
+            .set(total.max(Pixels::ZERO));
+        true
+    }
+
+    pub(super) fn update_transcript_estimates(&self, range: Range<usize>) {
+        let kinds = self.transcript_row_kinds.borrow();
+        if self.transcript_row_estimates.borrow().len() != kinds.len() {
+            drop(kinds);
+            self.rebuild_transcript_estimates();
+            return;
+        }
+
+        let mut estimates = self.transcript_row_estimates.borrow_mut();
+        let mut total = self.transcript_estimated_height.get();
+        for index in range.start.min(kinds.len())..range.end.min(kinds.len()) {
+            let next = self.estimated_transcript_row_height(index, kinds[index], kinds.len());
+            total += next - estimates[index];
+            estimates[index] = next;
+        }
+        self.transcript_estimated_height
+            .set(total.max(Pixels::ZERO));
+    }
+
+    pub(super) fn active_transcript_rows(&self) -> &ListState {
+        if self.transcript_anchor.get().is_some() {
+            &self.anchored_transcript_rows
+        } else {
+            &self.transcript_rows
+        }
+    }
+
+    pub(super) fn reset_transcript_rows(&self, count: usize) {
+        // Row keys contain indices, so dynamic corrections from another
+        // session must never bleed into the newly selected transcript.
+        self.transcript_row_height_adjustments.borrow_mut().clear();
+        self.rebuild_transcript_estimates();
+        *self.transcript_provisional_rows.borrow_mut() = (0..count).collect();
+        self.transcript_exact_measurement_rows.borrow_mut().clear();
+        let _ = self.transcript_rows.clone().measure_all();
+        self.transcript_is_scrolled.set(false);
+        self.transcript_rows.reset(count);
+        let _ = self.anchored_transcript_rows.clone().measure_all();
+        self.anchored_transcript_rows.reset(count);
+    }
+
+    pub(super) fn selected_transcript_anchor_row(&self) -> Option<usize> {
+        let anchor = self.transcript_anchor.get()?;
+        let session = self.selected_session()?;
+        if session.id != anchor.session_id {
+            return None;
+        }
+        let message_index = session.messages.iter().position(|message| {
+            message.role == MessageRole::User && message.turn_id == Some(anchor.turn_id)
+        })?;
+        self.transcript_row_kinds
+            .borrow()
+            .iter()
+            .position(|kind| *kind == TranscriptRowKind::Message(message_index))
+    }
+
+    pub(super) fn scroll_transcript_to_anchor(&self) {
+        let Some(item_ix) = self.selected_transcript_anchor_row() else {
+            return;
+        };
+        self.active_transcript_rows().scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: Pixels::ZERO,
+        });
+        self.transcript_is_scrolled.set(true);
+    }
+
+    pub(super) fn update_transcript_anchor_end_space(&self, window: &Window) -> Pixels {
+        let Some(anchor_row) = self.selected_transcript_anchor_row() else {
+            self.transcript_anchor_end_space.set(Pixels::ZERO);
+            self.transcript_anchor_following.set(false);
+            return Pixels::ZERO;
+        };
+
+        let viewport_height = {
+            let measured = self.active_transcript_rows().viewport_bounds().size.height;
+            if measured > Pixels::ZERO {
+                measured
+            } else {
+                // The first sent message replaces the empty state, so the list
+                // has no prior bounds yet. The full window is a conservative
+                // first-frame fallback that still guarantees a top anchor.
+                window.viewport_size().height
+            }
+        };
+        let estimated_tail_height = self
+            .transcript_row_estimates
+            .borrow()
+            .iter()
+            .skip(anchor_row)
+            .copied()
+            .fold(Pixels::ZERO, |height, row| height + row);
+        let transcript_rows = self.active_transcript_rows();
+        let last_row = transcript_rows.item_count().checked_sub(1);
+        let measured_tail_height = last_row.and_then(|last_row| {
+            let anchor = transcript_rows.bounds_for_item(anchor_row)?;
+            let last = transcript_rows.bounds_for_item(last_row)?;
+            Some((last.bottom() - anchor.top()).max(Pixels::ZERO))
+        });
+        let tail_is_unmeasured = self
+            .transcript_provisional_rows
+            .borrow()
+            .iter()
+            .any(|row| *row >= anchor_row)
+            || self
+                .transcript_exact_measurement_rows
+                .borrow()
+                .iter()
+                .any(|row| *row >= anchor_row);
+        let anchored_tail_height = if tail_is_unmeasured {
+            // Bounds still describe the element that was just invalidated.
+            // The estimate already reflects the requested expanded/collapsed
+            // state, so use it to prevent a one-frame underfill on collapse.
+            estimated_tail_height
+        } else {
+            measured_tail_height.unwrap_or(estimated_tail_height)
+        };
+        let end_space = stabilized_transcript_anchor_end_space(
+            viewport_height,
+            anchored_tail_height,
+            self.transcript_anchor_end_space.get(),
+            tail_is_unmeasured,
+        );
+        self.transcript_anchor_end_space.set(end_space);
+        if maintain_transcript_anchor(
+            transcript_rows,
+            anchor_row,
+            self.transcript_anchor_following.get(),
+            end_space,
+        ) {
+            self.transcript_is_scrolled.set(true);
+        }
+        end_space
+    }
+
+    pub(super) fn invalidate_transcript_rows(&self, range: Range<usize>, anchor_delta: Pixels) {
+        let transcript_rows = self.active_transcript_rows();
+        let count = transcript_rows.item_count();
+        let range = range.start.min(count)..range.end.min(count);
+        if range.is_empty() {
+            return;
+        }
+
+        let preserve_scroll = self.transcript_is_scrolled.get();
+        let previous_scroll_top = preserve_scroll.then(|| transcript_rows.logical_scroll_top());
+        self.transcript_provisional_rows
+            .borrow_mut()
+            .extend(range.clone());
+        let _ = transcript_rows.clone().measure_all();
+        transcript_rows.splice(range.clone(), range.len());
+
+        if let Some(scroll_top) = previous_scroll_top.and_then(|scroll_top| {
+            scroll_top_after_row_invalidation(scroll_top, range, anchor_delta)
+        }) {
+            transcript_rows.scroll_to(scroll_top);
+        }
+    }
+
+    pub(super) fn sync_transcript_layout_width(&self, window: &Window) -> bool {
+        let sidebar_width = if self.sidebar_visible {
+            px(SIDEBAR_WIDTH)
+        } else {
+            Pixels::ZERO
+        };
+        let content_width = (window.viewport_size().width - sidebar_width - px(40.0))
+            .clamp(px(1.0), px(CONTENT_MAX_WIDTH));
+        let previous = self.transcript_layout_width.replace(content_width);
+        if previous > Pixels::ZERO && (previous - content_width).abs() < px(1.0) {
+            return false;
+        }
+
+        // A width change is a real document reflow. Rebase the stable estimate
+        // for the new wrap width and let GPUI bulk-measure cheap placeholders
+        // before it lays out the visible rows exactly.
+        self.rebuild_transcript_estimates();
+        let count = self.active_transcript_rows().item_count();
+        self.invalidate_transcript_rows(0..count, Pixels::ZERO);
+        true
+    }
+
+    pub(super) fn drain_transcript_resize_events(&self) {
+        let Some(session_id) = self.state.selected_session else {
+            while self.transcript_resize_rx.try_recv().is_ok() {}
+            return;
+        };
+        let mut by_row = HashMap::<usize, (TranscriptRowKind, Pixels, Pixels)>::new();
+
+        while let Ok(event) = self.transcript_resize_rx.try_recv() {
+            if event.session_id != session_id {
+                continue;
+            }
+            let Some(message_index) = self.selected_session().and_then(|session| {
+                session
+                    .messages
+                    .iter()
+                    .position(|message| message.id == event.message_id)
+            }) else {
+                continue;
+            };
+            let kind = TranscriptRowKind::Message(message_index);
+            let Some(row_index) = self
+                .transcript_row_kinds
+                .borrow()
+                .iter()
+                .position(|candidate| *candidate == kind)
+            else {
+                continue;
+            };
+            let entry = by_row
+                .entry(row_index)
+                .or_insert((kind, Pixels::ZERO, Pixels::ZERO));
+            entry.1 += event.delta;
+            entry.2 += event.anchor_delta;
+        }
+
+        for (row_index, (kind, delta, anchor_delta)) in by_row {
+            *self
+                .transcript_row_height_adjustments
+                .borrow_mut()
+                .entry(kind)
+                .or_insert(Pixels::ZERO) += delta;
+            let row_count = self.transcript_row_kinds.borrow().len();
+            let next_estimate = self
+                .estimated_transcript_row_height(row_index, kind, row_count)
+                .max(px(1.0));
+            let applied_delta = {
+                let mut estimates = self.transcript_row_estimates.borrow_mut();
+                let Some(current) = estimates.get_mut(row_index) else {
+                    continue;
+                };
+                let applied_delta = next_estimate - *current;
+                *current = next_estimate;
+                applied_delta
+            };
+            self.transcript_estimated_height
+                .set((self.transcript_estimated_height.get() + applied_delta).max(Pixels::ZERO));
+            self.invalidate_transcript_rows(row_index..row_index + 1, anchor_delta);
+        }
+    }
+
+    /// Keep the list's row count in sync with the transcript. Appends keep
+    /// the reader's place (or the pinned tail); shrinking resets the view.
+    pub(super) fn sync_transcript_rows(&self) {
+        let count = self.transcript_row_count();
+        let transcript_rows = self.active_transcript_rows();
+        let current = transcript_rows.item_count();
+        if count > current {
+            if !self.append_transcript_estimates(current, count) {
+                self.reset_transcript_rows(count);
+                return;
+            }
+            self.transcript_provisional_rows
+                .borrow_mut()
+                .extend(current..count);
+            let _ = transcript_rows.clone().measure_all();
+            transcript_rows.splice(current..current, count - current);
+        } else if count < current {
+            self.reset_transcript_rows(count);
+        }
+    }
+
+    /// Provider events arrive in transcript order, so only the active tail can
+    /// change height. Keeping earlier row measurements intact is critical
+    /// for responsive scrolling while a long answer is still growing.
+    pub(super) fn remeasure_transcript_tail(&self) {
+        self.sync_transcript_rows();
+        let count = self.active_transcript_rows().item_count();
+        let from = count.saturating_sub(STREAM_REMEASURE_TAIL_ROWS);
+        if from < count {
+            self.update_transcript_estimates(from..count);
+            self.invalidate_transcript_rows(from..count, Pixels::ZERO);
+        }
+    }
+
+    pub(super) fn remeasure_transcript_block(&self, block_index: usize) {
+        self.sync_transcript_rows();
+        let row_index = self
+            .transcript_row_kinds
+            .borrow()
+            .iter()
+            .position(|kind| *kind == TranscriptRowKind::TurnBlock(block_index));
+        if let Some(row_index) = row_index {
+            self.update_transcript_estimates(row_index..row_index + 1);
+            self.invalidate_transcript_rows(row_index..row_index + 1, Pixels::ZERO);
+        }
+    }
+}
+
+// ── Shared pieces ──────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum TranscriptRowKind {
+    Message(usize),
+    TurnBlock(usize),
+}
+
+pub(super) fn transcript_anchor_end_space(
+    viewport_height: Pixels,
+    anchored_tail_height: Pixels,
+) -> Pixels {
+    (viewport_height - anchored_tail_height).max(Pixels::ZERO)
+}
+
+pub(super) fn stabilized_transcript_anchor_end_space(
+    viewport_height: Pixels,
+    anchored_tail_height: Pixels,
+    previous_end_space: Pixels,
+    tail_is_unmeasured: bool,
+) -> Pixels {
+    let candidate = transcript_anchor_end_space(viewport_height, anchored_tail_height);
+    if tail_is_unmeasured && previous_end_space > Pixels::ZERO {
+        // Expansion needs the old (larger) spacer until its exact height is
+        // known; collapse needs the new estimated (larger) spacer immediately.
+        // Taking the maximum prevents GPUI's bottom-aligned list from ever
+        // seeing an underfilled frame in either direction.
+        previous_end_space.max(candidate)
+    } else {
+        candidate
+    }
+}
+
+pub(super) fn maintain_transcript_anchor(
+    transcript_rows: &ListState,
+    anchor_row: usize,
+    anchor_following: bool,
+    end_space: Pixels,
+) -> bool {
+    if !anchor_following || end_space <= Pixels::ZERO {
+        return false;
+    }
+
+    // A bottom-aligned GPUI list represents its pinned tail as no logical
+    // scroll offset. While a response row is being remeasured, the retained
+    // end spacer and the newly expanded content briefly overflow together;
+    // without an explicit item offset that overflow is taken from the top of
+    // the user row. Reassert the turn anchor in the same layout pass.
+    transcript_rows.scroll_to(ListOffset {
+        item_ix: anchor_row,
+        offset_in_item: Pixels::ZERO,
+    });
+    true
+}
+
+pub(super) fn estimated_text_height(
+    text: &str,
+    characters_per_line: usize,
+    line_height: f32,
+) -> Pixels {
+    let visual_lines = text
+        .split('\n')
+        .map(|line| {
+            if line.trim().is_empty() {
+                0.35
+            } else {
+                line.chars().count().max(1).div_ceil(characters_per_line) as f32
+            }
+        })
+        .sum::<f32>()
+        .max(1.0);
+    px(visual_lines * line_height)
+}
+
+pub(super) fn markdown_estimation_source(text: &str) -> (String, Pixels) {
+    const DEFAULT_IMAGE_HEIGHT: f32 = 160.0;
+    // Image sources can be multi-megabyte data URLs. The visible estimate is
+    // usually much smaller, so do not duplicate that capacity or allocate a
+    // second lowercase copy of the entire response.
+    let mut visible = String::with_capacity(text.len().min(16 * 1024));
+    let mut media_height = Pixels::ZERO;
+    let mut offset = 0;
+
+    while offset < text.len() {
+        let remainder = &text[offset..];
+        if starts_html_tag(remainder, "<details")
+            && let Some(open_end) = remainder.find('>')
+            && let Some((body_end, details_end)) = matching_details_end(remainder, open_end + 1)
+        {
+            let opening_tag = &remainder[..=open_end];
+            let body = &remainder[open_end + 1..body_end];
+            let source = if html_has_attribute(opening_tag, "open") {
+                body
+            } else if let Some(summary_start) = find_html_tag(body, "<summary") {
+                let summary = &body[summary_start..];
+                if let Some(tag_end) = summary.find('>') {
+                    let content = &summary[tag_end + 1..];
+                    find_ascii_case_insensitive(content, "</summary>")
+                        .map_or("Details", |end| &content[..end])
+                } else {
+                    "Details"
+                }
+            } else {
+                "Details"
+            };
+            let (details_text, details_media) = markdown_estimation_source(source);
+            visible.push_str(&details_text);
+            visible.push('\n');
+            media_height += details_media;
+            offset += details_end;
+            continue;
+        }
+        if let Some(after_alt) = remainder.strip_prefix("![")
+            && let Some(label_end) = after_alt.find("](")
+        {
+            let target = &after_alt[label_end + 2..];
+            if let Some(target_end) = target.find(')') {
+                media_height += px(DEFAULT_IMAGE_HEIGHT);
+                visible.push('\n');
+                offset += 2 + label_end + 2 + target_end + 1;
+                continue;
+            }
+        }
+        if starts_html_tag(remainder, "<img")
+            && let Some(tag_end) = remainder.find('>')
+        {
+            let tag = &remainder[..=tag_end];
+            let explicit_height = html_numeric_attribute(tag, "height")
+                .map(|height| height.clamp(1.0, 720.0))
+                .unwrap_or(DEFAULT_IMAGE_HEIGHT);
+            media_height += px(explicit_height);
+            visible.push('\n');
+            offset += tag_end + 1;
+            continue;
+        }
+
+        let Some(character) = remainder.chars().next() else {
+            break;
+        };
+        visible.push(character);
+        offset += character.len_utf8();
+    }
+
+    (visible, media_height)
+}
+
+pub(super) fn find_ascii_case_insensitive(source: &str, needle: &str) -> Option<usize> {
+    source
+        .as_bytes()
+        .windows(needle.len())
+        .position(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+pub(super) fn starts_html_tag(source: &str, name: &str) -> bool {
+    source
+        .get(..name.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+        && source[name.len()..]
+            .chars()
+            .next()
+            .is_some_and(|character| {
+                character.is_ascii_whitespace() || character == '>' || character == '/'
+            })
+}
+
+pub(super) fn find_html_tag(source: &str, name: &str) -> Option<usize> {
+    let mut cursor = 0;
+    loop {
+        let index = cursor + find_ascii_case_insensitive(&source[cursor..], name)?;
+        if starts_html_tag(&source[index..], name) {
+            return Some(index);
+        }
+        cursor = index + name.len();
+    }
+}
+
+pub(super) fn matching_details_end(source: &str, body_start: usize) -> Option<(usize, usize)> {
+    let mut depth = 1usize;
+    let mut cursor = body_start;
+    while cursor < source.len() {
+        let next_open = find_html_tag(&source[cursor..], "<details").map(|index| cursor + index);
+        let next_close = find_ascii_case_insensitive(&source[cursor..], "</details>")
+            .map(|index| cursor + index);
+        match (next_open, next_close) {
+            (_, None) => return None,
+            (Some(open), Some(close)) if open < close => {
+                depth += 1;
+                cursor = open + "<details".len();
+            }
+            (_, Some(close)) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((close, close + "</details>".len()));
+                }
+                cursor = close + "</details>".len();
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn html_has_attribute(tag: &str, name: &str) -> bool {
+    tag.split(|character: char| {
+        character.is_ascii_whitespace() || character == '>' || character == '/'
+    })
+    .any(|attribute| {
+        attribute.eq_ignore_ascii_case(name)
+            || attribute
+                .split_once('=')
+                .is_some_and(|(key, _)| key.eq_ignore_ascii_case(name))
+    })
+}
+
+pub(super) fn html_numeric_attribute(tag: &str, name: &str) -> Option<f32> {
+    let mut cursor = 0;
+    let start = loop {
+        let index = cursor + find_ascii_case_insensitive(&tag[cursor..], name)?;
+        let before = tag[..index].chars().next_back();
+        let after = tag[index + name.len()..].chars().next();
+        if before.is_some_and(|character| character.is_ascii_whitespace())
+            && after.is_some_and(|character| character.is_ascii_whitespace() || character == '=')
+        {
+            break index + name.len();
+        }
+        cursor = index + name.len();
+    };
+    let value = tag[start..].trim_start().strip_prefix('=')?.trim_start();
+    let value = value
+        .strip_prefix(['\'', '"'])
+        .unwrap_or(value)
+        .split(|character: char| {
+            character == '\''
+                || character == '"'
+                || character.is_ascii_whitespace()
+                || character == '>'
+        })
+        .next()?;
+    value.trim_end_matches("px").parse().ok()
+}
+
+pub(super) fn estimated_message_height(
+    message: &Message,
+    content_width: Pixels,
+    checkpoint_visible: bool,
+) -> Pixels {
+    let assistant_columns = if content_width > Pixels::ZERO {
+        (content_width / px(7.25)).max(20.0) as usize
+    } else {
+        88
+    };
+    let user_width = content_width.min(px(540.0));
+    let user_columns = if user_width > Pixels::ZERO {
+        (user_width / px(7.5)).max(20.0) as usize
+    } else {
+        72
+    };
+    match message.role {
+        MessageRole::User => estimated_text_height(&message.content, user_columns, 20.0) + px(16.0),
+        MessageRole::Assistant => {
+            let checkpoint_height = if checkpoint_visible {
+                px(28.0)
+            } else {
+                Pixels::ZERO
+            };
+            let (visible_source, media_height) = markdown_estimation_source(&message.content);
+            estimated_text_height(&visible_source, assistant_columns, 21.0)
+                + media_height
+                + px(8.0)
+                + checkpoint_height
+        }
+        MessageRole::System => {
+            estimated_text_height(&message.content, assistant_columns, 16.0) + px(8.0)
+        }
+    }
+}
+
+pub(super) fn estimated_transcript_row_padding(
+    row_index: usize,
+    row_count: usize,
+    starts_followup_turn: bool,
+) -> Pixels {
+    let top = if row_index == 0 {
+        px(22.0)
+    } else if starts_followup_turn {
+        px(FOLLOWUP_TURN_TOP_GAP)
+    } else {
+        px(8.0)
+    };
+    let bottom = if row_index + 1 == row_count {
+        px(22.0)
+    } else {
+        px(8.0)
+    };
+    top + bottom
+}
+
+/// Interleave live turn blocks at the exact message boundary where their
+/// provider events arrived. `anchors[n] == 2` means block `n` renders after
+/// messages 0 and 1, before message 2.
+pub(super) fn transcript_row_kinds(
+    message_count: usize,
+    anchors: &[usize],
+) -> Vec<TranscriptRowKind> {
+    let mut blocks_after = vec![Vec::new(); message_count + 1];
+    for (block_index, anchor) in anchors.iter().copied().enumerate() {
+        blocks_after[anchor.min(message_count)].push(block_index);
+    }
+    let mut rows = Vec::with_capacity(message_count + anchors.len());
+    rows.extend(
+        blocks_after[0]
+            .iter()
+            .copied()
+            .map(TranscriptRowKind::TurnBlock),
+    );
+    for message_index in 0..message_count {
+        rows.push(TranscriptRowKind::Message(message_index));
+        rows.extend(
+            blocks_after[message_index + 1]
+                .iter()
+                .copied()
+                .map(TranscriptRowKind::TurnBlock),
+        );
+    }
+    rows
+}
+
+pub(super) fn message_starts_followup_turn(messages: &[Message], message_index: usize) -> bool {
+    messages
+        .get(message_index)
+        .is_some_and(|message| message.role == MessageRole::User)
+        && messages[..message_index]
+            .iter()
+            .any(|message| message.role == MessageRole::User)
+}
