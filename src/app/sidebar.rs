@@ -323,17 +323,16 @@ impl Waku {
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current(cx);
         let session = self.selected_session();
-        let provider = session.map(|session| session.provider).unwrap_or_default();
         let status = session.map(|session| session.status).unwrap_or_default();
         div()
             .id("window-header")
-            .h(px(46.0))
+            .h(px(48.0))
             .flex_none()
             .flex()
             .items_center()
             .gap(px(8.0))
             .pl(if self.sidebar_visible {
-                px(10.0)
+                px(14.0)
             } else {
                 px(0.0)
             })
@@ -404,24 +403,6 @@ impl Waku {
                         ),
                 )
             })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(px(11.5))
-                    .line_height(px(14.0))
-                    .child(icon(
-                        provider_icon(provider),
-                        11.0,
-                        provider_color(&theme, provider).opacity(0.9),
-                    ))
-                    .child(
-                        div()
-                            .text_color(theme.text_secondary)
-                            .child(provider.short_name()),
-                    ),
-            )
     }
 
     // ── Empty states ───────────────────────────────────────────────────────
