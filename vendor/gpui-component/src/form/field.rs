@@ -1,12 +1,12 @@
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::FluentBuilder as _, px, AlignItems, AnyElement, AnyView, App, Axis, Div, Element,
-    ElementId, InteractiveElement as _, IntoElement, ParentElement, Pixels, Rems, RenderOnce,
-    SharedString, Styled, Window,
+    AlignItems, AnyElement, AnyView, App, Axis, Div, ElementId, InteractiveElement as _,
+    IntoElement, ParentElement, Pixels, Rems, RenderOnce, SharedString, Styled, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 
-use crate::{h_flex, v_flex, ActiveTheme as _, AxisExt, Size, StyledExt};
+use crate::{ActiveTheme as _, AxisExt, Size, StyledExt, h_flex, v_flex};
 
 #[derive(Clone, Copy)]
 pub(super) struct FieldProps {
@@ -53,7 +53,7 @@ impl RenderOnce for FieldBuilder {
         match self {
             FieldBuilder::String(value) => value.into_any_element(),
             FieldBuilder::Element(builder) => builder(window, cx),
-            FieldBuilder::View(view) => view.into_any(),
+            FieldBuilder::View(view) => view.into_any_element(),
         }
     }
 }

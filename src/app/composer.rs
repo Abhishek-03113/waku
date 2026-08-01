@@ -148,7 +148,7 @@ impl Waku {
             .label(selected_model_name);
 
         Popover::new("provider-model-picker")
-            .anchor(Corner::BottomLeft)
+            .anchor(Anchor::BottomLeft)
             .appearance(false)
             .track_focus(&search_focus)
             .on_open_change({
@@ -167,7 +167,8 @@ impl Waku {
                                 search.set_value("", window, cx);
                             });
                         } else {
-                            window.focus(&this.composer.read(cx).focus());
+                            let focus_handle = this.composer.read(cx).focus();
+                            window.focus(&focus_handle, cx);
                         }
                         cx.notify();
                     });
@@ -637,7 +638,7 @@ impl Waku {
                     }
                     menu
                 })
-                .anchor(Corner::BottomLeft)
+                .anchor(Anchor::BottomLeft)
                 .into_any_element(),
         )
     }
@@ -709,7 +710,7 @@ impl Waku {
                 }
                 menu
             })
-            .anchor(Corner::BottomLeft)
+            .anchor(Anchor::BottomLeft)
             .into_any_element()
     }
 

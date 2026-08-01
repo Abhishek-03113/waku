@@ -14,11 +14,15 @@
 
 ## Product reference
 
-- Treat [T3 Code](https://github.com/pingdotgg/t3code) as the primary reference
-  for coding-agent workflow, information hierarchy, controls, tool activity,
-  and transcript presentation.
-- For user-visible changes, inspect the current T3 Code app or source for the
-  exact flow before implementing. Do not rely on an older screenshot or memory.
+- Use [T3 Code](https://github.com/pingdotgg/t3code) as a reference when a task
+  concerns coding-agent workflow, information hierarchy, controls, tool
+  activity, or transcript presentation and the comparison would materially
+  clarify an ambiguous product decision, or when the user explicitly asks for
+  the comparison.
+- Do not inspect T3 Code for localized bug fixes, straightforward visual
+  corrections, native platform behavior, or changes already specified clearly
+  by the user. When T3 Code is relevant, inspect its current app or source
+  rather than relying on an older screenshot or memory.
 - Use the reference as behavioral and design evidence, not as an instruction to
   reproduce web-specific interaction patterns or known bugs. Waku should keep
   native macOS conventions.

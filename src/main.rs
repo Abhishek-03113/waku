@@ -56,7 +56,7 @@ impl WakuApplicationExt for Application {
 }
 
 fn main() {
-    Application::new()
+    gpui_platform::application()
         .with_assets(crate::assets::Assets)
         .with_main_window_reopen()
         .run(|cx: &mut App| {
@@ -67,6 +67,7 @@ fn main() {
             cx.set_menus(vec![
                 Menu {
                     name: APP_NAME.into(),
+                    disabled: false,
                     items: vec![
                         MenuItem::action("New Session", NewSession),
                         MenuItem::separator(),
@@ -77,6 +78,7 @@ fn main() {
                 },
                 Menu {
                     name: "View".into(),
+                    disabled: false,
                     items: vec![
                         MenuItem::action("Toggle Sidebar", ToggleSidebar),
                         MenuItem::action("Toggle Right Panel", ToggleRightPanel),
@@ -122,7 +124,7 @@ fn main() {
                         crate::platform::configure_main_window_close_behavior(window, cx);
                         let waku = Waku::new(window, cx);
                         let composer_focus = waku.read(cx).composer_focus(cx);
-                        window.focus(&composer_focus);
+                        window.focus(&composer_focus, cx);
                         cx.new(|cx| {
                             gpui_component::Root::new(waku, window, cx)
                                 .background(gpui::transparent_black())

@@ -9,12 +9,12 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    Entity, EntityId, FocusHandle, GlobalElementId, Half, Hitbox, HitboxBehavior, InspectorElementId,
-    InteractiveElement, IntoElement, KeyBinding, LayoutId, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, RenderOnce, SharedString, Size,
-    StyleRefinement, Styled, TextLayout, Timer, Window, div, px,
+    Entity, EntityId, FocusHandle, GlobalElementId, Half, Hitbox, HitboxBehavior,
+    InspectorElementId, InteractiveElement, IntoElement, KeyBinding, LayoutId, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    RenderOnce, SharedString, Size, StyleRefinement, Styled, TextLayout, Window, div, px,
 };
-use smol::stream::StreamExt;
+use smol::{Timer, stream::StreamExt};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::highlighter::HighlightTheme;
@@ -1508,7 +1508,7 @@ fn selection_autoscroll_delta(pointer_y: Pixels, viewport: Bounds<Pixels>) -> Pi
 fn scroll_list_for_selection(scroll_handle: &ListState, delta: Pixels) -> Pixels {
     const PINNED_TAIL_EPSILON: Pixels = px(0.5);
 
-    let max_offset = scroll_handle.max_offset_for_scrollbar().height;
+    let max_offset = scroll_handle.max_offset_for_scrollbar().y;
     let selection_max = (max_offset - PINNED_TAIL_EPSILON).max(Pixels::ZERO);
     let current =
         (-scroll_handle.scroll_px_offset_for_scrollbar().y).clamp(Pixels::ZERO, selection_max);
@@ -1770,33 +1770,45 @@ mod tests {
                 + point(px(18.0), px(10.0))
         });
         let selected = cx.update(|window, app| {
-            let selected = text_state.update(app, |state, _| {
-                state.select_text_at(click_position, 2)
-            });
+            let selected =
+                text_state.update(app, |state, _| state.select_text_at(click_position, 2));
             window.refresh();
             selected
         });
-        assert!(selected, "double click should resolve to an inline text range");
+        assert!(
+            selected,
+            "double click should resolve to an inline text range"
+        );
         cx.run_until_parked();
         cx.update(|_, app| {
             assert_eq!(
-                text_state.read(app).selection_text().as_deref().map(str::trim),
+                text_state
+                    .read(app)
+                    .selection_text()
+                    .as_deref()
+                    .map(str::trim),
                 Some("Hello")
             );
         });
 
         let selected = cx.update(|window, app| {
-            let selected = text_state.update(app, |state, _| {
-                state.select_text_at(click_position, 3)
-            });
+            let selected =
+                text_state.update(app, |state, _| state.select_text_at(click_position, 3));
             window.refresh();
             selected
         });
-        assert!(selected, "triple click should resolve to an inline text range");
+        assert!(
+            selected,
+            "triple click should resolve to an inline text range"
+        );
         cx.run_until_parked();
         cx.update(|_, app| {
             assert_eq!(
-                text_state.read(app).selection_text().as_deref().map(str::trim),
+                text_state
+                    .read(app)
+                    .selection_text()
+                    .as_deref()
+                    .map(str::trim),
                 Some("Hello world from a selectable paragraph.")
             );
         });
@@ -1852,9 +1864,8 @@ mod tests {
                 + point(px(1.0), px(1.0))
         });
         let selected = cx.update(|window, app| {
-            let selected = text_state.update(app, |state, _| {
-                state.select_text_at(click_position, 2)
-            });
+            let selected =
+                text_state.update(app, |state, _| state.select_text_at(click_position, 2));
             window.refresh();
             selected
         });
@@ -1862,7 +1873,11 @@ mod tests {
         cx.run_until_parked();
         cx.update(|_, app| {
             assert_eq!(
-                text_state.read(app).selection_text().as_deref().map(str::trim),
+                text_state
+                    .read(app)
+                    .selection_text()
+                    .as_deref()
+                    .map(str::trim),
                 Some("economics")
             );
         });
@@ -2016,9 +2031,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remount_reset_discards_the_previous_parent_scroll_geometry(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn remount_reset_discards_the_previous_parent_scroll_geometry(cx: &mut gpui::TestAppContext) {
         let text_state = cx.new(TextViewState::new);
         let viewport = TextViewScrollViewport {
             bounds: Bounds::new(point(px(0.0), px(40.0)), size(px(700.0), px(600.0))),

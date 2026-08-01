@@ -17,7 +17,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
     App, Context, FocusHandle, Focusable, FontStyle, FontWeight, Hsla, InteractiveElement,
     IntoElement, KeyDownEvent, Keystroke, MouseButton, ParentElement, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText, TextRun, Timer,
+    ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText, TextRun,
     UnderlineStyle, Window, div, font, px, rgb,
 };
 use parking_lot::Mutex;
@@ -400,7 +400,9 @@ impl TerminalView {
 
         cx.spawn(async move |this, cx| {
             loop {
-                Timer::after(Duration::from_millis(24)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(24))
+                    .await;
                 if this
                     .update(cx, |this, cx| {
                         if this.poll(cx) {
@@ -663,7 +665,7 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    window.focus(&this.focus_handle);
+                    window.focus(&this.focus_handle, cx);
                     cx.stop_propagation();
                     cx.notify();
                 }),

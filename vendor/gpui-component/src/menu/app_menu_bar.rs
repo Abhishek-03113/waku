@@ -147,7 +147,7 @@ impl AppMenu {
                     })
                     .with_menu_items(items, window, cx)
                 });
-                popup_menu.read(cx).focus_handle(cx).focus(window);
+                popup_menu.read(cx).focus_handle(cx).focus(window, cx);
                 self._subscription =
                     Some(cx.subscribe_in(&popup_menu, window, Self::handle_dismiss));
                 self.popup_menu = Some(popup_menu.clone());
@@ -159,7 +159,7 @@ impl AppMenu {
 
         let focus_handle = popup_menu.read(cx).focus_handle(cx);
         if !focus_handle.contains_focused(window, cx) {
-            focus_handle.focus(window);
+            focus_handle.focus(window, cx);
         }
 
         popup_menu
@@ -236,7 +236,7 @@ impl Render for AppMenu {
             .when(is_selected, |this| {
                 this.child(deferred(
                     anchored()
-                        .anchor(gpui::Corner::TopLeft)
+                        .anchor(gpui::Anchor::TopLeft)
                         .snap_to_window_with_margin(px(8.))
                         .child(
                             div()

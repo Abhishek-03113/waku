@@ -84,7 +84,7 @@ impl Waku {
         self.copied_message_feedback.insert(message_id, generation);
         cx.notify();
         cx.spawn(async move |this, cx| {
-            Timer::after(Duration::from_secs(2)).await;
+            cx.background_executor().timer(Duration::from_secs(2)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.copied_message_feedback.get(&message_id) == Some(&generation) {
                     this.copied_message_feedback.remove(&message_id);
@@ -96,6 +96,7 @@ impl Waku {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_message_footer(
     theme: &Theme,
     message: &Message,
@@ -465,7 +466,8 @@ pub(super) fn render_message(
                             composer.update(cx, |composer, cx| {
                                 composer.set_content(edit_content.clone(), cx);
                             });
-                            window.focus(&composer.read(cx).focus());
+                            let focus_handle = composer.read(cx).focus();
+                            window.focus(&focus_handle, cx);
                         },
                     ));
                 }

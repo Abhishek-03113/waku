@@ -6,8 +6,8 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString,
-    StyledText, Subscription, Task, TextLayout, TextRun, Timer, UTF16Selection, UnderlineStyle,
-    Window, actions, div, fill, point, prelude::*, px, size,
+    StyledText, Subscription, Task, TextLayout, TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, div, fill, point, prelude::*, px, size,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use unicode_segmentation::UnicodeSegmentation;
@@ -133,13 +133,12 @@ impl BlinkCursor {
 
         let epoch = self.next_epoch();
         self._task = cx.spawn(async move |this, cx| {
-            Timer::after(CURSOR_BLINK_PAUSE).await;
+            cx.background_executor().timer(CURSOR_BLINK_PAUSE).await;
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
                     this.paused = false;
                     this.blink(epoch, cx);
-                })
-                .ok();
+                });
             }
         });
     }
@@ -160,9 +159,9 @@ impl BlinkCursor {
 
         let epoch = self.next_epoch();
         self._task = cx.spawn(async move |this, cx| {
-            Timer::after(CURSOR_BLINK_INTERVAL).await;
+            cx.background_executor().timer(CURSOR_BLINK_INTERVAL).await;
             if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| this.blink(epoch, cx)).ok();
+                this.update(cx, |this, cx| this.blink(epoch, cx));
             }
         });
     }
@@ -510,9 +509,9 @@ impl ComposerInput {
         &mut self,
         _: &MouseDownEvent,
         window: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {

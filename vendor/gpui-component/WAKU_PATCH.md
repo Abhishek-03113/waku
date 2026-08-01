@@ -5,6 +5,10 @@ non-scrollable `TextView` root renders every top-level Markdown node with
 `is_last = true`. That suppresses `TextViewStyle::paragraph_gap` for the
 entire document.
 
+The vendor also carries the mechanical API compatibility updates required by
+the Git-sourced Zed GPUI stack while preserving Waku's renderer and interaction
+patches below.
+
 Waku patches `src/text/node.rs` so root children receive `is_last = true`
 only for the actual final child, and applies the same computed block margin
 to headings and tables. This preserves one selectable `TextView` while

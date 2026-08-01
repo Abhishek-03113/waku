@@ -92,13 +92,14 @@ version = "0.4.38"
 version = "2.1.0"
 
 [dependencies.gpui]
-version = "0.2.2"
+git = "https://github.com/zed-industries/zed"
 
 [dependencies.gpui-component-macros]
 version = "0.5.1"
 
 [dependencies.gpui-macros]
-version = "0.2.2"
+git = "https://github.com/zed-industries/zed"
+package = "gpui_macros"
 
 [dependencies.html5ever]
 version = "0.27"
@@ -301,7 +302,7 @@ optional = true
 package = "lb-wry"
 
 [dev-dependencies.gpui]
-version = "0.2.2"
+git = "https://github.com/zed-industries/zed"
 features = ["test-support"]
 
 [dev-dependencies.indoc]

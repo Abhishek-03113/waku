@@ -122,7 +122,8 @@ impl Waku {
                         .child("Back")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.settings_page = None;
-                            window.focus(&this.composer_focus(cx));
+                            let focus_handle = this.composer_focus(cx);
+                            window.focus(&focus_handle, cx);
                             cx.notify();
                         })),
                 ),
@@ -242,7 +243,7 @@ impl Waku {
                 }
                 menu
             })
-            .anchor(Corner::TopRight);
+            .anchor(Anchor::TopRight);
 
         div()
             .mt(px(15.0))

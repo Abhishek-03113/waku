@@ -1241,12 +1241,11 @@ impl Paragraph {
         // Add the last text node
         if text.len() > 0 {
             self.state.lock().unwrap().set_text(text.into());
-            child_nodes
-                .push(
-                    Inline::new(ix, self.state.clone(), links, highlights, code_ranges)
-                        .selection_scope(selection_scope)
-                        .into_any_element(),
-                );
+            child_nodes.push(
+                Inline::new(ix, self.state.clone(), links, highlights, code_ranges)
+                    .selection_scope(selection_scope)
+                    .into_any_element(),
+            );
         }
 
         div().id(span.unwrap_or_default()).children(child_nodes)
@@ -1665,12 +1664,17 @@ impl Node {
                                                                 .w_full()
                                                                 .min_w_0()
                                                                 .whitespace_normal()
-                                                                .child(cell.children.render(
-                                                                    node_cx,
-                                                                    window,
-                                                                    cx,
-                                                                    Some(cell.children.selection_scope()),
-                                                                )),
+                                                                .child(
+                                                                    cell.children.render(
+                                                                        node_cx,
+                                                                        window,
+                                                                        cx,
+                                                                        Some(
+                                                                            cell.children
+                                                                                .selection_scope(),
+                                                                        ),
+                                                                    ),
+                                                                ),
                                                         ),
                                                 )
                                             }
@@ -1937,10 +1941,10 @@ impl Node {
                                 .text_color(cx.theme().muted_foreground),
                             )
                             .child(details.summary.render(node_cx, window, cx, None))
-                            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                 // Disclosure clicks are controls, not the
                                 // beginning of a document text selection.
-                                window.focus(&click_focus_handle);
+                                window.focus(&click_focus_handle, cx);
                                 window.prevent_default();
                             })
                             .on_click(move |_, _, cx| {

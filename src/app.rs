@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local, Utc};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Corner, Div, Entity,
+    Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListOffset, ListState,
     MouseButton, MouseDownEvent, NavigationDirection, PathPromptOptions, Pixels, Point, Render,
-    ScrollHandle, SharedString, Size, Stateful, StyleRefinement, Timer, WeakEntity, Window, canvas,
-    div, fill, linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px,
-    rems, size,
+    ScrollHandle, SharedString, Size, Stateful, StyleRefinement, WeakEntity, Window, canvas, div,
+    fill, linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px, rems,
+    size,
 };
 use uuid::Uuid;
 
@@ -241,9 +241,9 @@ impl StableListScrollbarHandle {
         let base = self.list_state.max_offset_for_scrollbar();
         let estimated_max = (self.effective_content_height() - viewport.height).max(Pixels::ZERO);
         size(
-            base.width,
-            if base.height > Pixels::ZERO {
-                base.height + self.anchor_end_space.get()
+            base.x,
+            if base.y > Pixels::ZERO {
+                base.y + self.anchor_end_space.get()
             } else {
                 estimated_max
             },
@@ -324,7 +324,7 @@ impl ScrollbarHandle for StableListScrollbarHandle {
         }
         if self.drag_estimated_height.get().is_none()
             && viewport.height > Pixels::ZERO
-            && self.list_state.max_offset_for_scrollbar().height <= Pixels::ZERO
+            && self.list_state.max_offset_for_scrollbar().y <= Pixels::ZERO
         {
             // Once GPUI has exact row geometry, its measured scroll range is
             // authoritative for the fits-in-viewport case. Text-height
@@ -633,7 +633,7 @@ impl Waku {
 
             cx.spawn(async move |this, cx| {
                 loop {
-                    Timer::after(STREAM_FRAME_INTERVAL).await;
+                    cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
                     if this
                         .update(cx, |this, cx| {
                             if this.drain_driver_events() || this.drain_provider_probe_events() {

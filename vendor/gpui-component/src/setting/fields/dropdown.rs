@@ -1,18 +1,18 @@
 use std::rc::Rc;
 
 use gpui::{
-    prelude::FluentBuilder as _, AnyElement, App, Corner, IntoElement, SharedString,
-    StyleRefinement, Styled, Window,
+    Anchor, AnyElement, App, IntoElement, SharedString, StyleRefinement, Styled, Window,
+    prelude::FluentBuilder as _,
 };
 
 use crate::{
+    AxisExt, Sizable, StyledExt,
     button::Button,
     menu::{DropdownMenu, PopupMenuItem},
     setting::{
-        fields::{get_value, set_value, SettingFieldRender},
         AnySettingField, RenderOptions,
+        fields::{SettingFieldRender, get_value, set_value},
     },
-    AxisExt, Sizable, StyledExt,
 };
 
 pub(crate) struct DropdownField<T> {
@@ -58,7 +58,7 @@ where
             .outline()
             .with_size(options.size)
             .refine_style(style)
-            .dropdown_menu_with_anchor(Corner::TopRight, move |menu, _, _| {
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let set_value = set_value.clone();
                 let menu = dropdown_options.iter().fold(menu, |menu, (value, label)| {
                     let old_value: SharedString = old_value.clone().into();

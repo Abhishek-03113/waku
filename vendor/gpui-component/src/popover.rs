@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, App, Bounds, Context, Corner, DismissEvent, ElementId, EventEmitter, FocusHandle,
+    Anchor, AnyElement, App, Bounds, Context, DismissEvent, ElementId, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement,
     Pixels, Point, Render, RenderOnce, StyleRefinement, Styled, Subscription, Window, anchored,
     canvas, deferred, div, prelude::FluentBuilder as _, px,
@@ -18,7 +18,7 @@ pub(crate) fn init(cx: &mut App) {
 pub struct Popover {
     id: ElementId,
     style: StyleRefinement,
-    anchor: Corner,
+    anchor: Anchor,
     default_open: bool,
     open: Option<bool>,
     tracked_focus_handle: Option<FocusHandle>,
@@ -45,7 +45,7 @@ impl Popover {
         Self {
             id: id.into(),
             style: StyleRefinement::default(),
-            anchor: Corner::TopLeft,
+            anchor: Anchor::TopLeft,
             trigger: None,
             trigger_style: None,
             content: None,
@@ -60,8 +60,8 @@ impl Popover {
         }
     }
 
-    /// Set the anchor corner of the popover, default is `Corner::TopLeft`.
-    pub fn anchor(mut self, anchor: Corner) -> Self {
+    /// Set the anchor corner of the popover, default is `Anchor::TopLeft`.
+    pub fn anchor(mut self, anchor: Anchor) -> Self {
         self.anchor = anchor;
         self
     }
@@ -164,15 +164,24 @@ impl Popover {
         self
     }
 
-    fn resolved_corner(anchor: Corner, bounds: Bounds<Pixels>) -> Point<Pixels> {
-        bounds.corner(match anchor {
-            Corner::TopLeft => Corner::BottomLeft,
-            Corner::TopRight => Corner::BottomRight,
-            Corner::BottomLeft => Corner::TopLeft,
-            Corner::BottomRight => Corner::TopRight,
-        }) + Point {
-            x: px(0.),
-            y: -bounds.size.height,
+    fn resolved_corner(anchor: Anchor, bounds: Bounds<Pixels>) -> Point<Pixels> {
+        match anchor {
+            Anchor::TopLeft => bounds.origin,
+            Anchor::TopCenter => bounds.top_center(),
+            Anchor::TopRight => bounds.top_right(),
+            Anchor::BottomLeft => Point {
+                x: bounds.origin.x,
+                y: bounds.origin.y - bounds.size.height,
+            },
+            Anchor::BottomCenter => Point {
+                x: bounds.top_center().x,
+                y: bounds.origin.y - bounds.size.height,
+            },
+            Anchor::BottomRight => Point {
+                x: bounds.top_right().x,
+                y: bounds.origin.y - bounds.size.height,
+            },
+            Anchor::LeftCenter | Anchor::RightCenter => bounds.origin,
         }
     }
 }
@@ -240,7 +249,7 @@ impl PopoverState {
             } else {
                 self.focus_handle.clone()
             };
-            focus_handle.focus(window);
+            focus_handle.focus(window, cx);
 
             self._dismiss_subscription =
                 Some(
@@ -363,8 +372,13 @@ impl RenderOnce for Popover {
                             .tab_group()
                             .when(self.appearance, |this| this.popover_style(cx).p_3())
                             .map(|this| match self.anchor {
-                                Corner::TopLeft | Corner::TopRight => this.top_1(),
-                                Corner::BottomLeft | Corner::BottomRight => this.bottom_1(),
+                                Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => {
+                                    this.top_1()
+                                }
+                                Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => {
+                                    this.bottom_1()
+                                }
+                                Anchor::LeftCenter | Anchor::RightCenter => this.top_1(),
                             })
                             .when_some(self.content, |this, content| {
                                 this.child(

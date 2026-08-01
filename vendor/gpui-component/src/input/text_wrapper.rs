@@ -490,6 +490,8 @@ impl LineLayout {
             _ = line.paint(
                 pos + point(px(0.), ix * line_height),
                 line_height,
+                gpui::TextAlign::Left,
+                None,
                 window,
                 cx,
             );

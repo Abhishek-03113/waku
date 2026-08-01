@@ -91,7 +91,7 @@ impl WindowExt for Window {
             }
 
             let focus_handle = cx.focus_handle();
-            focus_handle.focus(window);
+            focus_handle.focus(window, cx);
 
             root.active_sheet = Some(ActiveSheet {
                 focus_handle,
@@ -127,7 +127,7 @@ impl WindowExt for Window {
             }
 
             let focus_handle = cx.focus_handle();
-            focus_handle.focus(window);
+            focus_handle.focus(window, cx);
 
             root.active_dialogs.push(ActiveDialog {
                 focus_handle,
@@ -148,7 +148,7 @@ impl WindowExt for Window {
 
             if let Some(top_dialog) = root.active_dialogs.last() {
                 // Focus the next dialog.
-                top_dialog.focus_handle.focus(window);
+                top_dialog.focus_handle.focus(window, cx);
             } else {
                 // Restore focus if there are no more dialogs.
                 root.focus_back(window, cx);
@@ -277,9 +277,9 @@ impl Root {
             .read(cx)
     }
 
-    fn focus_back(&mut self, window: &mut Window, _: &mut App) {
+    fn focus_back(&mut self, window: &mut Window, cx: &mut App) {
         if let Some(handle) = self.previous_focus_handle.clone() {
-            window.focus(&handle);
+            window.focus(&handle, cx);
         }
     }
 
@@ -392,12 +392,12 @@ impl Root {
         &self.view
     }
 
-    fn on_action_tab(&mut self, _: &Tab, window: &mut Window, _: &mut Context<Self>) {
-        window.focus_next();
+    fn on_action_tab(&mut self, _: &Tab, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus_next(cx);
     }
 
-    fn on_action_tab_prev(&mut self, _: &TabPrev, window: &mut Window, _: &mut Context<Self>) {
-        window.focus_prev();
+    fn on_action_tab_prev(&mut self, _: &TabPrev, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus_prev(cx);
     }
 }
 

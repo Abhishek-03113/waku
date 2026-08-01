@@ -182,7 +182,8 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         if self.settings_page.take().is_some() {
-            window.focus(&self.composer_focus(cx));
+            let focus_handle = self.composer_focus(cx);
+            window.focus(&focus_handle, cx);
             cx.notify();
             return;
         }
@@ -240,7 +241,8 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.composer_focus(cx));
+        let focus_handle = self.composer_focus(cx);
+        window.focus(&focus_handle, cx);
     }
 
     pub(super) fn cancel_turn_action(

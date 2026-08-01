@@ -200,7 +200,7 @@ impl Waku {
 
         if scroll_top.item_ix >= count && count > 0 {
             let viewport_height = transcript_rows.viewport_bounds().size.height;
-            let actual_max = transcript_rows.max_offset_for_scrollbar().height;
+            let actual_max = transcript_rows.max_offset_for_scrollbar().y;
             if actual_max > px(0.5) {
                 // GPUI represents the exact bottom as an implicit tail anchor.
                 // Resolve the corresponding item just above the bottom, then
@@ -215,7 +215,14 @@ impl Waku {
                 // A short bottom-aligned transcript has leading empty space.
                 // A negative item offset preserves that space so expanding a
                 // row still grows downward from its current screen position.
-                let measured_content_height = -transcript_rows.scroll_px_offset_for_scrollbar().y;
+                // `scroll_px_offset_for_scrollbar` is zero for a short list in
+                // Zed's GPUI, so derive the actual content height from its
+                // rendered row bounds instead of treating the list as empty.
+                let measured_content_height = transcript_rows
+                    .bounds_for_item(0)
+                    .zip(transcript_rows.bounds_for_item(count - 1))
+                    .map(|(first, last)| (last.bottom() - first.top()).max(Pixels::ZERO))
+                    .unwrap_or_else(|| self.transcript_estimated_height.get());
                 let leading_space = (viewport_height - measured_content_height).max(Pixels::ZERO);
                 transcript_rows.scroll_to(ListOffset {
                     item_ix: 0,

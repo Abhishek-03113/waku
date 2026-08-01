@@ -166,7 +166,7 @@ fn tab_scroll_reveal_guard(
                 let offset = scroll_handle.offset();
                 let safe_offset = fade_safe_tab_offset(
                     offset.x,
-                    scroll_handle.max_offset().width,
+                    scroll_handle.max_offset().x,
                     item.left(),
                     item.right(),
                     viewport.left(),
@@ -199,10 +199,8 @@ fn tab_scroll_fade(
 ) -> impl IntoElement {
     canvas(
         move |bounds, _, _| {
-            let (show_left, show_right) = tab_scroll_fade_visibility(
-                scroll_handle.offset().x,
-                scroll_handle.max_offset().width,
-            );
+            let (show_left, show_right) =
+                tab_scroll_fade_visibility(scroll_handle.offset().x, scroll_handle.max_offset().x);
             let visible = match side {
                 TabScrollFadeSide::Left => show_left,
                 TabScrollFadeSide::Right => show_right,
@@ -242,6 +240,7 @@ fn tab_scroll_fade(
     .w(px(TAB_SCROLL_FADE_WIDTH))
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,7 +704,7 @@ impl Waku {
                                 }
                                 menu
                             })
-                            .anchor(Corner::TopLeft),
+                            .anchor(Anchor::TopLeft),
                     ),
             );
         }

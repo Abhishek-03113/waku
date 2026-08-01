@@ -215,7 +215,8 @@ impl Waku {
         });
         self.toast = None;
         self.remeasure_transcript_message(message_index);
-        window.focus(&input.read(cx).focus());
+        let focus_handle = input.read(cx).focus();
+        window.focus(&focus_handle, cx);
         cx.notify();
     }
 
@@ -236,7 +237,8 @@ impl Waku {
         if let Some(message_index) = message_index {
             self.remeasure_transcript_message(message_index);
         }
-        window.focus(&self.composer_focus(cx));
+        let focus_handle = self.composer_focus(cx);
+        window.focus(&focus_handle, cx);
         cx.notify();
     }
 
