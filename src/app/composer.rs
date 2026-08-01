@@ -805,7 +805,7 @@ impl Waku {
                                 .bg(theme.overlay_strong)
                                 .hover(|element| element.bg(theme.danger_soft))
                                 .active(|element| element.opacity(0.8))
-                                .child(icon("icons/stop.svg", 10.0, theme.text))
+                                .child(icon("icons/stop.svg", 18.0, theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.cancel_turn(cx);
                                 }))
@@ -831,7 +831,7 @@ impl Waku {
                                 })
                                 .child(icon(
                                     "icons/arrow-up.svg",
-                                    12.0,
+                                    16.0,
                                     if has_draft {
                                         theme.on_inverse
                                     } else {
