@@ -19,6 +19,8 @@ impl Render for Waku {
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
+            .on_action(cx.listener(Self::navigate_back_action))
+            .on_action(cx.listener(Self::navigate_forward_action))
             .on_action(cx.listener(Self::focus_composer_action))
             .on_action(cx.listener(Self::cancel_turn_action))
             .size_full()

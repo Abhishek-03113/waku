@@ -1,15 +1,52 @@
 use super::{
-    StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*, append_text_delta_to_session,
-    escape_html, estimated_message_height, estimated_text_height, fenced_code,
-    maintain_transcript_anchor, markdown_estimation_source, message_starts_followup_turn,
-    pop_stream_chunk, scale_scrollbar_offset, scroll_top_after_row_invalidation,
-    stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
-    transcript_row_kinds,
+    SessionNavigation, StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*,
+    append_text_delta_to_session, escape_html, estimated_message_height, estimated_text_height,
+    fenced_code, maintain_transcript_anchor, markdown_estimation_source,
+    message_starts_followup_turn, pop_stream_chunk, scale_scrollbar_offset,
+    scroll_top_after_row_invalidation, stabilized_transcript_anchor_end_space, take_stream_prefix,
+    transcript_anchor_end_space, transcript_row_kinds,
 };
 use crate::model::{
     ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind, SessionStatus,
 };
 use std::{cell::Cell, collections::VecDeque, rc::Rc};
+use uuid::Uuid;
+
+#[test]
+fn session_navigation_tracks_back_forward_and_new_branches() {
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let third = Uuid::new_v4();
+    let branch = Uuid::new_v4();
+    let mut navigation = SessionNavigation::default();
+
+    navigation.visit(Some(first), second);
+    navigation.visit(Some(second), third);
+    assert_eq!(navigation.go_back(third), Some(second));
+    assert_eq!(navigation.go_back(second), Some(first));
+    assert_eq!(navigation.go_forward(first), Some(second));
+
+    navigation.visit(Some(second), branch);
+    assert_eq!(navigation.go_forward(branch), None);
+    assert_eq!(navigation.go_back(branch), Some(second));
+}
+
+#[test]
+fn session_navigation_prunes_deleted_tasks() {
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let third = Uuid::new_v4();
+    let mut navigation = SessionNavigation::default();
+
+    navigation.visit(Some(first), second);
+    navigation.visit(Some(second), third);
+    assert_eq!(navigation.go_back(third), Some(second));
+
+    navigation.remove(first);
+    navigation.remove(third);
+    assert_eq!(navigation.go_back(second), None);
+    assert_eq!(navigation.go_forward(second), None);
+}
 
 #[test]
 fn stable_scrollbar_maps_live_offsets_without_changing_progress() {

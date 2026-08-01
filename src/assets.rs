@@ -19,6 +19,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "alert",
     "appearance",
     "arrow-left",
+    "arrow-right",
     "arrow-up",
     "block",
     "check",

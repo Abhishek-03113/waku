@@ -18,6 +18,20 @@ impl Waku {
     }
 
     pub(super) fn select_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if !self
+            .state
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id)
+        {
+            return;
+        }
+        self.session_navigation
+            .visit(self.state.selected_session, session_id);
+        self.activate_session(session_id, cx);
+    }
+
+    fn activate_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         self.state.selected_session = Some(session_id);
         if let Some((project_id, provider, model, reasoning_effort, service_tier)) =
             self.selected_session().map(|session| {
@@ -54,13 +68,7 @@ impl Waku {
         let session = self.state.new_session(project_id, provider);
         let id = session.id;
         self.state.sessions.push(session);
-        self.state.selected_project = Some(project_id);
-        self.state.selected_session = Some(id);
-        self.state.last_provider = provider;
-        self.reset_visible_state();
-        self.reset_transcript_rows(0);
-        self.save();
-        cx.notify();
+        self.select_session(id, cx);
     }
 
     pub(super) fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
@@ -83,6 +91,7 @@ impl Waku {
         let was_selected = self.state.selected_session == Some(session_id);
         self.reset_session_runtime(session_id);
         self.state.sessions.remove(index);
+        self.session_navigation.remove(session_id);
         if let Some(project_path) = project_path {
             let _ = checkpoint::delete_session_refs(&project_path, session_id, last_turn_count);
         }
@@ -138,6 +147,36 @@ impl Waku {
     ) {
         self.sidebar_visible = !self.sidebar_visible;
         cx.notify();
+    }
+
+    pub(super) fn navigate_back_action(
+        &mut self,
+        _: &NavigateBack,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current) = self.state.selected_session else {
+            return;
+        };
+        if let Some(target) = self.session_navigation.go_back(current) {
+            self.settings_page = None;
+            self.activate_session(target, cx);
+        }
+    }
+
+    pub(super) fn navigate_forward_action(
+        &mut self,
+        _: &NavigateForward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current) = self.state.selected_session else {
+            return;
+        };
+        if let Some(target) = self.session_navigation.go_forward(current) {
+            self.settings_page = None;
+            self.activate_session(target, cx);
+        }
     }
 
     pub(super) fn focus_composer_action(

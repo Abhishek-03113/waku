@@ -32,6 +32,8 @@ actions!(
         NewSession,
         OpenSettings,
         ToggleSidebar,
+        NavigateBack,
+        NavigateForward,
         FocusComposer,
         CancelTurn
     ]
@@ -88,6 +90,8 @@ fn main() {
                 KeyBinding::new("cmd-n", NewSession, None),
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("cmd-shift-s", ToggleSidebar, None),
+                KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
+                KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
                 KeyBinding::new("cmd-l", FocusComposer, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
                 KeyBinding::new("backspace", Backspace, Some("ComposerInput")),

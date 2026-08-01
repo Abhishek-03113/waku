@@ -150,6 +150,45 @@ impl Waku {
             }))
     }
 
+    fn render_history_button(
+        &self,
+        id: &'static str,
+        icon_path: &'static str,
+        enabled: bool,
+        navigate_back: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = Theme::current(cx);
+        div()
+            .id(id)
+            .w(px(26.0))
+            .h(px(26.0))
+            .flex_none()
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .when(!enabled, |element| element.opacity(0.35))
+            .when(enabled, |element| {
+                element
+                    .hover(|element| element.bg(theme.overlay))
+                    .active(|element| element.bg(theme.overlay_strong))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        if navigate_back {
+                            this.navigate_back_action(&NavigateBack, window, cx);
+                        } else {
+                            this.navigate_forward_action(&NavigateForward, window, cx);
+                        }
+                    }))
+            })
+            .child(icon(icon_path, 14.0, theme.text_tertiary))
+    }
+
     fn render_sidebar_titlebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("sidebar-titlebar")
@@ -168,6 +207,27 @@ impl Waku {
                 ),
             )
             .child(self.render_sidebar_toggle(cx))
+            .child(
+                div()
+                    .ml(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(self.render_history_button(
+                        "navigate-back",
+                        "icons/arrow-left.svg",
+                        !self.session_navigation.back.is_empty(),
+                        true,
+                        cx,
+                    ))
+                    .child(self.render_history_button(
+                        "navigate-forward",
+                        "icons/arrow-right.svg",
+                        !self.session_navigation.forward.is_empty(),
+                        false,
+                        cx,
+                    )),
+            )
             .child(self.window_drag_region(
                 div().id("sidebar-titlebar-drag-region").h_full().flex_1(),
                 cx,
@@ -386,7 +446,33 @@ impl Waku {
                             cx,
                         ),
                     )
-                    .child(self.render_sidebar_toggle(cx))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(self.render_sidebar_toggle(cx))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(2.0))
+                                    .child(self.render_history_button(
+                                        "navigate-back",
+                                        "icons/arrow-left.svg",
+                                        !self.session_navigation.back.is_empty(),
+                                        true,
+                                        cx,
+                                    ))
+                                    .child(self.render_history_button(
+                                        "navigate-forward",
+                                        "icons/arrow-right.svg",
+                                        !self.session_navigation.forward.is_empty(),
+                                        false,
+                                        cx,
+                                    )),
+                            ),
+                    )
             })
             .child(
                 self.window_drag_region(

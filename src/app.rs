@@ -40,7 +40,10 @@ use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, icon, provider_color,
     provider_icon, status_color, status_label,
 };
-use crate::{CancelTurn, CloseWindow, FocusComposer, NewSession, OpenSettings, ToggleSidebar};
+use crate::{
+    CancelTurn, CloseWindow, FocusComposer, NavigateBack, NavigateForward, NewSession,
+    OpenSettings, ToggleSidebar,
+};
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
@@ -318,6 +321,38 @@ struct SessionRuntime {
     pending_permission: Option<PendingPermission>,
 }
 
+#[derive(Debug, Default)]
+struct SessionNavigation {
+    back: Vec<Uuid>,
+    forward: Vec<Uuid>,
+}
+
+impl SessionNavigation {
+    fn visit(&mut self, current: Option<Uuid>, next: Uuid) {
+        if let Some(current) = current.filter(|current| *current != next) {
+            self.back.push(current);
+            self.forward.clear();
+        }
+    }
+
+    fn go_back(&mut self, current: Uuid) -> Option<Uuid> {
+        let target = self.back.pop()?;
+        self.forward.push(current);
+        Some(target)
+    }
+
+    fn go_forward(&mut self, current: Uuid) -> Option<Uuid> {
+        let target = self.forward.pop()?;
+        self.back.push(current);
+        Some(target)
+    }
+
+    fn remove(&mut self, session_id: Uuid) {
+        self.back.retain(|entry| *entry != session_id);
+        self.forward.retain(|entry| *entry != session_id);
+    }
+}
+
 pub struct Waku {
     state: PersistedState,
     store: StateStore,
@@ -335,6 +370,7 @@ pub struct Waku {
     activities_expanded: HashMap<usize, bool>,
     /// Individual tool rows the user has opened to read their full detail.
     expanded_activity_items: HashSet<Uuid>,
+    session_navigation: SessionNavigation,
     sidebar_visible: bool,
     settings_page: Option<SettingsPage>,
     header_drag_armed: bool,
@@ -569,6 +605,7 @@ impl Waku {
                 reasoning_expanded: HashMap::new(),
                 activities_expanded: HashMap::new(),
                 expanded_activity_items: HashSet::new(),
+                session_navigation: SessionNavigation::default(),
                 sidebar_visible: true,
                 settings_page: None,
                 header_drag_armed: false,
