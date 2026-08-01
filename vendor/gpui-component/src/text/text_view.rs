@@ -379,6 +379,16 @@ impl TextViewState {
 }
 
 impl TextViewState {
+    /// Forget geometry owned by the previous parent-list mount while retaining
+    /// parsed content and measured Markdown block heights. A virtualized
+    /// transcript can remount the same state after resetting its outer list;
+    /// the old row bounds and scroll offset must not influence the first block
+    /// window chosen for the new mount.
+    pub fn reset_block_viewport_layout(&mut self) {
+        self.bounds = Bounds::default();
+        self.parent_scroll_offset = Pixels::ZERO;
+    }
+
     fn invalidate_block_heights_for_width(&mut self) {
         self.block_rebase_pending
             .resize(self.block_reported_deltas.len(), false);
@@ -2005,6 +2015,38 @@ mod tests {
             );
             assert_eq!(state.block_reported_deltas, vec![px(60.0)]);
         });
+    }
+
+    #[gpui::test]
+    fn remount_reset_discards_the_previous_parent_scroll_geometry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let text_state = cx.new(TextViewState::new);
+        let viewport = TextViewScrollViewport {
+            bounds: Bounds::new(point(px(0.0), px(40.0)), size(px(700.0), px(600.0))),
+            scroll_offset: Pixels::ZERO,
+        };
+        text_state.update(cx, |state, _| {
+            state.bounds = Bounds::new(point(px(0.0), px(120.0)), size(px(700.0), px(900.0)));
+            state.parent_scroll_offset = px(-360.0);
+        });
+
+        let stale_origin = text_state.update(cx, |state, _| {
+            state
+                .block_virtualization(viewport, 4, text_state.clone(), None)
+                .expect("expected block virtualization")
+                .content_origin_y
+        });
+        assert_eq!(stale_origin, px(480.0));
+
+        text_state.update(cx, |state, _| state.reset_block_viewport_layout());
+        let remounted_origin = text_state.update(cx, |state, _| {
+            state
+                .block_virtualization(viewport, 4, text_state.clone(), None)
+                .expect("expected block virtualization")
+                .content_origin_y
+        });
+        assert_eq!(remounted_origin, viewport.bounds.origin.y);
     }
 
     #[gpui::test]

@@ -67,6 +67,10 @@ the unchanged AST prefix and invalidate only the changed tail, including code
 content changes. During a drag selection the complete document is rendered so
 selection and copy remain continuous across Markdown node types, then block
 virtualization resumes immediately after the endpoint settles.
+When a session switch resets the outer transcript list, Waku also clears the
+retained text state's parent-mount bounds and scroll offset. Parsed Markdown
+and measured block heights remain cached, but stale bottom-aligned list
+geometry cannot hide later blocks until an unrelated repaint.
 
 Measured blocks now report post-layout height changes to their virtualized
 parent. Initial discovery remains silent, while real changes such as an image

@@ -50,6 +50,21 @@ impl Waku {
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
         }
+        let message_ids = self
+            .selected_session()
+            .map(|session| {
+                session
+                    .messages
+                    .iter()
+                    .map(|message| message.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for message_id in message_ids {
+            if let Some(text_state) = self.message_text_states.get(&message_id) {
+                text_state.update(cx, |state, _| state.reset_block_viewport_layout());
+            }
+        }
         self.reset_visible_state();
         self.branch = self
             .selected_project()
