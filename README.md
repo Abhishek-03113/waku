@@ -9,6 +9,7 @@ The first MVP supports:
 
 | Provider | Transport | Session continuity | Checkpoint rollback |
 | --- | --- | --- | --- |
+| [Amp](https://ampcode.com/) | Claude-compatible `stream-json` | Native Amp thread ID | Not exposed by this transport |
 | Claude Code | `stream-json` | Native Claude session cursor | Not exposed by this transport |
 | Codex CLI | `app-server` JSON-RPC | `thread/start` and `thread/resume` | `thread/rollback` |
 | OpenCode | Native JSON events | Native OpenCode session cursor | Not exposed by this transport |
@@ -70,10 +71,12 @@ Running `cargo run` directly is useful for quick terminal debugging, but it
 launches a bare executable without the macOS app-bundle identity used by
 accessibility tools.
 
-Waku detects `claude`, `codex`, `opencode`, `grok`, and `pi` at launch. Existing
-CLI authentication and configuration remain owned by each provider. Pi models
-are read from its live RPC catalog, including model-specific thinking levels;
-Waku does not invent fallback Pi models.
+Waku detects `amp`, `claude`, `codex`, `opencode`, `grok`, and `pi` at launch.
+Existing CLI authentication and configuration remain owned by each provider.
+Amp's Low, Medium, High, and Ultra agent modes appear in the model picker, and
+its Fast serving tier is available in model traits. Pi models are read from its
+live RPC catalog, including model-specific thinking levels; Waku does not
+invent fallback Pi models.
 
 To produce a native app bundle:
 
@@ -119,6 +122,8 @@ notarization options.
   traits menu.
 - Choose Supervised, Auto-accept edits, Auto, or Full access independently from
   the Build/Plan interaction mode.
+- Amp currently supports Build with Full access; Waku passes the selected agent
+  mode and Fast tier to the CLI and resumes the exact native Amp thread.
 - Pi currently supports Build with Full access; unsupported Pi access modes
   fail explicitly instead of pretending to provide approval semantics.
 - Stop the active turn with `Escape`.
@@ -135,10 +140,11 @@ data directory described above. No telemetry or remote Waku service is involved.
 activity, permissions, completion, and errors. `src/app.rs` owns the GPUI view
 state and never parses a provider wire format.
 
-The MVP keeps the Codex and Pi transports alive for a session. Claude Code,
+The MVP keeps the Codex and Pi transports alive for a session. Amp, Claude Code,
 OpenCode, and Grok use resumable per-turn processes, preserving their native
-session IDs. The next product layer is richer provider-native configuration:
-structured diffs, file attachments, and OpenCode's managed server API.
+thread or session IDs. The next product layer is richer provider-native
+configuration: structured diffs, file attachments, and OpenCode's managed
+server API.
 
 ### Sessions and checkpoints
 

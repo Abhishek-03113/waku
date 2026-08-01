@@ -7,6 +7,7 @@ use uuid::Uuid;
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
+    Amp,
     Claude,
     #[default]
     Codex,
@@ -16,7 +17,8 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
+        Self::Amp,
         Self::Claude,
         Self::Codex,
         Self::OpenCode,
@@ -26,6 +28,7 @@ impl ProviderKind {
 
     pub fn id(self) -> &'static str {
         match self {
+            Self::Amp => "amp",
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
@@ -36,6 +39,7 @@ impl ProviderKind {
 
     pub fn display_name(self) -> &'static str {
         match self {
+            Self::Amp => "Amp",
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::OpenCode => "OpenCode",
@@ -46,6 +50,7 @@ impl ProviderKind {
 
     pub fn short_name(self) -> &'static str {
         match self {
+            Self::Amp => "Amp",
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::OpenCode => "OpenCode",
@@ -56,6 +61,7 @@ impl ProviderKind {
 
     pub fn command(self) -> &'static str {
         match self {
+            Self::Amp => "amp",
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
@@ -76,6 +82,9 @@ impl ProviderKind {
     tag = "provider"
 )]
 pub enum ProviderResumeCursor {
+    Amp {
+        thread_id: String,
+    },
     Claude {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +109,7 @@ pub enum ProviderResumeCursor {
 impl ProviderResumeCursor {
     pub fn from_session_id(provider: ProviderKind, id: String) -> Self {
         match provider {
+            ProviderKind::Amp => Self::Amp { thread_id: id },
             ProviderKind::Claude => Self::Claude {
                 session_id: id,
                 resume_at: None,
@@ -116,6 +126,7 @@ impl ProviderResumeCursor {
 
     pub fn provider(&self) -> ProviderKind {
         match self {
+            Self::Amp { .. } => ProviderKind::Amp,
             Self::Claude { .. } => ProviderKind::Claude,
             Self::Codex { .. } => ProviderKind::Codex,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
@@ -126,6 +137,7 @@ impl ProviderResumeCursor {
 
     pub fn native_id(&self) -> &str {
         match self {
+            Self::Amp { thread_id } => thread_id,
             Self::Claude { session_id, .. }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
@@ -945,6 +957,7 @@ mod tests {
 
     #[test]
     fn provider_ids_are_stable() {
+        assert_eq!(ProviderKind::Amp.id(), "amp");
         assert_eq!(ProviderKind::Claude.id(), "claude");
         assert_eq!(ProviderKind::Codex.command(), "codex");
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");

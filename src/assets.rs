@@ -35,6 +35,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "panel-left",
     "pencil",
     "plus",
+    "provider-amp",
     "provider-claude",
     "provider-grok",
     "provider-openai",

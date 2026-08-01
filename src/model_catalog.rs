@@ -13,6 +13,21 @@ const PI_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     match provider {
+        ProviderKind::Amp => [
+            ProviderModel::new("low", "Low"),
+            ProviderModel::new("medium", "Medium").default(),
+            ProviderModel::new("high", "High"),
+            ProviderModel::new("ultra", "Ultra"),
+        ]
+        .into_iter()
+        .map(|model| {
+            model.service_tiers(
+                [ProviderModelOption::new("fast", "Fast")
+                    .description("Use Amp's faster serving tier at a higher usage rate.")],
+                "default",
+            )
+        })
+        .collect(),
         ProviderKind::Codex => [
             ProviderModel::new("gpt-5.6-sol", "GPT-5.6-Sol").default(),
             ProviderModel::new("gpt-5.6-terra", "GPT-5.6-Terra"),
@@ -57,6 +72,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
 
 pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderModel> {
     let discovered = match provider {
+        // Amp exposes stable agent modes rather than a model inventory. Keep
+        // the picker aligned with the modes advertised by the current CLI.
+        ProviderKind::Amp => Vec::new(),
         ProviderKind::Codex => discover_codex_models(binary),
         // Claude Code accepts model aliases and full IDs but does not expose a
         // model inventory command. Keep this catalog aligned with the
@@ -588,6 +606,21 @@ fn deduplicate(models: Vec<ProviderModel>) -> Vec<ProviderModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amp_catalog_uses_agent_modes_and_medium_by_default() {
+        let models = fallback_models(ProviderKind::Amp);
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "ultra"]
+        );
+        assert!(models[1].is_default);
+        assert_eq!(models[1].service_tiers[0].id, "fast");
+    }
 
     #[test]
     fn parses_opencode_provider_qualified_models() {

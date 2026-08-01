@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -39,9 +39,16 @@ impl HeadlessDriver {
             interaction_mode,
             model,
             reasoning_effort,
-            service_tier: _,
+            service_tier,
             provider_cursor: existing_cursor,
         } = options;
+        if provider == ProviderKind::Amp
+            && (mode != RuntimeMode::FullAccess || interaction_mode != InteractionMode::Build)
+        {
+            return Err(anyhow!(
+                "Amp currently supports Build with Full access only"
+            ));
+        }
         let existing_session_id = match existing_cursor {
             Some(cursor) if cursor.provider() == provider => Some(cursor.native_id().to_owned()),
             Some(cursor) => {
@@ -65,7 +72,7 @@ impl HeadlessDriver {
                     ProviderKind::Claude | ProviderKind::Grok => {
                         Some(existing_session_id.unwrap_or_else(|| Uuid::new_v4().to_string()))
                     }
-                    ProviderKind::OpenCode => existing_session_id,
+                    ProviderKind::Amp | ProviderKind::OpenCode => existing_session_id,
                     _ => None,
                 };
                 let mut can_resume = had_existing_session;
@@ -87,6 +94,7 @@ impl HeadlessDriver {
                                 interaction_mode,
                                 model.as_deref(),
                                 reasoning_effort.as_deref(),
+                                service_tier.as_deref(),
                                 provider_session_id.as_deref(),
                                 can_resume,
                                 prompt,
@@ -152,6 +160,7 @@ fn run_prompt(
     interaction_mode: InteractionMode,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
     provider_session_id: Option<&str>,
     resume: bool,
     prompt: String,
@@ -161,7 +170,18 @@ fn run_prompt(
     let _ = events.send(DriverEvent::TurnStarted);
     let mut command = crate::command_env::command(binary);
     command.current_dir(cwd);
+    let mut prompt_via_stdin = false;
     match provider {
+        ProviderKind::Amp => {
+            command.args(amp_args(
+                model,
+                reasoning_effort,
+                service_tier,
+                provider_session_id.filter(|_| resume),
+            ));
+            command.stdin(Stdio::piped());
+            prompt_via_stdin = true;
+        }
         ProviderKind::Claude => {
             command.args([
                 "-p",
@@ -219,7 +239,7 @@ fn run_prompt(
             if let Some(session_id) = provider_session_id {
                 command.args(["--session", session_id]);
             }
-            command.arg(prompt);
+            command.arg(&prompt);
         }
         ProviderKind::Grok => {
             command.args([
@@ -277,6 +297,28 @@ fn run_prompt(
         }
     };
     active_pid.store(child.id(), Ordering::Relaxed);
+    if prompt_via_stdin {
+        let write_result = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("Amp stdin unavailable"))
+            .and_then(|mut stdin| {
+                stdin
+                    .write_all(prompt.as_bytes())
+                    .context("failed to send the prompt to Amp")
+            });
+        if let Err(error) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            active_pid.store(0, Ordering::Relaxed);
+            let _ = events.send(DriverEvent::Error(error.to_string()));
+            let _ = events.send(DriverEvent::TurnFinished {
+                success: false,
+                summary: Some("Amp could not receive the prompt.".into()),
+            });
+            return None;
+        }
+    }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stderr_events = events.clone();
@@ -303,6 +345,7 @@ fn run_prompt(
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
                 match provider {
+                    ProviderKind::Amp => parser.parse_amp(value, events),
                     ProviderKind::Claude => parser.parse_claude(value, events),
                     ProviderKind::OpenCode => parser.parse_opencode(value, events),
                     ProviderKind::Grok => parser.parse_grok(value, events),
@@ -334,11 +377,118 @@ struct StreamParser {
     saw_text_delta: bool,
     saw_reasoning_delta: bool,
     provider_session_id: Option<String>,
+    amp_tools: HashMap<String, (ActivityKind, String)>,
     claude_tools: HashMap<String, (ActivityKind, String)>,
     grok_tools: HashMap<String, (ActivityKind, String)>,
 }
 
 impl StreamParser {
+    fn parse_amp(&mut self, value: Value, events: &Sender<DriverEvent>) {
+        match value.get("type").and_then(Value::as_str) {
+            Some("system") if value.get("subtype").and_then(Value::as_str) == Some("init") => {
+                if let Some(id) = value.get("session_id").and_then(Value::as_str)
+                    && self.provider_session_id.as_deref() != Some(id)
+                {
+                    self.provider_session_id = Some(id.to_owned());
+                    let _ = events.send(DriverEvent::Connected {
+                        provider_cursor: Some(ProviderResumeCursor::Amp {
+                            thread_id: id.to_owned(),
+                        }),
+                    });
+                }
+            }
+            Some("assistant") => {
+                if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+                    for block in content {
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("text") => {
+                                if let Some(text) = block
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .filter(|text| !text.is_empty())
+                                {
+                                    let _ = events.send(DriverEvent::TextDelta(text.to_owned()));
+                                }
+                            }
+                            Some("thinking") => {
+                                if let Some(text) = block
+                                    .get("thinking")
+                                    .and_then(Value::as_str)
+                                    .filter(|text| !text.is_empty())
+                                {
+                                    let _ =
+                                        events.send(DriverEvent::ReasoningDelta(text.to_owned()));
+                                }
+                            }
+                            Some("tool_use") => {
+                                let id = block.get("id").and_then(Value::as_str).map(str::to_owned);
+                                let title = block
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("Tool")
+                                    .to_owned();
+                                let kind = classify_tool(&title);
+                                if let Some(id) = &id {
+                                    self.amp_tools.insert(id.clone(), (kind, title.clone()));
+                                }
+                                let detail = block
+                                    .get("input")
+                                    .map(compact_json)
+                                    .filter(|value| !value.is_empty());
+                                let _ = events.send(DriverEvent::Activity {
+                                    id,
+                                    kind,
+                                    title,
+                                    detail,
+                                    complete: false,
+                                });
+                            }
+                            // Redacted thinking is provider-private control data.
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Some("user") => {
+                if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+                    for block in content {
+                        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                            continue;
+                        }
+                        let id = block
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        let (kind, title) = id
+                            .as_ref()
+                            .and_then(|id| self.amp_tools.remove(id))
+                            .unwrap_or((ActivityKind::Tool, "Tool".to_owned()));
+                        let _ = events.send(DriverEvent::Activity {
+                            id,
+                            kind,
+                            title,
+                            detail: None,
+                            complete: true,
+                        });
+                    }
+                }
+            }
+            Some("result") if value.get("is_error").and_then(Value::as_bool) == Some(true) => {
+                let message = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Amp reported an error");
+                let _ = events.send(DriverEvent::Error(message.to_owned()));
+            }
+            Some("system") => {
+                if let Some(message) = value.get("error").and_then(Value::as_str) {
+                    let _ = events.send(DriverEvent::Error(message.to_owned()));
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn parse_claude(&mut self, value: Value, events: &Sender<DriverEvent>) {
         match value.get("type").and_then(Value::as_str) {
             Some("system") if value.get("subtype").and_then(Value::as_str) == Some("init") => {
@@ -660,6 +810,37 @@ fn compact_json(value: &Value) -> String {
     }
 }
 
+fn amp_args(
+    mode: Option<&str>,
+    reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
+    thread_id: Option<&str>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(thread_id) = thread_id {
+        args.extend([
+            "threads".to_owned(),
+            "continue".to_owned(),
+            thread_id.to_owned(),
+        ]);
+    }
+    args.extend([
+        "--execute".to_owned(),
+        "--stream-json-thinking".to_owned(),
+        "--dangerously-allow-all".to_owned(),
+    ]);
+    if let Some(mode) = mode {
+        args.extend(["--mode".to_owned(), mode.to_owned()]);
+    }
+    if let Some(reasoning_effort) = reasoning_effort {
+        args.extend(["--effort".to_owned(), reasoning_effort.to_owned()]);
+    }
+    if service_tier == Some("fast") {
+        args.push("--fast".to_owned());
+    }
+    args
+}
+
 fn classify_tool(name: &str) -> ActivityKind {
     let normalized = name.to_ascii_lowercase();
     if normalized.contains("bash") || normalized.contains("command") {
@@ -667,9 +848,14 @@ fn classify_tool(name: &str) -> ActivityKind {
     } else if normalized.contains("edit")
         || normalized.contains("write")
         || normalized.contains("patch")
+        || normalized.contains("create")
     {
         ActivityKind::FileChange
-    } else if normalized.contains("search") || normalized.contains("grep") {
+    } else if normalized.contains("search")
+        || normalized.contains("grep")
+        || normalized.contains("read")
+        || normalized.contains("find")
+    {
         ActivityKind::Search
     } else if normalized.contains("todo") || normalized.contains("plan") {
         ActivityKind::Plan
@@ -691,6 +877,150 @@ fn classify_grok_tool(kind: Option<&str>, name: Option<&str>, title: &str) -> Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amp_cli_args_create_and_resume_the_exact_thread() {
+        assert_eq!(
+            amp_args(Some("medium"), None, None, None),
+            [
+                "--execute",
+                "--stream-json-thinking",
+                "--dangerously-allow-all",
+                "--mode",
+                "medium",
+            ]
+        );
+        assert_eq!(
+            amp_args(
+                Some("high"),
+                Some("xhigh"),
+                Some("fast"),
+                Some("T-thread-123"),
+            ),
+            [
+                "threads",
+                "continue",
+                "T-thread-123",
+                "--execute",
+                "--stream-json-thinking",
+                "--dangerously-allow-all",
+                "--mode",
+                "high",
+                "--effort",
+                "xhigh",
+                "--fast",
+            ]
+        );
+    }
+
+    #[test]
+    fn amp_stream_preserves_thinking_text_and_tool_order() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_amp(
+            serde_json::json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "T-thread-123"
+            }),
+            &events,
+        );
+        parser.parse_amp(
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "thinking", "thinking": "Inspecting"},
+                    {"type": "redacted_thinking", "data": "private"},
+                    {"type": "text", "text": "Before"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_amp_1",
+                        "name": "create_file",
+                        "input": {"path": "src/new.rs"}
+                    }
+                ]}
+            }),
+            &events,
+        );
+        parser.parse_amp(
+            serde_json::json!({
+                "type": "user",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_amp_1",
+                    "content": "created",
+                    "is_error": false
+                }]}
+            }),
+            &events,
+        );
+        parser.parse_amp(
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "After"}]}
+            }),
+            &events,
+        );
+
+        assert_eq!(parser.provider_session_id.as_deref(), Some("T-thread-123"));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Connected {
+                provider_cursor: Some(ProviderResumeCursor::Amp { thread_id })
+            } if thread_id == "T-thread-123"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::ReasoningDelta(text) if text == "Inspecting"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::TextDelta(text) if text == "Before"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Activity {
+                id: Some(id),
+                kind: ActivityKind::FileChange,
+                complete: false,
+                ..
+            } if id == "toolu_amp_1"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Activity {
+                id: Some(id),
+                kind: ActivityKind::FileChange,
+                complete: true,
+                ..
+            } if id == "toolu_amp_1"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::TextDelta(text) if text == "After"
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn amp_stream_surfaces_structured_errors() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_amp(
+            serde_json::json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "error": "Authentication required"
+            }),
+            &events,
+        );
+
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Error(message) if message == "Authentication required"
+        ));
+    }
 
     #[test]
     fn opencode_stream_captures_native_session_and_text() {
