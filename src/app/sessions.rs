@@ -50,6 +50,7 @@ impl Waku {
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
         }
+        self.ensure_right_panel_terminals(cx);
         let message_ids = self
             .selected_session()
             .map(|session| {

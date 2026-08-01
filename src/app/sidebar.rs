@@ -94,7 +94,11 @@ fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
 }
 
 impl Waku {
-    fn window_drag_region(&self, region: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn window_drag_region(
+        &self,
+        region: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         region
             .on_click(|event, window, _| {
                 if event.click_count() == 2 {

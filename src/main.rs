@@ -10,6 +10,7 @@ mod model;
 mod model_catalog;
 mod persistence;
 mod platform;
+mod terminal;
 mod theme;
 mod ui;
 
@@ -60,6 +61,7 @@ fn main() {
         .with_main_window_reopen()
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+            crate::assets::register_fonts(cx).expect("failed to register bundled fonts");
             crate::input::init(cx);
             crate::theme::init_component_theme(cx);
             cx.set_menus(vec![

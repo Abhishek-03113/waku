@@ -26,6 +26,10 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+pub fn executable_search_path() -> Option<std::ffi::OsString> {
+    std::env::join_paths(executable_search_paths()).ok()
+}
+
 fn executable_search_paths() -> Vec<PathBuf> {
     search_paths_from(
         std::env::var_os("PATH").as_deref(),

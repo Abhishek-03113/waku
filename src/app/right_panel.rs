@@ -6,6 +6,8 @@ use gpui_component::{IconName, Sizable};
 
 use super::*;
 
+const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct WorkingTreeEntry {
     relative_path: String,
@@ -72,10 +74,25 @@ fn visible_working_tree_entries(
 }
 
 impl RightPanelSurface {
+    fn new_browser() -> Self {
+        Self::Browser(Uuid::new_v4())
+    }
+
+    fn new_terminal() -> Self {
+        Self::Terminal(Uuid::new_v4())
+    }
+
+    fn terminal_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Terminal(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     fn label(&self) -> &str {
         match self {
-            Self::Browser => "Browser",
-            Self::Terminal => "Terminal",
+            Self::Browser(_) => "Browser",
+            Self::Terminal(_) => "Terminal",
             Self::Files => "Files",
             Self::Diff => "Diff",
             Self::File(path) => path.rsplit('/').next().unwrap_or(path),
@@ -84,13 +101,145 @@ impl RightPanelSurface {
 
     fn icon_path(&self) -> &'static str {
         match self {
-            Self::Browser => "icons/globe.svg",
-            Self::Terminal => "icons/terminal.svg",
+            Self::Browser(_) => "icons/globe.svg",
+            Self::Terminal(_) => "icons/terminal.svg",
             Self::Files => "icons/folder.svg",
             Self::Diff => "icons/file-diff.svg",
             Self::File(_) => "icons/list.svg",
         }
     }
+}
+
+fn reusable_surface_index(
+    surfaces: &[RightPanelSurface],
+    requested: &RightPanelSurface,
+) -> Option<usize> {
+    match requested {
+        RightPanelSurface::Browser(_) | RightPanelSurface::Terminal(_) => None,
+        RightPanelSurface::Files | RightPanelSurface::Diff | RightPanelSurface::File(_) => {
+            surfaces.iter().position(|surface| surface == requested)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TabScrollFadeSide {
+    Left,
+    Right,
+}
+
+fn tab_scroll_fade_visibility(offset_x: Pixels, max_offset: Pixels) -> (bool, bool) {
+    let scrolled = -offset_x;
+    let threshold = px(0.5);
+    (scrolled > threshold, max_offset - scrolled > threshold)
+}
+
+fn fade_safe_tab_offset(
+    current_offset: Pixels,
+    max_offset: Pixels,
+    item_left: Pixels,
+    item_right: Pixels,
+    viewport_left: Pixels,
+    viewport_right: Pixels,
+) -> Pixels {
+    let inset = px(TAB_SCROLL_FADE_WIDTH);
+    let mut offset = current_offset;
+    let visible_left = item_left + offset;
+    let visible_right = item_right + offset;
+    if visible_left < viewport_left + inset {
+        offset += viewport_left + inset - visible_left;
+    } else if visible_right > viewport_right - inset {
+        offset -= visible_right - (viewport_right - inset);
+    }
+    offset.clamp(-max_offset, px(0.0))
+}
+
+fn tab_scroll_reveal_guard(
+    scroll_handle: ScrollHandle,
+    tab_index: usize,
+    waku: WeakEntity<Waku>,
+) -> impl IntoElement {
+    canvas(
+        move |_, window, _| {
+            if let Some(item) = scroll_handle.bounds_for_item(tab_index) {
+                let viewport = scroll_handle.bounds();
+                let offset = scroll_handle.offset();
+                let safe_offset = fade_safe_tab_offset(
+                    offset.x,
+                    scroll_handle.max_offset().width,
+                    item.left(),
+                    item.right(),
+                    viewport.left(),
+                    viewport.right(),
+                );
+                if safe_offset != offset.x {
+                    scroll_handle.set_offset(point(safe_offset, offset.y));
+                }
+            }
+
+            window.on_next_frame(move |_, cx| {
+                let _ = waku.update(cx, |this, cx| {
+                    if this.right_panel_pending_tab_reveal == Some(tab_index) {
+                        this.right_panel_pending_tab_reveal = None;
+                        cx.notify();
+                    }
+                });
+            });
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
+}
+
+fn tab_scroll_fade(
+    scroll_handle: ScrollHandle,
+    side: TabScrollFadeSide,
+    surface: Hsla,
+) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| {
+            let (show_left, show_right) = tab_scroll_fade_visibility(
+                scroll_handle.offset().x,
+                scroll_handle.max_offset().width,
+            );
+            let visible = match side {
+                TabScrollFadeSide::Left => show_left,
+                TabScrollFadeSide::Right => show_right,
+            };
+            visible.then(|| {
+                let transparent = surface.opacity(0.0);
+                let background = match side {
+                    TabScrollFadeSide::Left => linear_gradient(
+                        90.0,
+                        linear_color_stop(surface, 0.0),
+                        linear_color_stop(transparent, 1.0),
+                    ),
+                    TabScrollFadeSide::Right => linear_gradient(
+                        90.0,
+                        linear_color_stop(transparent, 0.0),
+                        linear_color_stop(surface, 1.0),
+                    ),
+                };
+                fill(bounds, background)
+            })
+        },
+        |_, fade, window, _| {
+            if let Some(fade) = fade {
+                window.paint_quad(fade);
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .bottom_0()
+    .when(matches!(side, TabScrollFadeSide::Left), |element| {
+        element.left_0()
+    })
+    .when(matches!(side, TabScrollFadeSide::Right), |element| {
+        element.right_0()
+    })
+    .w(px(TAB_SCROLL_FADE_WIDTH))
 }
 
 #[cfg(test)]
@@ -131,9 +280,90 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn only_reuses_single_instance_surface_tabs() {
+        let browser = RightPanelSurface::new_browser();
+        let terminal = RightPanelSurface::new_terminal();
+        let surfaces = vec![
+            browser,
+            terminal,
+            RightPanelSurface::Files,
+            RightPanelSurface::Diff,
+        ];
+
+        assert_eq!(
+            reusable_surface_index(&surfaces, &RightPanelSurface::new_browser()),
+            None
+        );
+        assert_eq!(
+            reusable_surface_index(&surfaces, &RightPanelSurface::new_terminal()),
+            None
+        );
+        assert_eq!(
+            reusable_surface_index(&surfaces, &RightPanelSurface::Files),
+            Some(2)
+        );
+        assert_eq!(
+            reusable_surface_index(&surfaces, &RightPanelSurface::Diff),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn tab_scroll_fades_only_show_toward_hidden_content() {
+        assert_eq!(
+            tab_scroll_fade_visibility(px(0.0), px(120.0)),
+            (false, true)
+        );
+        assert_eq!(
+            tab_scroll_fade_visibility(px(-40.0), px(120.0)),
+            (true, true)
+        );
+        assert_eq!(
+            tab_scroll_fade_visibility(px(-120.0), px(120.0)),
+            (true, false)
+        );
+        assert_eq!(tab_scroll_fade_visibility(px(0.0), px(0.0)), (false, false));
+    }
+
+    #[test]
+    fn selected_tab_offset_clears_fade_overlays() {
+        assert_eq!(
+            fade_safe_tab_offset(
+                px(-100.0),
+                px(300.0),
+                px(90.0),
+                px(190.0),
+                px(0.0),
+                px(300.0),
+            ),
+            px(-66.0)
+        );
+        assert_eq!(
+            fade_safe_tab_offset(
+                px(-100.0),
+                px(324.0),
+                px(300.0),
+                px(400.0),
+                px(0.0),
+                px(300.0),
+            ),
+            px(-124.0)
+        );
+        assert_eq!(
+            fade_safe_tab_offset(px(0.0), px(0.0), px(0.0), px(100.0), px(0.0), px(300.0),),
+            px(0.0)
+        );
+    }
 }
 
 impl Waku {
+    fn reveal_right_panel_tab(&mut self, index: usize) {
+        self.right_panel_pending_tab_reveal = Some(index);
+        self.right_panel_tabs_scroll_handle.scroll_to_item(index);
+    }
+
     fn active_right_panel_surface(&self) -> Option<&RightPanelSurface> {
         self.right_panel_active_surface
             .and_then(|index| self.right_panel_surfaces.get(index))
@@ -143,15 +373,16 @@ impl Waku {
         if surface == RightPanelSurface::Diff {
             self.refresh_right_panel_diff();
         }
-        let index = self
-            .right_panel_surfaces
-            .iter()
-            .position(|existing| existing == &surface)
-            .unwrap_or_else(|| {
+        if let Some(terminal_id) = surface.terminal_id() {
+            self.ensure_right_panel_terminal(terminal_id, cx);
+        }
+        let index =
+            reusable_surface_index(&self.right_panel_surfaces, &surface).unwrap_or_else(|| {
                 self.right_panel_surfaces.push(surface);
                 self.right_panel_surfaces.len() - 1
             });
         self.right_panel_active_surface = Some(index);
+        self.reveal_right_panel_tab(index);
         self.right_panel_visible = true;
         cx.notify();
     }
@@ -176,6 +407,9 @@ impl Waku {
         if index >= self.right_panel_surfaces.len() {
             return;
         }
+        if let Some(terminal_id) = self.right_panel_surfaces[index].terminal_id() {
+            self.right_panel_terminals.remove(&terminal_id);
+        }
         self.right_panel_surfaces.remove(index);
         self.right_panel_active_surface = if self.right_panel_surfaces.is_empty() {
             None
@@ -187,6 +421,11 @@ impl Waku {
                 None => 0,
             })
         };
+        if let Some(active) = self.right_panel_active_surface {
+            self.reveal_right_panel_tab(active);
+        } else {
+            self.right_panel_pending_tab_reveal = None;
+        }
         cx.notify();
     }
 
@@ -222,6 +461,19 @@ impl Waku {
             None => self.render_right_panel_chooser(cx).into_any_element(),
             Some(RightPanelSurface::Files) => self.render_right_panel_files(cx).into_any_element(),
             Some(RightPanelSurface::Diff) => self.render_right_panel_diff(cx).into_any_element(),
+            Some(RightPanelSurface::Terminal(terminal_id)) => self
+                .right_panel_terminals
+                .get(&terminal_id)
+                .cloned()
+                .map(IntoElement::into_any_element)
+                .unwrap_or_else(|| {
+                    self.render_right_panel_empty_message(
+                        "Terminal unavailable",
+                        "Open the Terminal surface again to start a shell.",
+                        cx,
+                    )
+                    .into_any_element()
+                }),
             Some(RightPanelSurface::File(path)) => {
                 self.render_right_panel_file(path, cx).into_any_element()
             }
@@ -247,6 +499,37 @@ impl Waku {
             .child(body)
     }
 
+    fn ensure_right_panel_terminal(&mut self, terminal_id: Uuid, cx: &mut Context<Self>) {
+        let Some(working_directory) = self.selected_project().map(|project| project.path.clone())
+        else {
+            self.right_panel_terminals.remove(&terminal_id);
+            return;
+        };
+        let matches_project = self
+            .right_panel_terminals
+            .get(&terminal_id)
+            .is_some_and(|terminal| terminal.read(cx).working_directory() == working_directory);
+        if !matches_project {
+            self.right_panel_terminals.insert(
+                terminal_id,
+                cx.new(|cx| TerminalView::new(working_directory.clone(), cx)),
+            );
+        }
+    }
+
+    pub(super) fn ensure_right_panel_terminals(&mut self, cx: &mut Context<Self>) {
+        let terminal_ids = self
+            .right_panel_surfaces
+            .iter()
+            .filter_map(RightPanelSurface::terminal_id)
+            .collect::<Vec<_>>();
+        self.right_panel_terminals
+            .retain(|terminal_id, _| terminal_ids.contains(terminal_id));
+        for terminal_id in terminal_ids {
+            self.ensure_right_panel_terminal(terminal_id, cx);
+        }
+    }
+
     fn render_right_panel_header(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::current(cx);
         let active_surface = self.right_panel_active_surface;
@@ -258,7 +541,8 @@ impl Waku {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .overflow_x_scroll();
+            .overflow_x_scroll()
+            .track_scroll(&self.right_panel_tabs_scroll_handle);
         for (index, surface) in self.right_panel_surfaces.iter().cloned().enumerate() {
             let active = active_surface == Some(index);
             let label = SharedString::from(surface.label().to_owned());
@@ -277,6 +561,9 @@ impl Waku {
                     .items_center()
                     .gap(px(6.0))
                     .cursor_default()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .when(active, |element| element.bg(theme.overlay_strong))
                     .when(!active, |element| {
                         element.hover(|element| element.bg(theme.overlay))
@@ -316,11 +603,13 @@ impl Waku {
                     .on_click(move |_, _, cx| {
                         let _ = activate_weak.update(cx, |this, cx| {
                             this.right_panel_active_surface = Some(index);
+                            this.reveal_right_panel_tab(index);
                             cx.notify();
                         });
                     }),
             );
         }
+        tabs = tabs.child(div().w(px(TAB_SCROLL_FADE_WIDTH)).h(px(1.0)).flex_none());
 
         let mut header = div()
             .id("right-panel-header")
@@ -331,54 +620,97 @@ impl Waku {
             .gap(px(6.0))
             .pl(px(10.0))
             .pr(px(14.0))
-            .child(tabs);
+            .child(
+                div()
+                    .relative()
+                    .h_full()
+                    .min_w_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(tabs)
+                    .when_some(self.right_panel_pending_tab_reveal, |element, tab_index| {
+                        element.child(tab_scroll_reveal_guard(
+                            self.right_panel_tabs_scroll_handle.clone(),
+                            tab_index,
+                            cx.entity().downgrade(),
+                        ))
+                    })
+                    .child(tab_scroll_fade(
+                        self.right_panel_tabs_scroll_handle.clone(),
+                        TabScrollFadeSide::Left,
+                        theme.surface,
+                    ))
+                    .child(tab_scroll_fade(
+                        self.right_panel_tabs_scroll_handle.clone(),
+                        TabScrollFadeSide::Right,
+                        theme.surface,
+                    )),
+            );
 
         if !self.right_panel_surfaces.is_empty() {
             let weak = cx.entity().downgrade();
             let existing_surfaces = self.right_panel_surfaces.clone();
             let options = [
-                RightPanelSurface::Browser,
-                RightPanelSurface::Terminal,
+                RightPanelSurface::new_browser(),
+                RightPanelSurface::new_terminal(),
                 RightPanelSurface::Files,
                 RightPanelSurface::Diff,
             ];
             header = header.child(
-                Button::new("add-right-panel-surface")
-                    .xsmall()
-                    .ghost()
-                    .icon(IconName::Plus)
-                    .dropdown_menu(move |mut menu, _, _| {
-                        menu = menu.min_w(px(168.0)).max_w(px(168.0));
-                        for surface in options.clone() {
-                            let item_weak = weak.clone();
-                            let item_surface = surface.clone();
-                            let item_theme = theme;
-                            let icon_path = surface.icon_path();
-                            let label = surface.label().to_owned();
-                            menu = menu.item(
-                                PopupMenuItem::element(move |_, _| {
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .child(icon(icon_path, 13.0, item_theme.text_tertiary))
-                                        .child(label.clone())
-                                })
-                                .checked(existing_surfaces.contains(&surface))
-                                .on_click(move |_, _, cx| {
-                                    let _ = item_weak.update(cx, |this, cx| {
-                                        this.open_right_panel_surface(item_surface.clone(), cx);
-                                    });
-                                }),
-                            );
-                        }
-                        menu
+                div()
+                    .flex_none()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
                     })
-                    .anchor(Corner::TopLeft),
+                    .child(
+                        Button::new("add-right-panel-surface")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Plus)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                menu = menu.min_w(px(168.0)).max_w(px(168.0));
+                                for surface in options.clone() {
+                                    let item_weak = weak.clone();
+                                    let item_surface = surface.clone();
+                                    let item_theme = theme;
+                                    let icon_path = surface.icon_path();
+                                    let label = surface.label().to_owned();
+                                    let checked =
+                                        reusable_surface_index(&existing_surfaces, &surface)
+                                            .is_some();
+                                    menu =
+                                        menu.item(
+                                            PopupMenuItem::element(move |_, _| {
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(8.0))
+                                                    .child(icon(
+                                                        icon_path,
+                                                        13.0,
+                                                        item_theme.text_tertiary,
+                                                    ))
+                                                    .child(label.clone())
+                                            })
+                                            .checked(checked)
+                                            .on_click(move |_, _, cx| {
+                                                let _ = item_weak.update(cx, |this, cx| {
+                                                    this.open_right_panel_surface(
+                                                        item_surface.clone(),
+                                                        cx,
+                                                    );
+                                                });
+                                            }),
+                                        );
+                                }
+                                menu
+                            })
+                            .anchor(Corner::TopLeft),
+                    ),
             );
         }
 
-        header.child(self.render_right_panel_toggle(cx))
+        self.window_drag_region(header.child(self.render_right_panel_toggle(cx)), cx)
     }
 
     fn render_right_panel_chooser(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -420,12 +752,12 @@ impl Waku {
                             .flex()
                             .gap(px(8.0))
                             .child(self.render_right_panel_card(
-                                RightPanelSurface::Browser,
+                                RightPanelSurface::new_browser(),
                                 "Open a local app or URL.",
                                 cx,
                             ))
                             .child(self.render_right_panel_card(
-                                RightPanelSurface::Terminal,
+                                RightPanelSurface::new_terminal(),
                                 "Start a shell in this workspace.",
                                 cx,
                             )),
@@ -508,10 +840,10 @@ impl Waku {
     ) -> Div {
         let theme = Theme::current(cx);
         let description = match surface {
-            RightPanelSurface::Browser => {
+            RightPanelSurface::Browser(_) => {
                 "Browser previews will appear here once the native preview backend is connected."
             }
-            RightPanelSurface::Terminal => {
+            RightPanelSurface::Terminal(_) => {
                 "A workspace terminal will appear here once the native terminal backend is connected."
             }
             _ => "This surface is not available yet.",

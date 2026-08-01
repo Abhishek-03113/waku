@@ -12,8 +12,9 @@ use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Corner, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListOffset, ListState,
     MouseButton, MouseDownEvent, NavigationDirection, PathPromptOptions, Pixels, Point, Render,
-    SharedString, Size, Stateful, StyleRefinement, Timer, Window, div, list, point, prelude::*,
-    pulsating_between, px, rems, size,
+    ScrollHandle, SharedString, Size, Stateful, StyleRefinement, Timer, WeakEntity, Window, canvas,
+    div, fill, linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px,
+    rems, size,
 };
 use uuid::Uuid;
 
@@ -37,6 +38,7 @@ use gpui_component::tooltip::Tooltip;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::persistence::{PersistedState, StateStore};
+use crate::terminal::TerminalView;
 use crate::theme::{Theme, ThemePreference};
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, icon, provider_color,
@@ -89,8 +91,8 @@ enum SettingsPage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RightPanelSurface {
-    Browser,
-    Terminal,
+    Browser(Uuid),
+    Terminal(Uuid),
     Files,
     Diff,
     File(String),
@@ -426,8 +428,11 @@ pub struct Waku {
     right_panel_visible: bool,
     right_panel_surfaces: Vec<RightPanelSurface>,
     right_panel_active_surface: Option<usize>,
+    right_panel_tabs_scroll_handle: ScrollHandle,
+    right_panel_pending_tab_reveal: Option<usize>,
     right_panel_expanded_paths: HashSet<PathBuf>,
     right_panel_diff_files: Vec<RightPanelDiffFile>,
+    right_panel_terminals: HashMap<Uuid, Entity<TerminalView>>,
     settings_page: Option<SettingsPage>,
     header_drag_armed: bool,
     branch: Option<String>,
@@ -667,8 +672,11 @@ impl Waku {
                 right_panel_visible: true,
                 right_panel_surfaces: Vec::new(),
                 right_panel_active_surface: None,
+                right_panel_tabs_scroll_handle: ScrollHandle::new(),
+                right_panel_pending_tab_reveal: None,
                 right_panel_expanded_paths: HashSet::new(),
                 right_panel_diff_files: Vec::new(),
+                right_panel_terminals: HashMap::new(),
                 settings_page: None,
                 header_drag_armed: false,
                 branch,

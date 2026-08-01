@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use anyhow::Result;
-use gpui::{AssetSource, SharedString};
+use gpui::{App, AssetSource, SharedString};
 
 /// Icons embedded in the binary so the app stays a single artifact.
 pub struct Assets;
@@ -58,6 +58,23 @@ const ICONS: &[(&str, &[u8])] = icons![
     "x",
     "zap",
 ];
+
+const FONTS: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf"),
+];
+
+pub fn register_fonts(cx: &App) -> Result<()> {
+    cx.text_system().add_fonts(
+        FONTS
+            .iter()
+            .map(|font| Cow::Borrowed(*font))
+            .collect::<Vec<_>>(),
+    )
+}
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
