@@ -196,6 +196,13 @@ impl Waku {
                     .iter_mut()
                     .find(|session| session.id == session_id)
                 {
+                    if let Some(ProviderResumeCursor::Claude {
+                        resume_at: Some(message_id),
+                        ..
+                    }) = &provider_cursor
+                    {
+                        session.mark_active_turn_provider_resume_at(message_id.clone());
+                    }
                     session.provider_cursor = provider_cursor;
                     if session.status == SessionStatus::Connecting {
                         session.status = SessionStatus::Working;

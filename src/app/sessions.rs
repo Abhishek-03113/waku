@@ -235,11 +235,15 @@ impl Waku {
     pub(super) fn cancel_turn_action(
         &mut self,
         _: &CancelTurn,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.settings_page.take().is_some() {
             cx.notify();
+            return;
+        }
+        if self.message_edit.is_some() {
+            self.cancel_message_edit(window, cx);
             return;
         }
         self.cancel_turn(cx);
@@ -250,7 +254,7 @@ impl Waku {
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.expanded_turns.clear();
-        self.pending_revert = None;
+        self.message_edit = None;
         self.toast = None;
         self.transcript_anchor.set(None);
         self.transcript_anchor_end_space.set(Pixels::ZERO);
@@ -291,6 +295,22 @@ impl Waku {
     }
 
     pub(super) fn select_model_picker_tab(&mut self, tab: ModelPickerTab, cx: &mut Context<Self>) {
+        match tab {
+            ModelPickerTab::Provider(provider) => {
+                self.request_provider_model_discovery(provider);
+            }
+            ModelPickerTab::Favorites => {
+                let providers = self
+                    .state
+                    .favorite_models
+                    .iter()
+                    .map(|favorite| favorite.provider)
+                    .collect::<HashSet<_>>();
+                for provider in providers {
+                    self.request_provider_model_discovery(provider);
+                }
+            }
+        }
         if self.model_picker_tab != tab {
             self.model_picker_tab = tab;
             cx.notify();

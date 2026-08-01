@@ -6,7 +6,8 @@ use std::process::Command;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, unbounded};
+use chrono::{DateTime, Local, Utc};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Corner, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListOffset, ListState,
@@ -22,9 +23,10 @@ use crate::input::{ComposerEvent, ComposerInput, preserve_composer_focus_for_con
 use crate::model::{
     ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, FavoriteModel,
     InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind, ProviderModel,
-    ProviderProbe, ReasoningBlock, RuntimeMode, SessionStatus, TranscriptBlock,
-    TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
+    ProviderProbe, ProviderResumeCursor, ReasoningBlock, RuntimeMode, SessionStatus,
+    TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
@@ -32,6 +34,7 @@ use gpui_component::scroll::{ScrollableElement, ScrollbarHandle};
 use gpui_component::text::{
     TextView, TextViewBlockResize, TextViewScrollViewport, TextViewState, TextViewStyle,
 };
+use gpui_component::tooltip::Tooltip;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::persistence::{PersistedState, StateStore};
@@ -152,13 +155,24 @@ fn traits_menu_choice(
     .selected(is_selected)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UserMessageActionKind {
+    Rewind,
+    Edit,
+}
+
 #[derive(Clone, Copy, Debug)]
-struct CheckpointAction {
+struct UserMessageAction {
     session_id: Uuid,
     turn_count: usize,
-    file_count: usize,
-    can_revert: bool,
-    confirmed: bool,
+    kind: UserMessageActionKind,
+}
+
+#[derive(Clone)]
+struct MessageEdit {
+    session_id: Uuid,
+    turn_count: usize,
+    input: Entity<ComposerInput>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,7 +374,10 @@ pub struct Waku {
     model_search: Entity<InputState>,
     settings_search: Entity<InputState>,
     probes: Vec<ProviderProbe>,
+    provider_probe_tx: Sender<ProviderProbe>,
     provider_probe_events: Receiver<ProviderProbe>,
+    provider_model_discoveries: HashSet<ProviderKind>,
+    provider_model_discoveries_pending: HashSet<ProviderKind>,
     model_picker_tab: ModelPickerTab,
     runtimes: HashMap<Uuid, SessionRuntime>,
     stream_state_dirty: bool,
@@ -378,7 +395,7 @@ pub struct Waku {
     header_drag_armed: bool,
     branch: Option<String>,
     toast: Option<String>,
-    pending_revert: Option<(Uuid, usize)>,
+    message_edit: Option<MessageEdit>,
     transcript_rows: ListState,
     /// Active turns use top alignment so row remeasurement cannot invoke the
     /// bottom-aligned list's implicit pin and displace the sent-message anchor.
@@ -493,15 +510,6 @@ impl Waku {
             .map(ProviderProbe::pending)
             .collect::<Vec<_>>();
         let (provider_probe_tx, provider_probe_events) = unbounded();
-        for provider in ProviderKind::ALL {
-            let provider_probe_tx = provider_probe_tx.clone();
-            let _ = std::thread::Builder::new()
-                .name(format!("waku-{}-probe", provider.id()))
-                .spawn(move || {
-                    let _ = provider_probe_tx.send(ProviderProbe::detect(provider));
-                });
-        }
-        drop(provider_probe_tx);
         let model_picker_tab = ModelPickerTab::Provider(
             state
                 .selected_session
@@ -599,7 +607,10 @@ impl Waku {
                 model_search,
                 settings_search,
                 probes,
+                provider_probe_tx,
                 provider_probe_events,
+                provider_model_discoveries: HashSet::new(),
+                provider_model_discoveries_pending: HashSet::new(),
                 model_picker_tab,
                 runtimes: HashMap::new(),
                 stream_state_dirty: false,
@@ -614,7 +625,7 @@ impl Waku {
                 header_drag_armed: false,
                 branch,
                 toast: None,
-                pending_revert: None,
+                message_edit: None,
                 transcript_rows,
                 anchored_transcript_rows,
                 transcript_row_kinds: RefCell::new(Vec::new()),

@@ -31,6 +31,34 @@ impl Waku {
         self.probes.iter().find(|probe| probe.provider == provider)
     }
 
+    pub(super) fn request_provider_model_discovery(&mut self, provider: ProviderKind) {
+        if !provider.supports_model_discovery()
+            || self.provider_model_discoveries.contains(&provider)
+        {
+            return;
+        }
+        let Some(probe) = self
+            .provider_probe(provider)
+            .filter(|probe| probe.installed)
+            .cloned()
+        else {
+            return;
+        };
+        self.provider_model_discoveries.insert(provider);
+        self.provider_model_discoveries_pending.insert(provider);
+        let provider_probe_tx = self.provider_probe_tx.clone();
+        if std::thread::Builder::new()
+            .name(format!("waku-{}-model-discovery", provider.id()))
+            .spawn(move || {
+                let _ = provider_probe_tx.send(probe.discover_models());
+            })
+            .is_err()
+        {
+            self.provider_model_discoveries.remove(&provider);
+            self.provider_model_discoveries_pending.remove(&provider);
+        }
+    }
+
     pub(super) fn model_for_session<'a>(&'a self, session: &'a AgentSession) -> Option<&'a str> {
         session.model.as_deref().or_else(|| {
             self.provider_probe(session.provider)
@@ -134,42 +162,134 @@ impl Waku {
         }
     }
 
-    pub(super) fn request_checkpoint_revert(
+    pub(super) fn begin_message_edit(
         &mut self,
         session_id: Uuid,
         turn_count: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_revert == Some((session_id, turn_count)) {
-            self.pending_revert = None;
-            self.revert_to_checkpoint(session_id, turn_count, cx);
-            return;
-        }
-
-        let discarded_turns = self
+        let Some(initial_message) = self
             .state
             .sessions
             .iter()
-            .find(|session| session.id == session_id)
-            .map(|session| session.turns.len().saturating_sub(turn_count))
-            .unwrap_or_default();
-        self.pending_revert = Some((session_id, turn_count));
-        self.toast = Some(if discarded_turns == 0 {
-            "Click “Confirm revert” to restore the workspace to this checkpoint.".into()
-        } else {
-            format!(
-                "Click “Confirm revert” to restore the workspace and discard {discarded_turns} later turn(s)."
-            )
+            .find(|session| {
+                session.id == session_id
+                    && session.provider == ProviderKind::Codex
+                    && matches!(session.status, SessionStatus::Idle | SessionStatus::Failed)
+            })
+            .and_then(|session| {
+                let turn = session
+                    .turns
+                    .iter()
+                    .find(|turn| turn.turn_count == turn_count)?;
+                session
+                    .messages
+                    .iter()
+                    .find(|message| {
+                        message.turn_id == Some(turn.id) && message.role == MessageRole::User
+                    })
+                    .map(|message| message.content.clone())
+            })
+        else {
+            self.toast = Some("That Codex message is not editable right now.".into());
+            cx.notify();
+            return;
+        };
+
+        let input = cx.new(|cx| ComposerInput::new(window, cx));
+        input.update(cx, |input, cx| input.set_content(initial_message, cx));
+        cx.observe(&input, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(
+            &input,
+            |this: &mut Self, _, event: &ComposerEvent, cx| match event {
+                ComposerEvent::Submit(_) => this.submit_message_edit(cx),
+            },
+        )
+        .detach();
+        self.message_edit = Some(MessageEdit {
+            session_id,
+            turn_count,
+            input: input.clone(),
         });
+        self.toast = None;
+        self.reset_transcript_rows(self.transcript_row_count());
+        window.focus(&input.read(cx).focus());
         cx.notify();
     }
 
-    pub(super) fn revert_to_checkpoint(
+    pub(super) fn cancel_message_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.message_edit.take().is_none() {
+            return;
+        }
+        self.reset_transcript_rows(self.transcript_row_count());
+        window.focus(&self.composer_focus(cx));
+        cx.notify();
+    }
+
+    pub(super) fn submit_message_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.message_edit.clone() else {
+            return;
+        };
+        let prompt = edit.input.read(cx).content().trim().to_owned();
+        if prompt.is_empty() {
+            self.toast = Some("The edited message cannot be empty.".into());
+            cx.notify();
+            return;
+        }
+        if !self.rewind_before_turn(edit.session_id, edit.turn_count, cx) {
+            return;
+        }
+        self.message_edit = None;
+        self.submit_prompt(prompt, cx);
+    }
+
+    pub(super) fn rewind_user_message(
+        &mut self,
+        session_id: Uuid,
+        turn_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(prompt) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id && session.provider == ProviderKind::Claude)
+            .and_then(|session| {
+                let turn = session
+                    .turns
+                    .iter()
+                    .find(|turn| turn.turn_count == turn_count)?;
+                session
+                    .messages
+                    .iter()
+                    .find(|message| {
+                        message.turn_id == Some(turn.id) && message.role == MessageRole::User
+                    })
+                    .map(|message| message.content.clone())
+            })
+        else {
+            self.toast = Some("That Claude message is no longer available.".into());
+            cx.notify();
+            return;
+        };
+        if !self.rewind_before_turn(session_id, turn_count, cx) {
+            return;
+        }
+        self.composer
+            .update(cx, |composer, cx| composer.set_content(prompt, cx));
+        window.focus(&self.composer_focus(cx));
+        cx.notify();
+    }
+
+    fn rewind_before_turn(
         &mut self,
         session_id: Uuid,
         turn_count: usize,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        let retained_turn_count = turn_count.saturating_sub(1);
         let Some((
             project_id,
             provider,
@@ -177,7 +297,9 @@ impl Waku {
             provider_cursor,
             previous_turn_count,
             rollback_turns,
-            checkpoint,
+            provider_turn_count,
+            provider_resume_at,
+            session_title,
         )) = self
             .state
             .sessions
@@ -188,46 +310,52 @@ impl Waku {
                     .turns
                     .iter()
                     .find(|turn| turn.turn_count == turn_count)
-                    .and_then(|turn| turn.checkpoint.clone())
-                    .map(|checkpoint| {
+                    .map(|_| {
                         (
                             session.project_id,
                             session.provider,
                             session.status,
                             session.provider_cursor.clone(),
                             session.turns.len(),
-                            session.provider_turns_after(turn_count),
-                            checkpoint,
+                            session.provider_turns_after(retained_turn_count),
+                            session
+                                .turns
+                                .iter()
+                                .take(retained_turn_count)
+                                .filter(|turn| turn.provider_turn_started)
+                                .count(),
+                            retained_turn_count
+                                .checked_sub(1)
+                                .and_then(|index| session.turns.get(index))
+                                .and_then(|turn| turn.provider_resume_at.clone()),
+                            session.title.clone(),
                         )
                     })
             })
         else {
-            self.toast = Some("That checkpoint is no longer available.".into());
+            self.toast = Some("That message is no longer available.".into());
             cx.notify();
-            return;
+            return false;
         };
         if self.state.selected_session != Some(session_id) {
-            self.toast = Some("Select the task before reverting its checkpoint.".into());
+            self.toast = Some("Select the task before rewinding its conversation.".into());
             cx.notify();
-            return;
+            return false;
         }
-        if status != SessionStatus::Idle {
-            self.toast = Some("Stop the current turn before reverting a checkpoint.".into());
+        if !matches!(status, SessionStatus::Idle | SessionStatus::Failed) {
+            self.toast = Some("Stop the current turn before rewinding the conversation.".into());
             cx.notify();
-            return;
+            return false;
         }
-        if checkpoint.status != CheckpointStatus::Ready {
-            self.toast = Some("This turn does not have a restorable Git checkpoint.".into());
-            cx.notify();
-            return;
-        }
-        if !provider.supports_conversation_rollback() || provider_cursor.is_none() {
+        if !provider.supports_conversation_rollback()
+            || (rollback_turns > 0 && provider_cursor.is_none())
+        {
             self.toast = Some(format!(
                 "{} cannot safely roll back its native conversation yet.",
                 provider.display_name()
             ));
             cx.notify();
-            return;
+            return false;
         }
         let Some(project_path) = self
             .state
@@ -238,23 +366,58 @@ impl Waku {
         else {
             self.toast = Some("The task's project could not be found.".into());
             cx.notify();
-            return;
+            return false;
         };
-        if !checkpoint::has_ref(&project_path, &checkpoint.git_ref) {
-            self.toast = Some("The checkpoint's hidden Git ref is missing.".into());
+        let checkpoint_ref = checkpoint::checkpoint_ref(session_id, retained_turn_count);
+        if !checkpoint::has_ref(&project_path, &checkpoint_ref) {
+            self.toast = Some("The message's pre-turn Git checkpoint is missing.".into());
             cx.notify();
-            return;
+            return false;
         }
+
+        let claude_reset =
+            provider == ProviderKind::Claude && rollback_turns > 0 && retained_turn_count == 0;
+        let claude_rollback =
+            if provider == ProviderKind::Claude && rollback_turns > 0 && retained_turn_count > 0 {
+                let Some(ProviderResumeCursor::Claude {
+                    session_id: native_session_id,
+                    ..
+                }) = provider_cursor.as_ref()
+                else {
+                    self.toast = Some("Claude's native session cursor is unavailable.".into());
+                    cx.notify();
+                    return false;
+                };
+                let resume_at = match provider_resume_at {
+                    Some(message_id) => message_id,
+                    None => match crate::claude_session::message_id_for_turn(
+                        native_session_id,
+                        provider_turn_count,
+                    ) {
+                        Ok(message_id) => message_id,
+                        Err(error) => {
+                            self.toast = Some(format!(
+                                "Claude's native checkpoint for that turn is unavailable: {error}"
+                            ));
+                            cx.notify();
+                            return false;
+                        }
+                    },
+                };
+                Some((native_session_id.clone(), resume_at))
+            } else {
+                None
+            };
 
         let safety_ref = format!("refs/waku/revert-backup-{session_id}-{}", Uuid::new_v4());
         if let Err(error) = checkpoint::capture_ref(&project_path, &safety_ref) {
             self.toast = Some(format!(
-                "Could not create a revert safety snapshot: {error}"
+                "Could not create a rewind safety snapshot: {error}"
             ));
             cx.notify();
-            return;
+            return false;
         }
-        if let Err(error) = checkpoint::restore_ref(&project_path, &checkpoint.git_ref) {
+        if let Err(error) = checkpoint::restore_ref(&project_path, &checkpoint_ref) {
             self.toast = Some(match checkpoint::restore_ref(&project_path, &safety_ref) {
                 Ok(()) => {
                     let _ = checkpoint::delete_ref(&project_path, &safety_ref);
@@ -265,13 +428,24 @@ impl Waku {
                 ),
             });
             cx.notify();
-            return;
+            return false;
         }
 
-        if rollback_turns > 0 {
-            let rollback_result = self
-                .ensure_driver()
-                .and_then(|driver| driver.rollback(rollback_turns));
+        let mut claude_fork = None;
+        if rollback_turns > 0 && !claude_reset {
+            let rollback_result = if let Some((native_session_id, resume_at)) = &claude_rollback {
+                crate::claude_session::fork_session_at(
+                    native_session_id,
+                    resume_at,
+                    &format!("{session_title} (rewind)"),
+                )
+                .map(|fork| {
+                    claude_fork = Some((fork, resume_at.to_owned()));
+                })
+            } else {
+                self.ensure_driver()
+                    .and_then(|driver| driver.rollback(rollback_turns))
+            };
             if let Err(error) = rollback_result {
                 let restore_result = checkpoint::restore_ref(&project_path, &safety_ref);
                 self.toast = Some(match restore_result {
@@ -286,7 +460,7 @@ impl Waku {
                     ),
                 });
                 cx.notify();
-                return;
+                return false;
             }
         }
 
@@ -294,7 +468,7 @@ impl Waku {
         let cleanup_result = checkpoint::delete_turn_refs_after(
             &project_path,
             session_id,
-            turn_count,
+            retained_turn_count,
             previous_turn_count,
         );
         if let Some(session) = self
@@ -303,10 +477,37 @@ impl Waku {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
-            session.truncate_after_turn(turn_count);
+            if let Some((fork, source_resume_at)) = &claude_fork {
+                for turn in session.turns.iter_mut().take(retained_turn_count) {
+                    if let Some(remapped) = turn
+                        .provider_resume_at
+                        .as_ref()
+                        .and_then(|message_id| fork.message_ids.get(message_id))
+                        .cloned()
+                    {
+                        turn.provider_resume_at = Some(remapped);
+                    }
+                }
+                let remapped_resume_at = fork
+                    .message_ids
+                    .get(source_resume_at)
+                    .cloned()
+                    .expect("the Claude fork includes its target message");
+                session.provider_cursor = Some(ProviderResumeCursor::Claude {
+                    session_id: fork.session_id.clone(),
+                    resume_at: Some(remapped_resume_at),
+                });
+            } else if claude_reset {
+                session.provider_cursor = None;
+            }
+            session.truncate_after_turn(retained_turn_count);
             session.status = SessionStatus::Idle;
         }
-        if let Some(runtime) = self.runtimes.get_mut(&session_id) {
+        if claude_fork.is_some() || claude_reset {
+            // The headless Claude driver retains its original native session ID.
+            // Recreate it lazily so the next prompt resumes the fork instead.
+            self.runtimes.remove(&session_id);
+        } else if let Some(runtime) = self.runtimes.get_mut(&session_id) {
             runtime.pending_events.clear();
             runtime.stream_remeasure_pending = false;
             runtime.stream_phase = None;
@@ -318,13 +519,14 @@ impl Waku {
         self.expanded_turns.clear();
         self.reset_transcript_rows(self.transcript_row_count());
         self.toast = Some(match cleanup_result {
-            Ok(()) => format!("Restored checkpoint after turn {turn_count}."),
+            Ok(()) => format!("Rewound to before turn {turn_count}."),
             Err(error) => {
-                format!("Restored checkpoint after turn {turn_count}; stale refs remain: {error}")
+                format!("Rewound to before turn {turn_count}; stale refs remain: {error}")
             }
         });
         self.save();
         cx.notify();
+        true
     }
 
     pub(super) fn ensure_driver(&mut self) -> anyhow::Result<DriverHandle> {
@@ -460,7 +662,7 @@ impl Waku {
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.expanded_turns.clear();
-        self.pending_revert = None;
+        self.message_edit = None;
         self.toast = checkpoint_warning;
         self.transcript_anchor.set(transcript_anchor);
         self.transcript_anchor_end_space.set(Pixels::ZERO);
@@ -496,6 +698,8 @@ impl Waku {
     pub(super) fn drain_provider_probe_events(&mut self) -> bool {
         let mut changed = false;
         while let Ok(probe) = self.provider_probe_events.try_recv() {
+            self.provider_model_discoveries_pending
+                .remove(&probe.provider);
             if let Some(existing) = self
                 .probes
                 .iter_mut()

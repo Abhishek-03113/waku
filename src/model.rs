@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     Amp,
@@ -71,7 +71,11 @@ impl ProviderKind {
     }
 
     pub fn supports_conversation_rollback(self) -> bool {
-        matches!(self, Self::Codex)
+        matches!(self, Self::Claude | Self::Codex)
+    }
+
+    pub fn supports_model_discovery(self) -> bool {
+        matches!(self, Self::Codex | Self::OpenCode | Self::Grok | Self::Pi)
     }
 }
 
@@ -314,7 +318,6 @@ pub struct ProviderProbe {
     pub provider: ProviderKind,
     pub installed: bool,
     pub path: Option<PathBuf>,
-    pub version: Option<String>,
     #[serde(default)]
     pub models: Vec<ProviderModel>,
 }
@@ -326,34 +329,17 @@ impl ProviderProbe {
             provider,
             installed: path.is_some(),
             path,
-            version: None,
             models: crate::model_catalog::fallback_models(provider),
         }
     }
 
-    pub fn detect(provider: ProviderKind) -> Self {
-        let mut probe = Self::pending(provider);
-        let path = probe.path.clone();
-        let version = path.as_ref().and_then(|path| {
-            crate::command_env::command(path)
-                .arg("--version")
-                .output()
-                .ok()
-                .and_then(|output| {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let value = format!("{stdout}{stderr}");
-                    value
-                        .lines()
-                        .find(|line| !line.trim().is_empty())
-                        .map(|line| line.trim().to_owned())
-                })
-        });
-        if let Some(path) = path.as_deref() {
-            probe.models = crate::model_catalog::discover_models(provider, path);
+    pub fn discover_models(mut self) -> Self {
+        if self.provider.supports_model_discovery()
+            && let Some(path) = self.path.as_deref()
+        {
+            self.models = crate::model_catalog::discover_models(self.provider, path);
         }
-        probe.version = version;
-        probe
+        self
     }
 
     pub fn preferred_model(&self) -> Option<&ProviderModel> {
@@ -443,6 +429,8 @@ pub struct AgentTurn {
     pub status: TurnStatus,
     #[serde(default)]
     pub provider_turn_started: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_resume_at: Option<String>,
     pub started_at: u64,
     pub completed_at: Option<u64>,
     #[serde(default)]
@@ -609,6 +597,7 @@ impl AgentSession {
                 turn_count: offset + 1,
                 status: TurnStatus::Completed,
                 provider_turn_started: true,
+                provider_resume_at: None,
                 started_at,
                 completed_at: Some(completed_at),
                 checkpoint: None,
@@ -624,6 +613,7 @@ impl AgentSession {
             turn_count: self.turns.len() + 1,
             status: TurnStatus::Running,
             provider_turn_started: false,
+            provider_resume_at: None,
             started_at: now,
             completed_at: None,
             checkpoint: None,
@@ -647,6 +637,16 @@ impl AgentSession {
             .filter(|turn| turn.status == TurnStatus::Running)
         {
             turn.provider_turn_started = true;
+        }
+    }
+
+    pub fn mark_active_turn_provider_resume_at(&mut self, message_id: String) {
+        if let Some(turn) = self
+            .turns
+            .last_mut()
+            .filter(|turn| turn.status == TurnStatus::Running)
+        {
+            turn.provider_resume_at = Some(message_id);
         }
     }
 
@@ -963,6 +963,16 @@ mod tests {
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
+    }
+
+    #[test]
+    fn only_dynamic_provider_catalogs_are_discovered() {
+        assert!(!ProviderKind::Amp.supports_model_discovery());
+        assert!(!ProviderKind::Claude.supports_model_discovery());
+        assert!(ProviderKind::Codex.supports_model_discovery());
+        assert!(ProviderKind::OpenCode.supports_model_discovery());
+        assert!(ProviderKind::Grok.supports_model_discovery());
+        assert!(ProviderKind::Pi.supports_model_discovery());
     }
 
     #[test]

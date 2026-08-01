@@ -17,11 +17,229 @@ pub(super) fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> 
         .into_any_element()
 }
 
+pub(super) fn format_message_time(created_at: u64) -> String {
+    let Ok(seconds) = i64::try_from(created_at) else {
+        return String::new();
+    };
+    DateTime::<Utc>::from_timestamp(seconds, 0)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Local)
+                .format("%I:%M %p")
+                .to_string()
+                .trim_start_matches('0')
+                .to_owned()
+        })
+        .unwrap_or_default()
+}
+
+fn render_message_footer(
+    theme: &Theme,
+    message: &Message,
+    group_name: SharedString,
+    align_right: bool,
+    user_message_action: Option<UserMessageAction>,
+    waku: gpui::WeakEntity<Waku>,
+) -> AnyElement {
+    let theme = *theme;
+    let message_id = message.id;
+    let copy_content = message.content.clone();
+    let mut footer = div()
+        .w_full()
+        .h(px(27.0))
+        .flex()
+        .items_center()
+        .gap(px(1.0))
+        .invisible()
+        .group_hover(group_name, |element| element.visible())
+        .when(align_right, |element| element.justify_end())
+        .child(
+            div()
+                .h(px(27.0))
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .text_size(px(11.5))
+                .line_height(px(14.0))
+                .text_color(theme.text_ghost)
+                .child(format_message_time(message.created_at)),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("copy-message-{message_id}")))
+                .w(px(27.0))
+                .h(px(27.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .hover(|element| element.bg(theme.overlay_strong))
+                .child(icon("icons/copy.svg", 14.0, theme.text_secondary))
+                .tooltip(|window, cx| Tooltip::new("Copy message").build(window, cx))
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
+                }),
+        );
+
+    if let Some(action) = user_message_action {
+        let (label, icon_path) = match action.kind {
+            UserMessageActionKind::Rewind => ("Rewind to here", "icons/rewind.svg"),
+            UserMessageActionKind::Edit => ("Edit message", "icons/pencil.svg"),
+        };
+        let trigger = Button::new(SharedString::from(format!(
+            "user-message-action-{message_id}"
+        )))
+        .w(px(27.0))
+        .h(px(27.0))
+        .p_0()
+        .border_0()
+        .rounded(px(8.0))
+        .ghost()
+        .bg(theme.overlay.opacity(0.0))
+        .child(icon(icon_path, 14.0, theme.text_secondary))
+        .tooltip(label)
+        .tab_stop(false);
+
+        footer = footer.child(match action.kind {
+            UserMessageActionKind::Rewind => {
+                let rewind_waku = waku.clone();
+                Popover::new(SharedString::from(format!(
+                    "rewind-message-confirmation-{message_id}"
+                )))
+                .anchor(Corner::BottomRight)
+                .appearance(false)
+                .trigger(trigger)
+                .content(move |_state, _window, popover_cx| {
+                    let popover = popover_cx.entity();
+                    let cancel_popover = popover.clone();
+                    let confirm_popover = popover.clone();
+                    let confirm_waku = rewind_waku.clone();
+
+                    div()
+                        .w(px(300.0))
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .bg(theme.raised)
+                        .shadow_lg()
+                        .p(px(12.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(7.0))
+                                .child(icon("icons/alert.svg", 14.0, theme.danger))
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.text)
+                                        .child("Rewind to here?"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt(px(7.0))
+                                .text_size(px(11.5))
+                                .line_height(px(16.0))
+                                .text_color(theme.text_secondary)
+                                .child(
+                                    "This restores the conversation and workspace to before this message. Later messages and code changes will be removed.",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt(px(12.0))
+                                .flex()
+                                .justify_end()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "cancel-rewind-message-{message_id}"
+                                        )))
+                                        .h(px(28.0))
+                                        .px(px(11.0))
+                                        .rounded(px(7.0))
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(theme.overlay)
+                                        .flex()
+                                        .items_center()
+                                        .text_size(px(11.5))
+                                        .text_color(theme.text_secondary)
+                                        .cursor_default()
+                                        .hover(|element| element.bg(theme.overlay_strong))
+                                        .child("Cancel")
+                                        .on_click(move |_, window, cx| {
+                                            cancel_popover.update(cx, |popover, cx| {
+                                                popover.dismiss(window, cx);
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "confirm-rewind-message-{message_id}"
+                                        )))
+                                        .h(px(28.0))
+                                        .px(px(11.0))
+                                        .rounded(px(7.0))
+                                        .bg(theme.danger)
+                                        .flex()
+                                        .items_center()
+                                        .text_size(px(11.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.on_inverse)
+                                        .cursor_default()
+                                        .hover(|element| element.opacity(0.9))
+                                        .child("Rewind")
+                                        .on_click(move |_, window, cx| {
+                                            confirm_popover.update(cx, |popover, cx| {
+                                                popover.dismiss(window, cx);
+                                            });
+                                            let _ = confirm_waku.update(cx, |this, cx| {
+                                                this.rewind_user_message(
+                                                    action.session_id,
+                                                    action.turn_count,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                ),
+                        )
+                })
+                .into_any_element()
+            }
+            UserMessageActionKind::Edit => {
+                let edit_waku = waku;
+                trigger
+                    .on_click(move |_, window, cx| {
+                        let _ = edit_waku.update(cx, |this, cx| {
+                            this.begin_message_edit(
+                                action.session_id,
+                                action.turn_count,
+                                window,
+                                cx,
+                            );
+                        });
+                    })
+                    .into_any_element()
+            }
+        });
+    }
+
+    footer.into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_message(
     theme: &Theme,
     message: &Message,
-    checkpoint_action: Option<CheckpointAction>,
+    user_message_action: Option<UserMessageAction>,
+    message_edit_input: Option<Entity<ComposerInput>>,
     session_id: Uuid,
     transcript_resize_tx: crossbeam_channel::Sender<TranscriptMarkdownResize>,
     transcript_layout_width: Pixels,
@@ -38,29 +256,133 @@ pub(super) fn render_message(
     let code = fenced_code(&content);
     let menu_content = content.clone();
     let element = match role {
-        MessageRole::User => div().w_full().flex().justify_end().child(
-            div()
-                .max_w(px(540.0))
-                .rounded(px(12.0))
-                .bg(theme.raised)
-                .px(px(12.0))
-                .py(px(8.0))
-                .text_size(px(14.0))
-                .line_height(px(20.0))
-                .text_color(theme.text)
-                .whitespace_normal()
-                .child(
-                    selectable_plain_text(
-                        SharedString::from(format!("message-{message_id}-user")),
-                        &content,
-                        text_state,
-                        cx,
-                    )
-                    .selection_scroll_handle(&transcript_rows)
-                    .block_viewport(transcript_viewport),
-                ),
-        ),
+        MessageRole::User => {
+            let group_name = SharedString::from(format!("user-message-{message_id}"));
+            let mut column = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(3.0))
+                .group(group_name.clone());
+            if let Some(edit_input) = message_edit_input {
+                let can_submit = !edit_input.read(cx).content().trim().is_empty();
+                let cancel_waku = waku.clone();
+                let submit_waku = waku.clone();
+                column = column.child(
+                    div()
+                        .w_full()
+                        .max_w(px(540.0))
+                        .rounded(px(12.0))
+                        .bg(theme.raised)
+                        .px(px(12.0))
+                        .pt(px(9.0))
+                        .pb(px(8.0))
+                        .child(edit_input)
+                        .child(
+                            div()
+                                .mt(px(7.0))
+                                .flex()
+                                .justify_end()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "cancel-message-edit-{message_id}"
+                                        )))
+                                        .h(px(26.0))
+                                        .px(px(10.0))
+                                        .rounded(px(7.0))
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(theme.overlay)
+                                        .flex()
+                                        .items_center()
+                                        .text_size(px(11.5))
+                                        .text_color(theme.text_secondary)
+                                        .cursor_default()
+                                        .hover(|element| element.bg(theme.overlay_strong))
+                                        .child("Cancel")
+                                        .on_click(move |_, window, cx| {
+                                            let _ = cancel_waku.update(cx, |this, cx| {
+                                                this.cancel_message_edit(window, cx);
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "submit-message-edit-{message_id}"
+                                        )))
+                                        .h(px(26.0))
+                                        .px(px(11.0))
+                                        .rounded(px(7.0))
+                                        .bg(if can_submit {
+                                            theme.inverse
+                                        } else {
+                                            theme.overlay_strong
+                                        })
+                                        .flex()
+                                        .items_center()
+                                        .text_size(px(11.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(if can_submit {
+                                            theme.on_inverse
+                                        } else {
+                                            theme.text_ghost
+                                        })
+                                        .when(can_submit, |element| {
+                                            element
+                                                .cursor_default()
+                                                .hover(|element| element.opacity(0.9))
+                                        })
+                                        .child("Send")
+                                        .on_click(move |_, _, cx| {
+                                            if can_submit {
+                                                let _ = submit_waku.update(cx, |this, cx| {
+                                                    this.submit_message_edit(cx);
+                                                });
+                                            }
+                                        }),
+                                ),
+                        ),
+                );
+            } else {
+                column = column.child(
+                    div()
+                        .max_w(px(540.0))
+                        .rounded(px(12.0))
+                        .bg(theme.raised)
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .text_size(px(14.0))
+                        .line_height(px(20.0))
+                        .text_color(theme.text)
+                        .whitespace_normal()
+                        .child(
+                            selectable_plain_text(
+                                SharedString::from(format!("message-{message_id}-user")),
+                                &content,
+                                text_state,
+                                cx,
+                            )
+                            .selection_scroll_handle(&transcript_rows)
+                            .block_viewport(transcript_viewport),
+                        ),
+                );
+                column = column.child(render_message_footer(
+                    theme,
+                    message,
+                    group_name,
+                    true,
+                    user_message_action,
+                    waku.clone(),
+                ));
+            }
+            column
+        }
         MessageRole::Assistant => {
+            let group_name = SharedString::from(format!("assistant-message-{message_id}"));
             let resize_tx = transcript_resize_tx.clone();
             let resize_waku = waku.clone();
             let mut column = div()
@@ -69,6 +391,8 @@ pub(super) fn render_message(
                 .flex()
                 .flex_col()
                 .py(px(4.0))
+                .gap(px(3.0))
+                .group(group_name.clone())
                 .text_size(px(13.5))
                 .line_height(px(21.0))
                 .text_color(theme.text)
@@ -110,68 +434,14 @@ pub(super) fn render_message(
                     theme.accent,
                 ));
             }
-            if let Some(action) = checkpoint_action {
-                let checkpoint_label = if action.file_count == 0 {
-                    format!("Checkpoint {} · no file changes", action.turn_count)
-                } else {
-                    format!(
-                        "Checkpoint {} · {} file(s)",
-                        action.turn_count, action.file_count
-                    )
-                };
-                let weak = waku.clone();
-                column = column.child(
-                    div()
-                        .mt(px(8.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(px(10.5))
-                        .line_height(px(16.0))
-                        .text_color(theme.text_tertiary)
-                        .child(icon("icons/check.svg", 10.0, theme.text_tertiary))
-                        .child(SharedString::from(checkpoint_label))
-                        .when(action.can_revert, |element| {
-                            element.child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "revert-checkpoint-{}-{}",
-                                        action.session_id, action.turn_count
-                                    )))
-                                    .ml(px(2.0))
-                                    .px(px(7.0))
-                                    .py(px(2.0))
-                                    .rounded(px(5.0))
-                                    .cursor_default()
-                                    .text_color(if action.confirmed {
-                                        theme.danger
-                                    } else {
-                                        theme.text_secondary
-                                    })
-                                    .bg(if action.confirmed {
-                                        theme.danger_soft
-                                    } else {
-                                        theme.overlay
-                                    })
-                                    .hover(|element| element.bg(theme.overlay_strong))
-                                    .child(if action.confirmed {
-                                        "Confirm revert"
-                                    } else {
-                                        "Revert"
-                                    })
-                                    .on_click(move |_, _, cx| {
-                                        let _ = weak.update(cx, |this, cx| {
-                                            this.request_checkpoint_revert(
-                                                action.session_id,
-                                                action.turn_count,
-                                                cx,
-                                            );
-                                        });
-                                    }),
-                            )
-                        }),
-                );
-            }
+            column = column.child(render_message_footer(
+                theme,
+                message,
+                group_name,
+                false,
+                None,
+                waku.clone(),
+            ));
             column
         }
         MessageRole::System => div().w_full().flex().justify_center().child(
@@ -213,10 +483,10 @@ pub(super) fn render_message(
                             }),
                         );
 
-                if role == MessageRole::User {
+                if role == MessageRole::User && user_message_action.is_none() {
                     let composer = composer.clone();
                     let edit_content = menu_content.clone();
-                    menu = menu.item(PopupMenuItem::new("Edit in Composer").on_click(
+                    menu = menu.item(PopupMenuItem::new("Copy to Composer").on_click(
                         move |_, window, cx| {
                             composer.update(cx, |composer, cx| {
                                 composer.set_content(edit_content.clone(), cx);
@@ -232,24 +502,28 @@ pub(super) fn render_message(
                     }));
                 }
 
-                if let Some(action) = checkpoint_action.filter(|action| action.can_revert) {
-                    let weak = waku.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(if action.confirmed {
-                            "Confirm Revert to Checkpoint"
-                        } else {
-                            "Revert to Checkpoint"
-                        })
-                        .on_click(move |_, _, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.request_checkpoint_revert(
-                                    action.session_id,
-                                    action.turn_count,
-                                    cx,
-                                );
-                            });
-                        }),
-                    );
+                if let Some(action) = user_message_action {
+                    let action_waku = waku.clone();
+                    let label = match action.kind {
+                        UserMessageActionKind::Rewind => "Rewind to here",
+                        UserMessageActionKind::Edit => "Edit Message",
+                    };
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let _ = action_waku.update(cx, |this, cx| match action.kind {
+                            UserMessageActionKind::Rewind => this.rewind_user_message(
+                                action.session_id,
+                                action.turn_count,
+                                window,
+                                cx,
+                            ),
+                            UserMessageActionKind::Edit => this.begin_message_edit(
+                                action.session_id,
+                                action.turn_count,
+                                window,
+                                cx,
+                            ),
+                        });
+                    }));
                 }
 
                 menu

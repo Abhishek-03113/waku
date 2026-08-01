@@ -134,6 +134,7 @@ impl Waku {
         let selected_tab = self.model_picker_tab;
         let selected_model = selected_model.map(str::to_owned);
         let probes = self.probes.clone();
+        let pending_discoveries = self.provider_model_discoveries_pending.clone();
         let favorites = self.state.favorite_models.clone();
         let weak = cx.entity().downgrade();
         let search = self.model_search.clone();
@@ -156,11 +157,12 @@ impl Waku {
                 move |open, window, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         if *open {
-                            this.model_picker_tab = ModelPickerTab::Provider(
-                                this.selected_session()
-                                    .map(|session| session.provider)
-                                    .unwrap_or_default(),
-                            );
+                            let provider = this
+                                .selected_session()
+                                .map(|session| session.provider)
+                                .unwrap_or_default();
+                            this.model_picker_tab = ModelPickerTab::Provider(provider);
+                            this.request_provider_model_discovery(provider);
                             search.update(cx, |search, cx| {
                                 search.set_value("", window, cx);
                             });
@@ -341,6 +343,12 @@ impl Waku {
                         "No models found"
                     } else if selected_tab == ModelPickerTab::Favorites {
                         "Star a model to keep it here"
+                    } else if matches!(
+                        selected_tab,
+                        ModelPickerTab::Provider(provider)
+                            if pending_discoveries.contains(&provider)
+                    ) {
+                        "Loading models…"
                     } else {
                         "No models reported by this provider"
                     };

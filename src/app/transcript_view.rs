@@ -151,32 +151,45 @@ impl Waku {
     /// list can measure it at its true wrap width. Current-turn reasoning and
     /// activity blocks are anchored at the exact boundary between assistant
     /// text segments where their provider events arrived.
-    pub(super) fn checkpoint_action_for_message(
+    pub(super) fn user_message_action_for_message(
         &self,
         message_index: usize,
-    ) -> Option<CheckpointAction> {
+    ) -> Option<UserMessageAction> {
         let session = self.selected_session()?;
         let message = session.messages.get(message_index)?;
-        let turn_id = message.turn_id?;
-        if session.messages[message_index + 1..]
-            .iter()
-            .any(|later| later.turn_id == Some(turn_id))
+        if message.role != MessageRole::User
+            || !matches!(session.status, SessionStatus::Idle | SessionStatus::Failed)
         {
             return None;
         }
+        let turn_id = message.turn_id?;
         let turn = session.turns.iter().find(|turn| turn.id == turn_id)?;
-        let checkpoint = turn
-            .checkpoint
-            .as_ref()
-            .filter(|checkpoint| checkpoint.status == CheckpointStatus::Ready)?;
-        Some(CheckpointAction {
+        let kind = match session.provider {
+            ProviderKind::Claude => UserMessageActionKind::Rewind,
+            ProviderKind::Codex => UserMessageActionKind::Edit,
+            _ => return None,
+        };
+        let retained_turn_count = turn.turn_count.saturating_sub(1);
+        let project_path = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .map(|project| project.path.as_path())?;
+        if !checkpoint::has_ref(
+            project_path,
+            &checkpoint::checkpoint_ref(session.id, retained_turn_count),
+        ) {
+            return None;
+        }
+        let rollback_turns = session.provider_turns_after(retained_turn_count);
+        if rollback_turns > 0 && session.provider_cursor.is_none() {
+            return None;
+        }
+        Some(UserMessageAction {
             session_id: session.id,
             turn_count: turn.turn_count,
-            file_count: checkpoint.files.len(),
-            can_revert: session.status == SessionStatus::Idle
-                && session.provider.supports_conversation_rollback()
-                && session.provider_cursor.is_some(),
-            confirmed: self.pending_revert == Some((session.id, turn.turn_count)),
+            kind,
         })
     }
 
@@ -243,7 +256,16 @@ impl Waku {
                 .and_then(|session| session.messages.get(message_index))
                 .cloned()
                 .map(|message| {
-                    let checkpoint_action = self.checkpoint_action_for_message(message_index);
+                    let user_message_action = self.user_message_action_for_message(message_index);
+                    let message_edit_input = user_message_action.and_then(|action| {
+                        self.message_edit
+                            .as_ref()
+                            .filter(|edit| {
+                                edit.session_id == action.session_id
+                                    && edit.turn_count == action.turn_count
+                            })
+                            .map(|edit| edit.input.clone())
+                    });
                     let text_state = self
                         .message_text_states
                         .entry(message.id)
@@ -252,7 +274,8 @@ impl Waku {
                     render_message(
                         &theme,
                         &message,
-                        checkpoint_action,
+                        user_message_action,
+                        message_edit_input,
                         self.state.selected_session.unwrap_or_default(),
                         self.transcript_resize_tx.clone(),
                         self.transcript_layout_width.get(),

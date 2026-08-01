@@ -280,6 +280,8 @@ mod tests {
             "icons/arrow-up.svg",
             "icons/stop.svg",
             "icons/check.svg",
+            "icons/copy.svg",
+            "icons/rewind.svg",
             "icons/git-branch.svg",
             "icons/chevron-down.svg",
             "icons/chevron-right.svg",

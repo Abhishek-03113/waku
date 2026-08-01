@@ -10,7 +10,7 @@ The first MVP supports:
 | Provider | Transport | Session continuity | Checkpoint rollback |
 | --- | --- | --- | --- |
 | [Amp](https://ampcode.com/) | Claude-compatible `stream-json` | Native Amp thread ID | Not exposed by this transport |
-| Claude Code | `stream-json` | Native Claude session cursor | Not exposed by this transport |
+| Claude Code | `stream-json` | Native Claude session cursor | Message-point session fork |
 | Codex CLI | `app-server` JSON-RPC | `thread/start` and `thread/resume` | `thread/rollback` |
 | OpenCode | Native JSON events | Native OpenCode session cursor | Not exposed by this transport |
 | Grok Build | Native `streaming-json` | Native Grok session cursor | Not exposed by this transport |
@@ -127,7 +127,8 @@ notarization options.
 - Pi currently supports Build with Full access; unsupported Pi access modes
   fail explicitly instead of pretending to provide approval semantics.
 - Stop the active turn with `Escape`.
-- In a Git project, revert a completed Codex turn from its checkpoint action.
+- In a Git project, use **Rewind to here** beneath a Claude Code prompt or
+  **Edit** beneath a Codex prompt.
 - Toggle the sidebar with `⌘⇧S` and focus the composer with `⌘L`.
 
 State is written atomically to the profile-specific platform-local application
@@ -163,8 +164,15 @@ snapshot under a hidden ref:
 refs/waku/session-<session-id>-turn-<turn-number>
 ```
 
-Reverting restores that ref, asks the provider to roll back the same number of
-native turns, then truncates Waku's turn-owned messages and activity blocks.
+User-message actions restore the checkpoint immediately before the selected
+prompt, ask the provider to roll back that prompt and every later native turn,
+then truncate Waku's matching messages and activity blocks. Codex's **Edit**
+button opens an inline editor in the original user bubble; Send performs
+`thread/rollback` and starts a replacement turn with the edited prompt.
+Claude's **Rewind to here** restores the original prompt into the main composer.
+Claude Code records the native message UUID for each completed turn and creates
+a fresh, remapped session fork through the preceding turn, so the original
+Claude conversation remains intact while Waku resumes from the rewound point.
 Before any restore, Waku creates a temporary safety ref; if provider rollback
 fails, it restores the original working tree and leaves the local timeline
 unchanged. The revert action is capability-gated, so providers whose current

@@ -23,11 +23,7 @@ impl Waku {
                 .selected_session()
                 .and_then(|session| session.messages.get(message_index))
                 .map(|message| {
-                    estimated_message_height(
-                        message,
-                        self.transcript_layout_width.get(),
-                        self.checkpoint_action_for_message(message_index).is_some(),
-                    )
+                    estimated_message_height(message, self.transcript_layout_width.get(), true)
                 })
                 .unwrap_or(px(36.0)),
             TranscriptRowKind::TurnBlock(block_index) => self
@@ -685,7 +681,7 @@ pub(super) fn html_numeric_attribute(tag: &str, name: &str) -> Option<f32> {
 pub(super) fn estimated_message_height(
     message: &Message,
     content_width: Pixels,
-    checkpoint_visible: bool,
+    message_footer_visible: bool,
 ) -> Pixels {
     let assistant_columns = if content_width > Pixels::ZERO {
         (content_width / px(7.25)).max(20.0) as usize
@@ -699,18 +695,25 @@ pub(super) fn estimated_message_height(
         72
     };
     match message.role {
-        MessageRole::User => estimated_text_height(&message.content, user_columns, 20.0) + px(16.0),
-        MessageRole::Assistant => {
-            let checkpoint_height = if checkpoint_visible {
-                px(28.0)
+        MessageRole::User => {
+            let action_height = if message_footer_visible {
+                px(30.0)
             } else {
                 Pixels::ZERO
             };
+            estimated_text_height(&message.content, user_columns, 20.0) + px(16.0) + action_height
+        }
+        MessageRole::Assistant => {
             let (visible_source, media_height) = markdown_estimation_source(&message.content);
+            let footer_height = if message_footer_visible {
+                px(30.0)
+            } else {
+                Pixels::ZERO
+            };
             estimated_text_height(&visible_source, assistant_columns, 21.0)
                 + media_height
                 + px(8.0)
-                + checkpoint_height
+                + footer_height
         }
         MessageRole::System => {
             estimated_text_height(&message.content, assistant_columns, 16.0) + px(8.0)

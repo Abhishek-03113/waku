@@ -202,12 +202,18 @@ fn markdown_estimates_reserve_images_without_counting_long_sources_as_text() {
 }
 
 #[test]
-fn assistant_estimate_reserves_only_a_visible_checkpoint() {
-    let message = Message::new(MessageRole::Assistant, "A short response.");
-    let without_checkpoint = estimated_message_height(&message, gpui::px(720.0), false);
-    let with_checkpoint = estimated_message_height(&message, gpui::px(720.0), true);
+fn message_estimates_reserve_shared_footer() {
+    let user = Message::new(MessageRole::User, "A short prompt.");
+    let without_actions = estimated_message_height(&user, gpui::px(720.0), false);
+    let with_actions = estimated_message_height(&user, gpui::px(720.0), true);
 
-    assert_eq!(with_checkpoint - without_checkpoint, gpui::px(28.0));
+    assert_eq!(with_actions - without_actions, gpui::px(30.0));
+
+    let assistant = Message::new(MessageRole::Assistant, "A short response.");
+    let without_actions = estimated_message_height(&assistant, gpui::px(720.0), false);
+    let with_actions = estimated_message_height(&assistant, gpui::px(720.0), true);
+
+    assert_eq!(with_actions - without_actions, gpui::px(30.0));
 }
 
 #[test]

@@ -168,6 +168,13 @@ fn run_prompt(
     active_pid: &AtomicU32,
 ) -> Option<String> {
     let _ = events.send(DriverEvent::TurnStarted);
+    let previous_claude_message = (provider == ProviderKind::Claude)
+        .then(|| {
+            provider_session_id
+                .and_then(|session_id| crate::claude_session::latest_message_id(session_id).ok())
+                .flatten()
+        })
+        .flatten();
     let mut command = crate::command_env::command(binary);
     command.current_dir(cwd);
     let mut prompt_via_stdin = false;
@@ -360,6 +367,21 @@ fn run_prompt(
         let _ = thread.join();
     }
     let success = status.map(|status| status.success()).unwrap_or(false);
+    if provider == ProviderKind::Claude
+        && let Some(session_id) = parser
+            .provider_session_id
+            .as_deref()
+            .or(provider_session_id)
+        && let Ok(Some(message_id)) = crate::claude_session::latest_message_id(session_id)
+        && previous_claude_message.as_deref() != Some(message_id.as_str())
+    {
+        let _ = events.send(DriverEvent::Connected {
+            provider_cursor: Some(ProviderResumeCursor::Claude {
+                session_id: session_id.to_owned(),
+                resume_at: Some(message_id),
+            }),
+        });
+    }
     let _ = events.send(DriverEvent::TurnFinished {
         success,
         summary: (!success).then(|| {

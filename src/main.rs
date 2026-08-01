@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod checkpoint;
+mod claude_session;
 mod command_env;
 mod driver;
 mod identity;
