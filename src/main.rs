@@ -19,11 +19,6 @@ use gpui::{
 
 use crate::app::Waku;
 use crate::identity::APP_NAME;
-use crate::input::{
-    Backspace, Copy, Cut, Delete, End, Enter, Home, Left, Paste, Right, SelectAll, SelectLeft,
-    SelectRight,
-};
-
 actions!(
     waku,
     [
@@ -63,6 +58,7 @@ fn main() {
         .with_main_window_reopen()
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+            crate::input::init(cx);
             crate::theme::init_component_theme(cx);
             cx.set_menus(vec![
                 Menu {
@@ -94,19 +90,6 @@ fn main() {
                 KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
                 KeyBinding::new("cmd-l", FocusComposer, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
-                KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
-                KeyBinding::new("delete", Delete, Some("ComposerInput")),
-                KeyBinding::new("left", Left, Some("ComposerInput")),
-                KeyBinding::new("right", Right, Some("ComposerInput")),
-                KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
-                KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
-                KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
-                KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
-                KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
-                KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
-                KeyBinding::new("home", Home, Some("ComposerInput")),
-                KeyBinding::new("end", End, Some("ComposerInput")),
-                KeyBinding::new("enter", Enter, Some("ComposerInput")),
             ]);
 
             cx.on_action(|_: &Quit, cx| cx.quit());

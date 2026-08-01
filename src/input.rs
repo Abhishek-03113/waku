@@ -4,10 +4,10 @@ use std::time::Duration;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, DismissEvent, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, StyledText, Subscription,
-    Task, TextLayout, TextRun, Timer, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
-    point, prelude::*, px, size,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString,
+    StyledText, Subscription, Task, TextLayout, TextRun, Timer, UTF16Selection, UnderlineStyle,
+    Window, actions, div, fill, point, prelude::*, px, size,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use unicode_segmentation::UnicodeSegmentation;
@@ -26,6 +26,16 @@ actions!(
         SelectAll,
         Home,
         End,
+        MoveToPreviousWord,
+        MoveToNextWord,
+        SelectToStart,
+        SelectToEnd,
+        SelectToPreviousWord,
+        SelectToNextWord,
+        DeleteToStart,
+        DeleteToEnd,
+        DeleteToPreviousWord,
+        DeleteToNextWord,
         Paste,
         Cut,
         Copy,
@@ -35,6 +45,56 @@ actions!(
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(300);
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
+        KeyBinding::new("delete", Delete, Some("ComposerInput")),
+        KeyBinding::new("cmd-backspace", DeleteToStart, Some("ComposerInput")),
+        KeyBinding::new("cmd-delete", DeleteToEnd, Some("ComposerInput")),
+        KeyBinding::new("alt-backspace", DeleteToPreviousWord, Some("ComposerInput")),
+        KeyBinding::new("alt-delete", DeleteToNextWord, Some("ComposerInput")),
+        KeyBinding::new("ctrl-h", Backspace, Some("ComposerInput")),
+        KeyBinding::new("ctrl-d", Delete, Some("ComposerInput")),
+        KeyBinding::new("ctrl-u", DeleteToStart, Some("ComposerInput")),
+        KeyBinding::new("ctrl-k", DeleteToEnd, Some("ComposerInput")),
+        KeyBinding::new("left", Left, Some("ComposerInput")),
+        KeyBinding::new("right", Right, Some("ComposerInput")),
+        KeyBinding::new("ctrl-b", Left, Some("ComposerInput")),
+        KeyBinding::new("ctrl-f", Right, Some("ComposerInput")),
+        KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
+        KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
+        KeyBinding::new("home", Home, Some("ComposerInput")),
+        KeyBinding::new("end", End, Some("ComposerInput")),
+        KeyBinding::new("cmd-left", Home, Some("ComposerInput")),
+        KeyBinding::new("cmd-right", End, Some("ComposerInput")),
+        KeyBinding::new("cmd-up", Home, Some("ComposerInput")),
+        KeyBinding::new("cmd-down", End, Some("ComposerInput")),
+        KeyBinding::new("ctrl-a", Home, Some("ComposerInput")),
+        KeyBinding::new("ctrl-e", End, Some("ComposerInput")),
+        KeyBinding::new("shift-home", SelectToStart, Some("ComposerInput")),
+        KeyBinding::new("shift-end", SelectToEnd, Some("ComposerInput")),
+        KeyBinding::new("shift-cmd-left", SelectToStart, Some("ComposerInput")),
+        KeyBinding::new("shift-cmd-right", SelectToEnd, Some("ComposerInput")),
+        KeyBinding::new("cmd-shift-up", SelectToStart, Some("ComposerInput")),
+        KeyBinding::new("cmd-shift-down", SelectToEnd, Some("ComposerInput")),
+        KeyBinding::new("ctrl-shift-a", SelectToStart, Some("ComposerInput")),
+        KeyBinding::new("ctrl-shift-e", SelectToEnd, Some("ComposerInput")),
+        KeyBinding::new("alt-left", MoveToPreviousWord, Some("ComposerInput")),
+        KeyBinding::new("alt-right", MoveToNextWord, Some("ComposerInput")),
+        KeyBinding::new(
+            "alt-shift-left",
+            SelectToPreviousWord,
+            Some("ComposerInput"),
+        ),
+        KeyBinding::new("alt-shift-right", SelectToNextWord, Some("ComposerInput")),
+        KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
+        KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
+        KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
+        KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
+        KeyBinding::new("enter", Enter, Some("ComposerInput")),
+    ]);
+}
 
 struct BlinkCursor {
     visible: bool,
@@ -122,6 +182,7 @@ pub struct ComposerInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<TextLayout>,
     is_selecting: bool,
+    selected_word_range: Option<Range<usize>>,
     external_context_menu_focus_holds: usize,
     blink_cursor: Entity<BlinkCursor>,
     _subscriptions: Vec<Subscription>,
@@ -155,6 +216,7 @@ impl ComposerInput {
             marked_range: None,
             last_layout: None,
             is_selecting: false,
+            selected_word_range: None,
             external_context_menu_focus_holds: 0,
             blink_cursor,
             _subscriptions,
@@ -275,6 +337,58 @@ impl ComposerInput {
         self.move_to(self.content.len(), cx);
     }
 
+    fn move_to_previous_word(
+        &mut self,
+        _: &MoveToPreviousWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = if self.selected_range.is_empty() {
+            previous_word_boundary(&self.content, self.cursor_offset())
+        } else {
+            self.selected_range.start
+        };
+        self.move_to(offset, cx);
+    }
+
+    fn move_to_next_word(&mut self, _: &MoveToNextWord, _: &mut Window, cx: &mut Context<Self>) {
+        let offset = if self.selected_range.is_empty() {
+            next_word_boundary(&self.content, self.cursor_offset())
+        } else {
+            self.selected_range.end
+        };
+        self.move_to(offset, cx);
+    }
+
+    fn select_to_start(&mut self, _: &SelectToStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_to_end(&mut self, _: &SelectToEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn select_to_previous_word(
+        &mut self,
+        _: &SelectToPreviousWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(
+            previous_word_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn select_to_next_word(
+        &mut self,
+        _: &SelectToNextWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(next_word_boundary(&self.content, self.cursor_offset()), cx);
+    }
+
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
@@ -285,6 +399,47 @@ impl ComposerInput {
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_start(&mut self, _: &DeleteToStart, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.select_to(0, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_end(&mut self, _: &DeleteToEnd, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.content.len(), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_previous_word(
+        &mut self,
+        _: &DeleteToPreviousWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(
+                previous_word_boundary(&self.content, self.cursor_offset()),
+                cx,
+            );
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_to_next_word(
+        &mut self,
+        _: &DeleteToNextWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(next_word_boundary(&self.content, self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -322,10 +477,32 @@ impl ComposerInput {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.is_selecting = true;
+        self.selected_word_range = None;
+        let offset = self.index_for_mouse_position(event.position);
+
+        if event.click_count >= 3 {
+            self.selected_range = 0..self.content.len();
+            self.selection_reversed = false;
+            self.selected_word_range = Some(self.selected_range.clone());
+            self.pause_blink_cursor(cx);
+            cx.notify();
+            return;
+        }
+
+        if event.click_count == 2 {
+            let range = word_range_at(&self.content, offset);
+            self.selected_range = range.clone();
+            self.selection_reversed = false;
+            self.selected_word_range = (!range.is_empty()).then_some(range);
+            self.pause_blink_cursor(cx);
+            cx.notify();
+            return;
+        }
+
         if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+            self.select_to(offset, cx);
         } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx);
+            self.move_to(offset, cx);
         }
     }
 
@@ -340,6 +517,7 @@ impl ComposerInput {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.is_selecting = false;
+        self.selected_word_range = None;
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -385,6 +563,10 @@ impl ComposerInput {
         if self.selected_range.end < self.selected_range.start {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
+        }
+        if let Some(word_range) = self.selected_word_range.as_ref() {
+            self.selected_range.start = self.selected_range.start.min(word_range.start);
+            self.selected_range.end = self.selected_range.end.max(word_range.end);
         }
         self.pause_blink_cursor(cx);
         cx.notify();
@@ -438,6 +620,33 @@ impl ComposerInput {
             .find_map(|(index, _)| (index > offset).then_some(index))
             .unwrap_or(self.content.len())
     }
+}
+
+fn previous_word_boundary(content: &str, offset: usize) -> usize {
+    content[..offset]
+        .split_word_bound_indices()
+        .rev()
+        .find(|(_, segment)| !segment.chars().all(char::is_whitespace))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn next_word_boundary(content: &str, offset: usize) -> usize {
+    content[offset..]
+        .split_word_bound_indices()
+        .find(|(_, segment)| !segment.chars().all(char::is_whitespace))
+        .map(|(index, segment)| offset + index + segment.len())
+        .unwrap_or(content.len())
+}
+
+fn word_range_at(content: &str, offset: usize) -> Range<usize> {
+    content
+        .split_word_bound_indices()
+        .find_map(|(index, segment)| {
+            let range = index..index + segment.len();
+            range.contains(&offset).then_some(range)
+        })
+        .unwrap_or(offset..offset)
 }
 
 impl EventEmitter<ComposerEvent> for ComposerInput {}
@@ -816,6 +1025,16 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::move_to_previous_word))
+            .on_action(cx.listener(Self::move_to_next_word))
+            .on_action(cx.listener(Self::select_to_start))
+            .on_action(cx.listener(Self::select_to_end))
+            .on_action(cx.listener(Self::select_to_previous_word))
+            .on_action(cx.listener(Self::select_to_next_word))
+            .on_action(cx.listener(Self::delete_to_start))
+            .on_action(cx.listener(Self::delete_to_end))
+            .on_action(cx.listener(Self::delete_to_previous_word))
+            .on_action(cx.listener(Self::delete_to_next_word))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
@@ -883,7 +1102,37 @@ impl Focusable for ComposerInput {
 mod tests {
     use gpui::{TextRun, font, hsla};
 
-    use super::{cursor_should_be_visible, input_text_runs};
+    use super::{
+        cursor_should_be_visible, input_text_runs, next_word_boundary, previous_word_boundary,
+        word_range_at,
+    };
+
+    #[test]
+    fn word_navigation_matches_native_text_inputs() {
+        let text = "hello, world  👋";
+
+        assert_eq!(next_word_boundary(text, 0), 5);
+        assert_eq!(next_word_boundary(text, 5), 6);
+        assert_eq!(next_word_boundary(text, 6), 12);
+        assert_eq!(next_word_boundary(text, 12), text.len());
+
+        assert_eq!(previous_word_boundary(text, text.len()), 14);
+        assert_eq!(previous_word_boundary(text, 14), 7);
+        assert_eq!(previous_word_boundary(text, 7), 5);
+        assert_eq!(previous_word_boundary(text, 5), 0);
+    }
+
+    #[test]
+    fn double_click_ranges_follow_unicode_word_boundaries() {
+        let text = "hello,  world 👋";
+
+        assert_eq!(word_range_at(text, 1), 0..5);
+        assert_eq!(word_range_at(text, 5), 5..6);
+        assert_eq!(word_range_at(text, 6), 6..8);
+        assert_eq!(word_range_at(text, 9), 8..13);
+        assert_eq!(word_range_at(text, 14), 14..text.len());
+        assert_eq!(word_range_at(text, text.len()), text.len()..text.len());
+    }
 
     #[test]
     fn context_menu_keeps_cursor_visible_while_it_owns_focus() {
