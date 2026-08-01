@@ -24,7 +24,7 @@ impl Waku {
                 div()
                     .absolute()
                     .top_0()
-                    .left(px(4.0))
+                    .left(px(5.0))
                     .w(px(2.0))
                     .h_full()
                     .bg(if active {
