@@ -169,7 +169,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(initial_message) = self
+        let Some((message_index, initial_message)) = self
             .state
             .sessions
             .iter()
@@ -186,10 +186,11 @@ impl Waku {
                 session
                     .messages
                     .iter()
-                    .find(|message| {
-                        message.turn_id == Some(turn.id) && message.role == MessageRole::User
+                    .enumerate()
+                    .find_map(|(index, message)| {
+                        (message.turn_id == Some(turn.id) && message.role == MessageRole::User)
+                            .then(|| (index, message.content.clone()))
                     })
-                    .map(|message| message.content.clone())
             })
         else {
             self.toast = Some("That message is not editable right now.".into());
@@ -213,16 +214,28 @@ impl Waku {
             input: input.clone(),
         });
         self.toast = None;
-        self.reset_transcript_rows(self.transcript_row_count());
+        self.remeasure_transcript_message(message_index);
         window.focus(&input.read(cx).focus());
         cx.notify();
     }
 
     pub(super) fn cancel_message_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.message_edit.take().is_none() {
+        let Some(edit) = self.message_edit.take() else {
             return;
+        };
+        let message_index = self.selected_session().and_then(|session| {
+            let turn_id = session
+                .turns
+                .iter()
+                .find(|turn| turn.turn_count == edit.turn_count)?
+                .id;
+            session.messages.iter().position(|message| {
+                message.turn_id == Some(turn_id) && message.role == MessageRole::User
+            })
+        });
+        if let Some(message_index) = message_index {
+            self.remeasure_transcript_message(message_index);
         }
-        self.reset_transcript_rows(self.transcript_row_count());
         window.focus(&self.composer_focus(cx));
         cx.notify();
     }
@@ -432,6 +445,8 @@ impl Waku {
             retained_turn_count,
             previous_turn_count,
         );
+        self.sync_transcript_rows();
+        let previous_kinds = self.transcript_row_kinds.borrow().clone();
         if let Some(session) = self
             .state
             .sessions
@@ -478,7 +493,7 @@ impl Waku {
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.expanded_turns.clear();
-        self.reset_transcript_rows(self.transcript_row_count());
+        self.splice_transcript_rows_after_visibility_change(&previous_kinds);
         self.toast = Some(match cleanup_result {
             Ok(()) => format!("Rewound to before turn {turn_count}."),
             Err(error) => {
@@ -587,6 +602,8 @@ impl Waku {
             cx.notify();
             return;
         }
+        self.sync_transcript_rows();
+        let previous_kinds = self.transcript_row_kinds.borrow().clone();
         let project_path = self
             .state
             .projects
@@ -628,7 +645,7 @@ impl Waku {
         self.transcript_anchor.set(transcript_anchor);
         self.transcript_anchor_end_space.set(Pixels::ZERO);
         self.transcript_anchor_following.set(true);
-        self.reset_transcript_rows(self.transcript_row_count());
+        self.splice_transcript_rows_after_visibility_change(&previous_kinds);
         self.scroll_transcript_to_anchor();
         let mut failed_to_start = false;
         match self.ensure_driver() {

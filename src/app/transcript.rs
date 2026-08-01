@@ -176,7 +176,9 @@ impl Waku {
         }
     }
 
-    pub(super) fn reset_transcript_rows(&self, count: usize) {
+    /// Bulk-reset the transcript through cheap height-only rows. This is for
+    /// session/document replacement, never for an in-place disclosure toggle.
+    pub(super) fn reset_transcript_rows_with_placeholders(&self, count: usize) {
         // Row keys contain indices, so dynamic corrections from another
         // session must never bleed into the newly selected transcript.
         self.transcript_row_height_adjustments.borrow_mut().clear();
@@ -188,6 +190,39 @@ impl Waku {
         self.transcript_rows.reset(count);
         let _ = self.anchored_transcript_rows.clone().measure_all();
         self.anchored_transcript_rows.reset(count);
+    }
+
+    /// Recover an unexpected local row-count mismatch without hiding content.
+    /// This can cost more than a placeholder reset, but it is the safe fallback
+    /// for message and transcript features running inside the current document.
+    fn reset_transcript_rows_exact(&self, count: usize) {
+        self.rebuild_transcript_estimates();
+        self.transcript_provisional_rows.borrow_mut().clear();
+        *self.transcript_exact_measurement_rows.borrow_mut() = (0..count).collect();
+        self.transcript_rows.reset(count);
+        self.anchored_transcript_rows.reset(count);
+    }
+
+    /// Apply a local disclosure change without replacing unchanged transcript
+    /// rows. A full reset intentionally renders height-only placeholders for
+    /// one pass; using it for a turn fold makes the surrounding markdown flash
+    /// blank even though those messages did not change.
+    pub(super) fn splice_transcript_rows_after_visibility_change(
+        &self,
+        previous_kinds: &[TranscriptRowKind],
+    ) {
+        let next_kinds = self.selected_transcript_row_kinds();
+        let splice = transcript_row_splice(previous_kinds, &next_kinds);
+
+        self.rebuild_transcript_estimates();
+        apply_transcript_visibility_splice(
+            [&self.transcript_rows, &self.anchored_transcript_rows],
+            previous_kinds.len(),
+            next_kinds.len(),
+            splice,
+            &self.transcript_provisional_rows,
+            &self.transcript_exact_measurement_rows,
+        );
     }
 
     pub(super) fn selected_transcript_anchor_row(&self) -> Option<usize> {
@@ -284,7 +319,24 @@ impl Waku {
         end_space
     }
 
-    pub(super) fn invalidate_transcript_rows(&self, range: Range<usize>, anchor_delta: Pixels) {
+    /// Remeasure rows whose content changed in place. This path always renders
+    /// the real row on its next pass so message features cannot flash blank.
+    pub(super) fn remeasure_transcript_rows(&self, range: Range<usize>, anchor_delta: Pixels) {
+        self.splice_remeasured_transcript_rows(range, anchor_delta, false);
+    }
+
+    /// Bulk width reflow may use cheap height-only rows while every transcript
+    /// row is being remeasured. Never use this for a local content interaction.
+    fn reflow_transcript_rows_with_placeholders(&self, range: Range<usize>, anchor_delta: Pixels) {
+        self.splice_remeasured_transcript_rows(range, anchor_delta, true);
+    }
+
+    fn splice_remeasured_transcript_rows(
+        &self,
+        range: Range<usize>,
+        anchor_delta: Pixels,
+        use_placeholders: bool,
+    ) {
         let transcript_rows = self.active_transcript_rows();
         let count = transcript_rows.item_count();
         let range = range.start.min(count)..range.end.min(count);
@@ -294,10 +346,15 @@ impl Waku {
 
         let preserve_scroll = self.transcript_is_scrolled.get();
         let previous_scroll_top = preserve_scroll.then(|| transcript_rows.logical_scroll_top());
-        self.transcript_provisional_rows
-            .borrow_mut()
-            .extend(range.clone());
-        let _ = transcript_rows.clone().measure_all();
+        prepare_transcript_row_remeasurement(
+            &self.transcript_provisional_rows,
+            &self.transcript_exact_measurement_rows,
+            range.clone(),
+            use_placeholders,
+        );
+        if use_placeholders {
+            let _ = transcript_rows.clone().measure_all();
+        }
         transcript_rows.splice(range.clone(), range.len());
 
         if let Some(scroll_top) = previous_scroll_top.and_then(|scroll_top| {
@@ -325,7 +382,7 @@ impl Waku {
         // before it lays out the visible rows exactly.
         self.rebuild_transcript_estimates();
         let count = self.active_transcript_rows().item_count();
-        self.invalidate_transcript_rows(0..count, Pixels::ZERO);
+        self.reflow_transcript_rows_with_placeholders(0..count, Pixels::ZERO);
         true
     }
 
@@ -385,7 +442,7 @@ impl Waku {
             };
             self.transcript_estimated_height
                 .set((self.transcript_estimated_height.get() + applied_delta).max(Pixels::ZERO));
-            self.invalidate_transcript_rows(row_index..row_index + 1, anchor_delta);
+            self.remeasure_transcript_rows(row_index..row_index + 1, anchor_delta);
         }
     }
 
@@ -397,16 +454,20 @@ impl Waku {
         let current = transcript_rows.item_count();
         if count > current {
             if !self.append_transcript_estimates(current, count) {
-                self.reset_transcript_rows(count);
+                self.reset_transcript_rows_exact(count);
                 return;
             }
-            self.transcript_provisional_rows
-                .borrow_mut()
-                .extend(current..count);
-            let _ = transcript_rows.clone().measure_all();
+            // Appended prompt/stream rows are a local update and must render
+            // immediately; the stable scrollbar already uses our estimates.
+            prepare_transcript_row_remeasurement(
+                &self.transcript_provisional_rows,
+                &self.transcript_exact_measurement_rows,
+                current..count,
+                false,
+            );
             transcript_rows.splice(current..current, count - current);
         } else if count < current {
-            self.reset_transcript_rows(count);
+            self.reset_transcript_rows_exact(count);
         }
     }
 
@@ -419,7 +480,7 @@ impl Waku {
         let from = count.saturating_sub(STREAM_REMEASURE_TAIL_ROWS);
         if from < count {
             self.update_transcript_estimates(from..count);
-            self.invalidate_transcript_rows(from..count, Pixels::ZERO);
+            self.remeasure_transcript_rows(from..count, Pixels::ZERO);
         }
     }
 
@@ -432,7 +493,20 @@ impl Waku {
             .position(|kind| *kind == TranscriptRowKind::TurnBlock(block_index));
         if let Some(row_index) = row_index {
             self.update_transcript_estimates(row_index..row_index + 1);
-            self.invalidate_transcript_rows(row_index..row_index + 1, Pixels::ZERO);
+            self.remeasure_transcript_rows(row_index..row_index + 1, Pixels::ZERO);
+        }
+    }
+
+    pub(super) fn remeasure_transcript_message(&self, message_index: usize) {
+        self.sync_transcript_rows();
+        let row_index = self
+            .transcript_row_kinds
+            .borrow()
+            .iter()
+            .position(|kind| *kind == TranscriptRowKind::Message(message_index));
+        if let Some(row_index) = row_index {
+            self.update_transcript_estimates(row_index..row_index + 1);
+            self.remeasure_transcript_rows(row_index..row_index + 1, Pixels::ZERO);
         }
     }
 }
@@ -444,6 +518,75 @@ pub(super) enum TranscriptRowKind {
     Message(usize),
     TurnBlock(usize),
     TurnFold(Uuid),
+}
+
+pub(super) fn transcript_row_splice(
+    previous: &[TranscriptRowKind],
+    next: &[TranscriptRowKind],
+) -> Option<(Range<usize>, usize)> {
+    let prefix = previous
+        .iter()
+        .zip(next)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = previous[prefix..]
+        .iter()
+        .rev()
+        .zip(next[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let old_end = previous.len() - suffix;
+    let new_count = next.len() - prefix - suffix;
+
+    (prefix != old_end || new_count != 0).then_some((prefix..old_end, new_count))
+}
+
+pub(super) fn apply_transcript_visibility_splice(
+    row_lists: [&ListState; 2],
+    previous_count: usize,
+    next_count: usize,
+    splice: Option<(Range<usize>, usize)>,
+    provisional_rows: &RefCell<HashSet<usize>>,
+    exact_measurement_rows: &RefCell<HashSet<usize>>,
+) {
+    // A disclosure update must render its newly visible rows immediately. In
+    // particular, never carry the bulk-reset placeholders into this path.
+    provisional_rows.borrow_mut().clear();
+    exact_measurement_rows.borrow_mut().clear();
+
+    let Some((old_range, new_count)) = splice else {
+        return;
+    };
+    exact_measurement_rows
+        .borrow_mut()
+        .extend(old_range.start..old_range.start + new_count);
+    for rows in row_lists {
+        if rows.item_count() == previous_count {
+            rows.splice(old_range.clone(), new_count);
+        } else {
+            // The inactive list can be stale after an alignment switch. Keep
+            // its count valid without introducing blank placeholders.
+            rows.reset(next_count);
+        }
+    }
+}
+
+pub(super) fn prepare_transcript_row_remeasurement(
+    provisional_rows: &RefCell<HashSet<usize>>,
+    exact_measurement_rows: &RefCell<HashSet<usize>>,
+    range: Range<usize>,
+    use_placeholders: bool,
+) {
+    let mut provisional_rows = provisional_rows.borrow_mut();
+    if use_placeholders {
+        exact_measurement_rows
+            .borrow_mut()
+            .retain(|row| !range.contains(row));
+        provisional_rows.extend(range);
+    } else {
+        provisional_rows.retain(|row| !range.contains(row));
+        exact_measurement_rows.borrow_mut().extend(range);
+    }
 }
 
 pub(super) fn transcript_anchor_end_space(

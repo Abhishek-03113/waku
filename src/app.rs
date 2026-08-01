@@ -400,7 +400,10 @@ pub struct Waku {
     transcript_anchor_end_space: Rc<Cell<Pixels>>,
     transcript_anchor_following: Rc<Cell<bool>>,
     transcript_drag_estimated_height: Rc<Cell<Option<Pixels>>>,
+    /// Height-only rows used only for explicit bulk document reflows.
     transcript_provisional_rows: RefCell<HashSet<usize>>,
+    /// Real rows awaiting exact layout; these schedule a follow-up anchor pass
+    /// without hiding any transcript content.
     transcript_exact_measurement_rows: RefCell<HashSet<usize>>,
     transcript_is_scrolled: Rc<Cell<bool>>,
     transcript_layout_width: Cell<Pixels>,
@@ -638,7 +641,9 @@ impl Waku {
             }
         });
         let initial_row_count = entity.read(cx).transcript_row_count();
-        entity.read(cx).reset_transcript_rows(initial_row_count);
+        entity
+            .read(cx)
+            .reset_transcript_rows_with_placeholders(initial_row_count);
         entity
     }
 }

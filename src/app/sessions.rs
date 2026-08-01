@@ -69,7 +69,7 @@ impl Waku {
         self.branch = self
             .selected_project()
             .and_then(|project| git_branch(&project.path));
-        self.reset_transcript_rows(self.transcript_row_count());
+        self.reset_transcript_rows_with_placeholders(self.transcript_row_count());
         self.save();
         cx.notify();
     }

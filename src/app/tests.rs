@@ -1,18 +1,20 @@
 use super::{
     SessionNavigation, StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*,
-    append_text_delta_to_session, escape_html, estimated_message_height, estimated_text_height,
-    fenced_code, folded_transcript_row_kinds, format_worked_duration, maintain_transcript_anchor,
-    markdown_estimation_source, message_starts_followup_turn, pop_stream_chunk,
+    append_text_delta_to_session, apply_transcript_visibility_splice, escape_html,
+    estimated_message_height, estimated_text_height, fenced_code, folded_transcript_row_kinds,
+    format_worked_duration, maintain_transcript_anchor, markdown_estimation_source,
+    message_starts_followup_turn, pop_stream_chunk, prepare_transcript_row_remeasurement,
     scale_scrollbar_offset, scroll_top_after_row_invalidation,
     stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
-    transcript_row_kinds,
+    transcript_row_kinds, transcript_row_splice,
 };
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
     ReasoningBlock, SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus,
 };
+use gpui::{ListAlignment, ListState, px};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{HashSet, VecDeque},
     rc::Rc,
 };
@@ -426,6 +428,69 @@ fn settled_turn_folds_interim_text_and_work_but_keeps_the_final_response() {
             Message(2)
         ]
     );
+}
+
+#[test]
+fn turn_fold_visibility_splice_preserves_surrounding_message_rows() {
+    let turn_id = Uuid::new_v4();
+    let collapsed = vec![Message(0), TurnFold(turn_id), Message(2)];
+    let expanded = vec![
+        Message(0),
+        TurnFold(turn_id),
+        TurnBlock(0),
+        Message(1),
+        TurnBlock(1),
+        Message(2),
+    ];
+
+    let expand_splice = transcript_row_splice(&collapsed, &expanded);
+    assert_eq!(expand_splice, Some((2..2, 3)));
+    assert_eq!(
+        transcript_row_splice(&expanded, &collapsed),
+        Some((2..5, 0))
+    );
+    assert_eq!(transcript_row_splice(&collapsed, &collapsed), None);
+
+    let transcript_rows = ListState::new(collapsed.len(), ListAlignment::Bottom, px(0.0));
+    let anchored_rows = ListState::new(collapsed.len(), ListAlignment::Top, px(0.0));
+    let provisional_rows = RefCell::new(HashSet::from([0, 1, 2]));
+    let exact_measurement_rows = RefCell::new(HashSet::from([1]));
+
+    apply_transcript_visibility_splice(
+        [&transcript_rows, &anchored_rows],
+        collapsed.len(),
+        expanded.len(),
+        expand_splice,
+        &provisional_rows,
+        &exact_measurement_rows,
+    );
+
+    assert_eq!(transcript_rows.item_count(), expanded.len());
+    assert_eq!(anchored_rows.item_count(), expanded.len());
+    assert!(provisional_rows.borrow().is_empty());
+    assert_eq!(*exact_measurement_rows.borrow(), HashSet::from([2, 3, 4]));
+}
+
+#[test]
+fn local_message_remeasurement_never_queues_blank_placeholder_rows() {
+    let provisional_rows = RefCell::new(HashSet::from([1, 4]));
+    let exact_measurement_rows = RefCell::new(HashSet::from([1, 2, 4]));
+
+    prepare_transcript_row_remeasurement(&provisional_rows, &exact_measurement_rows, 1..3, false);
+
+    assert_eq!(*provisional_rows.borrow(), HashSet::from([4]));
+    assert_eq!(*exact_measurement_rows.borrow(), HashSet::from([1, 2, 4]));
+}
+
+#[test]
+fn bulk_transcript_reflow_can_explicitly_queue_placeholder_rows() {
+    let provisional_rows = RefCell::new(HashSet::new());
+    let exact_measurement_rows = RefCell::new(HashSet::from([2]));
+
+    prepare_transcript_row_remeasurement(&provisional_rows, &exact_measurement_rows, 1..4, true);
+
+    assert_eq!(*provisional_rows.borrow(), HashSet::from([1, 2, 3]));
+    assert!(exact_measurement_rows.borrow().is_empty());
 }
 
 #[test]

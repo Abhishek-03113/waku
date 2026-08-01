@@ -110,19 +110,17 @@ impl Waku {
         expanded: bool,
         cx: &mut Context<Self>,
     ) {
+        self.sync_transcript_rows();
         let scroll_top = self.active_transcript_rows().logical_scroll_top();
-        let anchor_kind = self
-            .transcript_row_kinds
-            .borrow()
-            .get(scroll_top.item_ix)
-            .copied();
+        let previous_kinds = self.transcript_row_kinds.borrow().clone();
+        let anchor_kind = previous_kinds.get(scroll_top.item_ix).copied();
         if expanded {
             self.expanded_turns.remove(&turn_id);
         } else {
             self.expanded_turns.insert(turn_id);
         }
         self.transcript_anchor_following.set(false);
-        self.reset_transcript_rows(self.transcript_row_count());
+        self.splice_transcript_rows_after_visibility_change(&previous_kinds);
 
         let next_kinds = self.transcript_row_kinds.borrow();
         let anchored_target =
