@@ -310,6 +310,31 @@ mod tests {
     }
 
     #[test]
+    fn right_panel_state_isolated_by_session() {
+        let session_with_terminal = Uuid::new_v4();
+        let other_session = Uuid::new_v4();
+        let terminal_id = Uuid::new_v4();
+        let mut states = HashMap::new();
+        let mut terminal_state = RightPanelSessionState::empty(true);
+        terminal_state.surfaces = vec![RightPanelSurface::Terminal(terminal_id)];
+        terminal_state.active_surface = Some(0);
+        states.insert(session_with_terminal, terminal_state);
+
+        let other_state = RightPanelSessionState::take_or_closed(&mut states, other_session);
+        assert!(!other_state.visible);
+        assert!(other_state.surfaces.is_empty());
+        assert_eq!(other_state.active_surface, None);
+
+        let restored = RightPanelSessionState::take_or_closed(&mut states, session_with_terminal);
+        assert!(restored.visible);
+        assert_eq!(
+            restored.surfaces,
+            vec![RightPanelSurface::Terminal(terminal_id)]
+        );
+        assert_eq!(restored.active_surface, Some(0));
+    }
+
+    #[test]
     fn tab_scroll_fades_only_show_toward_hidden_content() {
         assert_eq!(
             tab_scroll_fade_visibility(px(0.0), px(120.0)),
@@ -358,6 +383,71 @@ mod tests {
 }
 
 impl Waku {
+    pub(super) fn store_selected_right_panel_state(&mut self) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let state = self.take_active_right_panel_state();
+        self.right_panel_session_states.insert(session_id, state);
+    }
+
+    pub(super) fn restore_right_panel_state(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let state = RightPanelSessionState::take_or_closed(
+            &mut self.right_panel_session_states,
+            session_id,
+        );
+        self.replace_active_right_panel_state(state);
+        self.state.right_panel_visible = self.right_panel_visible;
+        if self.active_right_panel_surface() == Some(&RightPanelSurface::Diff) {
+            self.refresh_right_panel_diff();
+        }
+        self.ensure_right_panel_terminals(cx);
+    }
+
+    pub(super) fn remove_right_panel_session_state(&mut self, session_id: Uuid) {
+        let state = if self.state.selected_session == Some(session_id) {
+            let state = self.take_active_right_panel_state();
+            self.replace_active_right_panel_state(RightPanelSessionState::empty(false));
+            Some(state)
+        } else {
+            self.right_panel_session_states.remove(&session_id)
+        };
+        if let Some(state) = state {
+            for terminal_id in state
+                .surfaces
+                .iter()
+                .filter_map(RightPanelSurface::terminal_id)
+            {
+                self.right_panel_terminals.remove(&terminal_id);
+            }
+        }
+    }
+
+    fn take_active_right_panel_state(&mut self) -> RightPanelSessionState {
+        RightPanelSessionState {
+            visible: self.right_panel_visible,
+            surfaces: std::mem::take(&mut self.right_panel_surfaces),
+            active_surface: self.right_panel_active_surface.take(),
+            tabs_scroll_handle: std::mem::replace(
+                &mut self.right_panel_tabs_scroll_handle,
+                ScrollHandle::new(),
+            ),
+            pending_tab_reveal: self.right_panel_pending_tab_reveal.take(),
+            expanded_paths: std::mem::take(&mut self.right_panel_expanded_paths),
+            diff_files: std::mem::take(&mut self.right_panel_diff_files),
+        }
+    }
+
+    fn replace_active_right_panel_state(&mut self, state: RightPanelSessionState) {
+        self.right_panel_visible = state.visible;
+        self.right_panel_surfaces = state.surfaces;
+        self.right_panel_active_surface = state.active_surface;
+        self.right_panel_tabs_scroll_handle = state.tabs_scroll_handle;
+        self.right_panel_pending_tab_reveal = state.pending_tab_reveal;
+        self.right_panel_expanded_paths = state.expanded_paths;
+        self.right_panel_diff_files = state.diff_files;
+    }
+
     fn reveal_right_panel_tab(&mut self, index: usize) {
         self.right_panel_pending_tab_reveal = Some(index);
         self.right_panel_tabs_scroll_handle.scroll_to_item(index);
@@ -523,14 +613,24 @@ impl Waku {
     }
 
     pub(super) fn ensure_right_panel_terminals(&mut self, cx: &mut Context<Self>) {
-        let terminal_ids = self
+        let active_terminal_ids = self
             .right_panel_surfaces
             .iter()
             .filter_map(RightPanelSurface::terminal_id)
             .collect::<Vec<_>>();
+        let retained_terminal_ids = active_terminal_ids
+            .iter()
+            .copied()
+            .chain(self.right_panel_session_states.values().flat_map(|state| {
+                state
+                    .surfaces
+                    .iter()
+                    .filter_map(RightPanelSurface::terminal_id)
+            }))
+            .collect::<HashSet<_>>();
         self.right_panel_terminals
-            .retain(|terminal_id, _| terminal_ids.contains(terminal_id));
-        for terminal_id in terminal_ids {
+            .retain(|terminal_id, _| retained_terminal_ids.contains(terminal_id));
+        for terminal_id in active_terminal_ids {
             self.ensure_right_panel_terminal(terminal_id, cx);
         }
     }

@@ -32,6 +32,10 @@ impl Waku {
     }
 
     fn activate_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let session_changed = self.state.selected_session != Some(session_id);
+        if session_changed {
+            self.store_selected_right_panel_state();
+        }
         self.state.selected_session = Some(session_id);
         if let Some((project_id, provider, model, reasoning_effort, service_tier)) =
             self.selected_session().map(|session| {
@@ -50,7 +54,11 @@ impl Waku {
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
         }
-        self.ensure_right_panel_terminals(cx);
+        if session_changed {
+            self.restore_right_panel_state(session_id, cx);
+        } else {
+            self.ensure_right_panel_terminals(cx);
+        }
         let message_ids = self
             .selected_session()
             .map(|session| {
@@ -106,6 +114,7 @@ impl Waku {
             .map(|project| project.path.clone());
         let was_selected = self.state.selected_session == Some(session_id);
         self.reset_session_runtime(session_id);
+        self.remove_right_panel_session_state(session_id);
         self.state.sessions.remove(index);
         self.session_navigation.remove(session_id);
         if let Some(project_path) = project_path {

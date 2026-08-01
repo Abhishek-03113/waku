@@ -189,6 +189,36 @@ struct RightPanelDiffFile {
     deletions: u64,
 }
 
+struct RightPanelSessionState {
+    visible: bool,
+    surfaces: Vec<RightPanelSurface>,
+    active_surface: Option<usize>,
+    tabs_scroll_handle: ScrollHandle,
+    pending_tab_reveal: Option<usize>,
+    expanded_paths: HashSet<PathBuf>,
+    diff_files: Vec<RightPanelDiffFile>,
+}
+
+impl RightPanelSessionState {
+    fn empty(visible: bool) -> Self {
+        Self {
+            visible,
+            surfaces: Vec::new(),
+            active_surface: None,
+            tabs_scroll_handle: ScrollHandle::new(),
+            pending_tab_reveal: None,
+            expanded_paths: HashSet::new(),
+            diff_files: Vec::new(),
+        }
+    }
+
+    fn take_or_closed(states: &mut HashMap<Uuid, Self>, session_id: Uuid) -> Self {
+        states
+            .remove(&session_id)
+            .unwrap_or_else(|| Self::empty(false))
+    }
+}
+
 fn traits_menu_label(theme: Theme, label: &'static str) -> PopupMenuItem {
     PopupMenuItem::element(move |_, _| {
         div()
@@ -513,6 +543,7 @@ pub struct Waku {
     right_panel_visible: bool,
     right_panel_width: f32,
     panel_resize_drag: Option<PanelResizeDrag>,
+    right_panel_session_states: HashMap<Uuid, RightPanelSessionState>,
     right_panel_surfaces: Vec<RightPanelSurface>,
     right_panel_active_surface: Option<usize>,
     right_panel_tabs_scroll_handle: ScrollHandle,
@@ -777,6 +808,7 @@ impl Waku {
                 right_panel_visible,
                 right_panel_width,
                 panel_resize_drag: None,
+                right_panel_session_states: HashMap::new(),
                 right_panel_surfaces: Vec::new(),
                 right_panel_active_surface: None,
                 right_panel_tabs_scroll_handle: ScrollHandle::new(),
