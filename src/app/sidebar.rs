@@ -272,7 +272,6 @@ impl Waku {
                         .active(|element| element.bg(theme.sidebar_item_background))
                         .child(
                             div()
-                                .w_full()
                                 .flex()
                                 .items_center()
                                 .gap(px(6.0))
@@ -280,11 +279,10 @@ impl Waku {
                                 .line_height(px(18.0))
                                 .child(
                                     div()
-                                        .w_full()
                                         .flex_1()
                                         .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
+                                        .whitespace_normal()
+                                        .line_clamp(1)
                                         .text_overflow(gpui::TextOverflow::Truncate("...".into()))
                                         .text_size(px(13.5))
                                         .text_color(theme.text)
@@ -351,6 +349,7 @@ impl Waku {
                 div()
                     .id("sidebar-scroll")
                     .flex_1()
+                    .min_h_0()
                     .child(div().px(px(10.0)).pt(px(2.0)).child(sessions))
                     .overflow_y_scrollbar(),
             )
