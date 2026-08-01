@@ -13,6 +13,107 @@ use gpui::{
 
 use crate::{global_state::GlobalState, input::Selection, text::node::LinkMark, ActiveTheme};
 
+// GPUI's text runs have no inline box model. Non-breaking spaces provide real
+// shaped layout gutters, while the adjacent word joiners keep those gutters
+// attached to the code span during wrapping. Copying strips both gutters.
+const LEADING_CODE_GUTTER: &str = "\u{00a0}\u{2060}";
+const TRAILING_CODE_GUTTER: &str = "\u{2060}\u{00a0}";
+
+struct LayoutText {
+    text: SharedString,
+    code_ranges: Vec<Range<usize>>,
+    virtual_gutters: Vec<Range<usize>>,
+    insertions: Vec<LayoutInsertion>,
+}
+
+struct LayoutInsertion {
+    source_offset: usize,
+    byte_len: usize,
+    before_source_boundary: bool,
+}
+
+impl LayoutText {
+    fn new(source: &str, code_ranges: &[Range<usize>]) -> Self {
+        let mut source_ranges = code_ranges
+            .iter()
+            .filter(|range| {
+                range.start < range.end
+                    && range.end <= source.len()
+                    && source.is_char_boundary(range.start)
+                    && source.is_char_boundary(range.end)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        source_ranges.sort_by_key(|range| (range.start, range.end));
+
+        let mut text = String::with_capacity(
+            source.len()
+                + source_ranges.len() * (LEADING_CODE_GUTTER.len() + TRAILING_CODE_GUTTER.len()),
+        );
+        let mut layout_code_ranges = Vec::with_capacity(source_ranges.len());
+        let mut virtual_gutters = Vec::with_capacity(source_ranges.len() * 2);
+        let mut insertions = Vec::with_capacity(source_ranges.len() * 2);
+        let mut source_cursor = 0;
+
+        for range in source_ranges {
+            if range.start < source_cursor {
+                continue;
+            }
+
+            text.push_str(&source[source_cursor..range.start]);
+
+            let capsule_start = text.len();
+            text.push_str(LEADING_CODE_GUTTER);
+            virtual_gutters.push(capsule_start..text.len());
+            insertions.push(LayoutInsertion {
+                source_offset: range.start,
+                byte_len: LEADING_CODE_GUTTER.len(),
+                before_source_boundary: false,
+            });
+
+            text.push_str(&source[range.clone()]);
+
+            let trailing_start = text.len();
+            text.push_str(TRAILING_CODE_GUTTER);
+            virtual_gutters.push(trailing_start..text.len());
+            insertions.push(LayoutInsertion {
+                source_offset: range.end,
+                byte_len: TRAILING_CODE_GUTTER.len(),
+                before_source_boundary: true,
+            });
+            layout_code_ranges.push(capsule_start..text.len());
+            source_cursor = range.end;
+        }
+
+        text.push_str(&source[source_cursor..]);
+
+        Self {
+            text: text.into(),
+            code_ranges: layout_code_ranges,
+            virtual_gutters,
+            insertions,
+        }
+    }
+
+    fn map_source_range(&self, range: Range<usize>) -> Range<usize> {
+        self.map_source_boundary(range.start)..self.map_source_boundary(range.end)
+    }
+
+    fn map_source_boundary(&self, source_offset: usize) -> usize {
+        source_offset
+            + self
+                .insertions
+                .iter()
+                .filter(|insertion| {
+                    insertion.source_offset < source_offset
+                        || (insertion.source_offset == source_offset
+                            && insertion.before_source_boundary)
+                })
+                .map(|insertion| insertion.byte_len)
+                .sum::<usize>()
+    }
+}
+
 /// A inline element used to render a inline text and support selectable.
 ///
 /// All text in TextView (including the CodeBlock) used this for text rendering.
@@ -22,6 +123,7 @@ pub(super) struct Inline {
     selection_scope: Option<usize>,
     links: Rc<Vec<(Range<usize>, LinkMark)>>,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    code_ranges: Vec<Range<usize>>,
     styled_text: StyledText,
 
     state: Arc<Mutex<InlineState>>,
@@ -33,6 +135,7 @@ pub(crate) struct InlineState {
     hovered_index: Option<usize>,
     /// The text that actually rendering, matched with selection.
     pub(super) text: SharedString,
+    virtual_gutters: Vec<Range<usize>>,
     pub(super) selection: Option<Selection>,
 }
 
@@ -40,6 +143,42 @@ impl InlineState {
     /// Save actually rendered text for selected text to use.
     pub(crate) fn set_text(&mut self, text: SharedString) {
         self.text = text;
+        self.virtual_gutters.clear();
+    }
+
+    fn set_layout_text(&mut self, text: SharedString, virtual_gutters: Vec<Range<usize>>) {
+        self.text = text;
+        self.virtual_gutters = virtual_gutters;
+    }
+
+    pub(super) fn selected_text(&self) -> String {
+        let Some(selection) = &self.selection else {
+            return String::new();
+        };
+        let start = selection.start.min(selection.end).min(self.text.len());
+        let end = selection.start.max(selection.end).min(self.text.len());
+        if start >= end {
+            return String::new();
+        }
+
+        let mut selected = String::new();
+        let mut cursor = start;
+        for gutter in &self.virtual_gutters {
+            if gutter.end <= cursor {
+                continue;
+            }
+            if gutter.start >= end {
+                break;
+            }
+            if cursor < gutter.start {
+                selected.push_str(&self.text[cursor..gutter.start.min(end)]);
+            }
+            cursor = cursor.max(gutter.end.min(end));
+        }
+        if cursor < end {
+            selected.push_str(&self.text[cursor..end]);
+        }
+        selected
     }
 }
 
@@ -49,12 +188,28 @@ impl Inline {
         state: Arc<Mutex<InlineState>>,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
+        code_ranges: Vec<Range<usize>>,
     ) -> Self {
-        let text = state.lock().unwrap().text.clone();
+        let source_text = state.lock().unwrap().text.clone();
+        let layout_text = LayoutText::new(&source_text, &code_ranges);
+        let links = links
+            .into_iter()
+            .map(|(range, mark)| (layout_text.map_source_range(range), mark))
+            .collect();
+        let highlights = highlights
+            .into_iter()
+            .map(|(range, style)| (layout_text.map_source_range(range), style))
+            .collect();
+        let text = layout_text.text.clone();
+        state
+            .lock()
+            .unwrap()
+            .set_layout_text(text.clone(), layout_text.virtual_gutters);
         Self {
             id: id.into(),
             links: Rc::new(links),
             highlights,
+            code_ranges: layout_text.code_ranges,
             text: text.clone(),
             selection_scope: None,
             styled_text: StyledText::new(text),
@@ -225,6 +380,74 @@ impl Inline {
             ));
         }
     }
+
+    /// Paint inline code as compact capsules instead of using a text-run
+    /// background, which fills the entire line height and visually joins code
+    /// on adjacent lines.
+    fn paint_code_backgrounds(
+        &self,
+        text_layout: &TextLayout,
+        bounds: &Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let line_height = text_layout.line_height();
+        let vertical_inset = px(2.0);
+        let corner_radius = px(4.0);
+        let background = if cx.theme().is_dark() {
+            gpui::hsla(209.26 / 360.0, 0.010_193, 0.149_55, 1.0)
+        } else {
+            gpui::hsla(307.61 / 360.0, 0.019_79, 0.896_49, 1.0)
+        };
+
+        for range in &self.code_ranges {
+            let Some(start) = text_layout.position_for_index(range.start) else {
+                continue;
+            };
+            let Some(end) = text_layout.position_for_index(range.end) else {
+                continue;
+            };
+
+            let mut paint_segment = |left: Pixels, right: Pixels, top: Pixels| {
+                let left = left.max(bounds.left());
+                let right = right.min(bounds.right());
+                if right <= left {
+                    return;
+                }
+
+                window.paint_quad(quad(
+                    Bounds::from_corners(
+                        point(left, top + vertical_inset),
+                        point(right, top + line_height - vertical_inset),
+                    ),
+                    corner_radius,
+                    background,
+                    Edges::default(),
+                    gpui::transparent_black(),
+                    BorderStyle::default(),
+                ));
+            };
+
+            if start.y == end.y {
+                paint_segment(start.x, end.x, start.y);
+                continue;
+            }
+
+            paint_segment(start.x, bounds.right(), start.y);
+
+            let mut line_top = start.y + line_height;
+            while line_top < end.y {
+                paint_segment(bounds.left(), bounds.right(), line_top);
+                line_top += line_height;
+            }
+
+            // A range ending exactly on a wrap boundary has no content on the
+            // final line, so avoid painting an empty capsule there.
+            if end.x > bounds.left() + px(0.5) {
+                paint_segment(bounds.left(), end.x, end.y);
+            }
+        }
+    }
 }
 
 impl IntoElement for Inline {
@@ -309,6 +532,8 @@ impl Element for Inline {
         let (_, is_selection, selection) = self.layout_selections(&text_layout, window, cx);
 
         state.selection = selection;
+
+        self.paint_code_backgrounds(&text_layout, &bounds, window, cx);
 
         if let Some(selection) = &state.selection {
             Self::paint_selection(selection, &text_layout, &bounds, window, cx);
@@ -415,8 +640,37 @@ fn point_in_text_selection(
 
 #[cfg(test)]
 mod tests {
-    use super::point_in_text_selection;
-    use gpui::{point, px, size, Bounds};
+    use super::{
+        InlineState, LEADING_CODE_GUTTER, LayoutText, TRAILING_CODE_GUTTER, point_in_text_selection,
+    };
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn inline_code_gutters_reserve_space_without_changing_selected_text() {
+        let source = "Run cargo now";
+        let layout = LayoutText::new(source, &[4..9]);
+        let expected = format!("Run {LEADING_CODE_GUTTER}cargo{TRAILING_CODE_GUTTER} now");
+        let capsule_end =
+            4 + LEADING_CODE_GUTTER.len() + "cargo".len() + TRAILING_CODE_GUTTER.len();
+
+        assert_eq!(layout.text.as_ref(), expected.as_str());
+        assert_eq!(layout.code_ranges, vec![4..capsule_end]);
+        assert_eq!(layout.map_source_range(0..4), 0..4);
+        assert_eq!(layout.map_source_range(4..9), layout.code_ranges[0]);
+        assert_eq!(
+            layout.map_source_range(9..source.len()),
+            capsule_end..layout.text.len()
+        );
+
+        let code_range = layout.code_ranges[0].clone();
+        let mut state = InlineState::default();
+        state.set_layout_text(layout.text, layout.virtual_gutters);
+        state.selection = Some((0..state.text.len()).into());
+        assert_eq!(state.selected_text(), source);
+
+        state.selection = Some(code_range.into());
+        assert_eq!(state.selected_text(), "cargo");
+    }
 
     #[test]
     fn test_point_in_text_selection() {

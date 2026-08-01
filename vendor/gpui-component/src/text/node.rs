@@ -202,17 +202,11 @@ impl Paragraph {
 
         for c in self.children.iter() {
             let state = c.state.lock().unwrap();
-            if let Some(selection) = &state.selection {
-                let part_text = state.text.clone();
-                text.push_str(&part_text[selection.start..selection.end]);
-            }
+            text.push_str(&state.selected_text());
         }
 
         let state = self.state.lock().unwrap();
-        if let Some(selection) = &state.selection {
-            let all_text = state.text.clone();
-            text.push_str(&all_text[selection.start..selection.end]);
-        }
+        text.push_str(&state.selected_text());
 
         text
     }
@@ -439,6 +433,7 @@ impl CodeBlock {
                         self.state.clone(),
                         vec![],
                         self.styles.clone(),
+                        vec![],
                     ))
                     .when_some(node_cx.code_block_actions.clone(), |this, actions| {
                         this.child(
@@ -1097,6 +1092,7 @@ impl Paragraph {
 
         let mut text = String::new();
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = vec![];
+        let mut code_ranges: Vec<Range<usize>> = vec![];
         let mut links: Vec<(Range<usize>, LinkMark)> = vec![];
         let mut offset = 0;
 
@@ -1118,6 +1114,7 @@ impl Paragraph {
                             inline_node.state.clone(),
                             links.clone(),
                             highlights.clone(),
+                            code_ranges.clone(),
                         )
                         .selection_scope(selection_scope)
                         .into_any_element(),
@@ -1191,6 +1188,7 @@ impl Paragraph {
                 text.clear();
                 links.clear();
                 highlights.clear();
+                code_ranges.clear();
                 offset = 0;
             } else {
                 let mut node_highlights = vec![];
@@ -1211,7 +1209,7 @@ impl Paragraph {
                         });
                     }
                     if style.code {
-                        highlight.background_color = Some(cx.theme().accent);
+                        code_ranges.push(inner_range.clone());
                     }
 
                     if let Some(mut link_mark) = style.link.clone() {
@@ -1245,7 +1243,7 @@ impl Paragraph {
             self.state.lock().unwrap().set_text(text.into());
             child_nodes
                 .push(
-                    Inline::new(ix, self.state.clone(), links, highlights)
+                    Inline::new(ix, self.state.clone(), links, highlights, code_ranges)
                         .selection_scope(selection_scope)
                         .into_any_element(),
                 );
@@ -1973,6 +1971,7 @@ impl Node {
             Node::List { children, ordered } => v_flex()
                 .id(if *ordered { "ol" } else { "ul" })
                 .pb(mb)
+                .gap(px(4.0))
                 .children({
                     let mut items = Vec::with_capacity(children.len());
                     let mut ix = 0;
