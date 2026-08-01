@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -7,6 +9,8 @@ use std::time::Duration;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point as TerminalPoint, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
@@ -15,11 +19,14 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    App, Context, FocusHandle, Focusable, FontStyle, FontWeight, Hsla, InteractiveElement,
-    IntoElement, KeyDownEvent, Keystroke, MouseButton, ParentElement, Render, ScrollDelta,
+    App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontStyle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta,
     ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText, TextRun,
-    UnderlineStyle, Window, div, font, px, rgb,
+    UnderlineStyle, Window, canvas, div, font, px, rgb,
 };
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::theme::ActiveTheme as _;
 use parking_lot::Mutex;
 
 use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
@@ -234,11 +241,12 @@ impl TerminalSession {
         self.dirty.swap(false, Ordering::AcqRel)
     }
 
-    fn snapshot(&self, theme: Theme) -> TerminalSnapshot {
+    fn snapshot(&self, theme: Theme, selection_color: Hsla) -> TerminalSnapshot {
         let term = self.term.lock();
         let content = term.renderable_content();
         let columns = self.grid_size.0;
         let rows = self.grid_size.1;
+        let selection = content.selection;
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_column = content.cursor.point.column.0;
         let cursor_visible = !matches!(
@@ -273,6 +281,10 @@ impl TerminalSession {
             }
             if cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD) {
                 foreground.l *= 0.7;
+            }
+            if selection.is_some_and(|selection| selection.contains(indexed.point)) {
+                background = selection_color;
+                foreground = theme.text;
             }
             if cursor_visible && row == cursor_row && column == cursor_column {
                 background = theme.text;
@@ -390,6 +402,8 @@ pub struct TerminalView {
     exited: bool,
     scroll_accumulator: f32,
     panel_width: f32,
+    grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    selecting: bool,
 }
 
 impl TerminalView {
@@ -428,6 +442,8 @@ impl TerminalView {
             exited: false,
             scroll_accumulator: 0.0,
             panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
+            grid_bounds: Rc::new(Cell::new(None)),
+            selecting: false,
         }
     }
 
@@ -466,14 +482,29 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("c") {
+            self.copy_selection(cx);
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+        if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("a") {
+            self.select_all(cx);
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+
         let Some(session) = &self.session else {
             return;
         };
-        let keystroke = &event.keystroke;
         if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("v") {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                session.term.lock().selection = None;
                 let bytes = bracketed_paste(text, session.mode());
                 session.write(bytes);
+                session.dirty.store(true, Ordering::Release);
                 window.prevent_default();
                 cx.stop_propagation();
             }
@@ -481,10 +512,128 @@ impl TerminalView {
         }
 
         if let Some(bytes) = terminal_key_bytes(keystroke, session.mode()) {
+            session.term.lock().selection = None;
             session.write(bytes);
+            session.dirty.store(true, Ordering::Release);
             window.prevent_default();
             cx.stop_propagation();
         }
+    }
+
+    fn grid_point_for_position(
+        &self,
+        position: Point<Pixels>,
+        clamp_to_grid: bool,
+    ) -> Option<(TerminalPoint, Side)> {
+        let bounds = self.grid_bounds.get()?;
+        let session = self.session.as_ref()?;
+        let display_offset = session.term.lock().grid().display_offset();
+        terminal_grid_point(
+            bounds,
+            position,
+            session.grid_size.0,
+            session.grid_size.1,
+            display_offset,
+            clamp_to_grid,
+        )
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        let Some((point, side)) = self.grid_point_for_position(event.position, false) else {
+            return;
+        };
+        let Some(session) = &self.session else {
+            return;
+        };
+
+        let mut term = session.term.lock();
+        if event.modifiers.shift
+            && let Some(selection) = term.selection.as_mut()
+        {
+            selection.update(point, side);
+        } else {
+            let selection_type = match event.click_count {
+                2 => SelectionType::Semantic,
+                count if count >= 3 => SelectionType::Lines,
+                _ => SelectionType::Simple,
+            };
+            term.selection = Some(Selection::new(selection_type, point, side));
+        }
+        drop(term);
+
+        self.selecting = true;
+        session.dirty.store(true, Ordering::Release);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let Some((point, side)) = self.grid_point_for_position(event.position, true) else {
+            return;
+        };
+        let Some(session) = &self.session else {
+            return;
+        };
+
+        if let Some(selection) = session.term.lock().selection.as_mut() {
+            selection.update(point, side);
+            session.dirty.store(true, Ordering::Release);
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.selecting = false;
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        self.session
+            .as_ref()?
+            .term
+            .lock()
+            .selection_to_string()
+            .filter(|text| !text.is_empty())
+    }
+
+    fn copy_selection(&self, cx: &mut App) {
+        if let Some(text) = self.selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn paste(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        session.term.lock().selection = None;
+        session.write(bracketed_paste(text, session.mode()));
+        session.dirty.store(true, Ordering::Release);
+        cx.notify();
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let mut term = session.term.lock();
+        let start = TerminalPoint::new(term.topmost_line(), Column(0));
+        let end = TerminalPoint::new(term.bottommost_line(), term.last_column());
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        term.selection = Some(selection);
+        drop(term);
+        session.dirty.store(true, Ordering::Release);
+        cx.notify();
     }
 
     fn on_scroll_wheel(
@@ -520,6 +669,7 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current(cx);
+        let selection_color = cx.theme().selection;
         let viewport = window.viewport_size();
         let panel_width = self.panel_width;
         let body_height = (f32::from(viewport.height) - 48.0 - TERMINAL_TOOLBAR_HEIGHT).max(120.0);
@@ -532,7 +682,7 @@ impl Render for TerminalView {
 
         let snapshot = self.session.as_mut().map(|session| {
             session.resize(columns, rows);
-            session.snapshot(theme)
+            session.snapshot(theme, selection_color)
         });
         let title = if self.title.trim().is_empty() {
             "Terminal"
@@ -546,16 +696,19 @@ impl Render for TerminalView {
             .unwrap_or("workspace")
             .to_owned();
 
-        let mut grid = div()
+        let mut screen = div()
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .px(px(TERMINAL_PADDING_X))
-            .py(px(TERMINAL_PADDING_Y))
-            .bg(theme.inset)
             .overflow_hidden()
             .flex()
-            .flex_col();
+            .flex_col()
+            .relative()
+            .cursor_text()
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_move(cx.listener(Self::on_mouse_move));
 
         if let Some(snapshot) = snapshot {
             for row in snapshot.rows {
@@ -591,7 +744,7 @@ impl Render for TerminalView {
                         }
                     })
                     .collect::<Vec<_>>();
-                grid = grid.child(
+                screen = screen.child(
                     div()
                         .h(px(TERMINAL_CELL_HEIGHT))
                         .flex_none()
@@ -603,7 +756,7 @@ impl Render for TerminalView {
                 );
             }
         } else {
-            grid = grid.child(
+            screen = screen.child(
                 div()
                     .p(px(12.0))
                     .text_size(px(11.0))
@@ -616,6 +769,74 @@ impl Render for TerminalView {
                     ),
             );
         }
+
+        let grid_bounds = self.grid_bounds.clone();
+        screen = screen.child(
+            canvas(
+                move |bounds, _, _| grid_bounds.set(Some(bounds)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
+
+        let context_terminal = cx.entity();
+        let focus_handle = self.focus_handle.clone();
+        let screen = screen.context_menu_with_id("terminal-context-menu", move |menu, _, cx| {
+            let has_selection = context_terminal.read(cx).selected_text().is_some();
+            let can_paste = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| !text.is_empty());
+            let has_session = context_terminal.read(cx).session.is_some();
+
+            let copy_terminal = context_terminal.clone();
+            let paste_terminal = context_terminal.clone();
+            let select_all_terminal = context_terminal.clone();
+            menu.action_context(focus_handle.clone())
+                .min_w(px(150.0))
+                .item(
+                    PopupMenuItem::new("Copy")
+                        .disabled(!has_selection)
+                        .on_click(move |_, _, cx| {
+                            let selected_text = { copy_terminal.read(cx).selected_text() };
+                            if let Some(text) = selected_text {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Paste")
+                        .disabled(!can_paste)
+                        .on_click(move |_, _, cx| {
+                            let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                            else {
+                                return;
+                            };
+                            paste_terminal.update(cx, |terminal, cx| terminal.paste(text, cx));
+                        }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Select All")
+                        .disabled(!has_session)
+                        .on_click(move |_, _, cx| {
+                            select_all_terminal.update(cx, |terminal, cx| terminal.select_all(cx));
+                        }),
+                )
+        });
+
+        let grid = div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .px(px(TERMINAL_PADDING_X))
+            .py(px(TERMINAL_PADDING_Y))
+            .bg(theme.inset)
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(screen);
 
         div()
             .id("alacritty-terminal")
@@ -669,15 +890,37 @@ impl Render for TerminalView {
             .child(grid)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    window.focus(&this.focus_handle, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
     }
+}
+
+fn terminal_grid_point(
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+    columns: usize,
+    rows: usize,
+    display_offset: usize,
+    clamp_to_grid: bool,
+) -> Option<(TerminalPoint, Side)> {
+    if columns == 0 || rows == 0 || (!clamp_to_grid && !bounds.contains(&position)) {
+        return None;
+    }
+
+    let x = f32::from(position.x - bounds.origin.x);
+    let y = f32::from(position.y - bounds.origin.y);
+    let max_x = columns as f32 * TERMINAL_CELL_WIDTH;
+    let max_y = rows as f32 * TERMINAL_CELL_HEIGHT;
+    let x = x.clamp(0.0, max_x);
+    let y = y.clamp(0.0, max_y);
+    let column = ((x / TERMINAL_CELL_WIDTH).floor() as usize).min(columns - 1);
+    let viewport_row = ((y / TERMINAL_CELL_HEIGHT).floor() as usize).min(rows - 1) as i32;
+    let side = if x >= max_x || x % TERMINAL_CELL_WIDTH >= TERMINAL_CELL_WIDTH / 2.0 {
+        Side::Right
+    } else {
+        Side::Left
+    };
+    let line = Line(viewport_row - display_offset.min(i32::MAX as usize) as i32);
+
+    Some((TerminalPoint::new(line, Column(column)), side))
 }
 
 fn bracketed_paste(text: String, mode: TermMode) -> Vec<u8> {
@@ -886,7 +1129,7 @@ fn terminal_rgb(index: usize) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::Modifiers;
+    use gpui::{Modifiers, point, size};
 
     fn key(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> Keystroke {
         Keystroke {
@@ -939,6 +1182,38 @@ mod tests {
             b"\x1b[200~hello\x1b[201~"
         );
         assert_eq!(bracketed_paste("hello".into(), TermMode::empty()), b"hello");
+    }
+
+    #[test]
+    fn maps_pointer_positions_into_scrollback_grid_coordinates() {
+        let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(72.0), px(64.0)));
+        let position = point(
+            px(10.0 + TERMINAL_CELL_WIDTH * 2.0 + 5.0),
+            px(20.0 + TERMINAL_CELL_HEIGHT + 8.0),
+        );
+
+        assert_eq!(
+            terminal_grid_point(bounds, position, 10, 4, 3, false),
+            Some((TerminalPoint::new(Line(-2), Column(2)), Side::Right))
+        );
+        assert_eq!(
+            terminal_grid_point(bounds, point(px(0.0), px(0.0)), 10, 4, 3, false),
+            None
+        );
+    }
+
+    #[test]
+    fn clamps_selection_drags_to_the_terminal_grid_edges() {
+        let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(72.0), px(64.0)));
+
+        assert_eq!(
+            terminal_grid_point(bounds, point(px(500.0), px(500.0)), 10, 4, 0, true),
+            Some((TerminalPoint::new(Line(3), Column(9)), Side::Right))
+        );
+        assert_eq!(
+            terminal_grid_point(bounds, point(px(-50.0), px(-50.0)), 10, 4, 3, true),
+            Some((TerminalPoint::new(Line(-3), Column(0)), Side::Left))
+        );
     }
 
     #[test]
