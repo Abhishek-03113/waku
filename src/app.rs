@@ -44,12 +44,15 @@ use crate::ui::{
 };
 use crate::{
     CancelTurn, CloseWindow, FocusComposer, NavigateBack, NavigateForward, NewSession,
-    OpenSettings, ToggleSidebar,
+    OpenSettings, ToggleRightPanel, ToggleSidebar,
 };
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 252.0;
+const RIGHT_PANEL_MIN_WIDTH: f32 = 360.0;
+const RIGHT_PANEL_MAX_WIDTH: f32 = 460.0;
+const RIGHT_PANEL_WIDTH_FRACTION: f32 = 0.4;
 const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
 const STREAM_MARKDOWN_DELAY: Duration = Duration::from_millis(32);
@@ -82,6 +85,22 @@ enum ModelPickerTab {
 enum SettingsPage {
     General,
     Appearance,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RightPanelSurface {
+    Browser,
+    Terminal,
+    Files,
+    Diff,
+    File(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RightPanelDiffFile {
+    path: String,
+    additions: u64,
+    deletions: u64,
 }
 
 fn traits_menu_label(theme: Theme, label: &'static str) -> PopupMenuItem {
@@ -404,6 +423,11 @@ pub struct Waku {
     expanded_turns: HashSet<Uuid>,
     session_navigation: SessionNavigation,
     sidebar_visible: bool,
+    right_panel_visible: bool,
+    right_panel_surfaces: Vec<RightPanelSurface>,
+    right_panel_active_surface: Option<usize>,
+    right_panel_expanded_paths: HashSet<PathBuf>,
+    right_panel_diff_files: Vec<RightPanelDiffFile>,
     settings_page: Option<SettingsPage>,
     header_drag_armed: bool,
     branch: Option<String>,
@@ -438,6 +462,7 @@ pub struct Waku {
 mod components;
 mod composer;
 mod render;
+mod right_panel;
 mod runtime;
 mod sessions;
 mod settings;
@@ -639,6 +664,11 @@ impl Waku {
                 expanded_turns: HashSet::new(),
                 session_navigation: SessionNavigation::default(),
                 sidebar_visible: true,
+                right_panel_visible: true,
+                right_panel_surfaces: Vec::new(),
+                right_panel_active_surface: None,
+                right_panel_expanded_paths: HashSet::new(),
+                right_panel_diff_files: Vec::new(),
                 settings_page: None,
                 header_drag_armed: false,
                 branch,

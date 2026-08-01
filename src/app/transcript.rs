@@ -422,8 +422,15 @@ impl Waku {
         } else {
             Pixels::ZERO
         };
-        let content_width = (window.viewport_size().width - sidebar_width - px(40.0))
-            .clamp(px(1.0), px(CONTENT_MAX_WIDTH));
+        let right_panel_width = if self.right_panel_visible {
+            (window.viewport_size().width * RIGHT_PANEL_WIDTH_FRACTION)
+                .clamp(px(RIGHT_PANEL_MIN_WIDTH), px(RIGHT_PANEL_MAX_WIDTH))
+        } else {
+            Pixels::ZERO
+        };
+        let content_width =
+            (window.viewport_size().width - sidebar_width - right_panel_width - px(40.0))
+                .clamp(px(1.0), px(CONTENT_MAX_WIDTH));
         let previous = self.transcript_layout_width.replace(content_width);
         if previous > Pixels::ZERO && (previous - content_width).abs() < px(1.0) {
             return false;

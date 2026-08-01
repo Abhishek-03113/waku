@@ -19,6 +19,7 @@ impl Render for Waku {
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
+            .on_action(cx.listener(Self::toggle_right_panel_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
             .on_action(cx.listener(Self::focus_composer_action))
@@ -81,6 +82,9 @@ impl Render for Waku {
                             .child(self.render_workspace_footer(cx))
                     }),
             )
+            .when(self.right_panel_visible, |root| {
+                root.child(self.render_right_panel(cx))
+            })
             .into_any_element()
     }
 }

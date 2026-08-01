@@ -526,6 +526,9 @@ impl Waku {
                         ),
                 )
             })
+            .when(!self.right_panel_visible, |element| {
+                element.child(self.render_right_panel_toggle(cx))
+            })
     }
 
     // ── Empty states ───────────────────────────────────────────────────────

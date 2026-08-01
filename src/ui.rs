@@ -287,6 +287,8 @@ mod tests {
             "icons/chevron-right.svg",
             "icons/folder.svg",
             "icons/folder-new.svg",
+            "icons/file-diff.svg",
+            "icons/globe.svg",
             "icons/alert.svg",
             "icons/lock.svg",
             "icons/lock-open.svg",
@@ -294,6 +296,8 @@ mod tests {
             "icons/star-filled.svg",
             "icons/sparkle.svg",
             "icons/zap.svg",
+            "icons/panel-right.svg",
+            "icons/x.svg",
         ];
         for provider in ProviderKind::ALL {
             paths.push(provider_icon(provider));

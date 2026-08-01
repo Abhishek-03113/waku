@@ -28,6 +28,7 @@ actions!(
         NewSession,
         OpenSettings,
         ToggleSidebar,
+        ToggleRightPanel,
         NavigateBack,
         NavigateForward,
         FocusComposer,
@@ -76,6 +77,7 @@ fn main() {
                     name: "View".into(),
                     items: vec![
                         MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                        MenuItem::action("Toggle Right Panel", ToggleRightPanel),
                         MenuItem::action("Focus Composer", FocusComposer),
                     ],
                 },
@@ -87,6 +89,7 @@ fn main() {
                 KeyBinding::new("cmd-n", NewSession, None),
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("cmd-shift-s", ToggleSidebar, None),
+                KeyBinding::new("cmd-shift-r", ToggleRightPanel, None),
                 KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
                 KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
                 KeyBinding::new("cmd-l", FocusComposer, None),

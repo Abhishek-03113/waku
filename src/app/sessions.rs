@@ -164,6 +164,16 @@ impl Waku {
         cx.notify();
     }
 
+    pub(super) fn toggle_right_panel_action(
+        &mut self,
+        _: &ToggleRightPanel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.right_panel_visible = !self.right_panel_visible;
+        cx.notify();
+    }
+
     pub(super) fn navigate_back_action(
         &mut self,
         _: &NavigateBack,

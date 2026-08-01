@@ -28,12 +28,15 @@ const ICONS: &[(&str, &[u8])] = icons![
     "copy",
     "folder",
     "folder-new",
+    "file-diff",
     "git-branch",
+    "globe",
     "hexagon",
     "list",
     "lock",
     "lock-open",
     "panel-left",
+    "panel-right",
     "pencil",
     "plus",
     "provider-amp",
@@ -52,6 +55,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "stop",
     "terminal",
     "wrench",
+    "x",
     "zap",
 ];
 
