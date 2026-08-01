@@ -9,12 +9,13 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    Entity, EntityId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    Entity, EntityId, FocusHandle, GlobalElementId, Half, Hitbox, HitboxBehavior, InspectorElementId,
     InteractiveElement, IntoElement, KeyBinding, LayoutId, ListState, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, RenderOnce, SharedString, Size,
-    StyleRefinement, Styled, Timer, Window, div, px,
+    StyleRefinement, Styled, TextLayout, Timer, Window, div, px,
 };
 use smol::stream::StreamExt;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::highlighter::HighlightTheme;
 use crate::scroll::ScrollableElement;
@@ -322,6 +323,7 @@ pub struct TextViewState {
     /// selection continue growing while its parent scrolls under the pointer.
     selection_pointer: Option<Point<Pixels>>,
     selection_autoscroll_active: bool,
+    active_selection_scope: Option<usize>,
     /// Is current in selection.
     is_selecting: bool,
     is_selectable: bool,
@@ -335,6 +337,15 @@ pub struct TextViewState {
     block_resize_handler: Option<Arc<BlockResizeFn>>,
     parent_scroll_offset: Pixels,
     rendered_block_count: Rc<Cell<usize>>,
+    selectable_text: Vec<SelectableText>,
+}
+
+#[derive(Clone)]
+struct SelectableText {
+    bounds: Bounds<Pixels>,
+    text: SharedString,
+    layout: TextLayout,
+    selection_scope: Option<usize>,
 }
 
 impl TextViewState {
@@ -349,6 +360,7 @@ impl TextViewState {
             selection_positions: (None, None),
             selection_pointer: None,
             selection_autoscroll_active: false,
+            active_selection_scope: None,
             is_selecting: false,
             is_selectable: false,
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
@@ -361,6 +373,7 @@ impl TextViewState {
             block_resize_handler: None,
             parent_scroll_offset: Pixels::ZERO,
             rendered_block_count: Rc::new(Cell::new(0)),
+            selectable_text: Vec::new(),
         }
     }
 }
@@ -548,15 +561,97 @@ impl TextViewState {
         self.selection_positions = (None, None);
         self.selection_pointer = None;
         self.selection_autoscroll_active = false;
+        self.active_selection_scope = None;
         self.is_selecting = false;
     }
 
     fn start_selection(&mut self, pos: Point<Pixels>) {
+        self.active_selection_scope = self
+            .selectable_text
+            .iter()
+            .rev()
+            .find(|text| text.bounds.contains(&pos))
+            .and_then(|text| text.selection_scope);
         let pos = pos - self.bounds.origin;
         self.selection_positions = (Some(pos), Some(pos));
         self.selection_pointer = Some(pos + self.bounds.origin);
         self.selection_autoscroll_active = false;
         self.is_selecting = true;
+    }
+
+    fn select_text_between(
+        &mut self,
+        start: Point<Pixels>,
+        end: Point<Pixels>,
+        selection_scope: Option<usize>,
+    ) {
+        self.selection_positions = (
+            Some(start - self.bounds.origin),
+            Some(end - self.bounds.origin),
+        );
+        self.selection_pointer = None;
+        self.selection_autoscroll_active = false;
+        self.active_selection_scope = selection_scope;
+        self.is_selecting = false;
+    }
+
+    pub(crate) fn record_selectable_text(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        text: SharedString,
+        layout: TextLayout,
+        selection_scope: Option<usize>,
+    ) {
+        if self.is_selectable {
+            self.selectable_text.push(SelectableText {
+                bounds,
+                text,
+                layout,
+                selection_scope,
+            });
+        }
+    }
+
+    pub(crate) fn selection_allows_scope(&self, selection_scope: Option<usize>) -> bool {
+        self.active_selection_scope
+            .is_none_or(|active_scope| selection_scope == Some(active_scope))
+    }
+
+    fn select_text_at(&mut self, position: Point<Pixels>, click_count: usize) -> bool {
+        let (mut start, mut end, selection_scope, line_height) = {
+            let Some(text) = self
+                .selectable_text
+                .iter()
+                .rev()
+                .find(|text| text.bounds.contains(&position))
+            else {
+                return false;
+            };
+            let index = match text.layout.index_for_position(position) {
+                Ok(index) | Err(index) => index,
+            };
+            let range = if click_count == 2 {
+                surrounding_word_range(&text.text, index)
+            } else {
+                surrounding_line_range(&text.text, index)
+            };
+            let Some(start) = text.layout.position_for_index(range.start) else {
+                return false;
+            };
+            let Some(end) = text.layout.position_for_index(range.end) else {
+                return false;
+            };
+            (start, end, text.selection_scope, text.layout.line_height())
+        };
+        // Text positions sit on the top edge of a line. Put the selection
+        // endpoints inside that line so the geometric selection resolver does
+        // not also include glyphs from the adjacent wrapped line.
+        let line_center = line_height.half();
+        start.y += line_center;
+        end.y += line_center + px(1.0);
+
+        self.select_text_between(start, end, selection_scope);
+        true
     }
 
     fn update_selection(&mut self, pos: Point<Pixels>) {
@@ -1151,6 +1246,7 @@ impl Element for TextView {
                     handle.scroll_px_offset_for_scrollbar().y
                 });
             state.update_bounds(bounds);
+            state.selectable_text.clear();
             let mut selection_settled = false;
             if state.selection_pointer.is_some() {
                 state.update_selection_from_pointer();
@@ -1209,9 +1305,19 @@ impl Element for TextView {
                         return;
                     }
 
-                    state.update(cx, |state, _| {
-                        state.start_selection(event.position);
+                    let handled_multiple_click = state.update(cx, |state, _| {
+                        if event.click_count >= 2
+                            && state.select_text_at(event.position, event.click_count)
+                        {
+                            true
+                        } else {
+                            state.start_selection(event.position);
+                            false
+                        }
                     });
+                    if handled_multiple_click {
+                        window.prevent_default();
+                    }
                     cx.notify(entity_id);
                 }
             });
@@ -1287,6 +1393,38 @@ impl Element for TextView {
             }
         }
     }
+}
+
+fn surrounding_word_range(text: &str, index: usize) -> std::ops::Range<usize> {
+    let index = index.min(text.len());
+    let mut previous_non_whitespace = None;
+
+    for (start, segment) in text.split_word_bound_indices() {
+        let end = start + segment.len();
+        let is_whitespace = segment.chars().all(char::is_whitespace);
+
+        if start <= index && index < end {
+            if is_whitespace {
+                return previous_non_whitespace.unwrap_or(start..end);
+            }
+            return start..end;
+        }
+
+        if end <= index && !is_whitespace {
+            previous_non_whitespace = Some(start..end);
+        }
+    }
+
+    previous_non_whitespace.unwrap_or(index..index)
+}
+
+fn surrounding_line_range(text: &str, index: usize) -> std::ops::Range<usize> {
+    let index = index.min(text.len());
+    let start = text[..index].rfind('\n').map_or(0, |newline| newline + 1);
+    let end = text[index..]
+        .find('\n')
+        .map_or(text.len(), |newline| index + newline);
+    start..end
 }
 
 fn parse_content(
@@ -1376,6 +1514,26 @@ mod tests {
     use super::*;
     use gpui::{Bounds, ListAlignment, Modifiers, point, px, size};
     use std::fmt::Write as _;
+
+    #[test]
+    fn double_click_ranges_follow_unicode_word_boundaries() {
+        let text = "Hello 世界 foo.bar";
+
+        assert_eq!(surrounding_word_range(text, 2), 0..5);
+        assert_eq!(surrounding_word_range(text, 6), 6..9);
+        assert_eq!(surrounding_word_range(text, 14), 13..20);
+        assert_eq!(surrounding_word_range(text, 16), 13..20);
+        assert_eq!(surrounding_word_range(text, 17), 13..20);
+    }
+
+    #[test]
+    fn triple_click_ranges_select_the_surrounding_logical_line() {
+        let text = "first line\nsecond line\nthird line";
+
+        assert_eq!(surrounding_line_range(text, 3), 0..10);
+        assert_eq!(surrounding_line_range(text, 15), 11..22);
+        assert_eq!(surrounding_line_range(text, text.len()), 23..33);
+    }
 
     #[test]
     fn test_text_view_state_selection_bounds() {
@@ -1561,6 +1719,223 @@ mod tests {
             assert_eq!(state.selection_positions, selection_before);
             assert!(!state.is_selecting);
             assert!(state.has_selection());
+        });
+    }
+
+    #[gpui::test]
+    fn multiple_clicks_select_words_and_paragraphs(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let text_state = cx.new(TextViewState::new);
+
+        struct SelectionView {
+            text_state: Entity<TextViewState>,
+        }
+
+        impl gpui::Render for SelectionView {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                TextView::markdown_with_state(
+                    "multiple-click-selection",
+                    "Hello world from a selectable paragraph.",
+                    self.text_state.clone(),
+                    cx,
+                )
+                .selectable(true)
+                .w(px(600.0))
+                .h(px(120.0))
+            }
+        }
+
+        let (_view, cx) = cx.add_window_view(|_, _| SelectionView {
+            text_state: text_state.clone(),
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        let click_position = cx.update(|_, app| {
+            text_state
+                .read(app)
+                .selectable_text
+                .first()
+                .expect("paragraph text layout should be registered")
+                .bounds
+                .origin
+                + point(px(18.0), px(10.0))
+        });
+        let selected = cx.update(|window, app| {
+            let selected = text_state.update(app, |state, _| {
+                state.select_text_at(click_position, 2)
+            });
+            window.refresh();
+            selected
+        });
+        assert!(selected, "double click should resolve to an inline text range");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                text_state.read(app).selection_text().as_deref().map(str::trim),
+                Some("Hello")
+            );
+        });
+
+        let selected = cx.update(|window, app| {
+            let selected = text_state.update(app, |state, _| {
+                state.select_text_at(click_position, 3)
+            });
+            window.refresh();
+            selected
+        });
+        assert!(selected, "triple click should resolve to an inline text range");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                text_state.read(app).selection_text().as_deref().map(str::trim),
+                Some("Hello world from a selectable paragraph.")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn double_click_selects_only_a_word_in_wrapped_text(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let text_state = cx.new(TextViewState::new);
+        let text = "Luna wins on absolute coding/agentic capability — it's the only one with an independent (AA) coding-agent score, and every shared benchmark points its way. V4 Flash wins decisively on cost (~7x cheaper input, ~21x cheaper output), open weights, and long-context economics, and its 0731 agent scores are unverified vendor claims.";
+
+        struct SelectionView {
+            text: SharedString,
+            text_state: Entity<TextViewState>,
+        }
+
+        impl gpui::Render for SelectionView {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                TextView::markdown_with_state(
+                    "wrapped-multiple-click-selection",
+                    self.text.clone(),
+                    self.text_state.clone(),
+                    cx,
+                )
+                .selectable(true)
+                .w(px(800.0))
+                .h(px(160.0))
+            }
+        }
+
+        let (_view, cx) = cx.add_window_view(|_, _| SelectionView {
+            text: text.into(),
+            text_state: text_state.clone(),
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        let click_position = cx.update(|_, app| {
+            let selectable = text_state
+                .read(app)
+                .selectable_text
+                .first()
+                .expect("wrapped paragraph text layout should be registered");
+            let index = selectable
+                .text
+                .find("economics")
+                .expect("target word should be present")
+                + 2;
+            selectable
+                .layout
+                .position_for_index(index)
+                .expect("target word should have a rendered position")
+                + point(px(1.0), px(1.0))
+        });
+        let selected = cx.update(|window, app| {
+            let selected = text_state.update(app, |state, _| {
+                state.select_text_at(click_position, 2)
+            });
+            window.refresh();
+            selected
+        });
+        assert!(selected, "double click should resolve to the wrapped word");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                text_state.read(app).selection_text().as_deref().map(str::trim),
+                Some("economics")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn table_drag_selection_stays_in_its_origin_cell(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let text_state = cx.new(TextViewState::new);
+
+        struct SelectionView {
+            text_state: Entity<TextViewState>,
+        }
+
+        impl gpui::Render for SelectionView {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                TextView::markdown_with_state(
+                    "table-cell-selection",
+                    "| Label | Primary detail | Neighbor |\n| --- | --- | --- |\n| Score | Alpha cell content | Beta must stay unselected |",
+                    self.text_state.clone(),
+                    cx,
+                )
+                .selectable(true)
+                .w(px(720.0))
+                .h(px(180.0))
+            }
+        }
+
+        let (_view, cx) = cx.add_window_view(|_, _| SelectionView {
+            text_state: text_state.clone(),
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        let (start, end, origin_scope, neighbor_scope) = cx.update(|_, app| {
+            let state = text_state.read(app);
+            let origin = state
+                .selectable_text
+                .iter()
+                .find(|text| text.text.contains("Alpha cell content"))
+                .expect("origin table cell should be registered");
+            let neighbor = state
+                .selectable_text
+                .iter()
+                .find(|text| text.text.contains("Beta must stay unselected"))
+                .expect("neighbor table cell should be registered");
+            (
+                origin
+                    .layout
+                    .position_for_index(0)
+                    .expect("origin text should have a rendered position")
+                    + point(px(1.0), origin.layout.line_height().half()),
+                neighbor
+                    .layout
+                    .position_for_index(neighbor.text.len())
+                    .expect("neighbor text should have a rendered end position")
+                    + point(px(1.0), neighbor.layout.line_height().half()),
+                origin.selection_scope,
+                neighbor.selection_scope,
+            )
+        });
+        assert!(origin_scope.is_some());
+        assert_ne!(origin_scope, neighbor_scope);
+
+        cx.update(|window, app| {
+            text_state.update(app, |state, _| {
+                state.start_selection(start);
+                state.update_selection(end);
+                state.end_selection();
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let selected = text_state
+                .read(app)
+                .selection_text()
+                .expect("the origin cell should have selected text");
+            assert!(selected.contains("Alpha cell content"));
+            assert!(!selected.contains("Beta must stay unselected"));
+            assert!(!selected.contains("Score"));
         });
     }
 

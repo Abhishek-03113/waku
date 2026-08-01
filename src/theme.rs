@@ -194,7 +194,9 @@ fn apply_component_theme(theme: Theme, window: Option<&mut Window>, cx: &mut App
     component.secondary_hover = theme.overlay;
     component.secondary_active = theme.overlay_strong;
     component.ring = theme.accent;
-    component.selection = theme.overlay_strong;
+    // Match the conspicuous blue selection used by browser text selection.
+    // Inline selections paint their glyphs above this translucent fill.
+    component.selection = hsla(211.0 / 360.0, 1.0, 0.50, 0.55);
     component.sidebar = theme.sidebar;
     component.sidebar_foreground = theme.text_secondary;
     component.sidebar_accent = theme.overlay;

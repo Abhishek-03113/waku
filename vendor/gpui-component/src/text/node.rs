@@ -216,6 +216,10 @@ impl Paragraph {
 
         text
     }
+
+    fn selection_scope(&self) -> usize {
+        Arc::as_ptr(&self.state) as usize
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1084,6 +1088,7 @@ impl Paragraph {
         node_cx: &NodeContext,
         _window: &mut Window,
         cx: &mut App,
+        selection_scope: Option<usize>,
     ) -> impl IntoElement {
         let span = self.span;
         let children = &self.children;
@@ -1114,6 +1119,7 @@ impl Paragraph {
                             links.clone(),
                             highlights.clone(),
                         )
+                        .selection_scope(selection_scope)
                         .into_any_element(),
                     );
                 }
@@ -1238,7 +1244,11 @@ impl Paragraph {
         if text.len() > 0 {
             self.state.lock().unwrap().set_text(text.into());
             child_nodes
-                .push(Inline::new(ix, self.state.clone(), links, highlights).into_any_element());
+                .push(
+                    Inline::new(ix, self.state.clone(), links, highlights)
+                        .selection_scope(selection_scope)
+                        .into_any_element(),
+                );
         }
 
         div().id(span.unwrap_or_default()).children(child_nodes)
@@ -1658,7 +1668,10 @@ impl Node {
                                                                 .min_w_0()
                                                                 .whitespace_normal()
                                                                 .child(cell.children.render(
-                                                                    node_cx, window, cx,
+                                                                    node_cx,
+                                                                    window,
+                                                                    cx,
+                                                                    Some(cell.children.selection_scope()),
                                                                 )),
                                                         ),
                                                 )
@@ -1845,7 +1858,7 @@ impl Node {
             Node::Paragraph(paragraph) => div()
                 .id("p")
                 .pb(mb)
-                .child(paragraph.render(node_cx, window, cx))
+                .child(paragraph.render(node_cx, window, cx, None))
                 .into_any_element(),
             Node::Heading { level, children } => {
                 let (text_size, font_weight) = match level {
@@ -1869,7 +1882,7 @@ impl Node {
                     .whitespace_normal()
                     .text_size(text_size)
                     .font_weight(font_weight)
-                    .child(children.render(node_cx, window, cx))
+                    .child(children.render(node_cx, window, cx, None))
                     .into_any_element()
             }
             Node::Blockquote { children } => div()
@@ -1925,7 +1938,7 @@ impl Node {
                                 .xsmall()
                                 .text_color(cx.theme().muted_foreground),
                             )
-                            .child(details.summary.render(node_cx, window, cx))
+                            .child(details.summary.render(node_cx, window, cx, None))
                             .on_mouse_down(MouseButton::Left, move |_, window, _| {
                                 // Disclosure clicks are controls, not the
                                 // beginning of a document text selection.
@@ -1991,7 +2004,7 @@ impl Node {
                 .children(
                     chunks
                         .iter()
-                        .map(|chunk| chunk.render(node_cx, window, cx).into_any_element())
+                        .map(|chunk| chunk.render(node_cx, window, cx, None).into_any_element())
                         .collect::<Vec<_>>(),
                 )
                 .into_any_element(),

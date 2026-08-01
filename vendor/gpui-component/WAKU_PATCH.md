@@ -35,6 +35,15 @@ header while an active drag can still leave the viewport to autoscroll.
 Secondary mouse input never starts, ends, or clears a text selection, and the
 custom context-menu trigger consumes the event after opening its menu. This
 keeps the selected range visibly highlighted while the menu is open.
+Double-clicking selectable text chooses the surrounding Unicode word, while a
+triple click selects the surrounding logical line (or the whole paragraph when
+it has no hard line breaks), matching browser transcript behavior. Programmatic
+selection endpoints sit inside their rendered lines so wrapped neighbors are
+not accidentally included, and the selection fill is painted below the glyphs
+so Waku can use the same conspicuous blue treatment as browser selection. Text
+inside a Markdown table carries a stable per-cell selection scope: a drag that
+starts in a cell remains limited to that cell even if the pointer crosses other
+columns or row labels.
 The list scrollbar offset is clamped to its measured maximum when a bottom-
 aligned transcript snaps to its pinned-tail state. This keeps the thumb valid
 and visible through the normal idle delay at the end of the transcript.

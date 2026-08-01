@@ -19,6 +19,7 @@ use crate::{global_state::GlobalState, input::Selection, text::node::LinkMark, A
 pub(super) struct Inline {
     id: ElementId,
     text: SharedString,
+    selection_scope: Option<usize>,
     links: Rc<Vec<(Range<usize>, LinkMark)>>,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     styled_text: StyledText,
@@ -55,9 +56,15 @@ impl Inline {
             links: Rc::new(links),
             highlights,
             text: text.clone(),
+            selection_scope: None,
             styled_text: StyledText::new(text),
             state,
         }
+    }
+
+    pub(super) fn selection_scope(mut self, selection_scope: Option<usize>) -> Self {
+        self.selection_scope = selection_scope;
+        self
     }
 
     /// Get link at given mouse position.
@@ -102,6 +109,9 @@ impl Inline {
         let text_view_state = text_view_state.read(cx);
         let is_selectable = text_view_state.is_selectable();
         if !text_view_state.has_selection() {
+            return (is_selectable, false, None);
+        }
+        if !text_view_state.selection_allows_scope(self.selection_scope) {
             return (is_selectable, false, None);
         }
 
@@ -295,9 +305,6 @@ impl Element for Inline {
         let mut state = self.state.lock().unwrap();
 
         let text_layout = self.styled_text.layout().clone();
-        self.styled_text
-            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
-
         // layout selections
         let (_, is_selection, selection) = self.layout_selections(&text_layout, window, cx);
 
@@ -305,6 +312,22 @@ impl Element for Inline {
 
         if let Some(selection) = &state.selection {
             Self::paint_selection(selection, &text_layout, &bounds, window, cx);
+        }
+
+        // Paint glyphs after the selection fill so an obvious selection color
+        // does not wash out the selected text.
+        self.styled_text
+            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+
+        if let Some(text_view_state) = GlobalState::global(cx).text_view_state().cloned() {
+            text_view_state.update(cx, |state, _| {
+                state.record_selectable_text(
+                    bounds,
+                    self.text.clone(),
+                    text_layout.clone(),
+                    self.selection_scope,
+                );
+            });
         }
 
         if let Some(hitbox) = prepaint {
