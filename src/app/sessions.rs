@@ -161,8 +161,7 @@ impl Waku {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_visible = !self.sidebar_visible;
-        cx.notify();
+        self.set_sidebar_visible(!self.sidebar_visible, cx);
     }
 
     pub(super) fn toggle_right_panel_action(
@@ -171,8 +170,121 @@ impl Waku {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.right_panel_visible = !self.right_panel_visible;
+        self.set_right_panel_visible(!self.right_panel_visible, cx);
+    }
+
+    pub(super) fn set_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.sidebar_visible == visible {
+            return;
+        }
+        self.sidebar_visible = visible;
+        self.persist_panel_layout();
         cx.notify();
+    }
+
+    pub(super) fn set_right_panel_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.right_panel_visible == visible {
+            return;
+        }
+        self.right_panel_visible = visible;
+        self.persist_panel_layout();
+        cx.notify();
+    }
+
+    pub(super) fn persist_panel_layout(&mut self) {
+        self.state.sidebar_visible = self.sidebar_visible;
+        self.state.right_panel_visible = self.right_panel_visible;
+        self.state.sidebar_width = self.sidebar_width;
+        self.state.right_panel_width = self.right_panel_width;
+        self.save();
+    }
+
+    pub(super) fn effective_panel_widths(&self, window: &Window) -> (f32, f32) {
+        fitted_panel_widths(
+            f32::from(window.viewport_size().width),
+            self.sidebar_visible,
+            self.right_panel_visible,
+            self.sidebar_width,
+            self.right_panel_width,
+        )
+    }
+
+    pub(super) fn begin_panel_resize(
+        &mut self,
+        target: PanelResizeTarget,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
+        let start_width = match target {
+            PanelResizeTarget::Sidebar => {
+                self.sidebar_width = sidebar_width;
+                crate::platform::set_sidebar_material_width(window, sidebar_width);
+                sidebar_width
+            }
+            PanelResizeTarget::RightPanel => {
+                self.right_panel_width = right_panel_width;
+                right_panel_width
+            }
+        };
+        self.panel_resize_drag = Some(PanelResizeDrag {
+            target,
+            start_mouse_x: f32::from(event.position.x),
+            start_width,
+        });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn resize_panel_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.panel_resize_drag else {
+            return;
+        };
+        let viewport_width = f32::from(window.viewport_size().width);
+        let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
+        let delta = f32::from(event.position.x) - drag.start_mouse_x;
+        match drag.target {
+            PanelResizeTarget::Sidebar => {
+                let maximum = SIDEBAR_MAX_WIDTH
+                    .min(viewport_width - MAIN_PANEL_MIN_WIDTH - right_panel_width)
+                    .max(SIDEBAR_MIN_WIDTH);
+                let width = (drag.start_width + delta).clamp(SIDEBAR_MIN_WIDTH, maximum);
+                if (self.sidebar_width - width).abs() < 0.5 {
+                    return;
+                }
+                self.sidebar_width = width;
+                crate::platform::set_sidebar_material_width(window, width);
+            }
+            PanelResizeTarget::RightPanel => {
+                let maximum = RIGHT_PANEL_MAX_WIDTH
+                    .min(viewport_width - MAIN_PANEL_MIN_WIDTH - sidebar_width)
+                    .max(RIGHT_PANEL_MIN_WIDTH);
+                let width = (drag.start_width - delta).clamp(RIGHT_PANEL_MIN_WIDTH, maximum);
+                if (self.right_panel_width - width).abs() < 0.5 {
+                    return;
+                }
+                self.right_panel_width = width;
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn finish_panel_resize(
+        &mut self,
+        event: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button == MouseButton::Left && self.panel_resize_drag.take().is_some() {
+            self.persist_panel_layout();
+            cx.notify();
+        }
     }
 
     pub(super) fn navigate_back_action(

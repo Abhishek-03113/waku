@@ -149,8 +149,7 @@ impl Waku {
             })
             .on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
-                this.sidebar_visible = !this.sidebar_visible;
-                cx.notify();
+                this.set_sidebar_visible(!this.sidebar_visible, cx);
             }))
     }
 
@@ -238,8 +237,11 @@ impl Waku {
             ))
     }
 
-    pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_sidebar(&self, width: f32, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
+        let is_resizing = self
+            .panel_resize_drag
+            .is_some_and(|drag| drag.target == PanelResizeTarget::Sidebar);
         let selected_session = self.state.selected_session;
 
         let today = Local::now().date_naive();
@@ -402,12 +404,16 @@ impl Waku {
         }
 
         div()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(width))
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
-            .bg(theme.sidebar)
+            .bg(if is_resizing {
+                theme.sidebar_drag_background
+            } else {
+                theme.sidebar
+            })
             .child(self.render_sidebar_titlebar(cx))
             .child(
                 div()

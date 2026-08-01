@@ -10,6 +10,7 @@ impl Waku {
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
+            .on_action(cx.listener(Self::toggle_right_panel_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
             .on_action(cx.listener(Self::focus_composer_action))
@@ -96,7 +97,7 @@ impl Waku {
         }
 
         div()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(DEFAULT_SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
             .flex()

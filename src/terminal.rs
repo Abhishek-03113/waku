@@ -22,6 +22,7 @@ use gpui::{
 };
 use parking_lot::Mutex;
 
+use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
 use crate::theme::Theme;
 
 const TERMINAL_CELL_WIDTH: f32 = 7.2;
@@ -388,6 +389,7 @@ pub struct TerminalView {
     title: String,
     exited: bool,
     scroll_accumulator: f32,
+    panel_width: f32,
 }
 
 impl TerminalView {
@@ -425,11 +427,16 @@ impl TerminalView {
             working_directory,
             exited: false,
             scroll_accumulator: 0.0,
+            panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
         }
     }
 
     pub fn working_directory(&self) -> &Path {
         &self.working_directory
+    }
+
+    pub fn set_panel_width(&mut self, width: f32) {
+        self.panel_width = width;
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) -> bool {
@@ -514,7 +521,7 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current(cx);
         let viewport = window.viewport_size();
-        let panel_width = (f32::from(viewport.width) * 0.4).clamp(360.0, 460.0);
+        let panel_width = self.panel_width;
         let body_height = (f32::from(viewport.height) - 48.0 - TERMINAL_TOOLBAR_HEIGHT).max(120.0);
         let columns = ((panel_width - TERMINAL_PADDING_X * 2.0) / TERMINAL_CELL_WIDTH)
             .floor()

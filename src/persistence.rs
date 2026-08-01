@@ -12,6 +12,13 @@ use crate::theme::ThemePreference;
 const STATE_VERSION: u32 = 3;
 const OLDEST_SUPPORTED_STATE_VERSION: u32 = 1;
 
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
+pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
+
+fn default_panel_visibility() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PersistedState {
     pub version: u32,
@@ -30,6 +37,22 @@ pub struct PersistedState {
     pub favorite_models: Vec<FavoriteModel>,
     #[serde(default)]
     pub theme: ThemePreference,
+    #[serde(default = "default_panel_visibility")]
+    pub sidebar_visible: bool,
+    #[serde(default = "default_panel_visibility")]
+    pub right_panel_visible: bool,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    #[serde(default = "default_right_panel_width")]
+    pub right_panel_width: f32,
+}
+
+fn default_sidebar_width() -> f32 {
+    DEFAULT_SIDEBAR_WIDTH
+}
+
+fn default_right_panel_width() -> f32 {
+    DEFAULT_RIGHT_PANEL_WIDTH
 }
 
 impl PersistedState {
@@ -46,6 +69,10 @@ impl PersistedState {
             last_service_tier: None,
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
+            sidebar_visible: true,
+            right_panel_visible: true,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
         }
     }
 
@@ -64,6 +91,10 @@ impl PersistedState {
             last_service_tier: None,
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
+            sidebar_visible: true,
+            right_panel_visible: true,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
         }
     }
 
@@ -202,6 +233,10 @@ mod tests {
             model: "gpt-5.6-luna".into(),
         });
         state.theme = ThemePreference::Light;
+        state.sidebar_visible = false;
+        state.right_panel_visible = false;
+        state.sidebar_width = 318.0;
+        state.right_panel_width = 612.0;
         state.sessions[0].transcript_blocks.extend([
             TranscriptBlock {
                 after_message: 1,
@@ -243,6 +278,10 @@ mod tests {
         );
         assert_eq!(restored.favorite_models, state.favorite_models);
         assert_eq!(restored.theme, ThemePreference::Light);
+        assert!(!restored.sidebar_visible);
+        assert!(!restored.right_panel_visible);
+        assert_eq!(restored.sidebar_width, 318.0);
+        assert_eq!(restored.right_panel_width, 612.0);
         assert_eq!(restored.sessions[0].transcript_blocks.len(), 2);
         assert!(matches!(
             &restored.sessions[0].transcript_blocks[0].content,
@@ -286,6 +325,10 @@ mod tests {
             .unwrap()
             .remove("last_reasoning_effort");
         value.as_object_mut().unwrap().remove("last_service_tier");
+        value.as_object_mut().unwrap().remove("sidebar_visible");
+        value.as_object_mut().unwrap().remove("right_panel_visible");
+        value.as_object_mut().unwrap().remove("sidebar_width");
+        value.as_object_mut().unwrap().remove("right_panel_width");
         value["sessions"][0]
             .as_object_mut()
             .unwrap()
@@ -302,6 +345,10 @@ mod tests {
         assert!(restored.last_model.is_none());
         assert!(restored.last_reasoning_effort.is_none());
         assert!(restored.last_service_tier.is_none());
+        assert!(restored.sidebar_visible);
+        assert!(restored.right_panel_visible);
+        assert_eq!(restored.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+        assert_eq!(restored.right_panel_width, DEFAULT_RIGHT_PANEL_WIDTH);
         assert!(restored.sessions[0].model.is_none());
         assert_eq!(
             restored.sessions[0]

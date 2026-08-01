@@ -51,6 +51,7 @@ pub struct Theme {
     pub is_dark: bool,
     pub canvas: Hsla,
     pub sidebar: Hsla,
+    pub sidebar_drag_background: Hsla,
     pub sidebar_item_background: Hsla,
     pub surface: Hsla,
     pub raised: Hsla,
@@ -70,6 +71,7 @@ pub struct Theme {
 
     /// Brand coral. Logo, caret, live-activity pulses — nothing structural.
     pub accent: Hsla,
+    pub resize_handle: Hsla,
 
     /// Light fill for primary buttons (send, allow), dark glyph on top.
     pub inverse: Hsla,
@@ -95,6 +97,7 @@ impl Theme {
             is_dark: true,
             canvas: rgb(0x1A1A1A).into(),
             sidebar: transparent_black(),
+            sidebar_drag_background: rgb(0x181818).into(),
             sidebar_item_background: hsla(0.0, 0.0, 0.941, 0.06),
             surface: rgb(0x1A1A1A).into(),
             raised: rgb(0x232323).into(),
@@ -113,6 +116,7 @@ impl Theme {
             text_ghost: rgb(0x575757).into(),
 
             accent: rgb(0xE2795B).into(),
+            resize_handle: rgb(0x3B82F6).into(),
 
             inverse: rgb(0xE7E9EC).into(),
             on_inverse: rgb(0x17181C).into(),
@@ -129,6 +133,7 @@ impl Theme {
             is_dark: false,
             canvas: rgb(0xF6F5F6).into(),
             sidebar: transparent_black(),
+            sidebar_drag_background: rgb(0xF3F3F3).into(),
             sidebar_item_background: hsla(0.0, 0.0, 0.078, 0.06),
             surface: rgb(0xF6F5F6).into(),
             raised: rgb(0xECECEC).into(),
@@ -147,6 +152,7 @@ impl Theme {
             text_ghost: rgb(0xA4A4A4).into(),
 
             accent: rgb(0xC85F44).into(),
+            resize_handle: rgb(0x2563EB).into(),
 
             inverse: rgb(0x202227).into(),
             on_inverse: rgb(0xF8F8F9).into(),

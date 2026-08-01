@@ -1,5 +1,50 @@
 use super::*;
 
+impl Waku {
+    pub(super) fn render_panel_resize_handle(
+        &self,
+        id: &'static str,
+        target: PanelResizeTarget,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = Theme::current(cx);
+        let active = self
+            .panel_resize_drag
+            .is_some_and(|drag| drag.target == target);
+        div()
+            .id(id)
+            .absolute()
+            .top_0()
+            .left(px(-5.0))
+            .w(px(10.0))
+            .h_full()
+            .group("panel-resize-handle")
+            .cursor_col_resize()
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(4.0))
+                    .w(px(2.0))
+                    .h_full()
+                    .bg(if active {
+                        theme.resize_handle
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .group_hover("panel-resize-handle", |element| {
+                        element.bg(theme.resize_handle)
+                    }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event, window, cx| {
+                    this.begin_panel_resize(target, event, window, cx);
+                }),
+            )
+    }
+}
+
 impl Render for Waku {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.settings_page.is_some() {
@@ -13,6 +58,7 @@ impl Render for Waku {
             .unwrap_or(true);
         let permission = self.render_permission(cx);
         let toast = self.toast.clone();
+        let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
         div()
             .key_context("Waku")
             .on_action(|_: &CloseWindow, window, _| crate::platform::hide_window(window))
@@ -25,12 +71,14 @@ impl Render for Waku {
             .on_action(cx.listener(Self::focus_composer_action))
             .on_action(cx.listener(Self::cancel_turn_action))
             .capture_any_mouse_down(cx.listener(Self::navigation_mouse_down))
+            .on_mouse_move(cx.listener(Self::resize_panel_mouse_move))
+            .capture_any_mouse_up(cx.listener(Self::finish_panel_resize))
             .size_full()
             .flex()
             .text_color(theme.text)
             .font_family(".SystemUIFont")
             .when(self.sidebar_visible, |root| {
-                root.child(self.render_sidebar(cx))
+                root.child(self.render_sidebar(sidebar_width, cx))
             })
             .child(
                 div()
@@ -80,10 +128,18 @@ impl Render for Waku {
                         element
                             .child(self.render_composer(window, cx))
                             .child(self.render_workspace_footer(cx))
+                    })
+                    .relative()
+                    .when(self.sidebar_visible, |element| {
+                        element.child(self.render_panel_resize_handle(
+                            "sidebar-resize-handle",
+                            PanelResizeTarget::Sidebar,
+                            cx,
+                        ))
                     }),
             )
             .when(self.right_panel_visible, |root| {
-                root.child(self.render_right_panel(cx))
+                root.child(self.render_right_panel(right_panel_width, cx))
             })
             .into_any_element()
     }

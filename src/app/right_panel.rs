@@ -382,7 +382,7 @@ impl Waku {
             });
         self.right_panel_active_surface = Some(index);
         self.reveal_right_panel_tab(index);
-        self.right_panel_visible = true;
+        self.set_right_panel_visible(true, cx);
         cx.notify();
     }
 
@@ -394,7 +394,7 @@ impl Waku {
             )
         {
             self.right_panel_surfaces[active] = RightPanelSurface::File(relative_path);
-            self.right_panel_visible = true;
+            self.set_right_panel_visible(true, cx);
             cx.notify();
             return;
         }
@@ -449,12 +449,11 @@ impl Waku {
             })
             .on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
-                this.right_panel_visible = !this.right_panel_visible;
-                cx.notify();
+                this.set_right_panel_visible(!this.right_panel_visible, cx);
             }))
     }
 
-    pub(super) fn render_right_panel(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn render_right_panel(&self, width: f32, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::current(cx);
         let body = match self.active_right_panel_surface().cloned() {
             None => self.render_right_panel_chooser(cx).into_any_element(),
@@ -464,6 +463,9 @@ impl Waku {
                 .right_panel_terminals
                 .get(&terminal_id)
                 .cloned()
+                .inspect(|terminal| {
+                    terminal.update(cx, |terminal, _| terminal.set_panel_width(width));
+                })
                 .map(IntoElement::into_any_element)
                 .unwrap_or_else(|| {
                     self.render_right_panel_empty_message(
@@ -483,9 +485,7 @@ impl Waku {
 
         div()
             .id("right-panel")
-            .w(gpui::relative(RIGHT_PANEL_WIDTH_FRACTION))
-            .min_w(px(RIGHT_PANEL_MIN_WIDTH))
-            .max_w(px(RIGHT_PANEL_MAX_WIDTH))
+            .w(px(width))
             .h_full()
             .flex_none()
             .flex()
@@ -494,8 +494,14 @@ impl Waku {
             .border_l_1()
             .border_color(theme.border_strong)
             .bg(theme.surface)
+            .relative()
             .child(self.render_right_panel_header(cx))
             .child(body)
+            .child(self.render_panel_resize_handle(
+                "right-panel-resize-handle",
+                PanelResizeTarget::RightPanel,
+                cx,
+            ))
     }
 
     fn ensure_right_panel_terminal(&mut self, terminal_id: Uuid, cx: &mut Context<Self>) {

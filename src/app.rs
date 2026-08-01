@@ -11,10 +11,10 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, NavigationDirection, PathPromptOptions, Pixels, Point, Render,
-    ScrollHandle, SharedString, Size, Stateful, StyleRefinement, WeakEntity, Window, canvas, div,
-    fill, linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px, rems,
-    size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
+    PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString, Size, Stateful,
+    StyleRefinement, WeakEntity, Window, canvas, div, fill, linear_color_stop, linear_gradient,
+    list, point, prelude::*, pulsating_between, px, rems, size,
 };
 use uuid::Uuid;
 
@@ -37,7 +37,9 @@ use gpui_component::text::{
 use gpui_component::tooltip::Tooltip;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::persistence::{PersistedState, StateStore};
+use crate::persistence::{
+    DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH, PersistedState, StateStore,
+};
 use crate::terminal::TerminalView;
 use crate::theme::{Theme, ThemePreference};
 use crate::ui::{
@@ -51,10 +53,11 @@ use crate::{
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
-const SIDEBAR_WIDTH: f32 = 252.0;
-const RIGHT_PANEL_MIN_WIDTH: f32 = 360.0;
-const RIGHT_PANEL_MAX_WIDTH: f32 = 460.0;
-const RIGHT_PANEL_WIDTH_FRACTION: f32 = 0.4;
+const SIDEBAR_MIN_WIDTH: f32 = 180.0;
+const SIDEBAR_MAX_WIDTH: f32 = 420.0;
+const RIGHT_PANEL_MIN_WIDTH: f32 = 280.0;
+const RIGHT_PANEL_MAX_WIDTH: f32 = 720.0;
+const MAIN_PANEL_MIN_WIDTH: f32 = 360.0;
 const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
 const STREAM_MARKDOWN_DELAY: Duration = Duration::from_millis(32);
@@ -87,6 +90,87 @@ enum ModelPickerTab {
 enum SettingsPage {
     General,
     Appearance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PanelResizeTarget {
+    Sidebar,
+    RightPanel,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PanelResizeDrag {
+    target: PanelResizeTarget,
+    start_mouse_x: f32,
+    start_width: f32,
+}
+
+fn sanitize_panel_width(width: f32, default: f32, min: f32, max: f32) -> f32 {
+    if width.is_finite() {
+        width.clamp(min, max)
+    } else {
+        default
+    }
+}
+
+fn fitted_panel_widths(
+    viewport_width: f32,
+    sidebar_visible: bool,
+    right_panel_visible: bool,
+    sidebar_width: f32,
+    right_panel_width: f32,
+) -> (f32, f32) {
+    let sidebar_min = if sidebar_visible {
+        SIDEBAR_MIN_WIDTH
+    } else {
+        0.0
+    };
+    let right_panel_min = if right_panel_visible {
+        RIGHT_PANEL_MIN_WIDTH
+    } else {
+        0.0
+    };
+    let mut sidebar = if sidebar_visible {
+        sanitize_panel_width(
+            sidebar_width,
+            DEFAULT_SIDEBAR_WIDTH,
+            SIDEBAR_MIN_WIDTH,
+            SIDEBAR_MAX_WIDTH,
+        )
+    } else {
+        0.0
+    };
+    let mut right_panel = if right_panel_visible {
+        sanitize_panel_width(
+            right_panel_width,
+            DEFAULT_RIGHT_PANEL_WIDTH,
+            RIGHT_PANEL_MIN_WIDTH,
+            RIGHT_PANEL_MAX_WIDTH,
+        )
+    } else {
+        0.0
+    };
+
+    let available = (viewport_width - MAIN_PANEL_MIN_WIDTH).max(0.0);
+    let mut overflow = (sidebar + right_panel - available).max(0.0);
+    let right_reduction = overflow.min((right_panel - right_panel_min).max(0.0));
+    right_panel -= right_reduction;
+    overflow -= right_reduction;
+    let sidebar_reduction = overflow.min((sidebar - sidebar_min).max(0.0));
+    sidebar -= sidebar_reduction;
+    overflow -= sidebar_reduction;
+
+    // The configured minimum window easily fits both panel minima. This final
+    // fallback only protects layout if the host temporarily reports a smaller
+    // viewport during a resize or display transition.
+    if overflow > 0.0 {
+        let right_reduction = overflow.min(right_panel);
+        right_panel -= right_reduction;
+        overflow -= right_reduction;
+        sidebar = (sidebar - overflow).max(0.0);
+    }
+
+    (sidebar, right_panel)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -425,7 +509,10 @@ pub struct Waku {
     expanded_turns: HashSet<Uuid>,
     session_navigation: SessionNavigation,
     sidebar_visible: bool,
+    sidebar_width: f32,
     right_panel_visible: bool,
+    right_panel_width: f32,
+    panel_resize_drag: Option<PanelResizeDrag>,
     right_panel_surfaces: Vec<RightPanelSurface>,
     right_panel_active_surface: Option<usize>,
     right_panel_tabs_scroll_handle: ScrollHandle,
@@ -496,7 +583,24 @@ impl Waku {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
         let mut state = store.load_or_fresh(cwd);
+        let sidebar_visible = state.sidebar_visible;
+        let right_panel_visible = state.right_panel_visible;
+        let sidebar_width = sanitize_panel_width(
+            state.sidebar_width,
+            DEFAULT_SIDEBAR_WIDTH,
+            SIDEBAR_MIN_WIDTH,
+            SIDEBAR_MAX_WIDTH,
+        );
+        let right_panel_width = sanitize_panel_width(
+            state.right_panel_width,
+            DEFAULT_RIGHT_PANEL_WIDTH,
+            RIGHT_PANEL_MIN_WIDTH,
+            RIGHT_PANEL_MAX_WIDTH,
+        );
+        state.sidebar_width = sidebar_width;
+        state.right_panel_width = right_panel_width;
         crate::theme::apply_theme_preference(state.theme, window, cx);
+        crate::platform::set_sidebar_material_width(window, sidebar_width);
         let project_paths = state
             .projects
             .iter()
@@ -668,8 +772,11 @@ impl Waku {
                 expanded_activity_items: HashSet::new(),
                 expanded_turns: HashSet::new(),
                 session_navigation: SessionNavigation::default(),
-                sidebar_visible: true,
-                right_panel_visible: true,
+                sidebar_visible,
+                sidebar_width,
+                right_panel_visible,
+                right_panel_width,
+                panel_resize_drag: None,
                 right_panel_surfaces: Vec::new(),
                 right_panel_active_surface: None,
                 right_panel_tabs_scroll_handle: ScrollHandle::new(),

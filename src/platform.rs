@@ -146,6 +146,46 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
 #[cfg(not(target_os = "macos"))]
 pub fn configure_sidebar_material(_: &Window, _: bool) {}
 
+#[cfg(target_os = "macos")]
+pub fn set_sidebar_material_width(window: &Window, width: f32) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSView;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let Some(_main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+
+    unsafe {
+        let view = handle.ns_view.cast::<NSView>().as_ref();
+        let Some(native_window) = view.window() else {
+            return;
+        };
+        SIDEBAR_TINT_VIEW.with_borrow(|slot| {
+            let Some(tint_view) = slot.as_ref().filter(|tint_view| {
+                tint_view
+                    .window()
+                    .as_deref()
+                    .is_some_and(|window| std::ptr::eq(window, native_window.as_ref()))
+            }) else {
+                return;
+            };
+            let mut frame = tint_view.frame();
+            frame.size.width = width.into();
+            tint_view.setFrame(frame);
+        });
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_sidebar_material_width(_: &Window, _: f32) {}
+
 /// Follow macOS when `dark` is `None`, otherwise force the native titlebar,
 /// traffic lights, menus, and vibrancy to the selected appearance.
 #[cfg(target_os = "macos")]

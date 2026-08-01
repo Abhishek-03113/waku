@@ -424,17 +424,9 @@ impl Waku {
     }
 
     pub(super) fn sync_transcript_layout_width(&self, window: &Window) -> bool {
-        let sidebar_width = if self.sidebar_visible {
-            px(SIDEBAR_WIDTH)
-        } else {
-            Pixels::ZERO
-        };
-        let right_panel_width = if self.right_panel_visible {
-            (window.viewport_size().width * RIGHT_PANEL_WIDTH_FRACTION)
-                .clamp(px(RIGHT_PANEL_MIN_WIDTH), px(RIGHT_PANEL_MAX_WIDTH))
-        } else {
-            Pixels::ZERO
-        };
+        let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
+        let sidebar_width = px(sidebar_width);
+        let right_panel_width = px(right_panel_width);
         let content_width =
             (window.viewport_size().width - sidebar_width - right_panel_width - px(40.0))
                 .clamp(px(1.0), px(CONTENT_MAX_WIDTH));

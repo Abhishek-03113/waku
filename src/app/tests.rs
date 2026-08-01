@@ -2,12 +2,12 @@ use super::{
     SessionNavigation, StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*,
     append_text_delta_to_session, apply_transcript_visibility_splice, assistant_response_footer,
     assistant_response_footer_index, assistant_response_footer_time, escape_html,
-    estimated_message_height, estimated_text_height, fenced_code, folded_transcript_row_kinds,
-    format_worked_duration, maintain_transcript_anchor, markdown_estimation_source,
-    message_starts_followup_turn, pop_stream_chunk, prepare_transcript_row_remeasurement,
-    scale_scrollbar_offset, scroll_top_after_row_invalidation,
-    stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
-    transcript_row_kinds, transcript_row_splice,
+    estimated_message_height, estimated_text_height, fenced_code, fitted_panel_widths,
+    folded_transcript_row_kinds, format_worked_duration, maintain_transcript_anchor,
+    markdown_estimation_source, message_starts_followup_turn, pop_stream_chunk,
+    prepare_transcript_row_remeasurement, scale_scrollbar_offset,
+    scroll_top_after_row_invalidation, stabilized_transcript_anchor_end_space, take_stream_prefix,
+    transcript_anchor_end_space, transcript_row_kinds, transcript_row_splice,
 };
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
@@ -55,6 +55,23 @@ fn session_navigation_prunes_deleted_tasks() {
     navigation.remove(third);
     assert_eq!(navigation.go_back(second), None);
     assert_eq!(navigation.go_forward(second), None);
+}
+
+#[test]
+fn panel_widths_preserve_main_content_when_the_window_narrows() {
+    let (sidebar, right_panel) = fitted_panel_widths(980.0, true, true, 420.0, 720.0);
+
+    assert_eq!(sidebar, 340.0);
+    assert_eq!(right_panel, 280.0);
+    assert_eq!(980.0 - sidebar - right_panel, 360.0);
+}
+
+#[test]
+fn hidden_panels_do_not_consume_layout_width() {
+    let (sidebar, right_panel) = fitted_panel_widths(980.0, false, true, 420.0, 720.0);
+
+    assert_eq!(sidebar, 0.0);
+    assert_eq!(right_panel, 620.0);
 }
 
 #[test]
