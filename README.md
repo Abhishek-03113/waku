@@ -1,6 +1,6 @@
 # Waku
 
-Waku is a fast, native macOS control plane for local coding agents. It is built
+Waku is a fast, native, cross-platform control plane for local coding agents. It is built
 in Rust with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)
 and keeps projects, sessions, transcripts, and provider IDs on the local
 machine.
