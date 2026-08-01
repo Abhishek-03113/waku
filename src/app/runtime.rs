@@ -175,7 +175,7 @@ impl Waku {
             .iter()
             .find(|session| {
                 session.id == session_id
-                    && session.provider == ProviderKind::Codex
+                    && session.provider.supports_conversation_rollback()
                     && matches!(session.status, SessionStatus::Idle | SessionStatus::Failed)
             })
             .and_then(|session| {
@@ -192,7 +192,7 @@ impl Waku {
                     .map(|message| message.content.clone())
             })
         else {
-            self.toast = Some("That Codex message is not editable right now.".into());
+            self.toast = Some("That message is not editable right now.".into());
             cx.notify();
             return;
         };
@@ -242,45 +242,6 @@ impl Waku {
         }
         self.message_edit = None;
         self.submit_prompt(prompt, cx);
-    }
-
-    pub(super) fn rewind_user_message(
-        &mut self,
-        session_id: Uuid,
-        turn_count: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(prompt) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id && session.provider == ProviderKind::Claude)
-            .and_then(|session| {
-                let turn = session
-                    .turns
-                    .iter()
-                    .find(|turn| turn.turn_count == turn_count)?;
-                session
-                    .messages
-                    .iter()
-                    .find(|message| {
-                        message.turn_id == Some(turn.id) && message.role == MessageRole::User
-                    })
-                    .map(|message| message.content.clone())
-            })
-        else {
-            self.toast = Some("That Claude message is no longer available.".into());
-            cx.notify();
-            return;
-        };
-        if !self.rewind_before_turn(session_id, turn_count, cx) {
-            return;
-        }
-        self.composer
-            .update(cx, |composer, cx| composer.set_content(prompt, cx));
-        window.focus(&self.composer_focus(cx));
-        cx.notify();
     }
 
     fn rewind_before_turn(

@@ -1,6 +1,10 @@
 {
   "name": "waku-workspace",
   "type": "module",
+  "scripts": {
+    "dev": "bun ./scripts/dev.ts",
+    "release": "bun ./scripts/release.ts",
+  },
   "private": true,
   "devDependencies": {
     "@types/bun": "latest",

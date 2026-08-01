@@ -25,7 +25,7 @@ const projectRoot = resolve(import.meta.dir, "..");
 const help = `Create a production macOS DMG for Waku.
 
 Usage:
-  bun scripts/package-dmg.ts [options]
+  bun run release [options]
 
 Options:
   --output <path>               Output path (default: dist/Waku-<version>.dmg)
@@ -42,7 +42,7 @@ Options:
   --help                        Show this help
 
 Production example:
-  bun scripts/package-dmg.ts
+  bun run release
 
 Before the first production build, create the keychain profile with:
   xcrun notarytool store-credentials NOTARY

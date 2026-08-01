@@ -26,7 +26,6 @@ use crate::model::{
     ProviderProbe, ProviderResumeCursor, ReasoningBlock, RuntimeMode, SessionStatus,
     TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
-use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
@@ -155,17 +154,10 @@ fn traits_menu_choice(
     .selected(is_selected)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UserMessageActionKind {
-    Rewind,
-    Edit,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct UserMessageAction {
     session_id: Uuid,
     turn_count: usize,
-    kind: UserMessageActionKind,
 }
 
 #[derive(Clone)]

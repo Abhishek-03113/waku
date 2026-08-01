@@ -164,11 +164,9 @@ impl Waku {
         }
         let turn_id = message.turn_id?;
         let turn = session.turns.iter().find(|turn| turn.id == turn_id)?;
-        let kind = match session.provider {
-            ProviderKind::Claude => UserMessageActionKind::Rewind,
-            ProviderKind::Codex => UserMessageActionKind::Edit,
-            _ => return None,
-        };
+        if !session.provider.supports_conversation_rollback() {
+            return None;
+        }
         let retained_turn_count = turn.turn_count.saturating_sub(1);
         let project_path = self
             .state
@@ -189,7 +187,6 @@ impl Waku {
         Some(UserMessageAction {
             session_id: session.id,
             turn_count: turn.turn_count,
-            kind,
         })
     }
 

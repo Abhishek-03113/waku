@@ -83,152 +83,28 @@ fn render_message_footer(
         );
 
     if let Some(action) = user_message_action {
-        let (label, icon_path) = match action.kind {
-            UserMessageActionKind::Rewind => ("Rewind to here", "icons/rewind.svg"),
-            UserMessageActionKind::Edit => ("Edit message", "icons/pencil.svg"),
-        };
-        let trigger = Button::new(SharedString::from(format!(
-            "user-message-action-{message_id}"
-        )))
-        .w(px(27.0))
-        .h(px(27.0))
-        .p_0()
-        .border_0()
-        .rounded(px(8.0))
-        .ghost()
-        .bg(theme.overlay.opacity(0.0))
-        .child(icon(icon_path, 14.0, theme.text_secondary))
-        .tooltip(label)
-        .tab_stop(false);
-
-        footer = footer.child(match action.kind {
-            UserMessageActionKind::Rewind => {
-                let rewind_waku = waku.clone();
-                Popover::new(SharedString::from(format!(
-                    "rewind-message-confirmation-{message_id}"
+        let edit_waku = waku;
+        footer = footer.child(
+            div()
+                .id(SharedString::from(format!(
+                    "user-message-action-{message_id}"
                 )))
-                .anchor(Corner::BottomRight)
-                .appearance(false)
-                .trigger(trigger)
-                .content(move |_state, _window, popover_cx| {
-                    let popover = popover_cx.entity();
-                    let cancel_popover = popover.clone();
-                    let confirm_popover = popover.clone();
-                    let confirm_waku = rewind_waku.clone();
-
-                    div()
-                        .w(px(300.0))
-                        .rounded(px(12.0))
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .bg(theme.raised)
-                        .shadow_lg()
-                        .p(px(12.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(7.0))
-                                .child(icon("icons/alert.svg", 14.0, theme.danger))
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.text)
-                                        .child("Rewind to here?"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .mt(px(7.0))
-                                .text_size(px(11.5))
-                                .line_height(px(16.0))
-                                .text_color(theme.text_secondary)
-                                .child(
-                                    "This restores the conversation and workspace to before this message. Later messages and code changes will be removed.",
-                                ),
-                        )
-                        .child(
-                            div()
-                                .mt(px(12.0))
-                                .flex()
-                                .justify_end()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "cancel-rewind-message-{message_id}"
-                                        )))
-                                        .h(px(28.0))
-                                        .px(px(11.0))
-                                        .rounded(px(7.0))
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .bg(theme.overlay)
-                                        .flex()
-                                        .items_center()
-                                        .text_size(px(11.5))
-                                        .text_color(theme.text_secondary)
-                                        .cursor_default()
-                                        .hover(|element| element.bg(theme.overlay_strong))
-                                        .child("Cancel")
-                                        .on_click(move |_, window, cx| {
-                                            cancel_popover.update(cx, |popover, cx| {
-                                                popover.dismiss(window, cx);
-                                            });
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "confirm-rewind-message-{message_id}"
-                                        )))
-                                        .h(px(28.0))
-                                        .px(px(11.0))
-                                        .rounded(px(7.0))
-                                        .bg(theme.danger)
-                                        .flex()
-                                        .items_center()
-                                        .text_size(px(11.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.on_inverse)
-                                        .cursor_default()
-                                        .hover(|element| element.opacity(0.9))
-                                        .child("Rewind")
-                                        .on_click(move |_, window, cx| {
-                                            confirm_popover.update(cx, |popover, cx| {
-                                                popover.dismiss(window, cx);
-                                            });
-                                            let _ = confirm_waku.update(cx, |this, cx| {
-                                                this.rewind_user_message(
-                                                    action.session_id,
-                                                    action.turn_count,
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        }),
-                                ),
-                        )
-                })
-                .into_any_element()
-            }
-            UserMessageActionKind::Edit => {
-                let edit_waku = waku;
-                trigger
-                    .on_click(move |_, window, cx| {
-                        let _ = edit_waku.update(cx, |this, cx| {
-                            this.begin_message_edit(
-                                action.session_id,
-                                action.turn_count,
-                                window,
-                                cx,
-                            );
-                        });
-                    })
-                    .into_any_element()
-            }
-        });
+                .w(px(27.0))
+                .h(px(27.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .hover(|element| element.bg(theme.overlay_strong))
+                .child(icon("icons/pencil.svg", 14.0, theme.text_secondary))
+                .tooltip(|window, cx| Tooltip::new("Edit message").build(window, cx))
+                .on_click(move |_, window, cx| {
+                    let _ = edit_waku.update(cx, |this, cx| {
+                        this.begin_message_edit(action.session_id, action.turn_count, window, cx);
+                    });
+                }),
+        );
     }
 
     footer.into_any_element()
@@ -504,26 +380,18 @@ pub(super) fn render_message(
 
                 if let Some(action) = user_message_action {
                     let action_waku = waku.clone();
-                    let label = match action.kind {
-                        UserMessageActionKind::Rewind => "Rewind to here",
-                        UserMessageActionKind::Edit => "Edit Message",
-                    };
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        let _ = action_waku.update(cx, |this, cx| match action.kind {
-                            UserMessageActionKind::Rewind => this.rewind_user_message(
-                                action.session_id,
-                                action.turn_count,
-                                window,
-                                cx,
-                            ),
-                            UserMessageActionKind::Edit => this.begin_message_edit(
-                                action.session_id,
-                                action.turn_count,
-                                window,
-                                cx,
-                            ),
-                        });
-                    }));
+                    menu = menu.item(PopupMenuItem::new("Edit Message").on_click(
+                        move |_, window, cx| {
+                            let _ = action_waku.update(cx, |this, cx| {
+                                this.begin_message_edit(
+                                    action.session_id,
+                                    action.turn_count,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        },
+                    ));
                 }
 
                 menu
