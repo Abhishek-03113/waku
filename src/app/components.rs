@@ -97,8 +97,8 @@ fn render_message_footer(
                 .justify_center()
                 .cursor_default()
                 .hover(|element| element.bg(theme.overlay_strong))
-                .child(icon("icons/pencil.svg", 14.0, theme.text_secondary))
-                .tooltip(|window, cx| Tooltip::new("Edit message").build(window, cx))
+                .child(icon("icons/rewind.svg", 14.0, theme.text_secondary))
+                .tooltip(|window, cx| Tooltip::new("Revert to here").build(window, cx))
                 .on_click(move |_, window, cx| {
                     let _ = edit_waku.update(cx, |this, cx| {
                         this.begin_message_edit(action.session_id, action.turn_count, window, cx);
@@ -380,7 +380,7 @@ pub(super) fn render_message(
 
                 if let Some(action) = user_message_action {
                     let action_waku = waku.clone();
-                    menu = menu.item(PopupMenuItem::new("Edit Message").on_click(
+                    menu = menu.item(PopupMenuItem::new("Revert to Here").on_click(
                         move |_, window, cx| {
                             let _ = action_waku.update(cx, |this, cx| {
                                 this.begin_message_edit(

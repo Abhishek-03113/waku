@@ -42,6 +42,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "provider-openai",
     "provider-opencode",
     "provider-pi",
+    "rewind",
     "search",
     "settings",
     "slash",
