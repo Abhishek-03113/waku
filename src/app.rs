@@ -408,6 +408,8 @@ pub struct Waku {
     header_drag_armed: bool,
     branch: Option<String>,
     toast: Option<String>,
+    copied_message_feedback: HashMap<Uuid, u64>,
+    copied_message_generation: u64,
     message_edit: Option<MessageEdit>,
     transcript_rows: ListState,
     /// Active turns use top alignment so row remeasurement cannot invoke the
@@ -641,6 +643,8 @@ impl Waku {
                 header_drag_armed: false,
                 branch,
                 toast: None,
+                copied_message_feedback: HashMap::new(),
+                copied_message_generation: 0,
                 message_edit: None,
                 transcript_rows,
                 anchored_transcript_rows,

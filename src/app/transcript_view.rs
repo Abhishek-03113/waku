@@ -255,6 +255,10 @@ impl Waku {
                 .and_then(|session| session.messages.get(message_index))
                 .cloned()
                 .map(|message| {
+                    let copied = self.copied_message_feedback.contains_key(&message.id);
+                    let assistant_footer_copy_content = self
+                        .selected_session()
+                        .and_then(|session| assistant_response_footer(session, message_index));
                     let user_message_action = self.user_message_action_for_message(message_index);
                     let message_edit_input = user_message_action.and_then(|action| {
                         self.message_edit
@@ -273,6 +277,8 @@ impl Waku {
                     render_message(
                         &theme,
                         &message,
+                        assistant_footer_copy_content,
+                        copied,
                         user_message_action,
                         message_edit_input,
                         self.state.selected_session.unwrap_or_default(),

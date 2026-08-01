@@ -1,12 +1,12 @@
 use super::{
     SessionNavigation, StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*,
-    append_text_delta_to_session, apply_transcript_visibility_splice, escape_html,
-    estimated_message_height, estimated_text_height, fenced_code, folded_transcript_row_kinds,
-    format_worked_duration, maintain_transcript_anchor, markdown_estimation_source,
-    message_starts_followup_turn, pop_stream_chunk, prepare_transcript_row_remeasurement,
-    scale_scrollbar_offset, scroll_top_after_row_invalidation,
-    stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
-    transcript_row_kinds, transcript_row_splice,
+    append_text_delta_to_session, apply_transcript_visibility_splice, assistant_response_footer,
+    assistant_response_footer_index, escape_html, estimated_message_height, estimated_text_height,
+    fenced_code, folded_transcript_row_kinds, format_worked_duration, maintain_transcript_anchor,
+    markdown_estimation_source, message_starts_followup_turn, pop_stream_chunk,
+    prepare_transcript_row_remeasurement, scale_scrollbar_offset,
+    scroll_top_after_row_invalidation, stabilized_transcript_anchor_end_space, take_stream_prefix,
+    transcript_anchor_end_space, transcript_row_kinds, transcript_row_splice,
 };
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
@@ -459,6 +459,56 @@ fn settled_turn_folds_interim_text_and_work_but_keeps_the_final_response() {
             TurnBlock(1),
             Message(2)
         ]
+    );
+}
+
+#[test]
+fn assistant_response_footer_is_owned_by_the_terminal_part_and_combines_text() {
+    let project_id = Uuid::new_v4();
+    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "First text part.");
+    session.push_message(MessageRole::Assistant, "  ");
+    session.push_message(MessageRole::Assistant, "Final text part.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    assert_eq!(assistant_response_footer_index(&session, 1), Some(3));
+    assert_eq!(assistant_response_footer_index(&session, 3), Some(3));
+    assert_eq!(assistant_response_footer(&session, 1), None);
+    assert_eq!(
+        assistant_response_footer(&session, 3).as_deref(),
+        Some("First text part.\n\nFinal text part.")
+    );
+    assert!(
+        session.messages[1..]
+            .iter()
+            .all(|message| message.turn_id == Some(turn_id))
+    );
+}
+
+#[test]
+fn running_assistant_response_withholds_its_footer() {
+    let project_id = Uuid::new_v4();
+    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    session.begin_turn("Keep going");
+    session.push_message(MessageRole::Assistant, "Interim text.");
+
+    assert_eq!(assistant_response_footer_index(&session, 1), None);
+    assert_eq!(assistant_response_footer(&session, 1), None);
+}
+
+#[test]
+fn unkeyed_assistant_message_keeps_a_standalone_footer() {
+    let project_id = Uuid::new_v4();
+    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    session
+        .messages
+        .push(Message::new(MessageRole::Assistant, "Standalone response."));
+
+    assert_eq!(assistant_response_footer_index(&session, 0), Some(0));
+    assert_eq!(
+        assistant_response_footer(&session, 0).as_deref(),
+        Some("Standalone response.")
     );
 }
 

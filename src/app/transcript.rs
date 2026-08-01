@@ -21,9 +21,21 @@ impl Waku {
         let inner_height = match kind {
             TranscriptRowKind::Message(message_index) => self
                 .selected_session()
-                .and_then(|session| session.messages.get(message_index))
-                .map(|message| {
-                    estimated_message_height(message, self.transcript_layout_width.get(), true)
+                .and_then(|session| {
+                    let message = session.messages.get(message_index)?;
+                    let message_footer_visible = match message.role {
+                        MessageRole::User => true,
+                        MessageRole::Assistant => {
+                            assistant_response_footer_index(session, message_index)
+                                == Some(message_index)
+                        }
+                        MessageRole::System => false,
+                    };
+                    Some(estimated_message_height(
+                        message,
+                        self.transcript_layout_width.get(),
+                        message_footer_visible,
+                    ))
                 })
                 .unwrap_or(px(36.0)),
             TranscriptRowKind::TurnBlock(block_index) => self
@@ -558,6 +570,59 @@ pub(super) enum TranscriptRowKind {
     Message(usize),
     TurnBlock(usize),
     TurnFold(Uuid),
+}
+
+/// A provider can split one assistant response into several ordered text
+/// messages around reasoning and tool activity. The response footer belongs
+/// only to the terminal text part, once the turn has settled.
+pub(super) fn assistant_response_footer_index(
+    session: &AgentSession,
+    message_index: usize,
+) -> Option<usize> {
+    let message = session.messages.get(message_index)?;
+    if message.role != MessageRole::Assistant || message.streaming {
+        return None;
+    }
+    let Some(turn_id) = message.turn_id else {
+        return Some(message_index);
+    };
+    if session
+        .turns
+        .iter()
+        .find(|turn| turn.id == turn_id)
+        .is_some_and(|turn| turn.status == TurnStatus::Running)
+    {
+        return None;
+    }
+    session.messages.iter().rposition(|candidate| {
+        candidate.role == MessageRole::Assistant && candidate.turn_id == Some(turn_id)
+    })
+}
+
+pub(super) fn assistant_response_footer(
+    session: &AgentSession,
+    message_index: usize,
+) -> Option<String> {
+    if assistant_response_footer_index(session, message_index) != Some(message_index) {
+        return None;
+    }
+    let message = &session.messages[message_index];
+    let Some(turn_id) = message.turn_id else {
+        return Some(message.content.clone());
+    };
+    Some(
+        session
+            .messages
+            .iter()
+            .filter(|candidate| {
+                candidate.role == MessageRole::Assistant
+                    && candidate.turn_id == Some(turn_id)
+                    && !candidate.content.trim().is_empty()
+            })
+            .map(|candidate| candidate.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
 }
 
 pub(super) fn transcript_row_splice(

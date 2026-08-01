@@ -1,5 +1,7 @@
 use super::*;
 
+use chrono::{Datelike, Days};
+
 pub(super) fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
     div()
         .w(px(size))
@@ -18,24 +20,87 @@ pub(super) fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> 
 }
 
 pub(super) fn format_message_time(created_at: u64) -> String {
+    format_message_time_at(created_at, Local::now())
+}
+
+fn format_message_time_at(created_at: u64, now: DateTime<Local>) -> String {
     let Ok(seconds) = i64::try_from(created_at) else {
         return String::new();
     };
     DateTime::<Utc>::from_timestamp(seconds, 0)
         .map(|timestamp| {
-            timestamp
-                .with_timezone(&Local)
+            let timestamp = timestamp.with_timezone(&Local);
+            let message_date = timestamp.date_naive();
+            let today = now.date_naive();
+            let time = timestamp
                 .format("%I:%M %p")
                 .to_string()
                 .trim_start_matches('0')
-                .to_owned()
+                .to_owned();
+
+            if message_date >= today {
+                return time;
+            }
+
+            if today.pred_opt() == Some(message_date) {
+                return format!("Yesterday {time}");
+            }
+
+            let week_start = today
+                .checked_sub_days(Days::new(today.weekday().num_days_from_monday().into()))
+                .unwrap_or(today);
+            if message_date >= week_start {
+                return format!("{} {time}", timestamp.format("%A"));
+            }
+
+            let day = timestamp.day();
+            let ordinal_suffix = match day % 100 {
+                11..=13 => "th",
+                _ => match day % 10 {
+                    1 => "st",
+                    2 => "nd",
+                    3 => "rd",
+                    _ => "th",
+                },
+            };
+            let date = if message_date.year() == today.year() {
+                format!("{} {day}{ordinal_suffix}", timestamp.format("%b"))
+            } else {
+                format!(
+                    "{} {day}{ordinal_suffix} {}",
+                    timestamp.format("%b"),
+                    timestamp.year()
+                )
+            };
+            format!("{date}, {time}")
         })
         .unwrap_or_default()
+}
+
+impl Waku {
+    fn show_message_copied(&mut self, message_id: Uuid, cx: &mut Context<Self>) {
+        self.copied_message_generation = self.copied_message_generation.wrapping_add(1);
+        let generation = self.copied_message_generation;
+        self.copied_message_feedback.insert(message_id, generation);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied_message_feedback.get(&message_id) == Some(&generation) {
+                    this.copied_message_feedback.remove(&message_id);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
 }
 
 fn render_message_footer(
     theme: &Theme,
     message: &Message,
+    copy_content: String,
+    copied: bool,
     group_name: SharedString,
     align_right: bool,
     user_message_action: Option<UserMessageAction>,
@@ -43,7 +108,49 @@ fn render_message_footer(
 ) -> AnyElement {
     let theme = *theme;
     let message_id = message.id;
-    let copy_content = message.content.clone();
+    let copy_waku = waku.clone();
+    let footer_color = if theme.is_dark {
+        gpui::hsla(126.93 / 360.0, 0.000_000_1, 0.543_95, 1.0)
+    } else {
+        theme.text_ghost
+    };
+    let timestamp = div()
+        .h(px(27.0))
+        .px(px(4.0))
+        .flex()
+        .items_center()
+        .text_size(px(11.5))
+        .line_height(px(14.0))
+        .text_color(footer_color)
+        .child(format_message_time(message.created_at));
+    let copy_button = div()
+        .id(SharedString::from(format!("copy-message-{message_id}")))
+        .w(px(27.0))
+        .h(px(27.0))
+        .rounded(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_default()
+        .hover(|element| element.bg(theme.overlay_strong))
+        .child(icon(
+            if copied {
+                "icons/check.svg"
+            } else {
+                "icons/copy.svg"
+            },
+            14.0,
+            footer_color,
+        ))
+        .tooltip(move |window, cx| {
+            Tooltip::new(if copied { "Copied" } else { "Copy message" }).build(window, cx)
+        })
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
+            let _ = copy_waku.update(cx, |this, cx| {
+                this.show_message_copied(message_id, cx);
+            });
+        });
     let mut footer = div()
         .w_full()
         .h(px(27.0))
@@ -52,35 +159,14 @@ fn render_message_footer(
         .gap(px(1.0))
         .invisible()
         .group_hover(group_name, |element| element.visible())
-        .when(align_right, |element| element.justify_end())
-        .child(
-            div()
-                .h(px(27.0))
-                .px(px(4.0))
-                .flex()
-                .items_center()
-                .text_size(px(11.5))
-                .line_height(px(14.0))
-                .text_color(theme.text_ghost)
-                .child(format_message_time(message.created_at)),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("copy-message-{message_id}")))
-                .w(px(27.0))
-                .h(px(27.0))
-                .rounded(px(8.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_default()
-                .hover(|element| element.bg(theme.overlay_strong))
-                .child(icon("icons/copy.svg", 14.0, theme.text_secondary))
-                .tooltip(|window, cx| Tooltip::new("Copy message").build(window, cx))
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
-                }),
-        );
+        .when(!align_right, |element| element.ml(-px(7.0)))
+        .when(align_right, |element| element.justify_end());
+
+    footer = if align_right {
+        footer.child(timestamp).child(copy_button)
+    } else {
+        footer.child(copy_button).child(timestamp)
+    };
 
     if let Some(action) = user_message_action {
         let edit_waku = waku;
@@ -97,7 +183,7 @@ fn render_message_footer(
                 .justify_center()
                 .cursor_default()
                 .hover(|element| element.bg(theme.overlay_strong))
-                .child(icon("icons/rewind.svg", 14.0, theme.text_secondary))
+                .child(icon("icons/rewind.svg", 14.0, footer_color))
                 .tooltip(|window, cx| Tooltip::new("Revert to here").build(window, cx))
                 .on_click(move |_, window, cx| {
                     let _ = edit_waku.update(cx, |this, cx| {
@@ -114,6 +200,8 @@ fn render_message_footer(
 pub(super) fn render_message(
     theme: &Theme,
     message: &Message,
+    assistant_footer_copy_content: Option<String>,
+    copied: bool,
     user_message_action: Option<UserMessageAction>,
     message_edit_input: Option<Entity<ComposerInput>>,
     session_id: Uuid,
@@ -249,6 +337,8 @@ pub(super) fn render_message(
                 column = column.child(render_message_footer(
                     theme,
                     message,
+                    message.content.clone(),
+                    copied,
                     group_name,
                     true,
                     user_message_action,
@@ -310,14 +400,18 @@ pub(super) fn render_message(
                     theme.accent,
                 ));
             }
-            column = column.child(render_message_footer(
-                theme,
-                message,
-                group_name,
-                false,
-                None,
-                waku.clone(),
-            ));
+            if let Some(copy_content) = assistant_footer_copy_content {
+                column = column.child(render_message_footer(
+                    theme,
+                    message,
+                    copy_content,
+                    copied,
+                    group_name,
+                    false,
+                    None,
+                    waku.clone(),
+                ));
+            }
             column
         }
         MessageRole::System => div().w_full().flex().justify_center().child(
@@ -505,4 +599,69 @@ pub(super) fn git_branch(path: &std::path::Path) -> Option<String> {
         .ok()?;
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (!branch.is_empty()).then_some(branch)
+}
+
+#[cfg(test)]
+mod message_time_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn local_datetime(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("test date should be valid in the local timezone")
+    }
+
+    fn unix_seconds(timestamp: DateTime<Local>) -> u64 {
+        timestamp
+            .timestamp()
+            .try_into()
+            .expect("test date should have a positive Unix timestamp")
+    }
+
+    #[test]
+    fn message_time_includes_calendar_context_for_older_messages() {
+        let now = local_datetime(2026, 8, 9, 16, 0); // Sunday
+
+        assert_eq!(
+            format_message_time_at(unix_seconds(local_datetime(2026, 8, 9, 9, 5)), now),
+            "9:05 AM"
+        );
+        assert_eq!(
+            format_message_time_at(unix_seconds(local_datetime(2026, 8, 8, 17, 0)), now),
+            "Yesterday 5:00 PM"
+        );
+        assert_eq!(
+            format_message_time_at(unix_seconds(local_datetime(2026, 8, 7, 13, 12)), now),
+            "Friday 1:12 PM"
+        );
+        assert_eq!(
+            format_message_time_at(unix_seconds(local_datetime(2026, 5, 12, 23, 0)), now),
+            "May 12th, 11:00 PM"
+        );
+        assert_eq!(
+            format_message_time_at(unix_seconds(local_datetime(2024, 8, 4, 11, 0)), now),
+            "Aug 4th 2024, 11:00 AM"
+        );
+    }
+
+    #[test]
+    fn message_time_uses_correct_ordinal_suffixes() {
+        let now = local_datetime(2026, 8, 9, 16, 0);
+
+        for (day, suffix) in [
+            (1, "st"),
+            (2, "nd"),
+            (3, "rd"),
+            (11, "th"),
+            (12, "th"),
+            (13, "th"),
+            (21, "st"),
+        ] {
+            let formatted =
+                format_message_time_at(unix_seconds(local_datetime(2026, 5, day, 9, 0)), now);
+            assert!(formatted.starts_with(&format!("May {day}{suffix},")));
+        }
+    }
 }
