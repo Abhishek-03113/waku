@@ -41,9 +41,9 @@ it has no hard line breaks), matching browser transcript behavior. Programmatic
 selection endpoints sit inside their rendered lines so wrapped neighbors are
 not accidentally included, and the selection fill is painted below the glyphs
 so Waku can use the same conspicuous blue treatment as browser selection. Text
-inside a Markdown table carries a stable per-cell selection scope: a drag that
-starts in a cell remains limited to that cell even if the pointer crosses other
-columns or row labels.
+inside a Markdown table carries a stable per-cell scope for exact double- and
+triple-click ranges, while ordinary pointer drags remain document-wide and can
+cross cell, row, and table boundaries.
 The list scrollbar offset is clamped to its measured maximum when a bottom-
 aligned transcript snaps to its pinned-tail state. This keeps the thumb valid
 and visible through the normal idle delay at the end of the transcript.

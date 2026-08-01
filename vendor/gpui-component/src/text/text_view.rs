@@ -576,12 +576,10 @@ impl TextViewState {
     }
 
     fn start_selection(&mut self, pos: Point<Pixels>) {
-        self.active_selection_scope = self
-            .selectable_text
-            .iter()
-            .rev()
-            .find(|text| text.bounds.contains(&pos))
-            .and_then(|text| text.selection_scope);
+        // Pointer drags are document selections, even when they begin inside
+        // a Markdown table cell. Selection scopes are only needed for the
+        // exact range produced by double- and triple-click selection.
+        self.active_selection_scope = None;
         let pos = pos - self.bounds.origin;
         self.selection_positions = (Some(pos), Some(pos));
         self.selection_pointer = Some(pos + self.bounds.origin);
@@ -1871,7 +1869,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn table_drag_selection_stays_in_its_origin_cell(cx: &mut gpui::TestAppContext) {
+    fn table_drag_selection_crosses_cell_boundaries(cx: &mut gpui::TestAppContext) {
         cx.update(crate::init);
         let text_state = cx.new(TextViewState::new);
 
@@ -1883,7 +1881,7 @@ mod tests {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 TextView::markdown_with_state(
                     "table-cell-selection",
-                    "| Label | Primary detail | Neighbor |\n| --- | --- | --- |\n| Score | Alpha cell content | Beta must stay unselected |",
+                    "| Label | Primary detail | Neighbor |\n| --- | --- | --- |\n| Score | Alpha cell content | Beta must be selectable |",
                     self.text_state.clone(),
                     cx,
                 )
@@ -1909,7 +1907,7 @@ mod tests {
             let neighbor = state
                 .selectable_text
                 .iter()
-                .find(|text| text.text.contains("Beta must stay unselected"))
+                .find(|text| text.text.contains("Beta must be selectable"))
                 .expect("neighbor table cell should be registered");
             (
                 origin
@@ -1942,9 +1940,9 @@ mod tests {
             let selected = text_state
                 .read(app)
                 .selection_text()
-                .expect("the origin cell should have selected text");
+                .expect("the table cells should have selected text");
             assert!(selected.contains("Alpha cell content"));
-            assert!(!selected.contains("Beta must stay unselected"));
+            assert!(selected.contains("Beta must be selectable"));
             assert!(!selected.contains("Score"));
         });
     }
