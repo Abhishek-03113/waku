@@ -10,9 +10,9 @@ use crossbeam_channel::{Receiver, unbounded};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Corner, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListOffset, ListState,
-    MouseButton, PathPromptOptions, Pixels, Point, Render, SharedString, Size, Stateful,
-    StyleRefinement, Timer, Window, div, list, point, prelude::*, pulsating_between, px, rems,
-    size,
+    MouseButton, MouseDownEvent, NavigationDirection, PathPromptOptions, Pixels, Point, Render,
+    SharedString, Size, Stateful, StyleRefinement, Timer, Window, div, list, point, prelude::*,
+    pulsating_between, px, rems, size,
 };
 use uuid::Uuid;
 

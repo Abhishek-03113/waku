@@ -167,9 +167,15 @@ impl Waku {
     pub(super) fn navigate_back_action(
         &mut self,
         _: &NavigateBack,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.settings_page.take().is_some() {
+            window.focus(&self.composer_focus(cx));
+            cx.notify();
+            return;
+        }
+
         let Some(current) = self.state.selected_session else {
             return;
         };
@@ -185,12 +191,35 @@ impl Waku {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.settings_page.is_some() {
+            return;
+        }
+
         let Some(current) = self.state.selected_session else {
             return;
         };
         if let Some(target) = self.session_navigation.go_forward(current) {
             self.settings_page = None;
             self.activate_session(target, cx);
+        }
+    }
+
+    pub(super) fn navigation_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.button {
+            MouseButton::Navigate(NavigationDirection::Back) => {
+                cx.stop_propagation();
+                self.navigate_back_action(&NavigateBack, window, cx);
+            }
+            MouseButton::Navigate(NavigationDirection::Forward) => {
+                cx.stop_propagation();
+                self.navigate_forward_action(&NavigateForward, window, cx);
+            }
+            _ => {}
         }
     }
 
