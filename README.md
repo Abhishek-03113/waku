@@ -37,8 +37,8 @@ conflict with a prior treatment.
 
 Requirements:
 
-- macOS
 - Rust 1.96 or newer
+- macOS, Linux, or Windows
 - At least one supported agent CLI available in `PATH` or a common local
   install directory
 
