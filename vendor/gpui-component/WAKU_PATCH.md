@@ -80,3 +80,7 @@ while the outer transcript bulk-measures only lightweight row placeholders so
 resizing a long session does not parse every offscreen message. Appending a row
 updates only the previous tail and new estimates rather than rescanning old
 Markdown, and image estimation avoids duplicating large data URLs.
+
+Markdown table cells use normal line wrapping instead of truncating their text.
+This keeps long prose readable within the allocated column width rather than
+silently clipping it behind the table border.

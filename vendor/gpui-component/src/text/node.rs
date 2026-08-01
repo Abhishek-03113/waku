@@ -1649,10 +1649,17 @@ impl Node {
                                                             this.border_r_1()
                                                                 .border_color(cx.theme().border)
                                                         })
-                                                        .truncate()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .whitespace_normal()
                                                         .child(
-                                                            cell.children
-                                                                .render(node_cx, window, cx),
+                                                            div()
+                                                                .w_full()
+                                                                .min_w_0()
+                                                                .whitespace_normal()
+                                                                .child(cell.children.render(
+                                                                    node_cx, window, cx,
+                                                                )),
                                                         ),
                                                 )
                                             }

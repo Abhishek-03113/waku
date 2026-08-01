@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 const root = resolve(import.meta.dir, "..");
 const appName = "Waku Debug";
 const appPath = join(root, "target/debug/Waku Debug.app");
-const watchedDirectories = ["src", "assets", "resources"];
+const watchedDirectories = ["src", "assets", "resources", "vendor"];
 const watchedFiles = ["Cargo.toml", "Cargo.lock"];
 
 $.cwd(root);
