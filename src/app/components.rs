@@ -99,6 +99,7 @@ impl Waku {
 fn render_message_footer(
     theme: &Theme,
     message: &Message,
+    footer_time: u64,
     copy_content: String,
     copied: bool,
     group_name: SharedString,
@@ -122,7 +123,7 @@ fn render_message_footer(
         .text_size(px(11.5))
         .line_height(px(14.0))
         .text_color(footer_color)
-        .child(format_message_time(message.created_at));
+        .child(format_message_time(footer_time));
     let copy_button = div()
         .id(SharedString::from(format!("copy-message-{message_id}")))
         .w(px(27.0))
@@ -201,6 +202,7 @@ pub(super) fn render_message(
     theme: &Theme,
     message: &Message,
     assistant_footer_copy_content: Option<String>,
+    assistant_footer_time: Option<u64>,
     copied: bool,
     user_message_action: Option<UserMessageAction>,
     message_edit_input: Option<Entity<ComposerInput>>,
@@ -337,6 +339,7 @@ pub(super) fn render_message(
                 column = column.child(render_message_footer(
                     theme,
                     message,
+                    message.created_at,
                     message.content.clone(),
                     copied,
                     group_name,
@@ -404,6 +407,7 @@ pub(super) fn render_message(
                 column = column.child(render_message_footer(
                     theme,
                     message,
+                    assistant_footer_time.unwrap_or(message.created_at),
                     copy_content,
                     copied,
                     group_name,

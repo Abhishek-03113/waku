@@ -1,12 +1,13 @@
 use super::{
     SessionNavigation, StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*,
     append_text_delta_to_session, apply_transcript_visibility_splice, assistant_response_footer,
-    assistant_response_footer_index, escape_html, estimated_message_height, estimated_text_height,
-    fenced_code, folded_transcript_row_kinds, format_worked_duration, maintain_transcript_anchor,
-    markdown_estimation_source, message_starts_followup_turn, pop_stream_chunk,
-    prepare_transcript_row_remeasurement, scale_scrollbar_offset,
-    scroll_top_after_row_invalidation, stabilized_transcript_anchor_end_space, take_stream_prefix,
-    transcript_anchor_end_space, transcript_row_kinds, transcript_row_splice,
+    assistant_response_footer_index, assistant_response_footer_time, escape_html,
+    estimated_message_height, estimated_text_height, fenced_code, folded_transcript_row_kinds,
+    format_worked_duration, maintain_transcript_anchor, markdown_estimation_source,
+    message_starts_followup_turn, pop_stream_chunk, prepare_transcript_row_remeasurement,
+    scale_scrollbar_offset, scroll_top_after_row_invalidation,
+    stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
+    transcript_row_kinds, transcript_row_splice,
 };
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
@@ -471,6 +472,8 @@ fn assistant_response_footer_is_owned_by_the_terminal_part_and_combines_text() {
     session.push_message(MessageRole::Assistant, "  ");
     session.push_message(MessageRole::Assistant, "Final text part.");
     session.finish_active_turn(TurnStatus::Completed);
+    session.messages[3].created_at = 100;
+    session.turns.last_mut().unwrap().completed_at = Some(200);
 
     assert_eq!(assistant_response_footer_index(&session, 1), Some(3));
     assert_eq!(assistant_response_footer_index(&session, 3), Some(3));
@@ -479,6 +482,8 @@ fn assistant_response_footer_is_owned_by_the_terminal_part_and_combines_text() {
         assistant_response_footer(&session, 3).as_deref(),
         Some("First text part.\n\nFinal text part.")
     );
+    assert_eq!(assistant_response_footer_time(&session, 1), None);
+    assert_eq!(assistant_response_footer_time(&session, 3), Some(200));
     assert!(
         session.messages[1..]
             .iter()
@@ -504,12 +509,14 @@ fn unkeyed_assistant_message_keeps_a_standalone_footer() {
     session
         .messages
         .push(Message::new(MessageRole::Assistant, "Standalone response."));
+    session.messages[0].created_at = 300;
 
     assert_eq!(assistant_response_footer_index(&session, 0), Some(0));
     assert_eq!(
         assistant_response_footer(&session, 0).as_deref(),
         Some("Standalone response.")
     );
+    assert_eq!(assistant_response_footer_time(&session, 0), Some(300));
 }
 
 #[test]

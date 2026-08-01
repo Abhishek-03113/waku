@@ -625,6 +625,24 @@ pub(super) fn assistant_response_footer(
     )
 }
 
+pub(super) fn assistant_response_footer_time(
+    session: &AgentSession,
+    message_index: usize,
+) -> Option<u64> {
+    if assistant_response_footer_index(session, message_index) != Some(message_index) {
+        return None;
+    }
+    let message = &session.messages[message_index];
+    let completed_at = message.turn_id.and_then(|turn_id| {
+        session
+            .turns
+            .iter()
+            .find(|turn| turn.id == turn_id)
+            .and_then(|turn| turn.completed_at)
+    });
+    Some(completed_at.unwrap_or(message.created_at))
+}
+
 pub(super) fn transcript_row_splice(
     previous: &[TranscriptRowKind],
     next: &[TranscriptRowKind],

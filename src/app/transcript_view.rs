@@ -259,6 +259,9 @@ impl Waku {
                     let assistant_footer_copy_content = self
                         .selected_session()
                         .and_then(|session| assistant_response_footer(session, message_index));
+                    let assistant_footer_time = self
+                        .selected_session()
+                        .and_then(|session| assistant_response_footer_time(session, message_index));
                     let user_message_action = self.user_message_action_for_message(message_index);
                     let message_edit_input = user_message_action.and_then(|action| {
                         self.message_edit
@@ -278,6 +281,7 @@ impl Waku {
                         &theme,
                         &message,
                         assistant_footer_copy_content,
+                        assistant_footer_time,
                         copied,
                         user_message_action,
                         message_edit_input,
