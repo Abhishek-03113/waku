@@ -96,6 +96,7 @@ fn stable_scrollbar_freezes_its_document_height_during_a_drag() {
         &anchor_following,
         &drag_estimate,
         &is_scrolled,
+        false,
     );
 
     handle.start_drag();
@@ -104,6 +105,29 @@ fn stable_scrollbar_freezes_its_document_height_during_a_drag() {
     assert_eq!(handle.content_size().height, gpui::px(1_300.0));
     handle.end_drag();
     assert_eq!(handle.content_size().height, gpui::px(2_000.0));
+}
+
+#[test]
+fn stable_scrollbar_hides_provisional_session_height() {
+    use gpui_component::scroll::ScrollbarHandle as _;
+
+    let rows = gpui::ListState::new(0, gpui::ListAlignment::Bottom, gpui::px(0.0));
+    let estimated = Rc::new(Cell::new(gpui::px(1_000.0)));
+    let anchor_end_space = Rc::new(Cell::new(gpui::Pixels::ZERO));
+    let anchor_following = Rc::new(Cell::new(false));
+    let drag_estimate = Rc::new(Cell::new(None));
+    let is_scrolled = Rc::new(Cell::new(false));
+    let handle = StableListScrollbarHandle::new(
+        &rows,
+        &estimated,
+        &anchor_end_space,
+        &anchor_following,
+        &drag_estimate,
+        &is_scrolled,
+        true,
+    );
+
+    assert_eq!(handle.content_size(), rows.viewport_bounds().size);
 }
 
 #[test]

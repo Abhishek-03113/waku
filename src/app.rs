@@ -185,6 +185,7 @@ struct StableListScrollbarHandle {
     anchor_following: Rc<Cell<bool>>,
     drag_estimated_height: Rc<Cell<Option<Pixels>>>,
     is_scrolled: Rc<Cell<bool>>,
+    initial_measurement_pending: bool,
 }
 
 impl StableListScrollbarHandle {
@@ -195,6 +196,7 @@ impl StableListScrollbarHandle {
         anchor_following: &Rc<Cell<bool>>,
         drag_estimated_height: &Rc<Cell<Option<Pixels>>>,
         is_scrolled: &Rc<Cell<bool>>,
+        initial_measurement_pending: bool,
     ) -> Self {
         Self {
             list_state: list_state.clone(),
@@ -203,6 +205,7 @@ impl StableListScrollbarHandle {
             anchor_following: anchor_following.clone(),
             drag_estimated_height: drag_estimated_height.clone(),
             is_scrolled: is_scrolled.clone(),
+            initial_measurement_pending,
         }
     }
 
@@ -291,6 +294,24 @@ impl ScrollbarHandle for StableListScrollbarHandle {
 
     fn content_size(&self) -> Size<Pixels> {
         let viewport = self.list_state.viewport_bounds().size;
+        if self.initial_measurement_pending {
+            // A session replacement first lays out cheap estimated-height
+            // rows. Do not expose that provisional document size to the
+            // scrollbar: an overestimate otherwise paints a one-frame thumb
+            // for transcripts whose exact content fits the viewport.
+            return viewport;
+        }
+        if self.drag_estimated_height.get().is_none()
+            && viewport.height > Pixels::ZERO
+            && self.list_state.max_offset_for_scrollbar().height <= Pixels::ZERO
+        {
+            // Once GPUI has exact row geometry, its measured scroll range is
+            // authoritative for the fits-in-viewport case. Text-height
+            // estimates may remain a little taller until asynchronous text
+            // resize events arrive, which previously caused the thumb to
+            // flash for a single frame after switching sessions.
+            return viewport;
+        }
         size(
             viewport.width,
             self.effective_content_height().max(viewport.height),

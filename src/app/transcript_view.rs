@@ -26,6 +26,8 @@ impl Waku {
         }
         let entity = cx.entity().downgrade();
         let transcript_viewport = TextViewScrollViewport::from_list(&transcript_rows);
+        let initial_measurement_pending = !self.transcript_provisional_rows.borrow().is_empty()
+            || !self.transcript_exact_measurement_rows.borrow().is_empty();
         let scrollbar_handle = StableListScrollbarHandle::new(
             &transcript_rows,
             &self.transcript_estimated_height,
@@ -33,6 +35,7 @@ impl Waku {
             &self.transcript_anchor_following,
             &self.transcript_drag_estimated_height,
             &self.transcript_is_scrolled,
+            initial_measurement_pending,
         );
         div()
             .flex_1()
@@ -198,15 +201,13 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.transcript_provisional_rows.borrow_mut().remove(&index) {
-            if self
-                .selected_transcript_anchor_row()
-                .is_some_and(|anchor_row| index >= anchor_row)
-            {
-                self.transcript_exact_measurement_rows
-                    .borrow_mut()
-                    .insert(index);
-                cx.notify();
-            }
+            // Keep the scrollbar suppressed for the pass that replaces this
+            // estimated-height row with its exact content. The following
+            // render can then trust ListState's measured scroll range.
+            self.transcript_exact_measurement_rows
+                .borrow_mut()
+                .insert(index);
+            cx.notify();
             let estimated_height = self
                 .transcript_row_estimates
                 .borrow()
