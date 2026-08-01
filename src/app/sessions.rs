@@ -249,6 +249,7 @@ impl Waku {
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
+        self.expanded_turns.clear();
         self.pending_revert = None;
         self.toast = None;
         self.transcript_anchor.set(None);

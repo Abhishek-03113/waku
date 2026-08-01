@@ -370,6 +370,8 @@ pub struct Waku {
     activities_expanded: HashMap<usize, bool>,
     /// Individual tool rows the user has opened to read their full detail.
     expanded_activity_items: HashSet<Uuid>,
+    /// Settled turns whose folded work the user has reopened.
+    expanded_turns: HashSet<Uuid>,
     session_navigation: SessionNavigation,
     sidebar_visible: bool,
     settings_page: Option<SettingsPage>,
@@ -605,6 +607,7 @@ impl Waku {
                 reasoning_expanded: HashMap::new(),
                 activities_expanded: HashMap::new(),
                 expanded_activity_items: HashSet::new(),
+                expanded_turns: HashSet::new(),
                 session_navigation: SessionNavigation::default(),
                 sidebar_visible: true,
                 settings_page: None,

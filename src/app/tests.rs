@@ -1,15 +1,21 @@
 use super::{
     SessionNavigation, StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*,
     append_text_delta_to_session, escape_html, estimated_message_height, estimated_text_height,
-    fenced_code, maintain_transcript_anchor, markdown_estimation_source,
-    message_starts_followup_turn, pop_stream_chunk, scale_scrollbar_offset,
-    scroll_top_after_row_invalidation, stabilized_transcript_anchor_end_space, take_stream_prefix,
-    transcript_anchor_end_space, transcript_row_kinds,
+    fenced_code, folded_transcript_row_kinds, format_worked_duration, maintain_transcript_anchor,
+    markdown_estimation_source, message_starts_followup_turn, pop_stream_chunk,
+    scale_scrollbar_offset, scroll_top_after_row_invalidation,
+    stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
+    transcript_row_kinds,
 };
 use crate::model::{
-    ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind, SessionStatus,
+    ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
+    ReasoningBlock, SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus,
 };
-use std::{cell::Cell, collections::VecDeque, rc::Rc};
+use std::{
+    cell::Cell,
+    collections::{HashSet, VecDeque},
+    rc::Rc,
+};
 use uuid::Uuid;
 
 #[test]
@@ -368,4 +374,95 @@ fn multiple_blocks_at_one_boundary_preserve_event_order() {
         rows,
         vec![Message(0), TurnBlock(0), TurnBlock(1), Message(1)]
     );
+}
+
+#[test]
+fn settled_turn_folds_interim_text_and_work_but_keeps_the_final_response() {
+    let project_id = Uuid::new_v4();
+    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
+            content: "Looking around".into(),
+            started_at_ms: 1_000,
+            finished_at_ms: 2_000,
+        }),
+    });
+    session.push_message(MessageRole::Assistant, "I found the relevant code.");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 2,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )]),
+    });
+    session.push_message(MessageRole::Assistant, "Done. The change is ready.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), TurnFold(turn_id), Message(2)]
+    );
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
+        vec![
+            Message(0),
+            TurnFold(turn_id),
+            TurnBlock(0),
+            Message(1),
+            TurnBlock(1),
+            Message(2)
+        ]
+    );
+}
+
+#[test]
+fn running_turn_keeps_its_ordered_work_visible() {
+    let project_id = Uuid::new_v4();
+    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let turn_id = session.begin_turn("Keep going");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
+            content: "Still thinking".into(),
+            started_at_ms: 1_000,
+            finished_at_ms: 2_000,
+        }),
+    });
+    session.push_message(MessageRole::Assistant, "Interim update");
+
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), TurnBlock(0), Message(1)]
+    );
+}
+
+#[test]
+fn plain_settled_response_does_not_add_an_empty_work_fold() {
+    let project_id = Uuid::new_v4();
+    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    session.begin_turn("Answer directly");
+    session.push_message(MessageRole::Assistant, "The answer.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), Message(1)]
+    );
+}
+
+#[test]
+fn worked_duration_uses_readable_units() {
+    assert_eq!(format_worked_duration(1), "1 second");
+    assert_eq!(format_worked_duration(28), "28 seconds");
+    assert_eq!(format_worked_duration(60), "1 minute");
+    assert_eq!(format_worked_duration(88), "1 minute 28 seconds");
+    assert_eq!(format_worked_duration(7_320), "2 hours 2 minutes");
 }

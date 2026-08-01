@@ -104,6 +104,49 @@ impl Waku {
         cx.notify();
     }
 
+    pub(super) fn toggle_turn_fold(
+        &mut self,
+        turn_id: Uuid,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let scroll_top = self.active_transcript_rows().logical_scroll_top();
+        let anchor_kind = self
+            .transcript_row_kinds
+            .borrow()
+            .get(scroll_top.item_ix)
+            .copied();
+        if expanded {
+            self.expanded_turns.remove(&turn_id);
+        } else {
+            self.expanded_turns.insert(turn_id);
+        }
+        self.transcript_anchor_following.set(false);
+        self.reset_transcript_rows(self.transcript_row_count());
+
+        let next_kinds = self.transcript_row_kinds.borrow();
+        let anchored_target =
+            anchor_kind.and_then(|kind| next_kinds.iter().position(|candidate| *candidate == kind));
+        let target = anchored_target.or_else(|| {
+            next_kinds
+                .iter()
+                .position(|kind| *kind == TranscriptRowKind::TurnFold(turn_id))
+        });
+        drop(next_kinds);
+        if let Some(item_ix) = target {
+            self.active_transcript_rows().scroll_to(ListOffset {
+                item_ix,
+                offset_in_item: if anchored_target.is_some() {
+                    scroll_top.offset_in_item
+                } else {
+                    Pixels::ZERO
+                },
+            });
+            self.transcript_is_scrolled.set(true);
+        }
+        cx.notify();
+    }
+
     /// A single transcript row, self-centered to the content column so the
     /// list can measure it at its true wrap width. Current-turn reasoning and
     /// activity blocks are anchored at the exact boundary between assistant
@@ -192,7 +235,7 @@ impl Waku {
                     message_starts_followup_turn(&session.messages, message_index)
                 })
             }
-            TranscriptRowKind::TurnBlock(_) => false,
+            TranscriptRowKind::TurnBlock(_) | TranscriptRowKind::TurnFold(_) => false,
         };
         let inner = match kind {
             TranscriptRowKind::Message(message_index) => self
@@ -234,6 +277,7 @@ impl Waku {
                     }
                 })
                 .unwrap_or_else(|| div().into_any_element()),
+            TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
         };
         div()
             .w_full()
@@ -253,6 +297,58 @@ impl Waku {
                     .min_w_0()
                     .child(inner),
             )
+            .into_any_element()
+    }
+
+    /// Settled reasoning, tool activity, and interim assistant commentary are
+    /// folded into a compact divider while the terminal response stays visible.
+    pub(super) fn render_turn_fold_row(
+        &self,
+        turn_id: Uuid,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let expanded = self.expanded_turns.contains(&turn_id);
+        let label = self
+            .selected_session()
+            .map(|session| turn_fold_label(session, turn_id))
+            .unwrap_or_else(|| "Worked".into());
+        div()
+            .w_full()
+            .h(px(24.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(div().h(px(1.0)).flex_1().bg(theme.border))
+            .child(
+                div()
+                    .id(SharedString::from(format!("turn-fold-{turn_id}")))
+                    .h(px(24.0))
+                    .px(px(2.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_default()
+                    .text_size(px(11.5))
+                    .line_height(px(16.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_tertiary)
+                    .child(SharedString::from(label))
+                    .child(icon(
+                        if expanded {
+                            "icons/chevron-down.svg"
+                        } else {
+                            "icons/chevron-right.svg"
+                        },
+                        10.0,
+                        theme.text_tertiary,
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_turn_fold(turn_id, expanded, cx);
+                    })),
+            )
+            .child(div().h(px(1.0)).flex_1().bg(theme.border))
             .into_any_element()
     }
 

@@ -3,24 +3,13 @@ use super::*;
 impl Waku {
     /// One list row per message plus each ordered non-message turn block.
     pub(super) fn transcript_row_count(&self) -> usize {
-        let messages = self
-            .selected_session()
-            .map(|session| session.messages.len())
-            .unwrap_or(0);
-        messages + self.selected_transcript_blocks().len()
+        self.selected_transcript_row_kinds().len()
     }
 
     pub(super) fn selected_transcript_row_kinds(&self) -> Vec<TranscriptRowKind> {
-        let message_count = self
-            .selected_session()
-            .map(|session| session.messages.len())
-            .unwrap_or(0);
-        let anchors = self
-            .selected_transcript_blocks()
-            .iter()
-            .map(|block| block.after_message)
-            .collect::<Vec<_>>();
-        transcript_row_kinds(message_count, &anchors)
+        self.selected_session().map_or_else(Vec::new, |session| {
+            folded_transcript_row_kinds(session, &self.expanded_turns)
+        })
     }
 
     pub(super) fn estimated_transcript_row_height(
@@ -89,6 +78,7 @@ impl Waku {
                     }
                 })
                 .unwrap_or(px(22.0)),
+            TranscriptRowKind::TurnFold(_) => px(24.0),
         };
         let starts_followup_turn = matches!(kind, TranscriptRowKind::Message(message_index)
             if message_index > 0
@@ -457,6 +447,7 @@ impl Waku {
 pub(super) enum TranscriptRowKind {
     Message(usize),
     TurnBlock(usize),
+    TurnFold(Uuid),
 }
 
 pub(super) fn transcript_anchor_end_space(
@@ -775,6 +766,121 @@ pub(super) fn transcript_row_kinds(
         );
     }
     rows
+}
+
+/// A settled turn presents only its terminal assistant message by default.
+/// Earlier assistant commentary and ordered reasoning/tool blocks remain in
+/// the transcript, but move behind one expandable work summary row.
+pub(super) fn folded_transcript_row_kinds(
+    session: &AgentSession,
+    expanded_turns: &HashSet<Uuid>,
+) -> Vec<TranscriptRowKind> {
+    let anchors = session
+        .transcript_blocks
+        .iter()
+        .map(|block| block.after_message)
+        .collect::<Vec<_>>();
+    let raw_rows = transcript_row_kinds(session.messages.len(), &anchors);
+    let mut hidden_rows = HashSet::new();
+    let mut fold_anchors = HashMap::new();
+
+    for turn in &session.turns {
+        if turn.status == TurnStatus::Running {
+            continue;
+        }
+        let terminal_message = session.messages.iter().rposition(|message| {
+            message.role == MessageRole::Assistant && message.turn_id == Some(turn.id)
+        });
+        let hidden = raw_rows
+            .iter()
+            .copied()
+            .filter(|row| match *row {
+                TranscriptRowKind::Message(message_index) => {
+                    Some(message_index) != terminal_message
+                        && session.messages.get(message_index).is_some_and(|message| {
+                            message.role == MessageRole::Assistant
+                                && message.turn_id == Some(turn.id)
+                        })
+                }
+                TranscriptRowKind::TurnBlock(block_index) => session
+                    .transcript_blocks
+                    .get(block_index)
+                    .is_some_and(|block| block.turn_id == Some(turn.id)),
+                TranscriptRowKind::TurnFold(_) => false,
+            })
+            .collect::<Vec<_>>();
+        let Some(anchor) = hidden.first().copied() else {
+            continue;
+        };
+        fold_anchors.insert(anchor, turn.id);
+        hidden_rows.extend(hidden);
+    }
+
+    let mut rows = Vec::with_capacity(raw_rows.len() + fold_anchors.len());
+    for row in raw_rows {
+        if let Some(turn_id) = fold_anchors.get(&row).copied() {
+            rows.push(TranscriptRowKind::TurnFold(turn_id));
+        }
+        let expanded =
+            row_turn_id(session, row).is_some_and(|turn_id| expanded_turns.contains(&turn_id));
+        if expanded || !hidden_rows.contains(&row) {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+fn row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
+    match row {
+        TranscriptRowKind::Message(index) => session.messages.get(index)?.turn_id,
+        TranscriptRowKind::TurnBlock(index) => session.transcript_blocks.get(index)?.turn_id,
+        TranscriptRowKind::TurnFold(turn_id) => Some(turn_id),
+    }
+}
+
+pub(super) fn turn_fold_label(session: &AgentSession, turn_id: Uuid) -> String {
+    let Some(turn) = session.turns.iter().find(|turn| turn.id == turn_id) else {
+        return "Worked".into();
+    };
+    let seconds = turn
+        .completed_at
+        .unwrap_or_else(unix_time)
+        .saturating_sub(turn.started_at)
+        .max(1);
+    let duration = format_worked_duration(seconds);
+    if turn.status == TurnStatus::Interrupted {
+        format!("You stopped after {duration}")
+    } else {
+        format!("Worked for {duration}")
+    }
+}
+
+pub(super) fn format_worked_duration(seconds: u64) -> String {
+    fn unit(value: u64, singular: &str) -> String {
+        format!("{value} {singular}{}", if value == 1 { "" } else { "s" })
+    }
+
+    match seconds {
+        0..=59 => unit(seconds, "second"),
+        60..=3599 => {
+            let minutes = seconds / 60;
+            let seconds = seconds % 60;
+            if seconds == 0 {
+                unit(minutes, "minute")
+            } else {
+                format!("{} {}", unit(minutes, "minute"), unit(seconds, "second"))
+            }
+        }
+        _ => {
+            let hours = seconds / 3600;
+            let minutes = (seconds % 3600) / 60;
+            if minutes == 0 {
+                unit(hours, "hour")
+            } else {
+                format!("{} {}", unit(hours, "hour"), unit(minutes, "minute"))
+            }
+        }
+    }
 }
 
 pub(super) fn message_starts_followup_turn(messages: &[Message], message_index: usize) -> bool {

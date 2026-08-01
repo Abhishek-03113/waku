@@ -315,6 +315,7 @@ impl Waku {
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
+        self.expanded_turns.clear();
         self.reset_transcript_rows(self.transcript_row_count());
         self.toast = Some(match cleanup_result {
             Ok(()) => format!("Restored checkpoint after turn {turn_count}."),
@@ -458,6 +459,7 @@ impl Waku {
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
+        self.expanded_turns.clear();
         self.pending_revert = None;
         self.toast = checkpoint_warning;
         self.transcript_anchor.set(transcript_anchor);
