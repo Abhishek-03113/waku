@@ -72,6 +72,7 @@ impl Waku {
         current: bool,
         cx: &mut Context<Self>,
     ) {
+        self.pin_transcript_for_disclosure();
         self.reasoning_expanded.insert(block_index, !current);
         self.remeasure_transcript_block(block_index);
         cx.notify();
@@ -83,12 +84,14 @@ impl Waku {
         current: bool,
         cx: &mut Context<Self>,
     ) {
+        self.pin_transcript_for_disclosure();
         self.activities_expanded.insert(block_index, !current);
         self.remeasure_transcript_block(block_index);
         cx.notify();
     }
 
     pub(super) fn toggle_activity_item(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.pin_transcript_for_disclosure();
         if !self.expanded_activity_items.remove(&id) {
             self.expanded_activity_items.insert(id);
         }
@@ -110,7 +113,7 @@ impl Waku {
         expanded: bool,
         cx: &mut Context<Self>,
     ) {
-        self.sync_transcript_rows();
+        self.pin_transcript_for_disclosure();
         let scroll_top = self.active_transcript_rows().logical_scroll_top();
         let previous_kinds = self.transcript_row_kinds.borrow().clone();
         let anchor_kind = previous_kinds.get(scroll_top.item_ix).copied();

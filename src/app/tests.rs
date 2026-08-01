@@ -180,6 +180,14 @@ fn row_invalidation_preserves_the_intra_message_anchor() {
     assert_eq!(anchored.item_ix, 4);
     assert_eq!(anchored.offset_in_item, gpui::px(400.0));
     assert!(scroll_top_after_row_invalidation(scroll_top, 5..6, gpui::px(80.0)).is_none());
+
+    let underfilled = gpui::ListOffset {
+        item_ix: 0,
+        offset_in_item: gpui::px(-140.0),
+    };
+    let anchored = scroll_top_after_row_invalidation(underfilled, 0..1, gpui::Pixels::ZERO)
+        .expect("the disclosure row contains the synthetic leading-space anchor");
+    assert_eq!(anchored.offset_in_item, gpui::px(-140.0));
 }
 
 #[test]

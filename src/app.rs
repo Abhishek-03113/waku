@@ -254,7 +254,7 @@ fn scroll_top_after_row_invalidation(
         return None;
     }
     if scroll_top.item_ix == range.start {
-        scroll_top.offset_in_item = (scroll_top.offset_in_item + anchor_delta).max(Pixels::ZERO);
+        scroll_top.offset_in_item += anchor_delta;
     }
     Some(scroll_top)
 }

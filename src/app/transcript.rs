@@ -176,6 +176,46 @@ impl Waku {
         }
     }
 
+    /// Turn a tail-pinned list into an explicit scroll position before a
+    /// disclosure changes the document height. Otherwise GPUI keeps the
+    /// bottom edge fixed and makes the disclosure header jump upward while
+    /// its newly visible content is inserted.
+    pub(super) fn pin_transcript_for_disclosure(&self) {
+        self.sync_transcript_rows();
+        let transcript_rows = self.active_transcript_rows();
+        let count = transcript_rows.item_count();
+        let scroll_top = transcript_rows.logical_scroll_top();
+
+        if scroll_top.item_ix >= count && count > 0 {
+            let viewport_height = transcript_rows.viewport_bounds().size.height;
+            let actual_max = transcript_rows.max_offset_for_scrollbar().height;
+            if actual_max > px(0.5) {
+                // GPUI represents the exact bottom as an implicit tail anchor.
+                // Resolve the corresponding item just above the bottom, then
+                // restore the final half pixel with scroll_to so the same
+                // position remains explicit while rows below it grow.
+                transcript_rows
+                    .set_offset_from_scrollbar(point(Pixels::ZERO, -(actual_max - px(0.5))));
+                let mut explicit_bottom = transcript_rows.logical_scroll_top();
+                explicit_bottom.offset_in_item += px(0.5);
+                transcript_rows.scroll_to(explicit_bottom);
+            } else if viewport_height > Pixels::ZERO {
+                // A short bottom-aligned transcript has leading empty space.
+                // A negative item offset preserves that space so expanding a
+                // row still grows downward from its current screen position.
+                let measured_content_height = -transcript_rows.scroll_px_offset_for_scrollbar().y;
+                let leading_space = (viewport_height - measured_content_height).max(Pixels::ZERO);
+                transcript_rows.scroll_to(ListOffset {
+                    item_ix: 0,
+                    offset_in_item: -leading_space,
+                });
+            }
+        }
+
+        self.transcript_anchor_following.set(false);
+        self.transcript_is_scrolled.set(true);
+    }
+
     /// Bulk-reset the transcript through cheap height-only rows. This is for
     /// session/document replacement, never for an in-place disclosure toggle.
     pub(super) fn reset_transcript_rows_with_placeholders(&self, count: usize) {
