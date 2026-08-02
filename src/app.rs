@@ -58,6 +58,10 @@ const SIDEBAR_MIN_WIDTH: f32 = 180.0;
 const SIDEBAR_MAX_WIDTH: f32 = 420.0;
 const RIGHT_PANEL_MIN_WIDTH: f32 = 280.0;
 const RIGHT_PANEL_MAX_WIDTH: f32 = 720.0;
+const DEFAULT_FILE_TREE_WIDTH: f32 = 184.0;
+const FILE_TREE_MIN_WIDTH: f32 = 140.0;
+const FILE_TREE_MAX_WIDTH: f32 = 360.0;
+const FILE_EDITOR_MIN_WIDTH: f32 = 140.0;
 const MAIN_PANEL_MIN_WIDTH: f32 = 360.0;
 const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
@@ -97,6 +101,7 @@ enum SettingsPage {
 enum PanelResizeTarget {
     Sidebar,
     RightPanel,
+    FileTree,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -112,6 +117,18 @@ fn sanitize_panel_width(width: f32, default: f32, min: f32, max: f32) -> f32 {
     } else {
         default
     }
+}
+
+fn fitted_file_tree_width(panel_width: f32, file_tree_width: f32) -> f32 {
+    let maximum = FILE_TREE_MAX_WIDTH
+        .min(panel_width - FILE_EDITOR_MIN_WIDTH)
+        .max(FILE_TREE_MIN_WIDTH);
+    sanitize_panel_width(
+        file_tree_width,
+        DEFAULT_FILE_TREE_WIDTH.clamp(FILE_TREE_MIN_WIDTH, maximum),
+        FILE_TREE_MIN_WIDTH,
+        maximum,
+    )
 }
 
 fn fitted_panel_widths(
@@ -205,6 +222,7 @@ struct RightPanelSessionState {
     pending_tab_reveal: Option<usize>,
     expanded_paths: HashSet<PathBuf>,
     files_selected_path: Option<String>,
+    file_tree_width: f32,
     file_editors: HashMap<String, RightPanelFileEditor>,
     diff_files: Vec<RightPanelDiffFile>,
 }
@@ -219,6 +237,7 @@ impl RightPanelSessionState {
             pending_tab_reveal: None,
             expanded_paths: HashSet::new(),
             files_selected_path: None,
+            file_tree_width: DEFAULT_FILE_TREE_WIDTH,
             file_editors: HashMap::new(),
             diff_files: Vec::new(),
         }
@@ -562,6 +581,7 @@ pub struct Waku {
     right_panel_pending_tab_reveal: Option<usize>,
     right_panel_expanded_paths: HashSet<PathBuf>,
     right_panel_files_selected_path: Option<String>,
+    right_panel_file_tree_width: f32,
     right_panel_file_editors: HashMap<String, RightPanelFileEditor>,
     right_panel_diff_files: Vec<RightPanelDiffFile>,
     right_panel_terminals: HashMap<Uuid, Entity<TerminalView>>,
@@ -836,6 +856,7 @@ impl Waku {
                 right_panel_pending_tab_reveal: None,
                 right_panel_expanded_paths: HashSet::new(),
                 right_panel_files_selected_path: None,
+                right_panel_file_tree_width: DEFAULT_FILE_TREE_WIDTH,
                 right_panel_file_editors: HashMap::new(),
                 right_panel_diff_files: Vec::new(),
                 right_panel_terminals: HashMap::new(),

@@ -14,8 +14,221 @@ struct WorkingTreeEntry {
     absolute_path: PathBuf,
     name: String,
     is_dir: bool,
+    file_icon: Option<&'static str>,
     expanded: bool,
     depth: usize,
+}
+
+/// Select from a compact, embedded subset of Material Icon Theme rather than
+/// shipping its entire icon catalog. The SVG path is resolved once per entry
+/// during the directory scan, not on every row paint.
+fn file_icon_for_path(path: &str) -> &'static str {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    file_icon_for_name(name)
+}
+
+fn file_icon_for_name(name: &str) -> &'static str {
+    let name = name.to_ascii_lowercase();
+    let named_icon = if name.starts_with("readme") {
+        Some("icons/file-types/readme.svg")
+    } else if name.starts_with("license")
+        || name.starts_with("licence")
+        || name.starts_with("copying")
+    {
+        Some("icons/file-types/certificate.svg")
+    } else if name.starts_with("dockerfile") || name.starts_with("compose.") {
+        Some("icons/file-types/docker.svg")
+    } else if name == "cmakelists.txt" || name.starts_with("cmake.") {
+        Some("icons/file-types/cmake.svg")
+    } else if name == "makefile" || name.starts_with("makefile.") || name == "justfile" {
+        Some("icons/file-types/makefile.svg")
+    } else if matches!(
+        name.as_str(),
+        "cargo.toml" | "cargo.lock" | "rust-toolchain.toml"
+    ) {
+        Some("icons/file-types/rust.svg")
+    } else if matches!(name.as_str(), "go.mod" | "go.sum" | "go.work") {
+        Some("icons/file-types/go.svg")
+    } else if name == "pyproject.toml" || name == "pipfile" || name.starts_with("requirements") {
+        Some("icons/file-types/python.svg")
+    } else if matches!(name.as_str(), "bun.lock" | "bun.lockb" | "bunfig.toml") {
+        Some("icons/file-types/bun.svg")
+    } else if name.starts_with("pnpm-") || name == ".pnpmfile.cjs" {
+        Some("icons/file-types/pnpm.svg")
+    } else if name == "yarn.lock" || name.starts_with(".yarnrc") {
+        Some("icons/file-types/yarn.svg")
+    } else if name == "package.json" {
+        Some("icons/file-types/nodejs.svg")
+    } else if name == "package-lock.json" {
+        Some("icons/file-types/npm.svg")
+    } else if name.starts_with("tsconfig.") || name == "tsconfig.json" {
+        Some("icons/file-types/typescript.svg")
+    } else if name.starts_with("jsconfig.") || name == "jsconfig.json" {
+        Some("icons/file-types/javascript.svg")
+    } else if name == ".gitignore"
+        || name == ".gitattributes"
+        || name == ".gitmodules"
+        || name == ".gitconfig"
+    {
+        Some("icons/file-types/git.svg")
+    } else if name == ".editorconfig" {
+        Some("icons/file-types/editorconfig.svg")
+    } else if name.starts_with(".env") {
+        Some("icons/file-types/settings.svg")
+    } else if name.starts_with(".prettier") || name.starts_with("prettier.config.") {
+        Some("icons/file-types/prettier.svg")
+    } else if name.starts_with(".eslint") || name.starts_with("eslint.config.") {
+        Some("icons/file-types/eslint.svg")
+    } else if name.starts_with("biome.json") {
+        Some("icons/file-types/biome.svg")
+    } else if name.starts_with(".babel") || name.starts_with("babel.config.") {
+        Some("icons/file-types/babel.svg")
+    } else if name.starts_with(".stylelint") || name.starts_with("stylelint.config.") {
+        Some("icons/file-types/stylelint.svg")
+    } else if name.starts_with("vite.config.") {
+        Some("icons/file-types/vite.svg")
+    } else if name.starts_with("vitest.config.") || name.starts_with("vitest.workspace.") {
+        Some("icons/file-types/vitest.svg")
+    } else if name.starts_with("webpack.") {
+        Some("icons/file-types/webpack.svg")
+    } else if name.starts_with("rollup.config.") {
+        Some("icons/file-types/rollup.svg")
+    } else if name.starts_with("next.config.") {
+        Some("icons/file-types/next.svg")
+    } else if name == "next-env.d.ts" {
+        Some("icons/file-types/next.svg")
+    } else if name.starts_with("nuxt.config.") || name == ".nuxtrc" {
+        Some("icons/file-types/nuxt.svg")
+    } else if name.starts_with("astro.config.") {
+        Some("icons/file-types/astro.svg")
+    } else if name == "angular.json" || name.ends_with(".component.ts") {
+        Some("icons/file-types/angular.svg")
+    } else if name == "nest-cli.json" {
+        Some("icons/file-types/nest.svg")
+    } else if name.starts_with("tailwind.config.") {
+        Some("icons/file-types/tailwindcss.svg")
+    } else if name.starts_with("svelte.config.") {
+        Some("icons/file-types/svelte.svg")
+    } else if name.starts_with("vue.config.") {
+        Some("icons/file-types/vue.svg")
+    } else if name == "firebase.json" || name == ".firebaserc" {
+        Some("icons/file-types/firebase.svg")
+    } else if name == "supabase.toml" {
+        Some("icons/file-types/supabase.svg")
+    } else if name.starts_with("prisma.config.") {
+        Some("icons/file-types/prisma.svg")
+    } else if name == "turbo.json" {
+        Some("icons/file-types/turborepo.svg")
+    } else if name.starts_with("deno.json") || name == "deno.lock" {
+        Some("icons/file-types/deno.svg")
+    } else if name == ".gitlab-ci.yml" || name == ".gitlab-ci.yaml" {
+        Some("icons/file-types/gitlab.svg")
+    } else if name == "kustomization.yaml" || name == "kustomization.yml" {
+        Some("icons/file-types/kubernetes.svg")
+    } else if name == "chart.yaml" || name == "values.yaml" {
+        Some("icons/file-types/helm.svg")
+    } else if name == "nginx.conf" {
+        Some("icons/file-types/nginx.svg")
+    } else if name == ".nvmrc" || name == ".node-version" {
+        Some("icons/file-types/nodejs.svg")
+    } else if name == "build.gradle"
+        || name == "settings.gradle"
+        || name == "gradlew"
+        || name == "gradlew.bat"
+    {
+        Some("icons/file-types/gradle.svg")
+    } else if name.contains(".stories.") || name.contains(".story.") {
+        Some("icons/file-types/storybook.svg")
+    } else if name == "gemfile" || name == "gemfile.lock" {
+        Some("icons/file-types/ruby.svg")
+    } else if name == "pom.xml" {
+        Some("icons/file-types/java.svg")
+    } else {
+        None
+    };
+    if let Some(icon) = named_icon {
+        return icon;
+    }
+
+    let extension = Path::new(&name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("");
+    match extension {
+        "rs" => "icons/file-types/rust.svg",
+        "js" | "mjs" | "cjs" => "icons/file-types/javascript.svg",
+        "ts" | "mts" | "cts" => "icons/file-types/typescript.svg",
+        "jsx" | "tsx" => "icons/file-types/react.svg",
+        "py" | "pyi" | "pyw" => "icons/file-types/python.svg",
+        "go" => "icons/file-types/go.svg",
+        "c" | "h" | "m" => "icons/file-types/c.svg",
+        "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "mm" => "icons/file-types/cpp.svg",
+        "cs" => "icons/file-types/csharp.svg",
+        "swift" => "icons/file-types/swift.svg",
+        "kt" | "kts" => "icons/file-types/kotlin.svg",
+        "java" | "class" => "icons/file-types/java.svg",
+        "rb" => "icons/file-types/ruby.svg",
+        "php" => "icons/file-types/php.svg",
+        "html" | "htm" => "icons/file-types/html.svg",
+        "css" | "less" => "icons/file-types/css.svg",
+        "scss" | "sass" => "icons/file-types/sass.svg",
+        "json" | "jsonc" | "jsonl" => "icons/file-types/json.svg",
+        "yaml" | "yml" => "icons/file-types/yaml.svg",
+        "toml" | "ini" | "cfg" | "conf" | "config" => "icons/file-types/settings.svg",
+        "xml" | "xsl" | "plist" => "icons/file-types/xml.svg",
+        "md" | "mdx" | "markdown" => "icons/file-types/markdown.svg",
+        "sh" | "bash" | "zsh" | "fish" => "icons/file-types/console.svg",
+        "ps1" | "psm1" => "icons/file-types/powershell.svg",
+        "sql" | "db" | "sqlite" | "sqlite3" | "csv" | "xls" | "xlsx" => {
+            "icons/file-types/database.svg"
+        }
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "ico" | "tiff" => {
+            "icons/file-types/image.svg"
+        }
+        "svg" => "icons/file-types/svg.svg",
+        "pdf" => "icons/file-types/pdf.svg",
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" => "icons/file-types/audio.svg",
+        "mp4" | "mov" | "avi" | "webm" | "mkv" => "icons/file-types/video.svg",
+        "zip" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "tar" | "jar" => {
+            "icons/file-types/zip.svg"
+        }
+        "wasm" | "wat" => "icons/file-types/webassembly.svg",
+        "svelte" => "icons/file-types/svelte.svg",
+        "vue" => "icons/file-types/vue.svg",
+        "tf" | "tfvars" => "icons/file-types/terraform.svg",
+        "graphql" | "gql" => "icons/file-types/graphql.svg",
+        "lua" => "icons/file-types/lua.svg",
+        "dart" => "icons/file-types/dart.svg",
+        "astro" => "icons/file-types/astro.svg",
+        "coffee" | "cson" => "icons/file-types/coffee.svg",
+        "cr" => "icons/file-types/crystal.svg",
+        "ex" | "exs" => "icons/file-types/elixir.svg",
+        "elm" => "icons/file-types/elm.svg",
+        "erl" | "hrl" => "icons/file-types/erlang.svg",
+        "clj" | "cljs" | "cljc" | "edn" => "icons/file-types/clojure.svg",
+        "hs" | "lhs" => "icons/file-types/haskell.svg",
+        "hx" | "hxml" => "icons/file-types/haxe.svg",
+        "jinja" | "jinja2" | "j2" => "icons/file-types/jinja.svg",
+        "jl" => "icons/file-types/julia.svg",
+        "ml" | "mli" => "icons/file-types/ocaml.svg",
+        "pl" | "pm" => "icons/file-types/perl.svg",
+        "prisma" => "icons/file-types/prisma.svg",
+        "pug" | "jade" => "icons/file-types/pug.svg",
+        "scala" | "sbt" | "sc" => "icons/file-types/scala.svg",
+        "sol" => "icons/file-types/solidity.svg",
+        "tex" | "sty" | "cls" => "icons/file-types/tex.svg",
+        "xaml" => "icons/file-types/xaml.svg",
+        "zig" => "icons/file-types/zig.svg",
+        "nix" => "icons/file-types/nix.svg",
+        "proto" => "icons/file-types/proto.svg",
+        "diff" | "patch" => "icons/file-types/diff.svg",
+        "exe" | "dll" | "so" | "dylib" => "icons/file-types/exe.svg",
+        "lock" => "icons/file-types/lock.svg",
+        _ => "icons/file-types/file.svg",
+    }
 }
 
 fn visible_working_tree_entries(
@@ -48,11 +261,13 @@ fn visible_working_tree_entries(
         for (absolute_path, name, is_dir) in children {
             let relative_path = relative_directory.join(&name);
             let expanded = is_dir && expanded_paths.contains(&absolute_path);
+            let file_icon = (!is_dir).then(|| file_icon_for_name(&name));
             entries.push(WorkingTreeEntry {
                 relative_path: relative_path.to_string_lossy().into_owned(),
                 absolute_path: absolute_path.clone(),
                 name,
                 is_dir,
+                file_icon,
                 expanded,
                 depth,
             });
@@ -134,8 +349,34 @@ impl RightPanelSurface {
             Self::Terminal(_) => "icons/terminal.svg",
             Self::Files => "icons/folder.svg",
             Self::Diff => "icons/file-diff.svg",
-            Self::File(_) => "icons/list.svg",
+            Self::File(path) => file_icon_for_path(path),
         }
+    }
+}
+
+fn right_panel_tab_label<'a>(
+    surface: &'a RightPanelSurface,
+    files_selected_path: Option<&'a str>,
+) -> &'a str {
+    match surface {
+        RightPanelSurface::Files => files_selected_path
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Files"),
+        _ => surface.label(),
+    }
+}
+
+fn right_panel_tab_icon(
+    surface: &RightPanelSurface,
+    files_selected_path: Option<&str>,
+) -> &'static str {
+    match surface {
+        RightPanelSurface::Files => files_selected_path
+            .map(file_icon_for_path)
+            .unwrap_or_else(|| surface.icon_path()),
+        _ => surface.icon_path(),
     }
 }
 
@@ -319,6 +560,57 @@ mod tests {
     }
 
     #[test]
+    fn working_tree_file_icons_follow_names_and_extensions() {
+        assert_eq!(file_icon_for_name("main.rs"), "icons/file-types/rust.svg");
+        assert_eq!(
+            file_icon_for_name("Panel.tsx"),
+            "icons/file-types/react.svg"
+        );
+        assert_eq!(
+            file_icon_for_name("README.md"),
+            "icons/file-types/readme.svg"
+        );
+        assert_eq!(
+            file_icon_for_name("Dockerfile.dev"),
+            "icons/file-types/docker.svg"
+        );
+        assert_eq!(file_icon_for_name("bun.lock"), "icons/file-types/bun.svg");
+        assert_eq!(
+            file_icon_for_name("pnpm-lock.yaml"),
+            "icons/file-types/pnpm.svg"
+        );
+        assert_eq!(
+            file_icon_for_name("vite.config.ts"),
+            "icons/file-types/vite.svg"
+        );
+        assert_eq!(
+            file_icon_for_name("unknown.data"),
+            "icons/file-types/file.svg"
+        );
+    }
+
+    #[test]
+    fn files_tab_uses_the_selected_file_name_and_icon() {
+        let files = RightPanelSurface::Files;
+        assert_eq!(right_panel_tab_label(&files, None), "Files");
+        assert_eq!(
+            right_panel_tab_label(&files, Some("packages/desktop/bun.lock")),
+            "bun.lock"
+        );
+        assert_eq!(
+            right_panel_tab_icon(&files, Some("packages/desktop/bun.lock")),
+            "icons/file-types/bun.svg"
+        );
+
+        let file = RightPanelSurface::File("src/main.rs".into());
+        assert_eq!(right_panel_tab_label(&file, None), "main.rs");
+        assert_eq!(
+            right_panel_tab_icon(&file, None),
+            "icons/file-types/rust.svg"
+        );
+    }
+
+    #[test]
     fn editable_file_reader_keeps_the_complete_disk_content() {
         let root = std::env::temp_dir().join(format!("waku-editor-file-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -369,12 +661,14 @@ mod tests {
         let mut terminal_state = RightPanelSessionState::empty(true);
         terminal_state.surfaces = vec![RightPanelSurface::Terminal(terminal_id)];
         terminal_state.active_surface = Some(0);
+        terminal_state.file_tree_width = 248.0;
         states.insert(session_with_terminal, terminal_state);
 
         let other_state = RightPanelSessionState::take_or_closed(&mut states, other_session);
         assert!(!other_state.visible);
         assert!(other_state.surfaces.is_empty());
         assert_eq!(other_state.active_surface, None);
+        assert_eq!(other_state.file_tree_width, DEFAULT_FILE_TREE_WIDTH);
 
         let restored = RightPanelSessionState::take_or_closed(&mut states, session_with_terminal);
         assert!(restored.visible);
@@ -383,6 +677,7 @@ mod tests {
             vec![RightPanelSurface::Terminal(terminal_id)]
         );
         assert_eq!(restored.active_surface, Some(0));
+        assert_eq!(restored.file_tree_width, 248.0);
     }
 
     #[test]
@@ -486,6 +781,7 @@ impl Waku {
             pending_tab_reveal: self.right_panel_pending_tab_reveal.take(),
             expanded_paths: std::mem::take(&mut self.right_panel_expanded_paths),
             files_selected_path: self.right_panel_files_selected_path.take(),
+            file_tree_width: self.right_panel_file_tree_width,
             file_editors: std::mem::take(&mut self.right_panel_file_editors),
             diff_files: std::mem::take(&mut self.right_panel_diff_files),
         }
@@ -499,6 +795,7 @@ impl Waku {
         self.right_panel_pending_tab_reveal = state.pending_tab_reveal;
         self.right_panel_expanded_paths = state.expanded_paths;
         self.right_panel_files_selected_path = state.files_selected_path;
+        self.right_panel_file_tree_width = state.file_tree_width;
         self.right_panel_file_editors = state.file_editors;
         self.right_panel_diff_files = state.diff_files;
     }
@@ -680,9 +977,9 @@ impl Waku {
         let theme = Theme::current(cx);
         let body = match self.active_right_panel_surface().cloned() {
             None => self.render_right_panel_chooser(cx).into_any_element(),
-            Some(RightPanelSurface::Files) => {
-                self.render_right_panel_files(window, cx).into_any_element()
-            }
+            Some(RightPanelSurface::Files) => self
+                .render_right_panel_files(width, window, cx)
+                .into_any_element(),
             Some(RightPanelSurface::Diff) => self.render_right_panel_diff(cx).into_any_element(),
             Some(RightPanelSurface::Terminal(terminal_id)) => self
                 .right_panel_terminals
@@ -701,7 +998,7 @@ impl Waku {
                     .into_any_element()
                 }),
             Some(RightPanelSurface::File(path)) => self
-                .render_right_panel_file(path, window, cx)
+                .render_right_panel_file(path, width, window, cx)
                 .into_any_element(),
             Some(surface) => self
                 .render_right_panel_placeholder(surface, cx)
@@ -786,7 +1083,12 @@ impl Waku {
         for (index, surface) in self.right_panel_surfaces.iter().cloned().enumerate() {
             let active = active_surface == Some(index);
             let dirty = self.right_panel_surface_is_dirty(&surface);
-            let label = SharedString::from(surface.label().to_owned());
+            let label = SharedString::from(
+                right_panel_tab_label(&surface, self.right_panel_files_selected_path.as_deref())
+                    .to_owned(),
+            );
+            let icon_path =
+                right_panel_tab_icon(&surface, self.right_panel_files_selected_path.as_deref());
             let activate_weak = cx.entity().downgrade();
             let close_weak = cx.entity().downgrade();
             tabs = tabs.child(
@@ -809,7 +1111,7 @@ impl Waku {
                     .when(!active, |element| {
                         element.hover(|element| element.bg(theme.overlay))
                     })
-                    .child(icon(surface.icon_path(), 13.0, theme.text_secondary))
+                    .child(icon(icon_path, 13.0, theme.text_secondary))
                     .child(
                         div()
                             .min_w_0()
@@ -1133,9 +1435,14 @@ impl Waku {
             )
     }
 
-    fn render_right_panel_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_right_panel_files(
+        &mut self,
+        panel_width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         if let Some(relative_path) = self.right_panel_files_selected_path.clone() {
-            self.render_right_panel_file(relative_path, window, cx)
+            self.render_right_panel_file(relative_path, panel_width, window, cx)
         } else {
             self.render_right_panel_working_tree(None, cx)
         }
@@ -1193,15 +1500,9 @@ impl Waku {
                 } else {
                     div().w(px(10.0)).h(px(10.0)).flex_none().into_any_element()
                 })
-                .child(icon(
-                    if is_dir {
-                        "icons/folder.svg"
-                    } else {
-                        "icons/list.svg"
-                    },
-                    13.0,
-                    theme.text_tertiary,
-                ))
+                .when_some(entry.file_icon, |element, file_icon| {
+                    element.child(icon(file_icon, 14.0, theme.text_secondary))
+                })
                 .child(
                     div()
                         .min_w_0()
@@ -1259,10 +1560,12 @@ impl Waku {
     fn render_right_panel_file(
         &mut self,
         relative_path: String,
+        panel_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = Theme::current(cx);
+        let file_tree_width = fitted_file_tree_width(panel_width, self.right_panel_file_tree_width);
         let (editor_state, writable, _) =
             self.ensure_right_panel_file_editor(&relative_path, window, cx);
 
@@ -1282,7 +1585,11 @@ impl Waku {
                     .gap(px(8.0))
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(icon("icons/list.svg", 13.0, theme.text_tertiary))
+                    .child(icon(
+                        file_icon_for_path(&relative_path),
+                        13.0,
+                        theme.text_tertiary,
+                    ))
                     .child(
                         div()
                             .min_w_0()
@@ -1320,15 +1627,21 @@ impl Waku {
             .child(editor)
             .child(
                 div()
-                    .w(px(184.0))
-                    .min_w(px(164.0))
+                    .w(px(file_tree_width))
+                    .min_w(px(FILE_TREE_MIN_WIDTH))
                     .h_full()
                     .flex_none()
                     .flex()
                     .flex_col()
+                    .relative()
                     .border_l_1()
                     .border_color(theme.border_strong)
-                    .child(self.render_right_panel_working_tree(Some(&relative_path), cx)),
+                    .child(self.render_right_panel_working_tree(Some(&relative_path), cx))
+                    .child(self.render_panel_resize_handle(
+                        "right-panel-file-tree-resize-handle",
+                        PanelResizeTarget::FileTree,
+                        cx,
+                    )),
             )
     }
 

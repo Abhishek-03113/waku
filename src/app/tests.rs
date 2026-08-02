@@ -2,10 +2,10 @@ use super::{
     SessionNavigation, StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*,
     append_text_delta_to_session, apply_transcript_visibility_splice, assistant_response_footer,
     assistant_response_footer_index, assistant_response_footer_time, escape_html,
-    estimated_message_height, estimated_text_height, fenced_code, fitted_panel_widths,
-    folded_transcript_row_kinds, format_worked_duration, maintain_transcript_anchor,
-    markdown_estimation_source, message_starts_followup_turn, pop_stream_chunk,
-    prepare_transcript_row_remeasurement, scale_scrollbar_offset,
+    estimated_message_height, estimated_text_height, fenced_code, fitted_file_tree_width,
+    fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
+    maintain_transcript_anchor, markdown_estimation_source, message_starts_followup_turn,
+    pop_stream_chunk, prepare_transcript_row_remeasurement, scale_scrollbar_offset,
     scroll_top_after_row_invalidation, stabilized_transcript_anchor_end_space, take_stream_prefix,
     transcript_anchor_end_space, transcript_row_kinds, transcript_row_splice,
 };
@@ -72,6 +72,14 @@ fn hidden_panels_do_not_consume_layout_width() {
 
     assert_eq!(sidebar, 0.0);
     assert_eq!(right_panel, 620.0);
+}
+
+#[test]
+fn file_tree_width_preserves_a_usable_editor() {
+    assert_eq!(fitted_file_tree_width(460.0, 184.0), 184.0);
+    assert_eq!(fitted_file_tree_width(460.0, 400.0), 320.0);
+    assert_eq!(fitted_file_tree_width(280.0, 184.0), 140.0);
+    assert_eq!(fitted_file_tree_width(280.0, f32::NAN), 140.0);
 }
 
 #[test]
