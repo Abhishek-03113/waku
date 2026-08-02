@@ -1638,6 +1638,8 @@ impl Waku {
                     .line_height(px(15.0))
                     .text_color(theme.text_tertiary)
                     .whitespace_normal()
+                    .line_clamp(2)
+                    .text_overflow(gpui::TextOverflow::Truncate("...".into()))
                     .child(description),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
