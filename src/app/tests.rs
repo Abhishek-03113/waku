@@ -11,6 +11,7 @@ use super::{
     scroll_top_after_row_invalidation, should_show_navigation_rail,
     stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
     transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
+    widened_panel_width_for_file_editor,
 };
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
@@ -177,6 +178,13 @@ fn file_tree_width_preserves_a_usable_editor() {
     assert_eq!(fitted_file_tree_width(460.0, 400.0), 320.0);
     assert_eq!(fitted_file_tree_width(280.0, 184.0), 140.0);
     assert_eq!(fitted_file_tree_width(280.0, f32::NAN), 140.0);
+}
+
+#[test]
+fn first_file_editor_opening_reserves_500_pixels() {
+    assert_eq!(widened_panel_width_for_file_editor(460.0, 184.0), 684.0);
+    assert_eq!(widened_panel_width_for_file_editor(720.0, 184.0), 720.0);
+    assert_eq!(widened_panel_width_for_file_editor(460.0, 360.0), 860.0);
 }
 
 #[test]

@@ -62,6 +62,7 @@ const DEFAULT_FILE_TREE_WIDTH: f32 = 184.0;
 const FILE_TREE_MIN_WIDTH: f32 = 140.0;
 const FILE_TREE_MAX_WIDTH: f32 = 360.0;
 const FILE_EDITOR_MIN_WIDTH: f32 = 140.0;
+const FILE_EDITOR_INITIAL_WIDTH: f32 = 500.0;
 const MAIN_PANEL_MIN_WIDTH: f32 = 360.0;
 const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
 const NAVIGATION_RAIL_WIDTH: f32 = 44.0;
@@ -138,6 +139,24 @@ fn fitted_file_tree_width(panel_width: f32, file_tree_width: f32) -> f32 {
         FILE_TREE_MIN_WIDTH,
         maximum,
     )
+}
+
+fn widened_panel_width_for_file_editor(panel_width: f32, file_tree_width: f32) -> f32 {
+    let panel_width = sanitize_panel_width(
+        panel_width,
+        DEFAULT_RIGHT_PANEL_WIDTH,
+        RIGHT_PANEL_MIN_WIDTH,
+        RIGHT_PANEL_MAX_WIDTH,
+    );
+    let file_tree_width = sanitize_panel_width(
+        file_tree_width,
+        DEFAULT_FILE_TREE_WIDTH,
+        FILE_TREE_MIN_WIDTH,
+        FILE_TREE_MAX_WIDTH,
+    );
+    panel_width
+        .max(file_tree_width + FILE_EDITOR_INITIAL_WIDTH)
+        .min(RIGHT_PANEL_MAX_WIDTH)
 }
 
 fn fitted_panel_widths(

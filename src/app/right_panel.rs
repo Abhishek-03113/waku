@@ -1055,7 +1055,19 @@ impl Waku {
         }
     }
 
+    fn ensure_initial_right_panel_file_editor_width(&mut self) {
+        if self.right_panel_file_editors.is_empty() {
+            self.right_panel_width = widened_panel_width_for_file_editor(
+                self.right_panel_width,
+                self.right_panel_file_tree_width,
+            );
+        }
+    }
+
     fn open_right_panel_surface(&mut self, surface: RightPanelSurface, cx: &mut Context<Self>) {
+        if matches!(&surface, RightPanelSurface::File(_)) {
+            self.ensure_initial_right_panel_file_editor_width();
+        }
         if surface == RightPanelSurface::Diff {
             self.refresh_right_panel_diff();
         }
@@ -1075,6 +1087,7 @@ impl Waku {
     }
 
     fn open_right_panel_file(&mut self, relative_path: String, cx: &mut Context<Self>) {
+        self.ensure_initial_right_panel_file_editor_width();
         let Some(active) = self.right_panel_active_surface else {
             self.open_right_panel_surface(RightPanelSurface::File(relative_path), cx);
             return;

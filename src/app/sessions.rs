@@ -3,18 +3,7 @@ use super::*;
 impl Waku {
     pub(super) fn select_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
         self.state.selected_project = Some(project_id);
-        let next_session = self
-            .state
-            .sessions
-            .iter()
-            .filter(|session| session.project_id == project_id)
-            .max_by_key(|session| session.updated_at)
-            .map(|session| session.id);
-        if let Some(session_id) = next_session {
-            self.select_session(session_id, cx);
-        } else {
-            self.create_session_for(project_id, self.state.last_provider, cx);
-        }
+        self.create_session_for(project_id, self.state.last_provider, cx);
     }
 
     pub(super) fn select_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
