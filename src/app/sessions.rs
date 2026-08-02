@@ -410,6 +410,9 @@ impl Waku {
         self.expanded_turns.clear();
         self.message_edit = None;
         self.toast = None;
+        self.navigation_rail_active_scale_enabled.set(false);
+        self.navigation_rail_reset_generation
+            .set(self.navigation_rail_reset_generation.get().wrapping_add(1));
         self.transcript_anchor.set(None);
         self.transcript_anchor_end_space.set(Pixels::ZERO);
         self.transcript_anchor_following.set(false);

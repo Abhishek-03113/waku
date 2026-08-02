@@ -1,5 +1,17 @@
 use gpui::Window;
 
+#[cfg(target_os = "macos")]
+pub fn reduce_motion_enabled() -> bool {
+    use objc2_app_kit::NSWorkspace;
+
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reduce_motion_enabled() -> bool {
+    false
+}
+
 /// Keep Waku's single main window alive when the user closes it. This preserves
 /// the current session and lets a Dock activation reveal the same GPUI window.
 #[cfg(target_os = "macos")]

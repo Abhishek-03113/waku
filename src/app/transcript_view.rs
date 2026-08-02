@@ -1,9 +1,93 @@
 use super::*;
 
+#[derive(Clone, Debug, PartialEq)]
+struct ConversationNavigationRailSnapshot {
+    visible: bool,
+    turns: Vec<TranscriptNavigationTurn>,
+    viewport_height: f32,
+    active_turn: Option<Uuid>,
+    active_scale_enabled: bool,
+    reset_generation: u64,
+    theme_is_dark: bool,
+}
+
+impl Default for ConversationNavigationRailSnapshot {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            turns: Vec::new(),
+            viewport_height: 0.0,
+            active_turn: None,
+            active_scale_enabled: false,
+            reset_generation: 0,
+            theme_is_dark: true,
+        }
+    }
+}
+
+pub(super) struct ConversationNavigationRail {
+    waku: Option<WeakEntity<Waku>>,
+    snapshot: ConversationNavigationRailSnapshot,
+    hovered_turn: Option<Uuid>,
+    focus_handles: HashMap<Uuid, FocusHandle>,
+    visual_state: NavigationRailVisualState,
+    transition_from: NavigationRailVisualState,
+    animation_generation: u64,
+}
+
+impl ConversationNavigationRail {
+    pub(super) fn new() -> Self {
+        Self {
+            waku: None,
+            snapshot: ConversationNavigationRailSnapshot::default(),
+            hovered_turn: None,
+            focus_handles: HashMap::new(),
+            visual_state: NavigationRailVisualState::default(),
+            transition_from: NavigationRailVisualState::default(),
+            animation_generation: 0,
+        }
+    }
+
+    pub(super) fn set_waku(&mut self, waku: WeakEntity<Waku>) {
+        self.waku = Some(waku);
+    }
+
+    fn set_snapshot(
+        &mut self,
+        snapshot: ConversationNavigationRailSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if self.snapshot == snapshot {
+            return;
+        }
+        if self.snapshot.reset_generation != snapshot.reset_generation {
+            self.hovered_turn = None;
+            self.focus_handles.clear();
+            self.visual_state = NavigationRailVisualState::default();
+            self.transition_from = NavigationRailVisualState::default();
+            self.animation_generation = self.animation_generation.wrapping_add(1);
+        } else {
+            self.focus_handles.retain(|message_id, _| {
+                snapshot
+                    .turns
+                    .iter()
+                    .any(|turn| turn.message_id == *message_id)
+            });
+        }
+        self.snapshot = snapshot;
+        cx.notify();
+    }
+}
+
 impl Waku {
     // ── Transcript ─────────────────────────────────────────────────────────
 
-    pub(super) fn render_transcript(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_transcript(
+        &self,
+        window: &mut Window,
+        chat_viewport_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.sync_transcript_rows();
         if self.sync_transcript_layout_width(window) {
             while self.transcript_resize_rx.try_recv().is_ok() {}
@@ -37,6 +121,52 @@ impl Waku {
             &self.transcript_is_scrolled,
             initial_measurement_pending,
         );
+        let viewport_size = transcript_rows.viewport_bounds().size;
+        let transcript_scrollable = viewport_size.height > Pixels::ZERO
+            && transcript_rows.max_offset_for_scrollbar().y > px(0.5);
+        let navigation_turns = self
+            .selected_session()
+            .map(|session| {
+                transcript_navigation_turns(session, &self.transcript_row_kinds.borrow())
+            })
+            .unwrap_or_default();
+        let navigation_rail_visible = should_show_navigation_rail(
+            transcript_scrollable,
+            navigation_turns.len(),
+            chat_viewport_width,
+        );
+        let scroll_top_row = transcript_rows.logical_scroll_top().item_ix;
+        let turn_rows = navigation_turns
+            .iter()
+            .map(|turn| turn.row_index)
+            .collect::<Vec<_>>();
+        let active_turn = active_navigation_turn_index(
+            &turn_rows,
+            scroll_top_row,
+            !self.transcript_is_scrolled.get(),
+        )
+        .map(|index| navigation_turns[index].message_id);
+        let navigation_rail_snapshot = ConversationNavigationRailSnapshot {
+            visible: navigation_rail_visible,
+            turns: navigation_turns,
+            viewport_height: f32::from(viewport_size.height),
+            active_turn,
+            active_scale_enabled: self.navigation_rail_active_scale_enabled.get(),
+            reset_generation: self.navigation_rail_reset_generation.get(),
+            theme_is_dark: Theme::current(cx).is_dark,
+        };
+        if self.navigation_rail.read(cx).snapshot != navigation_rail_snapshot {
+            self.navigation_rail.update(cx, |rail, cx| {
+                rail.set_snapshot(navigation_rail_snapshot, cx)
+            });
+        }
+        let navigation_rail = self.navigation_rail.clone().cached(
+            StyleRefinement::default()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        );
         div()
             .flex_1()
             .min_h_0()
@@ -56,8 +186,319 @@ impl Waku {
                 .size_full()
                 .pb(anchor_end_space),
             )
+            .child(navigation_rail)
             .vertical_scrollbar(&scrollbar_handle)
             .into_any_element()
+    }
+}
+
+impl Render for ConversationNavigationRail {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.snapshot.visible {
+            return div().into_any_element();
+        }
+        let theme = Theme::current(cx);
+        let turns = self.snapshot.turns.clone();
+        let viewport_height = self.snapshot.viewport_height;
+        let rail_height = navigation_rail_height(turns.len(), viewport_height);
+        let rail_top = (viewport_height - rail_height).max(0.0) / 2.0;
+        let focus_handles = turns
+            .iter()
+            .map(|turn| self.navigation_rail_focus_handle(turn.message_id, window, cx))
+            .collect::<Vec<_>>();
+        let focused_turn_index = focus_handles
+            .iter()
+            .position(|focus_handle| focus_handle.is_focused(window));
+        let hovered_turn_index = self
+            .hovered_turn
+            .and_then(|message_id| turns.iter().position(|turn| turn.message_id == message_id));
+        let emphasized_turn_index = hovered_turn_index.or(focused_turn_index);
+        let active_turn_index = self
+            .snapshot
+            .active_turn
+            .and_then(|message_id| turns.iter().position(|turn| turn.message_id == message_id));
+        let scaled_active_turn_index = self
+            .snapshot
+            .active_scale_enabled
+            .then_some(active_turn_index)
+            .flatten();
+        let visual_state = NavigationRailVisualState {
+            active_turn: scaled_active_turn_index.map(|index| turns[index].message_id),
+            emphasized_turn: emphasized_turn_index.map(|index| turns[index].message_id),
+        };
+        let previous_visual_state = self.visual_state;
+        if previous_visual_state != visual_state {
+            self.transition_from = previous_visual_state;
+            self.visual_state = visual_state;
+            self.animation_generation = self.animation_generation.wrapping_add(1);
+        }
+        let transition_from = self.transition_from;
+        let index_for_message = |message_id: Option<Uuid>| {
+            message_id
+                .and_then(|message_id| turns.iter().position(|turn| turn.message_id == message_id))
+        };
+        let from_active_turn_index = index_for_message(transition_from.active_turn);
+        let from_emphasized_turn_index = index_for_message(transition_from.emphasized_turn);
+        let animation_generation = self.animation_generation;
+
+        let tick_rows = turns
+            .iter()
+            .zip(focus_handles)
+            .enumerate()
+            .map(|(turn_index, (turn, focus_handle))| {
+                let from_width = NAVIGATION_RAIL_TICK_WIDTH
+                    * navigation_rail_scale(
+                        turn_index,
+                        from_active_turn_index,
+                        from_emphasized_turn_index,
+                    );
+                let to_width = NAVIGATION_RAIL_TICK_WIDTH
+                    * navigation_rail_scale(
+                        turn_index,
+                        scaled_active_turn_index,
+                        emphasized_turn_index,
+                    );
+                let prominent = active_turn_index == Some(turn_index)
+                    || emphasized_turn_index == Some(turn_index);
+                let tick_color = if prominent {
+                    if theme.is_dark {
+                        rgb(0xFFFFFF).into()
+                    } else {
+                        theme.text
+                    }
+                } else {
+                    theme.text_ghost
+                };
+                let message_id = turn.message_id;
+                let click_focus = focus_handle.clone();
+                let animation_id = SharedString::from(format!(
+                    "conversation-navigation-tick-animation-{message_id}-{animation_generation}"
+                ));
+                let tick = div()
+                    .h(px(NAVIGATION_RAIL_TICK_HEIGHT))
+                    .rounded_full()
+                    .bg(tick_color)
+                    .with_animation(
+                        animation_id,
+                        Animation::new(NAVIGATION_RAIL_ANIMATION_DURATION)
+                            .with_easing(ease_out_quint()),
+                        move |element, delta| {
+                            element.w(px(from_width + (to_width - from_width) * delta))
+                        },
+                    );
+
+                div()
+                    .id(SharedString::from(format!(
+                        "conversation-navigation-turn-hit-{message_id}"
+                    )))
+                    .w(px(NAVIGATION_RAIL_WIDTH))
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .cursor_default()
+                    .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                        if *hovering {
+                            this.hovered_turn = Some(message_id);
+                        } else if this.hovered_turn == Some(message_id) {
+                            this.hovered_turn = None;
+                        }
+                        cx.notify();
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        click_focus.focus(window, cx);
+                        this.activate_turn(message_id, cx);
+                    }))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "conversation-navigation-turn-focus-{message_id}"
+                            )))
+                            .w(px(NAVIGATION_RAIL_TICK_WIDTH + 4.0))
+                            .h(px(8.0))
+                            .ml(px(-2.0))
+                            .pl(px(2.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(4.0))
+                            .track_focus(&focus_handle)
+                            .tab_index(turn_index as isize)
+                            .focus_visible(|style| style.border_1().border_color(theme.accent))
+                            .on_key_down(cx.listener(move |this, event, window, cx| {
+                                this.navigation_rail_key_down(message_id, event, window, cx);
+                            }))
+                            .child(tick),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        let rail = div()
+            .id("conversation-navigation-rail")
+            .absolute()
+            .left(px(NAVIGATION_RAIL_LEFT))
+            .top(px(rail_top))
+            .w(px(NAVIGATION_RAIL_WIDTH))
+            .h(px(rail_height))
+            .flex()
+            .flex_col()
+            .tab_index(0)
+            .tab_group()
+            .tab_stop(false)
+            .children(tick_rows);
+
+        let preview = emphasized_turn_index.map(|turn_index| {
+            let turn = &turns[turn_index];
+            let hit_height = rail_height / turns.len() as f32;
+            let preview_height = 126.0;
+            let max_preview_top = (viewport_height - preview_height - 12.0).max(12.0);
+            let preview_top = (rail_top + (turn_index as f32 + 0.5) * hit_height
+                - preview_height / 2.0)
+                .clamp(12.0, max_preview_top);
+            div()
+                .absolute()
+                .left(px(NAVIGATION_RAIL_LEFT
+                    + NAVIGATION_RAIL_WIDTH
+                    + NAVIGATION_RAIL_CONTENT_GAP))
+                .top(px(preview_top))
+                .w(px(320.0))
+                .max_h(px(preview_height))
+                .overflow_hidden()
+                .rounded(px(14.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.raised)
+                .shadow_lg()
+                .px(px(15.0))
+                .py(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .w_full()
+                        .truncate()
+                        .text_size(px(14.0))
+                        .line_height(px(20.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(SharedString::from(turn.prompt.clone())),
+                )
+                .when(!turn.response.is_empty(), |preview| {
+                    preview.child(
+                        div()
+                            .w_full()
+                            .max_h(px(60.0))
+                            .overflow_hidden()
+                            .whitespace_normal()
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(turn.response.clone())),
+                    )
+                })
+        });
+
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .child(rail)
+            .children(preview)
+            .into_any_element()
+    }
+}
+
+impl ConversationNavigationRail {
+    fn navigation_rail_focus_handle(
+        &mut self,
+        message_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> FocusHandle {
+        if let Some(focus_handle) = self.focus_handles.get(&message_id).cloned() {
+            return focus_handle;
+        }
+
+        let focus_handle = cx.focus_handle();
+        cx.on_focus(&focus_handle, window, |_: &mut Self, _, cx| {
+            cx.notify();
+        })
+        .detach();
+        cx.on_blur(&focus_handle, window, |_: &mut Self, _, cx| {
+            cx.notify();
+        })
+        .detach();
+        self.focus_handles.insert(message_id, focus_handle.clone());
+        focus_handle
+    }
+
+    fn navigation_rail_key_down(
+        &mut self,
+        message_id: Uuid,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let turns = &self.snapshot.turns;
+        let Some(turn_index) = turns.iter().position(|turn| turn.message_id == message_id) else {
+            return;
+        };
+
+        let target_index = match event.keystroke.key.as_str() {
+            "up" => Some(turn_index.saturating_sub(1)),
+            "down" => Some((turn_index + 1).min(turns.len() - 1)),
+            "home" => Some(0),
+            "end" => Some(turns.len() - 1),
+            "enter" | "space" => {
+                self.activate_turn(message_id, cx);
+                cx.stop_propagation();
+                return;
+            }
+            _ => None,
+        };
+        let Some(target_index) = target_index else {
+            return;
+        };
+        if let Some(focus_handle) = self
+            .focus_handles
+            .get(&turns[target_index].message_id)
+            .cloned()
+        {
+            focus_handle.focus(window, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    fn activate_turn(&self, message_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(waku) = &self.waku {
+            let _ = waku.update(cx, |waku, cx| {
+                waku.scroll_to_navigation_turn(message_id, cx)
+            });
+        }
+    }
+}
+
+impl Waku {
+    fn scroll_to_navigation_turn(&mut self, message_id: Uuid, cx: &mut Context<Self>) {
+        let row_index = self.selected_session().and_then(|session| {
+            transcript_navigation_turns(session, &self.transcript_row_kinds.borrow())
+                .into_iter()
+                .find(|turn| turn.message_id == message_id)
+                .map(|turn| turn.row_index)
+        });
+        let Some(row_index) = row_index else {
+            return;
+        };
+
+        self.transcript_anchor_following.set(false);
+        self.navigation_rail_active_scale_enabled.set(true);
+        self.active_transcript_rows().scroll_to(ListOffset {
+            item_ix: row_index,
+            offset_in_item: Pixels::ZERO,
+        });
+        self.transcript_is_scrolled.set(true);
+        cx.notify();
     }
 
     /// The provider's latest ordered block is still reasoning.

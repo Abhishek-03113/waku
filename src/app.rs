@@ -10,11 +10,11 @@ use chrono::{DateTime, Local, Utc};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity,
-    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
     PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString, Size, Stateful,
-    StyleRefinement, WeakEntity, Window, canvas, div, fill, linear_color_stop, linear_gradient,
-    list, point, prelude::*, pulsating_between, px, rems, size,
+    StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, linear_color_stop,
+    linear_gradient, list, point, prelude::*, pulsating_between, px, rems, rgb, size,
 };
 use uuid::Uuid;
 
@@ -64,6 +64,15 @@ const FILE_TREE_MAX_WIDTH: f32 = 360.0;
 const FILE_EDITOR_MIN_WIDTH: f32 = 140.0;
 const MAIN_PANEL_MIN_WIDTH: f32 = 360.0;
 const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
+const NAVIGATION_RAIL_WIDTH: f32 = 44.0;
+const NAVIGATION_RAIL_LEFT: f32 = 16.0;
+const NAVIGATION_RAIL_CONTENT_GAP: f32 = 16.0;
+const NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO: f32 = 0.65;
+const NAVIGATION_RAIL_TICK_WIDTH: f32 = 32.0;
+const NAVIGATION_RAIL_TICK_HEIGHT: f32 = 2.0;
+const NAVIGATION_RAIL_TICK_GAP: f32 = 10.0;
+const NAVIGATION_RAIL_TURN_HEIGHT: f32 = NAVIGATION_RAIL_TICK_HEIGHT + NAVIGATION_RAIL_TICK_GAP;
+const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
 const STREAM_MARKDOWN_DELAY: Duration = Duration::from_millis(32);
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
@@ -337,6 +346,12 @@ struct MessageEdit {
 struct TranscriptAnchor {
     session_id: Uuid,
     turn_id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct NavigationRailVisualState {
+    active_turn: Option<Uuid>,
+    emphasized_turn: Option<Uuid>,
 }
 
 /// Presents a stable, estimated document length to the scrollbar while the
@@ -614,6 +629,9 @@ pub struct Waku {
     transcript_resize_tx: crossbeam_channel::Sender<TranscriptMarkdownResize>,
     transcript_resize_rx: Receiver<TranscriptMarkdownResize>,
     message_text_states: HashMap<Uuid, Entity<TextViewState>>,
+    navigation_rail: Entity<ConversationNavigationRail>,
+    navigation_rail_active_scale_enabled: Rc<Cell<bool>>,
+    navigation_rail_reset_generation: Cell<u64>,
 }
 
 mod components;
@@ -631,6 +649,7 @@ mod transcript_view;
 use components::*;
 use streaming::*;
 use transcript::*;
+use transcript_view::ConversationNavigationRail;
 
 impl Waku {
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
@@ -645,6 +664,7 @@ impl Waku {
                 .placeholder("Search Settings")
                 .clean_on_escape()
         });
+        let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
         let mut state = store.load_or_fresh(cwd);
@@ -748,20 +768,31 @@ impl Waku {
             ListState::new(0, ListAlignment::Top, px(512.0)).measure_all();
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
+        let navigation_rail_active_scale_enabled = Rc::new(Cell::new(false));
         transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
-            move |event, _, _| {
+            let navigation_rail_active_scale_enabled = navigation_rail_active_scale_enabled.clone();
+            move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
+                if event.is_scrolled {
+                    navigation_rail_active_scale_enabled.set(true);
+                }
+                window.refresh();
             }
         });
         anchored_transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
-            move |event, _, _| {
+            let navigation_rail_active_scale_enabled = navigation_rail_active_scale_enabled.clone();
+            move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
+                if event.is_scrolled {
+                    navigation_rail_active_scale_enabled.set(true);
+                }
+                window.refresh();
             }
         });
         let (transcript_resize_tx, transcript_resize_rx) = unbounded();
@@ -884,8 +915,12 @@ impl Waku {
                 transcript_resize_tx,
                 transcript_resize_rx,
                 message_text_states: HashMap::new(),
+                navigation_rail: navigation_rail.clone(),
+                navigation_rail_active_scale_enabled,
+                navigation_rail_reset_generation: Cell::new(0),
             }
         });
+        navigation_rail.update(cx, |rail, _| rail.set_waku(entity.downgrade()));
         let initial_row_count = entity.read(cx).transcript_row_count();
         entity
             .read(cx)

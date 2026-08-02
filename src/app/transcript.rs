@@ -578,6 +578,135 @@ pub(super) enum TranscriptRowKind {
     TurnFold(Uuid),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct TranscriptNavigationTurn {
+    pub message_id: Uuid,
+    pub message_index: usize,
+    pub row_index: usize,
+    pub prompt: String,
+    pub response: String,
+}
+
+pub(super) fn transcript_navigation_turns(
+    session: &AgentSession,
+    row_kinds: &[TranscriptRowKind],
+) -> Vec<TranscriptNavigationTurn> {
+    let user_message_indexes = session
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| (message.role == MessageRole::User).then_some(index))
+        .collect::<Vec<_>>();
+
+    user_message_indexes
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(turn_index, message_index)| {
+            let message = session.messages.get(message_index)?;
+            let row_index = row_kinds
+                .iter()
+                .position(|kind| *kind == TranscriptRowKind::Message(message_index))?;
+            let next_user_index = user_message_indexes
+                .get(turn_index + 1)
+                .copied()
+                .unwrap_or(session.messages.len());
+            let turn_running = message.turn_id.is_some_and(|turn_id| {
+                session
+                    .turns
+                    .iter()
+                    .any(|turn| turn.id == turn_id && turn.status == TurnStatus::Running)
+            });
+            let response = (!turn_running)
+                .then(|| {
+                    session.messages[message_index + 1..next_user_index]
+                        .iter()
+                        .rev()
+                        .find(|candidate| {
+                            candidate.role == MessageRole::Assistant
+                                && !candidate.content.trim().is_empty()
+                        })
+                        .map(|candidate| navigation_preview_snippet(&candidate.content, 240))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            Some(TranscriptNavigationTurn {
+                message_id: message.id,
+                message_index,
+                row_index,
+                prompt: navigation_preview_snippet(&message.content, 100),
+                response,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn navigation_preview_snippet(content: &str, max_graphemes: usize) -> String {
+    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut graphemes = normalized.graphemes(true);
+    let snippet = graphemes.by_ref().take(max_graphemes).collect::<String>();
+    if graphemes.next().is_some() {
+        format!("{snippet}…")
+    } else {
+        snippet
+    }
+}
+
+pub(super) fn active_navigation_turn_index(
+    turn_rows: &[usize],
+    scroll_top_row: usize,
+    at_transcript_end: bool,
+) -> Option<usize> {
+    if turn_rows.is_empty() {
+        return None;
+    }
+    if at_transcript_end {
+        return Some(turn_rows.len() - 1);
+    }
+    Some(
+        turn_rows
+            .partition_point(|row| *row <= scroll_top_row)
+            .saturating_sub(1),
+    )
+}
+
+pub(super) fn navigation_rail_scale(
+    turn_index: usize,
+    active_turn_index: Option<usize>,
+    emphasized_turn_index: Option<usize>,
+) -> f32 {
+    let active_scale: f32 = if active_turn_index == Some(turn_index) {
+        0.50
+    } else {
+        0.25
+    };
+    let emphasis_scale =
+        emphasized_turn_index.map_or(0.25, |emphasized| match turn_index.abs_diff(emphasized) {
+            0 => 1.0,
+            1 => 0.68,
+            2 => 0.44,
+            _ => 0.25,
+        });
+    active_scale.max(emphasis_scale)
+}
+
+pub(super) fn navigation_rail_height(turn_count: usize, viewport_height: f32) -> f32 {
+    (turn_count as f32 * NAVIGATION_RAIL_TURN_HEIGHT)
+        .min(viewport_height * NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO)
+}
+
+pub(super) fn should_show_navigation_rail(
+    transcript_scrollable: bool,
+    turn_count: usize,
+    chat_viewport_width: f32,
+) -> bool {
+    let content_left = ((chat_viewport_width - CONTENT_MAX_WIDTH) / 2.0).max(20.0);
+    let rail_right = NAVIGATION_RAIL_LEFT + NAVIGATION_RAIL_WIDTH;
+    transcript_scrollable
+        && turn_count >= 2
+        && content_left >= rail_right + NAVIGATION_RAIL_CONTENT_GAP
+}
+
 /// A provider can split one assistant response into several ordered text
 /// messages around reasoning and tool activity. The response footer belongs
 /// only to the terminal text part, once the turn has settled.

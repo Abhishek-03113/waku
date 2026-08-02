@@ -65,6 +65,7 @@ fn main() {
             crate::assets::register_fonts(cx).expect("failed to register bundled fonts");
             crate::input::init(cx);
             crate::theme::init_component_theme(cx);
+            cx.set_reduce_motion(crate::platform::reduce_motion_enabled());
             cx.set_menus(vec![
                 Menu {
                     name: APP_NAME.into(),

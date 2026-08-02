@@ -59,6 +59,17 @@ impl Render for Waku {
         let permission = self.render_permission(cx);
         let toast = self.toast.clone();
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
+        let chat_viewport_width = f32::from(window.viewport_size().width)
+            - if self.sidebar_visible {
+                sidebar_width
+            } else {
+                0.0
+            }
+            - if self.right_panel_visible {
+                right_panel_width
+            } else {
+                0.0
+            };
         div()
             .key_context("Waku")
             .on_action(cx.listener(Self::close_window_or_right_panel_tab_action))
@@ -96,7 +107,7 @@ impl Render for Waku {
                     .child(if empty {
                         self.render_empty_state(cx).into_any_element()
                     } else {
-                        self.render_transcript(window, cx)
+                        self.render_transcript(window, chat_viewport_width, cx)
                     })
                     .children(permission)
                     .when_some(toast, |element, toast| {

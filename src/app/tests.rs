@@ -1,13 +1,16 @@
 use super::{
-    SessionNavigation, StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*,
+    NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation,
+    StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
     append_text_delta_to_session, apply_transcript_visibility_splice, assistant_response_footer,
     assistant_response_footer_index, assistant_response_footer_time, escape_html,
     estimated_message_height, estimated_text_height, fenced_code, fitted_file_tree_width,
     fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
     maintain_transcript_anchor, markdown_estimation_source, message_starts_followup_turn,
-    pop_stream_chunk, prepare_transcript_row_remeasurement, scale_scrollbar_offset,
-    scroll_top_after_row_invalidation, stabilized_transcript_anchor_end_space, take_stream_prefix,
-    transcript_anchor_end_space, transcript_row_kinds, transcript_row_splice,
+    navigation_preview_snippet, navigation_rail_height, navigation_rail_scale, pop_stream_chunk,
+    prepare_transcript_row_remeasurement, scale_scrollbar_offset,
+    scroll_top_after_row_invalidation, should_show_navigation_rail,
+    stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
+    transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
 };
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
@@ -55,6 +58,100 @@ fn session_navigation_prunes_deleted_tasks() {
     navigation.remove(third);
     assert_eq!(navigation.go_back(second), None);
     assert_eq!(navigation.go_forward(second), None);
+}
+
+#[test]
+fn conversation_navigation_rail_visibility_uses_all_three_gates() {
+    assert!(should_show_navigation_rail(true, 2, 872.0));
+    assert!(!should_show_navigation_rail(false, 2, 872.0));
+    assert!(!should_show_navigation_rail(true, 1, 872.0));
+    assert!(!should_show_navigation_rail(true, 2, 871.0));
+}
+
+#[test]
+fn conversation_navigation_rail_height_caps_at_sixty_five_percent() {
+    assert_eq!(navigation_rail_height(10, 600.0), 120.0);
+    assert_eq!(navigation_rail_height(100, 600.0), 390.0);
+    assert_eq!(
+        NAVIGATION_RAIL_TURN_HEIGHT - NAVIGATION_RAIL_TICK_HEIGHT,
+        10.0
+    );
+}
+
+#[test]
+fn conversation_navigation_tick_scale_combines_active_and_hover_falloff() {
+    assert_eq!(navigation_rail_scale(0, Some(0), None), 0.50);
+    assert_eq!(navigation_rail_scale(4, None, Some(4)), 1.0);
+    assert_eq!(navigation_rail_scale(3, None, Some(4)), 0.68);
+    assert_eq!(navigation_rail_scale(2, Some(2), Some(4)), 0.50);
+    assert_eq!(navigation_rail_scale(1, None, Some(4)), 0.25);
+}
+
+#[test]
+fn conversation_navigation_active_turn_follows_the_scroll_top_and_tail() {
+    let turn_rows = [0, 4, 9];
+    assert_eq!(active_navigation_turn_index(&turn_rows, 0, false), Some(0));
+    assert_eq!(active_navigation_turn_index(&turn_rows, 3, false), Some(0));
+    assert_eq!(active_navigation_turn_index(&turn_rows, 4, false), Some(1));
+    assert_eq!(active_navigation_turn_index(&turn_rows, 8, false), Some(1));
+    assert_eq!(active_navigation_turn_index(&turn_rows, 4, true), Some(2));
+    assert_eq!(active_navigation_turn_index(&[], 0, false), None);
+}
+
+#[test]
+fn conversation_navigation_preview_uses_each_prompt_and_latest_response() {
+    let project_id = Uuid::new_v4();
+    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    session.begin_turn("  First\n\nprompt  ");
+    session.push_message(MessageRole::Assistant, "Interim update");
+    session.push_message(MessageRole::Assistant, "Final answer");
+    session.finish_active_turn(TurnStatus::Completed);
+    session.begin_turn("Second prompt");
+    let rows = [Message(0), Message(1), Message(2), Message(3)];
+
+    let turns = transcript_navigation_turns(&session, &rows);
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].message_index, 0);
+    assert_eq!(turns[0].row_index, 0);
+    assert_eq!(turns[0].prompt, "First prompt");
+    assert_eq!(turns[0].response, "Final answer");
+    assert_eq!(turns[1].row_index, 3);
+    assert!(turns[1].response.is_empty());
+    assert_eq!(
+        navigation_preview_snippet("one   two\nthree", 20),
+        "one two three"
+    );
+}
+
+#[test]
+fn conversation_navigation_preview_does_not_change_during_a_running_turn() {
+    let project_id = Uuid::new_v4();
+    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let session_id = session.id;
+    session.begin_turn("Streaming prompt");
+    append_text_delta_to_session(
+        std::slice::from_mut(&mut session),
+        session_id,
+        false,
+        "Partial".to_owned(),
+    );
+    let rows = [Message(0), Message(1)];
+    let before = transcript_navigation_turns(&session, &rows);
+
+    append_text_delta_to_session(
+        std::slice::from_mut(&mut session),
+        session_id,
+        true,
+        " response".to_owned(),
+    );
+    let during = transcript_navigation_turns(&session, &rows);
+
+    assert_eq!(before, during);
+    assert_eq!(during[0].response, "");
+
+    session.finish_active_turn(TurnStatus::Completed);
+    let completed = transcript_navigation_turns(&session, &rows);
+    assert_eq!(completed[0].response, "Partial response");
 }
 
 #[test]

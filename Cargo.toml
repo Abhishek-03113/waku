@@ -24,6 +24,7 @@ uuid = { version = "1.18", features = ["v4", "serde"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
+    "NSAccessibility",
     "NSAppearance",
     "NSColor",
     "NSGraphics",
@@ -31,6 +32,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSView",
     "NSVisualEffectView",
     "NSWindow",
+    "NSWorkspace",
     "objc2-core-graphics",
     "objc2-quartz-core",
 ] }
