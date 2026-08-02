@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::{
-    highlighter::{languages, Language},
-    ActiveTheme, ThemeMode, DEFAULT_THEME_COLORS,
+    ActiveTheme, DEFAULT_THEME_COLORS, ThemeMode,
+    highlighter::{Language, languages},
 };
 
 pub(super) const HIGHLIGHT_NAMES: [&str; 40] = [
@@ -269,16 +269,11 @@ impl SyntaxColors {
         if style.is_some() {
             style
         } else {
-            // Fallback `keyword.modifier` to `keyword`
-            if name.contains(".") {
-                if let Some(prefix) = name.split(".").next() {
-                    return self.style(prefix);
-                }
-
-                None
-            } else {
-                None
-            }
+            // Try progressively broader captures, preserving an intermediate
+            // match: `punctuation.bracket.extra` -> `punctuation.bracket` ->
+            // `punctuation`.
+            name.rsplit_once('.')
+                .and_then(|(parent, _)| self.style(parent))
         }
     }
 
@@ -503,7 +498,7 @@ impl LanguageRegistry {
 
 #[cfg(test)]
 mod tests {
-    use crate::highlighter::LanguageConfig;
+    use crate::highlighter::{LanguageConfig, SyntaxColors, ThemeStyle};
 
     #[test]
     fn test_registry() {
@@ -520,5 +515,25 @@ mod tests {
         assert!(registry.language("rs").is_some());
         assert!(registry.language("javascript").is_some());
         assert!(registry.language("js").is_some());
+    }
+
+    #[test]
+    fn dotted_capture_fallback_keeps_the_most_specific_parent() {
+        let colors = SyntaxColors {
+            punctuation: Some(ThemeStyle {
+                color: Some(gpui::red()),
+                ..Default::default()
+            }),
+            punctuation_bracket: Some(ThemeStyle {
+                color: Some(gpui::blue()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            colors.style("punctuation.bracket.extra").unwrap().color,
+            Some(gpui::blue())
+        );
     }
 }

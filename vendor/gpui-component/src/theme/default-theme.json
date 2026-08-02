@@ -137,10 +137,10 @@
             "color": "#C5060B"
           },
           "comment": {
-            "color": "#007fff"
+            "color": "#808080"
           },
           "comment.doc": {
-            "color": "#007fff"
+            "color": "#808080"
           },
           "constant": {
             "color": "#C5060B"

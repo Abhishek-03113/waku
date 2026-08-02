@@ -114,10 +114,21 @@ impl TextWrapper {
         self.update_all(&self.text.clone(), cx);
     }
 
-    pub(super) fn prepare_if_need(&mut self, text: &Rope, cx: &mut App) {
+    pub(super) fn prepare_if_need(
+        &mut self,
+        text: &Rope,
+        wrap_width: Option<Pixels>,
+        cx: &mut App,
+    ) {
         if self._initialized {
+            self.set_wrap_width(wrap_width, cx);
             return;
         }
+
+        // Use the measured viewport width for the initial line map. Preparing
+        // with `None` and applying the width later exposes one unwrapped frame
+        // and performs an unnecessary second full-document reflow.
+        self.wrap_width = wrap_width;
         self._initialized = true;
         self.update_all(text, cx);
     }

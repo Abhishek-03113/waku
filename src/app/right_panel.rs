@@ -294,6 +294,31 @@ fn file_highlighter_language(relative_path: &str) -> &'static str {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
+    let normalized_file_name = file_name.to_ascii_lowercase();
+
+    // Lockfiles often have a generic `.lock` suffix (or no useful extension),
+    // so resolve their actual serialization format before extension fallback.
+    let lockfile_language = match normalized_file_name.as_str() {
+        "bun.lock"
+        | "composer.lock"
+        | "conan.lock"
+        | "deno.lock"
+        | "flake.lock"
+        | "npm-shrinkwrap.json"
+        | "package-lock.json"
+        | "package.resolved"
+        | "packages.lock.json"
+        | "pipfile.lock" => Some(Language::Json),
+        "cargo.lock" | "pdm.lock" | "poetry.lock" | "uv.lock" => Some(Language::Toml),
+        "chart.lock" | "gemfile.lock" | "pnpm-lock.yaml" | "podfile.lock" | "pubspec.lock"
+        | "yarn.lock" => Some(Language::Yaml),
+        "mix.lock" => Some(Language::Elixir),
+        _ => None,
+    };
+    if let Some(language) = lockfile_language {
+        return language.name();
+    }
+
     if file_name == "Makefile" || file_name.starts_with("Makefile.") {
         return Language::Make.name();
     }
@@ -552,11 +577,63 @@ mod tests {
 
     #[test]
     fn file_highlighter_language_follows_file_name_and_extension() {
+        use gpui_component::Colorize as _;
+
         assert_eq!(file_highlighter_language("src/app.rs"), "rust");
         assert_eq!(file_highlighter_language("ui/panel.tsx"), "tsx");
+        assert_eq!(file_highlighter_language("Sources/App.swift"), "swift");
+        assert_eq!(
+            gpui_component::highlighter::SyntaxHighlighter::new("swift").language(),
+            "swift"
+        );
+        let theme = gpui_component::highlighter::HighlightTheme::default_light();
+        assert_eq!(
+            theme.style("comment").unwrap().color.unwrap().to_hex(),
+            "#808080"
+        );
+
+        let source = "// ordinary\n/// documentation\nimport AppKit\n";
+        let text = gpui_component::Rope::from(source);
+        let mut highlighter = gpui_component::highlighter::SyntaxHighlighter::new("swift");
+        highlighter.update(None, &text);
+        let styles = highlighter.styles(&(0..source.len()), &theme);
+        for offset in [0, source.find("documentation").unwrap()] {
+            let color = styles
+                .iter()
+                .find(|(range, _)| range.contains(&offset))
+                .and_then(|(_, style)| style.color)
+                .unwrap();
+            assert_eq!(color.to_hex(), "#808080");
+        }
         assert_eq!(file_highlighter_language("Makefile"), "make");
         assert_eq!(file_highlighter_language("src/native.hpp"), "cpp");
         assert_eq!(file_highlighter_language("LICENSE"), "text");
+
+        for (path, expected_language) in [
+            ("bun.lock", "json"),
+            ("package-lock.json", "json"),
+            ("deno.lock", "json"),
+            ("composer.lock", "json"),
+            ("Pipfile.lock", "json"),
+            ("Package.resolved", "json"),
+            ("Cargo.lock", "toml"),
+            ("uv.lock", "toml"),
+            ("poetry.lock", "toml"),
+            ("pnpm-lock.yaml", "yaml"),
+            ("yarn.lock", "yaml"),
+            ("Podfile.lock", "yaml"),
+            ("Gemfile.lock", "yaml"),
+            ("mix.lock", "elixir"),
+        ] {
+            assert_eq!(file_highlighter_language(path), expected_language, "{path}");
+        }
+        for language in ["json", "toml", "yaml", "elixir"] {
+            assert_eq!(
+                gpui_component::highlighter::SyntaxHighlighter::new(language).language(),
+                language,
+                "{language} grammar should be available"
+            );
+        }
     }
 
     #[test]

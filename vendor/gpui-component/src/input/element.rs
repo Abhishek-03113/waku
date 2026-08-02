@@ -917,10 +917,29 @@ impl Element for TextElement {
         let style = window.text_style();
         let font = style.font();
         let text_size = style.font_size.to_pixels(window.rem_size());
+        let text_style = window.text_style();
+
+        // The first prepaint already has the final editor bounds. Initialize
+        // wrapping from them before preparing visible lines so a newly opened
+        // file never paints one unwrapped frame while waiting for `paint()` to
+        // feed the same bounds back into `InputState`.
+        let (line_number_width, line_number_len, wrap_width) = {
+            let state = self.state.read(cx);
+            let (line_number_width, line_number_len) =
+                Self::layout_line_numbers(&state, &state.text, text_size, &text_style, window);
+            let wrap_width = if state.mode.is_multi_line() && state.soft_wrap {
+                Some((bounds.size.width - line_number_width - RIGHT_MARGIN).max(px(0.)))
+            } else {
+                None
+            };
+            (line_number_width, line_number_len, wrap_width)
+        };
 
         self.state.update(cx, |state, cx| {
             state.text_wrapper.set_font(font, text_size, cx);
-            state.text_wrapper.prepare_if_need(&state.text, cx);
+            state
+                .text_wrapper
+                .prepare_if_need(&state.text, wrap_width, cx);
         });
 
         let state = self.state.read(cx);
@@ -941,7 +960,6 @@ impl Element for TextElement {
         );
 
         let state = self.state.read(cx);
-        let multi_line = state.mode.is_multi_line();
         let text = state.text.clone();
         let is_empty = text.len() == 0;
         let placeholder = self.placeholder.clone();
@@ -960,18 +978,6 @@ impl Element for TextElement {
             )
         } else {
             (&text, cx.theme().foreground)
-        };
-
-        let text_style = window.text_style();
-
-        // Calculate the width of the line numbers
-        let (line_number_width, line_number_len) =
-            Self::layout_line_numbers(&state, &text, text_size, &text_style, window);
-
-        let wrap_width = if multi_line && state.soft_wrap {
-            Some(bounds.size.width - line_number_width - RIGHT_MARGIN)
-        } else {
-            None
         };
 
         let mut last_layout = LastLayout {
@@ -1449,6 +1455,8 @@ impl Element for TextElement {
         }
 
         self.state.update(cx, |state, cx| {
+            let scroll_size_changed = state.scroll_size != prepaint.scroll_size;
+
             state.last_layout = Some(prepaint.last_layout.clone());
             state.last_bounds = Some(bounds);
             state.last_cursor = Some(state.cursor());
@@ -1458,7 +1466,13 @@ impl Element for TextElement {
             state.update_scroll_offset(Some(prepaint.cursor_scroll_offset), cx);
             state.deferred_scroll_offset = None;
 
-            cx.notify();
+            // The scrollbar is rendered before this text element paints, so a
+            // content-size change needs one follow-up frame. Stable paints do
+            // not: notifying unconditionally here creates an idle render loop
+            // that competes with high-frequency trackpad scroll events.
+            if scroll_size_changed {
+                cx.notify();
+            }
         });
 
         if let Some(hitbox) = prepaint.hover_definition_hitbox.as_ref() {

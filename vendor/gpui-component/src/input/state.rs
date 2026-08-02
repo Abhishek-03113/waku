@@ -33,7 +33,10 @@ use crate::input::{
 };
 use crate::input::{InlineCompletion, RopeExt as _, Selection};
 use crate::{Root, history::History};
-use crate::{highlighter::DiagnosticSet, input::text_wrapper::LineItem};
+use crate::{
+    highlighter::{DiagnosticSet, SyntaxHighlighter},
+    input::text_wrapper::LineItem,
+};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = input, no_json)]
@@ -320,6 +323,8 @@ pub struct InputState {
     ///
     /// If true, will call some update (for example LSP, Syntax Highlight) before render.
     _pending_update: bool,
+    /// The initial highlighter query and full-file parse are prepared off the UI thread.
+    highlighter_loading: bool,
     /// A flag to indicate if we should ignore the next completion event.
     pub(super) silent_replace_text: bool,
 
@@ -410,6 +415,7 @@ impl InputState {
             _subscriptions,
             _context_menu_task: Task::ready(Ok(())),
             _pending_update: false,
+            highlighter_loading: false,
             inline_completion: InlineCompletion::default(),
         }
     }
@@ -523,6 +529,7 @@ impl InputState {
             } => {
                 *language = new_language.into();
                 *highlighter.borrow_mut() = None;
+                self._pending_update = true;
             }
             _ => {}
         }
@@ -533,10 +540,73 @@ impl InputState {
         match &mut self.mode {
             InputMode::CodeEditor { highlighter, .. } => {
                 *highlighter.borrow_mut() = None;
+                self._pending_update = true;
             }
             _ => {}
         }
         cx.notify();
+    }
+
+    fn start_pending_highlighter(&mut self, cx: &mut Context<Self>) {
+        if self.highlighter_loading {
+            return;
+        }
+
+        let language = match &self.mode {
+            InputMode::CodeEditor {
+                language,
+                highlighter,
+                ..
+            } if highlighter.borrow().is_none() => language.clone(),
+            _ => return,
+        };
+        let text = self.text.clone();
+        self.highlighter_loading = true;
+
+        let prepare = cx.background_spawn(async move {
+            let mut highlighter = SyntaxHighlighter::new(language.as_ref());
+            highlighter.update(None, &text);
+            (language, text, highlighter)
+        });
+
+        cx.spawn(async move |this, cx| {
+            let (language, text, highlighter) = prepare.await;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+
+            this.update(cx, |this, cx| {
+                this.highlighter_loading = false;
+                let installed = match &this.mode {
+                    InputMode::CodeEditor {
+                        language: current_language,
+                        highlighter: current_highlighter,
+                        ..
+                    } if current_language == &language
+                        && this.text == text
+                        && current_highlighter.borrow().is_none() =>
+                    {
+                        current_highlighter.borrow_mut().replace(highlighter);
+                        true
+                    }
+                    _ => false,
+                };
+
+                if installed {
+                    cx.notify();
+                } else if matches!(
+                    &this.mode,
+                    InputMode::CodeEditor { highlighter, .. }
+                        if highlighter.borrow().is_none()
+                ) {
+                    // The file changed while parsing. Keep showing plain text
+                    // and prepare only the latest snapshot next.
+                    this._pending_update = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     #[inline]
@@ -662,10 +732,10 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reset_highlighter(cx);
         let text: SharedString = text.into();
         let range = 0..self.text.chars().map(|c| c.len_utf16()).sum();
         self.replace_text_in_range_silent(Some(range), &text, window, cx);
-        self.reset_highlighter(cx);
     }
 
     /// Set with disabled mode.
@@ -1335,6 +1405,11 @@ impl InputState {
             offset.y.clamp(safe_y_range.start, safe_y_range.end)
         };
         offset.x = offset.x.clamp(safe_x_range.start, safe_x_range.end);
+
+        if offset == self.scroll_handle.offset() {
+            return;
+        }
+
         self.scroll_handle.set_offset(offset);
         cx.notify();
     }
@@ -1996,8 +2071,12 @@ impl EntityInputHandler for InputState {
         }
         self.text_wrapper
             .update(&self.text, &range, &Rope::from(new_text), cx);
-        self.mode
-            .update_highlighter(&range, &self.text, &new_text, true, cx);
+        if !self
+            .mode
+            .update_highlighter(&range, &self.text, &new_text, true)
+        {
+            self._pending_update = true;
+        }
         self.lsp.update(&self.text, window, cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
@@ -2051,8 +2130,12 @@ impl EntityInputHandler for InputState {
         }
         self.text_wrapper
             .update(&self.text, &range, &Rope::from(new_text), cx);
-        self.mode
-            .update_highlighter(&range, &self.text, &new_text, true, cx);
+        if !self
+            .mode
+            .update_highlighter(&range, &self.text, &new_text, true)
+        {
+            self._pending_update = true;
+        }
         self.lsp.update(&self.text, window, cx);
         if new_text.is_empty() {
             // Cancel selection, when cancel IME input.
@@ -2159,10 +2242,11 @@ impl Focusable for InputState {
 impl Render for InputState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self._pending_update {
-            self.mode
-                .update_highlighter(&(0..0), &self.text, "", false, cx);
-            self.lsp.update(&self.text, window, cx);
             self._pending_update = false;
+            if !self.mode.update_highlighter(&(0..0), &self.text, "", false) {
+                self.start_pending_highlighter(cx);
+            }
+            self.lsp.update(&self.text, window, cx);
         }
 
         div()

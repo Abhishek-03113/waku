@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use std::{cell::RefCell, ops::Range};
 
-use gpui::{App, SharedString};
+use gpui::SharedString;
 use ropey::Rope;
 use tree_sitter::InputEdit;
 
@@ -194,26 +194,16 @@ impl InputMode {
         text: &Rope,
         new_text: &str,
         force: bool,
-        cx: &mut App,
-    ) {
+    ) -> bool {
         match &self {
-            InputMode::CodeEditor {
-                language,
-                highlighter,
-                ..
-            } => {
+            InputMode::CodeEditor { highlighter, .. } => {
                 if !force && highlighter.borrow().is_some() {
-                    return;
+                    return true;
                 }
 
                 let mut highlighter = highlighter.borrow_mut();
-                if highlighter.is_none() {
-                    let new_highlighter = SyntaxHighlighter::new(language);
-                    highlighter.replace(new_highlighter);
-                }
-
                 let Some(highlighter) = highlighter.as_mut() else {
-                    return;
+                    return false;
                 };
 
                 // When full text changed, the selected_range may be out of bound (The before version).
@@ -241,8 +231,9 @@ impl InputMode {
                 };
 
                 highlighter.update(Some(edit), text);
+                true
             }
-            _ => {}
+            _ => true,
         }
     }
 
@@ -273,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_code_editor() {
-        let mode = InputMode::code_editor("rust");
+        let mut mode = InputMode::code_editor("rust");
         assert_eq!(mode.is_code_editor(), true);
         assert_eq!(mode.is_multi_line(), true);
         assert_eq!(mode.is_single_line(), false);
@@ -281,6 +272,7 @@ mod tests {
         assert_eq!(mode.has_indent_guides(), true);
         assert_eq!(mode.max_rows(), usize::MAX);
         assert_eq!(mode.min_rows(), 1);
+        assert!(!mode.update_highlighter(&(0..0), &Rope::from("let value = 1"), "", false));
 
         let mode = InputMode::CodeEditor {
             multi_line: false,

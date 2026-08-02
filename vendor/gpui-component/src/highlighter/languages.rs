@@ -297,7 +297,12 @@ impl Language {
                 "",
                 "",
             ),
-            Self::Swift => (tree_sitter_swift::LANGUAGE, "", "", ""),
+            Self::Swift => (
+                tree_sitter_swift::LANGUAGE,
+                tree_sitter_swift::HIGHLIGHTS_QUERY,
+                "",
+                tree_sitter_swift::LOCALS_QUERY,
+            ),
             Self::Scala => (
                 tree_sitter_scala::LANGUAGE,
                 tree_sitter_scala::HIGHLIGHTS_QUERY,
@@ -388,6 +393,8 @@ mod tests {
         assert_eq!(Language::Cpp.name(), "cpp");
         assert_eq!(Language::Sql.name(), "sql");
         assert_eq!(Language::JavaScript.name(), "javascript");
+        assert!(!Language::Swift.config().highlights.is_empty());
+        assert!(!Language::Swift.config().locals.is_empty());
         assert_eq!(Language::Zig.name(), "zig");
         assert_eq!(Language::CSharp.name(), "csharp");
         assert_eq!(Language::TypeScript.name(), "typescript");

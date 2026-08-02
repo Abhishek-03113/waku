@@ -1,7 +1,7 @@
 use crate::highlighter::{HighlightTheme, LanguageRegistry};
 use crate::input::RopeExt;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use gpui::{HighlightStyle, SharedString};
 
 use ropey::{ChunkCursor, Rope};
@@ -100,6 +100,15 @@ impl HighlightItem {
             name: name.into(),
         }
     }
+}
+
+/// Query metadata that may share a range with a real color capture.
+///
+/// Swift, for example, emits `@comment @spell` for the same node. These
+/// captures describe editor behavior, not syntax colors, so they must never
+/// participate in style precedence.
+fn is_ignored_highlight_capture(name: &str) -> bool {
+    matches!(name, "spell" | "nospell" | "conceal" | "none")
 }
 
 impl sum_tree::Item for HighlightItem {
@@ -309,6 +318,11 @@ impl SyntaxHighlighter {
         self.text.len() == 0
     }
 
+    /// Return the active language, including `text` when initialization fell back.
+    pub fn language(&self) -> &str {
+        self.language.as_ref()
+    }
+
     /// Highlight the given text, returning a map from byte ranges to highlight captures.
     ///
     /// Uses incremental parsing by `edit` to efficiently update the highlighter's state.
@@ -391,33 +405,13 @@ impl SyntaxHighlighter {
                 let Some(highlight_name) = query.capture_names().get(cap.index as usize) else {
                     continue;
                 };
+                if is_ignored_highlight_capture(highlight_name) {
+                    continue;
+                }
 
                 let node_range: Range<usize> = node.start_byte()..node.end_byte();
                 let highlight_name = SharedString::from(highlight_name.to_string());
-
-                // Merge near range and same highlight name
-                let last_item = highlights.last();
-                let last_range = last_item.map(|item| &item.range).unwrap_or(&(0..0));
-                let last_highlight_name = last_item.map(|item| item.name.clone());
-
-                if last_range.end <= node_range.start
-                    && last_highlight_name.as_ref() == Some(&highlight_name)
-                {
-                    highlights.push(HighlightItem::new(
-                        last_range.start..node_range.end,
-                        highlight_name.clone(),
-                    ));
-                } else if last_range == &node_range {
-                    // case:
-                    // last_range: 213..220, last_highlight_name: Some("property")
-                    // last_range: 213..220, last_highlight_name: Some("string")
-                    highlights.push(HighlightItem::new(
-                        node_range,
-                        last_highlight_name.unwrap_or(highlight_name),
-                    ));
-                } else {
-                    highlights.push(HighlightItem::new(node_range, highlight_name.clone()));
-                }
+                highlights.push(HighlightItem::new(node_range, highlight_name));
             }
         }
 
@@ -467,7 +461,6 @@ impl SyntaxHighlighter {
         let mut query_cursor = QueryCursor::new();
         let mut matches = query_cursor.matches(query, tree.root_node(), source);
 
-        let mut last_end = start_offset;
         while let Some(m) = matches.next() {
             for cap in m.captures {
                 let cap_node = cap.node;
@@ -475,15 +468,14 @@ impl SyntaxHighlighter {
                 let node_range: Range<usize> =
                     start_offset + cap_node.start_byte()..start_offset + cap_node.end_byte();
 
-                if node_range.start < last_end {
-                    continue;
-                }
                 if node_range.end > end_offset {
                     break;
                 }
 
                 if let Some(highlight_name) = query.capture_names().get(cap.index as usize) {
-                    last_end = node_range.end;
+                    if is_ignored_highlight_capture(highlight_name) {
+                        continue;
+                    }
                     cache.push((node_range, highlight_name.to_string()));
                 }
             }
