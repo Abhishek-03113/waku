@@ -60,6 +60,10 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
             claude_reasoning_model("claude-sonnet-4-6", "Claude Sonnet 4.6"),
             ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
         ],
+        // Cursor's full catalog is account-specific and exposed by the
+        // installed CLI. Auto remains the provider-owned default and keeps
+        // older CLIs selectable if model discovery is unavailable.
+        ProviderKind::Cursor => vec![ProviderModel::new("auto", "Auto").default()],
         ProviderKind::OpenCode => Vec::new(),
         ProviderKind::Grok => {
             vec![ProviderModel::new("grok-build", "Grok Build").default()]
@@ -80,6 +84,7 @@ pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderMod
         // model inventory command. Keep this catalog aligned with the
         // version-gated list used by T3 Code.
         ProviderKind::Claude => Vec::new(),
+        ProviderKind::Cursor => discover_cursor_models(binary),
         ProviderKind::OpenCode => discover_opencode_models(binary),
         ProviderKind::Grok => discover_grok_models(binary),
         ProviderKind::Pi => discover_pi_models(binary),
@@ -89,6 +94,64 @@ pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderMod
     } else {
         deduplicate(discovered)
     }
+}
+
+fn discover_cursor_models(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(output) = crate::command_env::command(binary).arg("models").output() else {
+        return Vec::new();
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_cursor_models(&combined)
+}
+
+fn parse_cursor_models(output: &str) -> Vec<ProviderModel> {
+    strip_ansi(output)
+        .lines()
+        .filter_map(|line| {
+            let mut line = line.trim();
+            if line.is_empty()
+                || line.ends_with(':')
+                || matches!(
+                    line.to_ascii_lowercase().as_str(),
+                    "model" | "models" | "available models"
+                )
+            {
+                return None;
+            }
+            line = line
+                .strip_prefix('*')
+                .or_else(|| line.strip_prefix('-'))
+                .or_else(|| line.strip_prefix('•'))
+                .map(str::trim)
+                .unwrap_or(line);
+            let is_default = line.to_ascii_lowercase().contains("(default)");
+            let line = line.replace("(default)", "").replace("(Default)", "");
+            let line = line.trim();
+            if line.is_empty() || line.contains("Usage:") || line.contains("error:") {
+                return None;
+            }
+            let (id, label) = line
+                .split_once('\t')
+                .or_else(|| line.split_once("  "))
+                .map(|(id, label)| (id.trim(), label.trim()))
+                .filter(|(id, _)| !id.is_empty())
+                .unwrap_or((line, line));
+            if id.split_whitespace().count() != 1 {
+                return None;
+            }
+            let name = if label == id {
+                display_name_from_slug(id)
+            } else {
+                label.to_owned()
+            };
+            let model = ProviderModel::new(id, name);
+            Some(if is_default { model.default() } else { model })
+        })
+        .collect()
 }
 
 fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
@@ -623,6 +686,14 @@ mod tests {
     }
 
     #[test]
+    fn cursor_catalog_falls_back_to_provider_owned_auto() {
+        let models = fallback_models(ProviderKind::Cursor);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "auto");
+        assert!(models[0].is_default);
+    }
+
+    #[test]
     fn parses_opencode_provider_qualified_models() {
         let models = parse_opencode_models(
             "opencode/big-pickle\n\u{1b}[32mgithub-copilot/gpt-5.4\u{1b}[0m\nnoise here\n",
@@ -631,6 +702,18 @@ mod tests {
         assert_eq!(models[1].id, "github-copilot/gpt-5.4");
         assert_eq!(models[1].name, "GPT-5.4");
         assert_eq!(models[1].sub_provider.as_deref(), Some("Github Copilot"));
+    }
+
+    #[test]
+    fn parses_cursor_cli_models_and_default_marker() {
+        let models = parse_cursor_models(
+            "Available models:\n  * auto (default)\n  composer-2.5  Composer 2.5\n",
+        );
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "auto");
+        assert!(models[0].is_default);
+        assert_eq!(models[1].id, "composer-2.5");
+        assert_eq!(models[1].name, "Composer 2.5");
     }
 
     #[test]

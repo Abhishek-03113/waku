@@ -12,6 +12,7 @@ The first MVP supports:
 | [Amp](https://ampcode.com/) | Claude-compatible `stream-json` | Native Amp thread ID | New thread seeded from exported turn prefix |
 | Claude Code | `stream-json` | Native Claude session cursor | Message-point session fork |
 | Codex CLI | `app-server` JSON-RPC | `thread/start` and `thread/resume` | `thread/rollback` |
+| Cursor CLI | Native `stream-json` | Native Cursor session ID and `--resume` | New session seeded from Waku's retained turn prefix |
 | OpenCode | Native JSON events | Native OpenCode session cursor | Message-point session fork |
 | Grok Build | Native `streaming-json` | Native Grok session cursor | Native ACP fork with exact turn truncation |
 | Pi | Native RPC JSONL | Pi session file and ID | RPC session fork/clone |
@@ -71,7 +72,8 @@ Running `cargo run` directly is useful for quick terminal debugging, but it
 launches a bare executable without the macOS app-bundle identity used by
 accessibility tools.
 
-Waku detects `amp`, `claude`, `codex`, `opencode`, `grok`, and `pi` at launch.
+Waku detects `amp`, `claude`, `codex`, `cursor-agent`, `opencode`, `grok`, and
+`pi` at launch.
 Existing CLI authentication and configuration remain owned by each provider.
 Amp's Low, Medium, High, and Ultra agent modes appear in the model picker, and
 its Fast serving tier is available in model traits. Pi models are read from its

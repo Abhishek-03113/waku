@@ -252,6 +252,10 @@ impl Waku {
                     }
                     Ok((self.ensure_driver()?.fork(turns_to_remove)?, None))
                 }
+                ProviderKind::Cursor => Ok((
+                    crate::cursor_session::fork_session_at_turn(&source, turn_count)?,
+                    None,
+                )),
                 ProviderKind::Amp => {
                     let Some(ProviderResumeCursor::Amp {
                         thread_id: native_thread_id,
@@ -605,6 +609,8 @@ impl Waku {
 
         let claude_reset =
             provider == ProviderKind::Claude && rollback_turns > 0 && retained_turn_count == 0;
+        let cursor_reset =
+            provider == ProviderKind::Cursor && rollback_turns > 0 && retained_turn_count == 0;
         let grok_reset =
             provider == ProviderKind::Grok && rollback_turns > 0 && retained_turn_count == 0;
         let claude_rollback =
@@ -663,7 +669,7 @@ impl Waku {
 
         let mut claude_fork = None;
         let mut provider_rewind_cursor = None;
-        if rollback_turns > 0 && !claude_reset && !grok_reset {
+        if rollback_turns > 0 && !claude_reset && !cursor_reset && !grok_reset {
             let rollback_result = if let Some((native_session_id, resume_at)) = &claude_rollback {
                 crate::claude_session::fork_session_at(
                     native_session_id,
@@ -727,6 +733,19 @@ impl Waku {
                     provider_turn_count,
                 )
                 .map(|cursor| provider_rewind_cursor = Some(cursor))
+            } else if provider == ProviderKind::Cursor {
+                let Some(source) = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                else {
+                    self.toast = Some("Cursor's Waku task is unavailable.".into());
+                    cx.notify();
+                    return false;
+                };
+                crate::cursor_session::fork_session_at_turn(source, retained_turn_count)
+                    .map(|cursor| provider_rewind_cursor = Some(cursor))
             } else if provider == ProviderKind::Grok {
                 let Some(ProviderResumeCursor::Grok {
                     session_id: native_session_id,
@@ -811,7 +830,7 @@ impl Waku {
                     session_id: fork.session_id.clone(),
                     resume_at: Some(remapped_resume_at),
                 });
-            } else if claude_reset || grok_reset {
+            } else if claude_reset || cursor_reset || grok_reset {
                 session.provider_cursor = None;
             } else if let Some(cursor) = provider_rewind_cursor.clone() {
                 session.provider_cursor = Some(cursor);
@@ -821,10 +840,14 @@ impl Waku {
         }
         if claude_fork.is_some()
             || claude_reset
+            || cursor_reset
             || grok_reset
             || (matches!(
                 provider,
-                ProviderKind::Amp | ProviderKind::OpenCode | ProviderKind::Grok
+                ProviderKind::Amp
+                    | ProviderKind::Cursor
+                    | ProviderKind::OpenCode
+                    | ProviderKind::Grok
             ) && provider_rewind_cursor.is_some())
         {
             // Headless drivers retain their original native session ID. Recreate

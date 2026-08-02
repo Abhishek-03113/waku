@@ -57,8 +57,18 @@ impl HeadlessDriver {
             }
             _ => None,
         };
+        let cursor_fork_context = match existing_cursor.as_ref() {
+            Some(ProviderResumeCursor::Cursor { fork_context, .. })
+                if provider == ProviderKind::Cursor =>
+            {
+                fork_context.clone()
+            }
+            _ => None,
+        };
         let existing_session_id = match existing_cursor.as_ref() {
-            Some(cursor) if cursor.provider() == provider => Some(cursor.native_id().to_owned()),
+            Some(cursor) if cursor.provider() == provider => {
+                (!cursor.native_id().is_empty()).then(|| cursor.native_id().to_owned())
+            }
             Some(cursor) => {
                 return Err(anyhow!(
                     "cannot resume {} from a {} cursor",
@@ -80,7 +90,9 @@ impl HeadlessDriver {
                     ProviderKind::Claude | ProviderKind::Grok => {
                         Some(existing_session_id.unwrap_or_else(|| Uuid::new_v4().to_string()))
                     }
-                    ProviderKind::Amp | ProviderKind::OpenCode => existing_session_id,
+                    ProviderKind::Amp | ProviderKind::Cursor | ProviderKind::OpenCode => {
+                        existing_session_id
+                    }
                     _ => None,
                 };
                 let mut can_resume = had_existing_session;
@@ -99,6 +111,7 @@ impl HeadlessDriver {
                     });
                 }
                 let mut amp_fork_context = amp_fork_context;
+                let mut cursor_fork_context = cursor_fork_context;
                 while let Ok(message) = command_rx.recv() {
                     match message {
                         CommandMessage::Prompt(prompt) => {
@@ -107,6 +120,15 @@ impl HeadlessDriver {
                                     .as_deref()
                                     .map(|context| {
                                         crate::amp_session::prompt_with_fork_context(
+                                            context, &prompt,
+                                        )
+                                    })
+                                    .unwrap_or(prompt)
+                            } else if provider == ProviderKind::Cursor {
+                                cursor_fork_context
+                                    .as_deref()
+                                    .map(|context| {
+                                        crate::cursor_session::prompt_with_fork_context(
                                             context, &prompt,
                                         )
                                     })
@@ -132,6 +154,7 @@ impl HeadlessDriver {
                                 provider_session_id = Some(session_id);
                                 can_resume = true;
                                 amp_fork_context = None;
+                                cursor_fork_context = None;
                             }
                         }
                         CommandMessage::Shutdown => break,
@@ -255,6 +278,15 @@ fn run_prompt(
                     command.args(["--session-id", session_id]);
                 }
             }
+        }
+        ProviderKind::Cursor => {
+            command.args(cursor_args(
+                mode,
+                interaction_mode,
+                model,
+                provider_session_id.filter(|_| resume),
+            ));
+            command.arg(&prompt);
         }
         ProviderKind::OpenCode => {
             command.args(["run", "--format", "json", "--thinking"]);
@@ -383,6 +415,7 @@ fn run_prompt(
                 match provider {
                     ProviderKind::Amp => parser.parse_amp(value, events),
                     ProviderKind::Claude => parser.parse_claude(value, events),
+                    ProviderKind::Cursor => parser.parse_cursor(value, events),
                     ProviderKind::OpenCode => parser.parse_opencode(value, events),
                     ProviderKind::Grok => parser.parse_grok(value, events),
                     ProviderKind::Codex | ProviderKind::Pi => {}
@@ -430,6 +463,7 @@ struct StreamParser {
     provider_session_id: Option<String>,
     amp_tools: HashMap<String, (ActivityKind, String)>,
     claude_tools: HashMap<String, (ActivityKind, String)>,
+    cursor_tools: HashMap<String, (ActivityKind, String)>,
     grok_tools: HashMap<String, (ActivityKind, String)>,
 }
 
@@ -654,6 +688,89 @@ impl StreamParser {
                 if let Some(result) = value.get("result").and_then(Value::as_str) {
                     let _ = events.send(DriverEvent::Error(result.to_owned()));
                 }
+            }
+            _ => {}
+        }
+    }
+
+    fn parse_cursor(&mut self, value: Value, events: &Sender<DriverEvent>) {
+        let event_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if let Some(id) = value.get("session_id").and_then(Value::as_str)
+            && !id.is_empty()
+            && self.provider_session_id.as_deref() != Some(id)
+        {
+            self.provider_session_id = Some(id.to_owned());
+            let _ = events.send(DriverEvent::Connected {
+                provider_cursor: Some(ProviderResumeCursor::Cursor {
+                    session_id: id.to_owned(),
+                    fork_context: None,
+                }),
+            });
+        }
+        match event_type {
+            "assistant" => {
+                if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+                    for block in content {
+                        if block.get("type").and_then(Value::as_str) == Some("text")
+                            && let Some(text) = block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .filter(|text| !text.is_empty())
+                        {
+                            let _ = events.send(DriverEvent::TextDelta(text.to_owned()));
+                        }
+                    }
+                }
+            }
+            "tool_call" => {
+                let id = value
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let tool_call = value.get("tool_call").unwrap_or(&Value::Null);
+                let (wire_name, payload) = tool_call
+                    .as_object()
+                    .and_then(|tools| tools.iter().next())
+                    .map(|(name, payload)| (name.as_str(), payload))
+                    .unwrap_or(("toolCall", tool_call));
+                let title = cursor_tool_title(wire_name);
+                let kind = classify_tool(wire_name);
+                let complete = value.get("subtype").and_then(Value::as_str) == Some("completed");
+                if !complete && let Some(id) = &id {
+                    self.cursor_tools.insert(id.clone(), (kind, title.clone()));
+                }
+                let (kind, title) = if complete {
+                    id.as_ref()
+                        .and_then(|id| self.cursor_tools.remove(id))
+                        .unwrap_or((kind, title))
+                } else {
+                    (kind, title)
+                };
+                let detail = if complete {
+                    payload.get("result")
+                } else {
+                    payload.get("args")
+                }
+                .filter(|value| !value.is_null())
+                .map(compact_json);
+                let _ = events.send(DriverEvent::Activity {
+                    id,
+                    kind,
+                    title,
+                    detail,
+                    complete,
+                });
+            }
+            "result" if value.get("is_error").and_then(Value::as_bool) == Some(true) => {
+                let message = value
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .or_else(|| value.get("error").and_then(Value::as_str))
+                    .unwrap_or("Cursor reported an error");
+                let _ = events.send(DriverEvent::Error(message.to_owned()));
             }
             _ => {}
         }
@@ -893,9 +1010,65 @@ fn amp_args(
     args
 }
 
+fn cursor_args(
+    mode: RuntimeMode,
+    interaction_mode: InteractionMode,
+    model: Option<&str>,
+    session_id: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "stream-json".to_owned(),
+    ];
+    if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
+        args.push("--mode=plan".to_owned());
+    } else if mode == RuntimeMode::Ask {
+        args.push("--mode=ask".to_owned());
+    } else {
+        // Cursor's print transport cannot relay approval prompts back to Waku.
+        // Its force flag is the documented non-interactive write path.
+        args.push("--force".to_owned());
+    }
+    if let Some(model) = model {
+        args.extend(["--model".to_owned(), model.to_owned()]);
+    }
+    if let Some(session_id) = session_id {
+        args.extend(["--resume".to_owned(), session_id.to_owned()]);
+    }
+    args
+}
+
+fn cursor_tool_title(wire_name: &str) -> String {
+    let name = wire_name
+        .strip_suffix("ToolCall")
+        .unwrap_or(wire_name)
+        .replace('_', " ");
+    let mut title = String::new();
+    for (index, character) in name.chars().enumerate() {
+        if index > 0 && character.is_ascii_uppercase() {
+            title.push(' ');
+        }
+        if index == 0 {
+            title.extend(character.to_uppercase());
+        } else {
+            title.push(character);
+        }
+    }
+    if title.is_empty() {
+        "Tool".into()
+    } else {
+        title
+    }
+}
+
 fn classify_tool(name: &str) -> ActivityKind {
     let normalized = name.to_ascii_lowercase();
-    if normalized.contains("bash") || normalized.contains("command") {
+    if normalized.contains("bash")
+        || normalized.contains("command")
+        || normalized.contains("shell")
+        || normalized.contains("terminal")
+    {
         ActivityKind::Command
     } else if normalized.contains("edit")
         || normalized.contains("write")
@@ -963,6 +1136,113 @@ mod tests {
                 "--fast",
             ]
         );
+    }
+
+    #[test]
+    fn cursor_cli_args_map_waku_modes_and_resume_exact_session() {
+        assert_eq!(
+            cursor_args(
+                RuntimeMode::FullAccess,
+                InteractionMode::Build,
+                Some("composer-2.5"),
+                Some("cursor-session-1"),
+            ),
+            [
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--force",
+                "--model",
+                "composer-2.5",
+                "--resume",
+                "cursor-session-1",
+            ]
+        );
+        assert!(
+            cursor_args(RuntimeMode::Ask, InteractionMode::Build, None, None)
+                .contains(&"--mode=ask".to_owned())
+        );
+        assert!(
+            cursor_args(RuntimeMode::FullAccess, InteractionMode::Plan, None, None)
+                .contains(&"--mode=plan".to_owned())
+        );
+    }
+
+    #[test]
+    fn cursor_stream_emits_session_text_and_correlated_tools_in_wire_order() {
+        let (events, receiver) = unbounded();
+        let mut parser = StreamParser::default();
+        parser.parse_cursor(
+            serde_json::json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "cursor-session-1"
+            }),
+            &events,
+        );
+        parser.parse_cursor(
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "Before"}]},
+                "session_id": "cursor-session-1"
+            }),
+            &events,
+        );
+        parser.parse_cursor(
+            serde_json::json!({
+                "type": "tool_call",
+                "subtype": "started",
+                "call_id": "tool-1",
+                "tool_call": {"readToolCall": {"args": {"path": "src/main.rs"}}},
+                "session_id": "cursor-session-1"
+            }),
+            &events,
+        );
+        parser.parse_cursor(
+            serde_json::json!({
+                "type": "tool_call",
+                "subtype": "completed",
+                "call_id": "tool-1",
+                "tool_call": {"readToolCall": {"result": {"success": {"totalLines": 12}}}},
+                "session_id": "cursor-session-1"
+            }),
+            &events,
+        );
+
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Connected {
+                provider_cursor: Some(ProviderResumeCursor::Cursor {
+                    session_id,
+                    fork_context: None,
+                })
+            } if session_id == "cursor-session-1"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::TextDelta(text) if text == "Before"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Activity {
+                id: Some(id),
+                kind: ActivityKind::Search,
+                title,
+                complete: false,
+                ..
+            } if id == "tool-1" && title == "Read"
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            DriverEvent::Activity {
+                id: Some(id),
+                kind: ActivityKind::Search,
+                title,
+                complete: true,
+                ..
+            } if id == "tool-1" && title == "Read"
+        ));
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

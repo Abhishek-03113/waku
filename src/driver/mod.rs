@@ -65,7 +65,11 @@ pub fn start(
     let inner: Arc<dyn DriverControl> = match provider {
         ProviderKind::Codex => Arc::new(codex::CodexDriver::start(options, events)?),
         ProviderKind::Pi => Arc::new(pi::PiDriver::start(options, events)?),
-        ProviderKind::Amp | ProviderKind::Claude | ProviderKind::OpenCode | ProviderKind::Grok => {
+        ProviderKind::Amp
+        | ProviderKind::Claude
+        | ProviderKind::Cursor
+        | ProviderKind::OpenCode
+        | ProviderKind::Grok => {
             Arc::new(headless::HeadlessDriver::start(provider, options, events)?)
         }
     };

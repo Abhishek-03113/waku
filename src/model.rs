@@ -11,16 +11,18 @@ pub enum ProviderKind {
     Claude,
     #[default]
     Codex,
+    Cursor,
     OpenCode,
     Grok,
     Pi,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
+        Self::Cursor,
         Self::OpenCode,
         Self::Grok,
         Self::Pi,
@@ -31,6 +33,7 @@ impl ProviderKind {
             Self::Amp => "amp",
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Cursor => "cursor",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
@@ -42,6 +45,7 @@ impl ProviderKind {
             Self::Amp => "Amp",
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
+            Self::Cursor => "Cursor CLI",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
             Self::Pi => "Pi",
@@ -53,6 +57,7 @@ impl ProviderKind {
             Self::Amp => "Amp",
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Cursor => "Cursor",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
             Self::Pi => "Pi",
@@ -64,6 +69,9 @@ impl ProviderKind {
             Self::Amp => "amp",
             Self::Claude => "claude",
             Self::Codex => "codex",
+            // Cursor documents `agent` as its primary command, but that name is
+            // shared by other CLIs. The backward-compatible alias is unambiguous.
+            Self::Cursor => "cursor-agent",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
@@ -73,19 +81,34 @@ impl ProviderKind {
     pub fn supports_conversation_rollback(self) -> bool {
         matches!(
             self,
-            Self::Amp | Self::Claude | Self::Codex | Self::OpenCode | Self::Grok | Self::Pi
+            Self::Amp
+                | Self::Claude
+                | Self::Codex
+                | Self::Cursor
+                | Self::OpenCode
+                | Self::Grok
+                | Self::Pi
         )
     }
 
     pub fn supports_conversation_fork(self) -> bool {
         matches!(
             self,
-            Self::Amp | Self::Claude | Self::Codex | Self::OpenCode | Self::Grok | Self::Pi
+            Self::Amp
+                | Self::Claude
+                | Self::Codex
+                | Self::Cursor
+                | Self::OpenCode
+                | Self::Grok
+                | Self::Pi
         )
     }
 
     pub fn supports_model_discovery(self) -> bool {
-        matches!(self, Self::Codex | Self::OpenCode | Self::Grok | Self::Pi)
+        matches!(
+            self,
+            Self::Codex | Self::Cursor | Self::OpenCode | Self::Grok | Self::Pi
+        )
     }
 }
 
@@ -108,6 +131,11 @@ pub enum ProviderResumeCursor {
     },
     Codex {
         thread_id: String,
+    },
+    Cursor {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fork_context: Option<String>,
     },
     OpenCode {
         session_id: String,
@@ -134,6 +162,10 @@ impl ProviderResumeCursor {
                 resume_at: None,
             },
             ProviderKind::Codex => Self::Codex { thread_id: id },
+            ProviderKind::Cursor => Self::Cursor {
+                session_id: id,
+                fork_context: None,
+            },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::Grok => Self::Grok { session_id: id },
             ProviderKind::Pi => Self::Pi {
@@ -148,6 +180,7 @@ impl ProviderResumeCursor {
             Self::Amp { .. } => ProviderKind::Amp,
             Self::Claude { .. } => ProviderKind::Claude,
             Self::Codex { .. } => ProviderKind::Codex,
+            Self::Cursor { .. } => ProviderKind::Cursor,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Pi { .. } => ProviderKind::Pi,
@@ -158,6 +191,7 @@ impl ProviderResumeCursor {
         match self {
             Self::Amp { thread_id, .. } => thread_id,
             Self::Claude { session_id, .. }
+            | Self::Cursor { session_id, .. }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
             | Self::Pi { session_id, .. } => session_id,
@@ -1024,6 +1058,7 @@ mod tests {
         assert_eq!(ProviderKind::Amp.id(), "amp");
         assert_eq!(ProviderKind::Claude.id(), "claude");
         assert_eq!(ProviderKind::Codex.command(), "codex");
+        assert_eq!(ProviderKind::Cursor.command(), "cursor-agent");
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
@@ -1035,6 +1070,7 @@ mod tests {
             ProviderKind::Amp,
             ProviderKind::Claude,
             ProviderKind::Codex,
+            ProviderKind::Cursor,
             ProviderKind::OpenCode,
             ProviderKind::Grok,
             ProviderKind::Pi,
@@ -1049,6 +1085,7 @@ mod tests {
         assert!(!ProviderKind::Amp.supports_model_discovery());
         assert!(!ProviderKind::Claude.supports_model_discovery());
         assert!(ProviderKind::Codex.supports_model_discovery());
+        assert!(ProviderKind::Cursor.supports_model_discovery());
         assert!(ProviderKind::OpenCode.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());
@@ -1152,6 +1189,15 @@ mod tests {
         assert_eq!(value["provider"], "claude");
         assert_eq!(value["sessionId"], "session-1");
         assert_eq!(value["resumeAt"], "message-9");
+
+        let cursor = ProviderResumeCursor::Cursor {
+            session_id: String::new(),
+            fork_context: Some("[]".into()),
+        };
+        let value = serde_json::to_value(&cursor).unwrap();
+        assert_eq!(value["provider"], "cursor");
+        assert_eq!(value["sessionId"], "");
+        assert_eq!(value["forkContext"], "[]");
     }
 
     #[test]

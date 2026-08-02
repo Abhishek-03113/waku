@@ -4,6 +4,7 @@ mod assets;
 mod checkpoint;
 mod claude_session;
 mod command_env;
+mod cursor_session;
 mod driver;
 mod grok_session;
 mod identity;
