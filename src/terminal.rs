@@ -19,11 +19,11 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontStyle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
+    App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontStyle, FontWeight,
+    Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText, TextRun,
-    UnderlineStyle, Window, canvas, div, font, px, rgb,
+    ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task,
+    TextRun, UnderlineStyle, Window, canvas, div, font, px, rgb,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::theme::ActiveTheme as _;
@@ -41,6 +41,8 @@ const TERMINAL_TOOLBAR_HEIGHT: f32 = 34.0;
 const TERMINAL_MIN_COLUMNS: usize = 20;
 const TERMINAL_MIN_ROWS: usize = 8;
 const TERMINAL_SCROLLBACK_LINES: usize = 10_000;
+const TERMINAL_CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+const TERMINAL_CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(300);
 
 enum TerminalUiEvent {
     Title(String),
@@ -241,7 +243,12 @@ impl TerminalSession {
         self.dirty.swap(false, Ordering::AcqRel)
     }
 
-    fn snapshot(&self, theme: Theme, selection_color: Hsla) -> TerminalSnapshot {
+    fn snapshot(
+        &self,
+        theme: Theme,
+        selection_color: Hsla,
+        render_cursor: bool,
+    ) -> TerminalSnapshot {
         let term = self.term.lock();
         let content = term.renderable_content();
         let columns = self.grid_size.0;
@@ -249,10 +256,11 @@ impl TerminalSession {
         let selection = content.selection;
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_column = content.cursor.point.column.0;
-        let cursor_visible = !matches!(
-            content.cursor.shape,
-            alacritty_terminal::vte::ansi::CursorShape::Hidden
-        );
+        let cursor_visible = render_cursor
+            && !matches!(
+                content.cursor.shape,
+                alacritty_terminal::vte::ansi::CursorShape::Hidden
+            );
         let mut cells = vec![TerminalCell::default(); columns * rows];
 
         for indexed in content.display_iter {
@@ -393,6 +401,87 @@ struct TerminalSnapshot {
     rows: Vec<TerminalRow>,
 }
 
+struct TerminalCursorBlink {
+    visible: bool,
+    enabled: bool,
+    epoch: usize,
+    _task: Task<()>,
+}
+
+impl TerminalCursorBlink {
+    fn new() -> Self {
+        Self {
+            visible: true,
+            enabled: false,
+            epoch: 0,
+            _task: Task::ready(()),
+        }
+    }
+
+    fn start(&mut self, cx: &mut Context<Self>) {
+        if self.enabled {
+            return;
+        }
+
+        self.enabled = true;
+        self.visible = true;
+        let epoch = self.next_epoch();
+        self.schedule_blink(epoch, TERMINAL_CURSOR_BLINK_INTERVAL, cx);
+        cx.notify();
+    }
+
+    fn stop(&mut self, cx: &mut Context<Self>) {
+        if !self.enabled && self.visible {
+            return;
+        }
+
+        self.enabled = false;
+        self.visible = true;
+        self.next_epoch();
+        cx.notify();
+    }
+
+    fn pause(&mut self, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+
+        self.visible = true;
+        let epoch = self.next_epoch();
+        self.schedule_blink(epoch, TERMINAL_CURSOR_BLINK_PAUSE, cx);
+        cx.notify();
+    }
+
+    fn blink(&mut self, epoch: usize, cx: &mut Context<Self>) {
+        if !self.enabled || epoch != self.epoch {
+            return;
+        }
+
+        self.visible = !self.visible;
+        let epoch = self.next_epoch();
+        self.schedule_blink(epoch, TERMINAL_CURSOR_BLINK_INTERVAL, cx);
+        cx.notify();
+    }
+
+    fn schedule_blink(&mut self, epoch: usize, delay: Duration, cx: &mut Context<Self>) {
+        self._task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            if let Some(this) = this.upgrade() {
+                this.update(cx, |this, cx| this.blink(epoch, cx));
+            }
+        });
+    }
+
+    fn next_epoch(&mut self) -> usize {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.epoch
+    }
+
+    fn visible(&self) -> bool {
+        self.visible
+    }
+}
+
 pub struct TerminalView {
     session: Option<TerminalSession>,
     error: Option<String>,
@@ -404,6 +493,9 @@ pub struct TerminalView {
     panel_width: f32,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     selecting: bool,
+    cursor_blink: gpui::Entity<TerminalCursorBlink>,
+    cursor_focus_tracking_started: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl TerminalView {
@@ -433,6 +525,9 @@ impl TerminalView {
         })
         .detach();
 
+        let cursor_blink = cx.new(|_| TerminalCursorBlink::new());
+        let subscriptions = vec![cx.observe(&cursor_blink, |_, _, cx| cx.notify())];
+
         Self {
             session,
             error,
@@ -444,6 +539,9 @@ impl TerminalView {
             panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             grid_bounds: Rc::new(Cell::new(None)),
             selecting: false,
+            cursor_blink,
+            cursor_focus_tracking_started: false,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -482,6 +580,7 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.pause_cursor_blink(cx);
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("c") {
             self.copy_selection(cx);
@@ -612,6 +711,7 @@ impl TerminalView {
     }
 
     fn paste(&mut self, text: String, cx: &mut Context<Self>) {
+        self.pause_cursor_blink(cx);
         let Some(session) = &self.session else {
             return;
         };
@@ -658,6 +758,42 @@ impl TerminalView {
             cx.notify();
         }
     }
+
+    fn ensure_cursor_focus_tracking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cursor_focus_tracking_started {
+            return;
+        }
+        self.cursor_focus_tracking_started = true;
+
+        let focus_handle = self.focus_handle.clone();
+        self._subscriptions.extend([
+            cx.observe_window_activation(window, |terminal, window, cx| {
+                terminal.update_cursor_blinking(window, cx);
+            }),
+            cx.on_focus(&focus_handle, window, |terminal, window, cx| {
+                terminal.update_cursor_blinking(window, cx);
+            }),
+            cx.on_blur(&focus_handle, window, |terminal, window, cx| {
+                terminal.update_cursor_blinking(window, cx);
+            }),
+        ]);
+        self.update_cursor_blinking(window, cx);
+    }
+
+    fn update_cursor_blinking(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let focused = window.is_window_active() && self.focus_handle.is_focused(window);
+        self.cursor_blink.update(cx, |cursor, cx| {
+            if focused {
+                cursor.start(cx);
+            } else {
+                cursor.stop(cx);
+            }
+        });
+    }
+
+    fn pause_cursor_blink(&mut self, cx: &mut Context<Self>) {
+        self.cursor_blink.update(cx, |cursor, cx| cursor.pause(cx));
+    }
 }
 
 impl Focusable for TerminalView {
@@ -668,6 +804,7 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_cursor_focus_tracking(window, cx);
         let theme = Theme::current(cx);
         let selection_color = cx.theme().selection;
         let viewport = window.viewport_size();
@@ -680,9 +817,14 @@ impl Render for TerminalView {
             .floor()
             .max(TERMINAL_MIN_ROWS as f32) as usize;
 
+        let terminal_focused = window.is_window_active() && self.focus_handle.is_focused(window);
+        let render_cursor = terminal_cursor_should_be_visible(
+            terminal_focused,
+            self.cursor_blink.read(cx).visible(),
+        );
         let snapshot = self.session.as_mut().map(|session| {
             session.resize(columns, rows);
-            session.snapshot(theme, selection_color)
+            session.snapshot(theme, selection_color, render_cursor)
         });
         let title = if self.title.trim().is_empty() {
             "Terminal"
@@ -891,6 +1033,10 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
     }
+}
+
+fn terminal_cursor_should_be_visible(focused: bool, blink_visible: bool) -> bool {
+    !focused || blink_visible
 }
 
 fn terminal_grid_point(
@@ -1182,6 +1328,14 @@ mod tests {
             b"\x1b[200~hello\x1b[201~"
         );
         assert_eq!(bracketed_paste("hello".into(), TermMode::empty()), b"hello");
+    }
+
+    #[test]
+    fn cursor_blinks_only_while_terminal_is_focused() {
+        assert!(terminal_cursor_should_be_visible(false, false));
+        assert!(terminal_cursor_should_be_visible(false, true));
+        assert!(!terminal_cursor_should_be_visible(true, false));
+        assert!(terminal_cursor_should_be_visible(true, true));
     }
 
     #[test]

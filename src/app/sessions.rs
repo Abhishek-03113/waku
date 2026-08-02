@@ -192,6 +192,11 @@ impl Waku {
     }
 
     pub(super) fn set_right_panel_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if visible {
+            self.request_active_terminal_focus();
+        } else {
+            self.right_panel_pending_terminal_focus = None;
+        }
         if self.right_panel_visible == visible {
             return;
         }

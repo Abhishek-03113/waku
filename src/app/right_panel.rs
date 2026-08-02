@@ -967,6 +967,9 @@ impl Waku {
             self.refresh_right_panel_diff();
         }
         self.ensure_right_panel_terminals(cx);
+        if self.right_panel_visible {
+            self.request_active_terminal_focus();
+        }
     }
 
     pub(super) fn remove_right_panel_session_state(&mut self, session_id: Uuid) {
@@ -1029,6 +1032,12 @@ impl Waku {
             .and_then(|index| self.right_panel_surfaces.get(index))
     }
 
+    pub(super) fn request_active_terminal_focus(&mut self) {
+        self.right_panel_pending_terminal_focus = self
+            .active_right_panel_surface()
+            .and_then(RightPanelSurface::terminal_id);
+    }
+
     fn right_panel_file_is_dirty(&self, relative_path: &str) -> bool {
         self.right_panel_file_editors
             .get(relative_path)
@@ -1060,6 +1069,7 @@ impl Waku {
             });
         self.right_panel_active_surface = Some(index);
         self.reveal_right_panel_tab(index);
+        self.request_active_terminal_focus();
         self.set_right_panel_visible(true, cx);
         cx.notify();
     }
@@ -1139,8 +1149,10 @@ impl Waku {
         };
         if let Some(active) = self.right_panel_active_surface {
             self.reveal_right_panel_tab(active);
+            self.request_active_terminal_focus();
         } else {
             self.right_panel_pending_tab_reveal = None;
+            self.right_panel_pending_terminal_focus = None;
         }
         cx.notify();
     }
@@ -1194,6 +1206,17 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let theme = Theme::current(cx);
+        let active_terminal_id = self
+            .active_right_panel_surface()
+            .and_then(RightPanelSurface::terminal_id);
+        if self.right_panel_pending_terminal_focus == active_terminal_id
+            && let Some(terminal_id) = active_terminal_id
+            && let Some(terminal) = self.right_panel_terminals.get(&terminal_id)
+        {
+            let focus_handle = terminal.read(cx).focus_handle(cx);
+            window.focus(&focus_handle, cx);
+            self.right_panel_pending_terminal_focus = None;
+        }
         let body = match self.active_right_panel_surface().cloned() {
             None => self.render_right_panel_chooser(cx).into_any_element(),
             Some(RightPanelSurface::Files) => self
@@ -1379,6 +1402,7 @@ impl Waku {
                         let _ = activate_weak.update(cx, |this, cx| {
                             this.right_panel_active_surface = Some(index);
                             this.reveal_right_panel_tab(index);
+                            this.request_active_terminal_focus();
                             cx.notify();
                         });
                     }),
