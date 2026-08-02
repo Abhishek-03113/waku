@@ -210,6 +210,10 @@ fn apply_component_theme(theme: Theme, window: Option<&mut Window>, cx: &mut App
     component.sidebar_border = theme.border;
     component.title_bar = theme.surface;
     component.title_bar_border = theme.border;
+    component.mono_font_family = "JetBrains Mono".into();
+    std::sync::Arc::make_mut(&mut component.highlight_theme)
+        .style
+        .editor_background = Some(theme.surface);
     cx.set_global(ActiveWakuTheme(theme));
 }
 

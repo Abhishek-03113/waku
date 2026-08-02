@@ -73,6 +73,35 @@ fn visible_working_tree_entries(
     entries
 }
 
+fn file_highlighter_language(relative_path: &str) -> &'static str {
+    let path = Path::new(relative_path);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if file_name == "Makefile" || file_name.starts_with("Makefile.") {
+        return Language::Make.name();
+    }
+
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    let language = match extension {
+        Some("h") => Language::C,
+        Some("hpp" | "hh" | "hxx") => Language::Cpp,
+        Some("jsx" | "mjs" | "cjs") => Language::JavaScript,
+        Some("mts" | "cts") => Language::TypeScript,
+        Some(extension) => Language::from_str(extension),
+        None => Language::Plain,
+    };
+    language.name()
+}
+
+fn read_right_panel_file(project_path: &Path, relative_path: &str) -> (String, bool) {
+    match std::fs::read_to_string(project_path.join(relative_path)) {
+        Ok(content) => (content, true),
+        Err(error) => (format!("Unable to edit this file: {error}"), false),
+    }
+}
+
 impl RightPanelSurface {
     fn new_browser() -> Self {
         Self::Browser(Uuid::new_v4())
@@ -281,6 +310,28 @@ mod tests {
     }
 
     #[test]
+    fn file_highlighter_language_follows_file_name_and_extension() {
+        assert_eq!(file_highlighter_language("src/app.rs"), "rust");
+        assert_eq!(file_highlighter_language("ui/panel.tsx"), "tsx");
+        assert_eq!(file_highlighter_language("Makefile"), "make");
+        assert_eq!(file_highlighter_language("src/native.hpp"), "cpp");
+        assert_eq!(file_highlighter_language("LICENSE"), "text");
+    }
+
+    #[test]
+    fn editable_file_reader_keeps_the_complete_disk_content() {
+        let root = std::env::temp_dir().join(format!("waku-editor-file-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let content = "line\n".repeat(10_000);
+        std::fs::write(root.join("large.txt"), &content).unwrap();
+
+        assert_eq!(read_right_panel_file(&root, "large.txt"), (content, true));
+        assert!(!read_right_panel_file(&root, "missing.txt").1);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn only_reuses_single_instance_surface_tabs() {
         let browser = RightPanelSurface::new_browser();
         let terminal = RightPanelSurface::new_terminal();
@@ -434,6 +485,8 @@ impl Waku {
             ),
             pending_tab_reveal: self.right_panel_pending_tab_reveal.take(),
             expanded_paths: std::mem::take(&mut self.right_panel_expanded_paths),
+            files_selected_path: self.right_panel_files_selected_path.take(),
+            file_editors: std::mem::take(&mut self.right_panel_file_editors),
             diff_files: std::mem::take(&mut self.right_panel_diff_files),
         }
     }
@@ -445,6 +498,8 @@ impl Waku {
         self.right_panel_tabs_scroll_handle = state.tabs_scroll_handle;
         self.right_panel_pending_tab_reveal = state.pending_tab_reveal;
         self.right_panel_expanded_paths = state.expanded_paths;
+        self.right_panel_files_selected_path = state.files_selected_path;
+        self.right_panel_file_editors = state.file_editors;
         self.right_panel_diff_files = state.diff_files;
     }
 
@@ -456,6 +511,23 @@ impl Waku {
     fn active_right_panel_surface(&self) -> Option<&RightPanelSurface> {
         self.right_panel_active_surface
             .and_then(|index| self.right_panel_surfaces.get(index))
+    }
+
+    fn right_panel_file_is_dirty(&self, relative_path: &str) -> bool {
+        self.right_panel_file_editors
+            .get(relative_path)
+            .is_some_and(|editor| editor.dirty)
+    }
+
+    fn right_panel_surface_is_dirty(&self, surface: &RightPanelSurface) -> bool {
+        match surface {
+            RightPanelSurface::Files => self
+                .right_panel_files_selected_path
+                .as_deref()
+                .is_some_and(|path| self.right_panel_file_is_dirty(path)),
+            RightPanelSurface::File(path) => self.right_panel_file_is_dirty(path),
+            _ => false,
+        }
     }
 
     fn open_right_panel_surface(&mut self, surface: RightPanelSurface, cx: &mut Context<Self>) {
@@ -477,19 +549,58 @@ impl Waku {
     }
 
     fn open_right_panel_file(&mut self, relative_path: String, cx: &mut Context<Self>) {
-        if let Some(active) = self.right_panel_active_surface
-            && matches!(
-                self.right_panel_surfaces.get(active),
-                Some(RightPanelSurface::Files)
-            )
-        {
-            self.right_panel_surfaces[active] = RightPanelSurface::File(relative_path);
-            self.set_right_panel_visible(true, cx);
-            cx.notify();
+        let Some(active) = self.right_panel_active_surface else {
+            self.open_right_panel_surface(RightPanelSurface::File(relative_path), cx);
             return;
-        }
+        };
+        match self.right_panel_surfaces.get(active).cloned() {
+            Some(RightPanelSurface::Files) => {
+                let dirty_file_would_be_replaced = self
+                    .right_panel_files_selected_path
+                    .as_deref()
+                    .is_some_and(|current_path| {
+                        current_path != relative_path
+                            && self.right_panel_file_is_dirty(current_path)
+                    });
+                if dirty_file_would_be_replaced {
+                    self.open_right_panel_surface(RightPanelSurface::File(relative_path), cx);
+                    return;
+                }
 
-        self.open_right_panel_surface(RightPanelSurface::File(relative_path), cx);
+                self.right_panel_files_selected_path = Some(relative_path);
+                self.set_right_panel_visible(true, cx);
+                cx.notify();
+            }
+            Some(RightPanelSurface::File(current_path)) => {
+                if current_path == relative_path {
+                    return;
+                }
+                if self.right_panel_file_is_dirty(&current_path) {
+                    self.open_right_panel_surface(RightPanelSurface::File(relative_path), cx);
+                    return;
+                }
+
+                let requested = RightPanelSurface::File(relative_path);
+                if let Some(existing) =
+                    reusable_surface_index(&self.right_panel_surfaces, &requested)
+                {
+                    self.right_panel_surfaces.remove(active);
+                    let existing = if existing > active {
+                        existing - 1
+                    } else {
+                        existing
+                    };
+                    self.right_panel_active_surface = Some(existing);
+                    self.reveal_right_panel_tab(existing);
+                } else {
+                    self.right_panel_surfaces[active] = requested;
+                    self.reveal_right_panel_tab(active);
+                }
+                self.set_right_panel_visible(true, cx);
+                cx.notify();
+            }
+            _ => self.open_right_panel_surface(RightPanelSurface::File(relative_path), cx),
+        }
     }
 
     fn close_right_panel_surface(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -518,6 +629,23 @@ impl Waku {
         cx.notify();
     }
 
+    pub(super) fn close_window_or_right_panel_tab_action(
+        &mut self,
+        _: &CloseWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(active) = self.right_panel_active_surface {
+            self.close_right_panel_surface(active, cx);
+            if self.right_panel_surfaces.is_empty() {
+                let focus_handle = self.composer_focus(cx);
+                window.focus(&focus_handle, cx);
+            }
+        } else {
+            crate::platform::hide_window(window);
+        }
+    }
+
     pub(super) fn render_right_panel_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::current(cx);
         div()
@@ -543,11 +671,18 @@ impl Waku {
             }))
     }
 
-    pub(super) fn render_right_panel(&self, width: f32, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn render_right_panel(
+        &mut self,
+        width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let theme = Theme::current(cx);
         let body = match self.active_right_panel_surface().cloned() {
             None => self.render_right_panel_chooser(cx).into_any_element(),
-            Some(RightPanelSurface::Files) => self.render_right_panel_files(cx).into_any_element(),
+            Some(RightPanelSurface::Files) => {
+                self.render_right_panel_files(window, cx).into_any_element()
+            }
             Some(RightPanelSurface::Diff) => self.render_right_panel_diff(cx).into_any_element(),
             Some(RightPanelSurface::Terminal(terminal_id)) => self
                 .right_panel_terminals
@@ -565,9 +700,9 @@ impl Waku {
                     )
                     .into_any_element()
                 }),
-            Some(RightPanelSurface::File(path)) => {
-                self.render_right_panel_file(path, cx).into_any_element()
-            }
+            Some(RightPanelSurface::File(path)) => self
+                .render_right_panel_file(path, window, cx)
+                .into_any_element(),
             Some(surface) => self
                 .render_right_panel_placeholder(surface, cx)
                 .into_any_element(),
@@ -650,6 +785,7 @@ impl Waku {
             .track_scroll(&self.right_panel_tabs_scroll_handle);
         for (index, surface) in self.right_panel_surfaces.iter().cloned().enumerate() {
             let active = active_surface == Some(index);
+            let dirty = self.right_panel_surface_is_dirty(&surface);
             let label = SharedString::from(surface.label().to_owned());
             let activate_weak = cx.entity().downgrade();
             let close_weak = cx.entity().downgrade();
@@ -687,6 +823,19 @@ impl Waku {
                             })
                             .child(label),
                     )
+                    .when(dirty, |element| {
+                        element.child(
+                            div()
+                                .id(SharedString::from(format!("right-panel-tab-dirty-{index}")))
+                                .size(px(7.0))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(theme.warning)
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Unsaved changes — ⌘S to save").build(window, cx)
+                                }),
+                        )
+                    })
                     .child(
                         div()
                             .id(SharedString::from(format!("close-right-panel-tab-{index}")))
@@ -984,8 +1133,12 @@ impl Waku {
             )
     }
 
-    fn render_right_panel_files(&self, cx: &mut Context<Self>) -> Div {
-        self.render_right_panel_working_tree(None, cx)
+    fn render_right_panel_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        if let Some(relative_path) = self.right_panel_files_selected_path.clone() {
+            self.render_right_panel_file(relative_path, window, cx)
+        } else {
+            self.render_right_panel_working_tree(None, cx)
+        }
     }
 
     fn render_right_panel_working_tree(
@@ -1103,22 +1256,15 @@ impl Waku {
             .child(div().flex_1().min_h_0().child(list).overflow_y_scrollbar())
     }
 
-    fn render_right_panel_file(&self, relative_path: String, cx: &mut Context<Self>) -> Div {
+    fn render_right_panel_file(
+        &mut self,
+        relative_path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = Theme::current(cx);
-        let content = self
-            .selected_project()
-            .map(|project| project.path.join(&relative_path))
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .map(|content| {
-                let mut chars = content.chars();
-                let preview = chars.by_ref().take(30_000).collect::<String>();
-                if chars.next().is_some() {
-                    format!("{preview}\n\n… File preview truncated")
-                } else {
-                    preview
-                }
-            })
-            .unwrap_or_else(|| "This file is binary, too large, or no longer available.".into());
+        let (editor_state, writable, _) =
+            self.ensure_right_panel_file_editor(&relative_path, window, cx);
 
         let editor = div()
             .flex_1()
@@ -1151,14 +1297,19 @@ impl Waku {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .p(px(16.0))
-                    .font_family("SF Mono")
+                    .font_family("JetBrains Mono")
                     .text_size(px(10.5))
-                    .line_height(px(16.0))
-                    .text_color(theme.text_secondary)
-                    .whitespace_normal()
-                    .child(content)
-                    .overflow_y_scrollbar(),
+                    .child(
+                        Input::new(&editor_state)
+                            .h_full()
+                            .appearance(false)
+                            .bordered(false)
+                            .focus_bordered(false)
+                            .disabled(!writable)
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .line_height(px(16.0)),
+                    ),
             );
 
         div()
@@ -1173,10 +1324,168 @@ impl Waku {
                     .min_w(px(164.0))
                     .h_full()
                     .flex_none()
+                    .flex()
+                    .flex_col()
                     .border_l_1()
                     .border_color(theme.border_strong)
                     .child(self.render_right_panel_working_tree(Some(&relative_path), cx)),
             )
+    }
+
+    fn ensure_right_panel_file_editor(
+        &mut self,
+        relative_path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<InputState>, bool, bool) {
+        if let Some(editor) = self.right_panel_file_editors.get(relative_path) {
+            return (editor.state.clone(), editor.writable, editor.dirty);
+        }
+
+        let (content, writable) = self
+            .selected_project()
+            .map(|project| read_right_panel_file(&project.path, relative_path))
+            .unwrap_or_else(|| ("No project is open.".into(), false));
+        let language = file_highlighter_language(relative_path);
+        let state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor(language)
+                .soft_wrap(true)
+        });
+        state.update(cx, |state, cx| {
+            state.set_value(content.clone(), window, cx);
+        });
+
+        self.right_panel_file_editors.insert(
+            relative_path.to_owned(),
+            RightPanelFileEditor {
+                state: state.clone(),
+                disk_content: content,
+                writable,
+                dirty: false,
+            },
+        );
+
+        let subscribed_path = relative_path.to_owned();
+        cx.subscribe_in(
+            &state,
+            window,
+            move |this: &mut Self, state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    let value = state.read(cx).value();
+                    if let Some(editor) = this
+                        .right_panel_file_editors
+                        .get_mut(subscribed_path.as_str())
+                    {
+                        editor.dirty =
+                            editor.writable && value.as_str() != editor.disk_content.as_str();
+                        cx.notify();
+                    }
+                }
+                InputEvent::Focus => {
+                    this.reload_right_panel_file_if_clean(subscribed_path.as_str(), window, cx);
+                }
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {}
+            },
+        )
+        .detach();
+
+        (state, writable, false)
+    }
+
+    fn reload_right_panel_file_if_clean(
+        &mut self,
+        relative_path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .right_panel_file_editors
+            .get(relative_path)
+            .is_none_or(|editor| editor.dirty)
+        {
+            return;
+        }
+
+        let Some(project_path) = self.selected_project().map(|project| project.path.clone()) else {
+            return;
+        };
+        let (content, writable) = read_right_panel_file(&project_path, relative_path);
+        let Some(editor) = self.right_panel_file_editors.get_mut(relative_path) else {
+            return;
+        };
+        if editor.disk_content == content && editor.writable == writable {
+            return;
+        }
+
+        editor.disk_content = content.clone();
+        editor.writable = writable;
+        editor.dirty = false;
+        let state = editor.state.clone();
+        state.update(cx, |state, cx| {
+            state.set_value(content, window, cx);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn reload_clean_right_panel_file_editors(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = self
+            .right_panel_file_editors
+            .iter()
+            .filter(|(_, editor)| !editor.dirty)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        for path in paths {
+            self.reload_right_panel_file_if_clean(&path, window, cx);
+        }
+    }
+
+    pub(super) fn save_right_panel_file_action(
+        &mut self,
+        _: &SaveFile,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let relative_path = match self.active_right_panel_surface() {
+            Some(RightPanelSurface::Files) => self.right_panel_files_selected_path.clone(),
+            Some(RightPanelSurface::File(path)) => Some(path.clone()),
+            _ => None,
+        };
+        let Some(relative_path) = relative_path else {
+            return;
+        };
+        let Some(project_path) = self.selected_project().map(|project| project.path.clone()) else {
+            return;
+        };
+        let Some(editor) = self.right_panel_file_editors.get(&relative_path) else {
+            return;
+        };
+        if !editor.writable {
+            self.toast = Some(format!(
+                "Could not save {relative_path}: file is not editable"
+            ));
+            cx.notify();
+            return;
+        }
+
+        let content = editor.state.read(cx).value().to_string();
+        match std::fs::write(project_path.join(&relative_path), content.as_bytes()) {
+            Ok(()) => {
+                if let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) {
+                    editor.disk_content = content;
+                    editor.dirty = false;
+                }
+                cx.notify();
+            }
+            Err(error) => {
+                self.toast = Some(format!("Could not save {relative_path}: {error}"));
+                cx.notify();
+            }
+        }
     }
 
     fn render_right_panel_diff(&self, cx: &mut Context<Self>) -> Div {

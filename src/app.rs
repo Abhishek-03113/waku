@@ -27,6 +27,7 @@ use crate::model::{
     ProviderProbe, ProviderResumeCursor, ReasoningBlock, RuntimeMode, SessionStatus,
     TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
+use gpui_component::highlighter::Language;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
@@ -48,7 +49,7 @@ use crate::ui::{
 };
 use crate::{
     CancelTurn, CloseWindow, FocusComposer, NavigateBack, NavigateForward, NewSession,
-    OpenSettings, ToggleRightPanel, ToggleSidebar,
+    OpenSettings, SaveFile, ToggleRightPanel, ToggleSidebar,
 };
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
@@ -189,6 +190,13 @@ struct RightPanelDiffFile {
     deletions: u64,
 }
 
+struct RightPanelFileEditor {
+    state: Entity<InputState>,
+    disk_content: String,
+    writable: bool,
+    dirty: bool,
+}
+
 struct RightPanelSessionState {
     visible: bool,
     surfaces: Vec<RightPanelSurface>,
@@ -196,6 +204,8 @@ struct RightPanelSessionState {
     tabs_scroll_handle: ScrollHandle,
     pending_tab_reveal: Option<usize>,
     expanded_paths: HashSet<PathBuf>,
+    files_selected_path: Option<String>,
+    file_editors: HashMap<String, RightPanelFileEditor>,
     diff_files: Vec<RightPanelDiffFile>,
 }
 
@@ -208,6 +218,8 @@ impl RightPanelSessionState {
             tabs_scroll_handle: ScrollHandle::new(),
             pending_tab_reveal: None,
             expanded_paths: HashSet::new(),
+            files_selected_path: None,
+            file_editors: HashMap::new(),
             diff_files: Vec::new(),
         }
     }
@@ -549,6 +561,8 @@ pub struct Waku {
     right_panel_tabs_scroll_handle: ScrollHandle,
     right_panel_pending_tab_reveal: Option<usize>,
     right_panel_expanded_paths: HashSet<PathBuf>,
+    right_panel_files_selected_path: Option<String>,
+    right_panel_file_editors: HashMap<String, RightPanelFileEditor>,
     right_panel_diff_files: Vec<RightPanelDiffFile>,
     right_panel_terminals: HashMap<Uuid, Entity<TerminalView>>,
     settings_page: Option<SettingsPage>,
@@ -741,6 +755,13 @@ impl Waku {
             })
             .detach();
 
+            cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+                if window.is_window_active() {
+                    this.reload_clean_right_panel_file_editors(window, cx);
+                }
+            })
+            .detach();
+
             cx.subscribe(
                 &composer,
                 |this: &mut Self, _, event: &ComposerEvent, cx| match event {
@@ -814,6 +835,8 @@ impl Waku {
                 right_panel_tabs_scroll_handle: ScrollHandle::new(),
                 right_panel_pending_tab_reveal: None,
                 right_panel_expanded_paths: HashSet::new(),
+                right_panel_files_selected_path: None,
+                right_panel_file_editors: HashMap::new(),
                 right_panel_diff_files: Vec::new(),
                 right_panel_terminals: HashMap::new(),
                 settings_page: None,

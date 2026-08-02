@@ -33,6 +33,7 @@ actions!(
         NavigateBack,
         NavigateForward,
         FocusComposer,
+        SaveFile,
         CancelTurn
     ]
 );
@@ -97,6 +98,7 @@ fn main() {
                 KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
                 KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
                 KeyBinding::new("cmd-l", FocusComposer, None),
+                KeyBinding::new("cmd-s", SaveFile, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
             ]);
 

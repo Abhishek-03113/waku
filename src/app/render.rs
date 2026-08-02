@@ -61,7 +61,7 @@ impl Render for Waku {
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
         div()
             .key_context("Waku")
-            .on_action(|_: &CloseWindow, window, _| crate::platform::hide_window(window))
+            .on_action(cx.listener(Self::close_window_or_right_panel_tab_action))
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
@@ -69,6 +69,7 @@ impl Render for Waku {
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
             .on_action(cx.listener(Self::focus_composer_action))
+            .on_action(cx.listener(Self::save_right_panel_file_action))
             .on_action(cx.listener(Self::cancel_turn_action))
             .capture_any_mouse_down(cx.listener(Self::navigation_mouse_down))
             .on_mouse_move(cx.listener(Self::resize_panel_mouse_move))
@@ -139,7 +140,7 @@ impl Render for Waku {
                     }),
             )
             .when(self.right_panel_visible, |root| {
-                root.child(self.render_right_panel(right_panel_width, cx))
+                root.child(self.render_right_panel(right_panel_width, window, cx))
             })
             .into_any_element()
     }
