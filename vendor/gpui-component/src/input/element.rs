@@ -965,6 +965,15 @@ impl Element for TextElement {
         let placeholder = self.placeholder.clone();
 
         let mut bounds = bounds;
+        let input_text_color = if state.mode.is_code_editor() {
+            cx.theme()
+                .highlight_theme
+                .style
+                .editor_foreground
+                .unwrap_or(cx.theme().foreground)
+        } else {
+            cx.theme().foreground
+        };
 
         let (display_text, text_color) = if is_empty {
             (
@@ -974,10 +983,10 @@ impl Element for TextElement {
         } else if state.masked {
             (
                 &Rope::from("*".repeat(text.chars().count())),
-                cx.theme().foreground,
+                input_text_color,
             )
         } else {
-            (&text, cx.theme().foreground)
+            (&text, input_text_color)
         };
 
         let mut last_layout = LastLayout {
@@ -1172,10 +1181,22 @@ impl Element for TextElement {
         let state = self.state.read(cx);
         let line_numbers = if state.mode.line_number() {
             let mut line_numbers = vec![];
+            let line_number_color = cx
+                .theme()
+                .highlight_theme
+                .style
+                .editor_line_number
+                .unwrap_or(cx.theme().muted_foreground);
+            let active_line_number_color = cx
+                .theme()
+                .highlight_theme
+                .style
+                .editor_active_line_number
+                .unwrap_or(input_text_color);
             let other_line_runs = vec![TextRun {
                 len: line_number_len,
                 font: style.font(),
-                color: cx.theme().muted_foreground,
+                color: line_number_color,
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -1183,7 +1204,7 @@ impl Element for TextElement {
             let current_line_runs = vec![TextRun {
                 len: line_number_len,
                 font: style.font(),
-                color: cx.theme().foreground,
+                color: active_line_number_color,
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -1305,6 +1326,15 @@ impl Element for TextElement {
         }
 
         let active_line_color = cx.theme().highlight_theme.style.editor_active_line;
+        let caret_color = if state.mode.is_code_editor() {
+            cx.theme()
+                .highlight_theme
+                .style
+                .editor_caret
+                .unwrap_or(cx.theme().caret)
+        } else {
+            cx.theme().caret
+        };
 
         // Paint active line
         let mut offset_y = px(0.);
@@ -1404,7 +1434,7 @@ impl Element for TextElement {
         // Paint blinking cursor
         if focused && show_cursor {
             if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
-                window.paint_quad(fill(cursor_bounds, cx.theme().caret));
+                window.paint_quad(fill(cursor_bounds, caret_color));
             }
         }
 

@@ -106,7 +106,7 @@ impl Language {
 
         #[cfg(feature = "tree-sitter-languages")]
         match s {
-            "bash" | "sh" => Self::Bash,
+            "bash" | "sh" | "shell" | "shellscript" | "zsh" => Self::Bash,
             "c" => Self::C,
             "cmake" => Self::CMake,
             "cpp" | "c++" => Self::Cpp,
@@ -120,7 +120,7 @@ impl Language {
             "graphql" => Self::GraphQL,
             "html" => Self::Html,
             "java" => Self::Java,
-            "javascript" | "js" => Self::JavaScript,
+            "javascript" | "js" | "javascriptreact" | "jsx" => Self::JavaScript,
             "jsdoc" => Self::JsDoc,
             "json" | "jsonc" => Self::Json,
             "make" | "makefile" => Self::Make,
@@ -134,7 +134,7 @@ impl Language {
             "sql" => Self::Sql,
             "swift" => Self::Swift,
             "toml" => Self::Toml,
-            "tsx" => Self::Tsx,
+            "tsx" | "typescriptreact" => Self::Tsx,
             "typescript" | "ts" => Self::TypeScript,
             "yaml" | "yml" => Self::Yaml,
             "zig" => Self::Zig,
@@ -148,8 +148,20 @@ impl Language {
         return vec![];
 
         #[cfg(feature = "tree-sitter-languages")]
+        if matches!(self, Self::Markdown) {
+            // Fence labels are dynamic (`rust`, `tsx`, `swift`, ...). All
+            // grammars are already embedded in this feature, so prepare their
+            // small highlight queries with the Markdown highlighter rather
+            // than silently supporting only a fixed subset.
+            return Self::all()
+                .filter(|language| *language != Self::Plain)
+                .map(|language| language.name().into())
+                .collect();
+        }
+
+        #[cfg(feature = "tree-sitter-languages")]
         match self {
-            Self::Markdown => vec!["markdown-inline", "html", "toml", "yaml"],
+            Self::Markdown => unreachable!(),
             Self::MarkdownInline => vec![],
             Self::Html => vec!["javascript", "css"],
             Self::Rust => vec!["rust"],
@@ -333,7 +345,7 @@ impl Language {
             ),
             Self::Tsx => (
                 tree_sitter_typescript::LANGUAGE_TSX,
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                "",
                 "",
                 tree_sitter_typescript::LOCALS_QUERY,
             ),
@@ -362,6 +374,22 @@ impl Language {
                 "",
             ),
         };
+
+        #[cfg(feature = "tree-sitter-languages")]
+        let combined_query = match self {
+            Self::JavaScript | Self::Tsx => Some(format!(
+                "{}\n{}",
+                if matches!(self, Self::Tsx) {
+                    include_str!("languages/typescript/highlights.scm")
+                } else {
+                    include_str!("languages/javascript/highlights.scm")
+                },
+                include_str!("languages/tsx/highlights.scm")
+            )),
+            _ => None,
+        };
+        #[cfg(feature = "tree-sitter-languages")]
+        let query = combined_query.as_deref().unwrap_or(query);
 
         let language = tree_sitter::Language::new(language);
 

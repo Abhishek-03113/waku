@@ -410,6 +410,8 @@ pub struct HighlightThemeStyle {
     pub editor_background: Option<Hsla>,
     #[serde(rename = "editor.foreground")]
     pub editor_foreground: Option<Hsla>,
+    #[serde(rename = "editor.caret")]
+    pub editor_caret: Option<Hsla>,
     #[serde(rename = "editor.active_line.background")]
     pub editor_active_line: Option<Hsla>,
     #[serde(rename = "editor.line_number")]

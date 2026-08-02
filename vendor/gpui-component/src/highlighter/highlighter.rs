@@ -6,8 +6,9 @@ use gpui::{HighlightStyle, SharedString};
 
 use ropey::{ChunkCursor, Rope};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     ops::Range,
+    sync::{Arc, LazyLock, Mutex, OnceLock},
     usize,
 };
 use sum_tree::Bias;
@@ -20,8 +21,9 @@ use tree_sitter::{
 #[allow(unused)]
 pub struct SyntaxHighlighter {
     language: SharedString,
-    query: Option<Query>,
-    injection_queries: HashMap<SharedString, Query>,
+    query: Option<Arc<Query>>,
+    injection_queries: HashMap<SharedString, Arc<Query>>,
+    supported_injection_languages: HashSet<SharedString>,
 
     locals_pattern_index: usize,
     highlights_pattern_index: usize,
@@ -40,6 +42,32 @@ pub struct SyntaxHighlighter {
     /// The last parsed tree.
     tree: Option<Tree>,
 }
+
+struct PreparedHighlighter {
+    language: SharedString,
+    parser_language: tree_sitter::Language,
+    query: Arc<Query>,
+    supported_injection_languages: HashSet<SharedString>,
+    locals_pattern_index: usize,
+    highlights_pattern_index: usize,
+    non_local_variable_patterns: Vec<bool>,
+    injection_content_capture_index: Option<u32>,
+    injection_language_capture_index: Option<u32>,
+    local_scope_capture_index: Option<u32>,
+    local_def_capture_index: Option<u32>,
+    local_def_value_capture_index: Option<u32>,
+    local_ref_capture_index: Option<u32>,
+}
+
+type PreparedHighlighterResult = std::result::Result<Arc<PreparedHighlighter>, String>;
+type InjectionQueryResult = std::result::Result<Arc<Query>, String>;
+
+static PREPARED_HIGHLIGHTERS: LazyLock<
+    Mutex<HashMap<SharedString, Arc<OnceLock<PreparedHighlighterResult>>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static INJECTION_QUERIES: LazyLock<
+    Mutex<HashMap<SharedString, Arc<OnceLock<InjectionQueryResult>>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct TextProvider<'a>(&'a Rope);
 struct ByteChunks<'a> {
@@ -183,18 +211,62 @@ impl SyntaxHighlighter {
     ///
     /// https://github.com/tree-sitter/tree-sitter/blob/v0.25.5/highlight/src/lib.rs#L336
     fn build_combined_injections_query(lang: &str) -> Result<Self> {
-        let Some(config) = LanguageRegistry::singleton().language(&lang) else {
+        let prepared = Self::prepared_highlighter(lang)?;
+        let mut parser = Parser::new();
+        parser
+            .set_language(&prepared.parser_language)
+            .context("parse set_language")?;
+
+        Ok(Self {
+            language: prepared.language.clone(),
+            query: Some(prepared.query.clone()),
+            injection_queries: HashMap::new(),
+            supported_injection_languages: prepared.supported_injection_languages.clone(),
+            locals_pattern_index: prepared.locals_pattern_index,
+            highlights_pattern_index: prepared.highlights_pattern_index,
+            non_local_variable_patterns: prepared.non_local_variable_patterns.clone(),
+            injection_content_capture_index: prepared.injection_content_capture_index,
+            injection_language_capture_index: prepared.injection_language_capture_index,
+            local_scope_capture_index: prepared.local_scope_capture_index,
+            local_def_capture_index: prepared.local_def_capture_index,
+            local_def_value_capture_index: prepared.local_def_value_capture_index,
+            local_ref_capture_index: prepared.local_ref_capture_index,
+            text: Rope::new(),
+            parser,
+            tree: None,
+        })
+    }
+
+    /// Return the immutable, compiled query metadata for a language. Query
+    /// compilation is substantially more expensive than creating a parser, so
+    /// share it across every editor that uses the same grammar.
+    fn prepared_highlighter(lang: &str) -> Result<Arc<PreparedHighlighter>> {
+        let Some(config) = LanguageRegistry::singleton().language(lang) else {
             return Err(anyhow!(
                 "language {:?} is not registered in `LanguageRegistry`",
                 lang
             ));
         };
+        let slot = {
+            let mut cache = PREPARED_HIGHLIGHTERS.lock().unwrap();
+            cache
+                .entry(config.name.clone())
+                .or_insert_with(|| Arc::new(OnceLock::new()))
+                .clone()
+        };
 
-        let mut parser = Parser::new();
-        parser
-            .set_language(&config.language)
-            .context("parse set_language")?;
+        slot.get_or_init(|| {
+            Self::compile_highlighter(&config)
+                .map(Arc::new)
+                .map_err(|err| format!("{err:#}"))
+        })
+        .clone()
+        .map_err(|err| anyhow!(err))
+    }
 
+    fn compile_highlighter(
+        config: &crate::highlighter::LanguageConfig,
+    ) -> Result<PreparedHighlighter> {
         // Concatenate the query strings, keeping track of the start offset of each section.
         let mut query_source = String::new();
         query_source.push_str(&config.injections);
@@ -274,31 +346,18 @@ impl SyntaxHighlighter {
             }
         }
 
-        let mut injection_queries = HashMap::new();
-        for inj_language in config.injection_languages.iter() {
-            if let Some(inj_config) = LanguageRegistry::singleton().language(&inj_language) {
-                match Query::new(&inj_config.language, &inj_config.highlights) {
-                    Ok(q) => {
-                        injection_queries.insert(inj_config.name.clone(), q);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "failed to build injection query for {:?}: {:?}",
-                            inj_config.name,
-                            e
-                        );
-                    }
-                }
-            }
-        }
+        let supported_injection_languages = config
+            .injection_languages
+            .iter()
+            .filter_map(|language| LanguageRegistry::singleton().language(language.as_ref()))
+            .map(|config| config.name)
+            .collect();
 
-        // let highlight_indices = vec![None; query.capture_names().len()];
-
-        Ok(Self {
+        Ok(PreparedHighlighter {
             language: config.name.clone(),
-            query: Some(query),
-            injection_queries,
-
+            parser_language: config.language.clone(),
+            query: Arc::new(query),
+            supported_injection_languages,
             locals_pattern_index,
             highlights_pattern_index,
             non_local_variable_patterns,
@@ -308,10 +367,32 @@ impl SyntaxHighlighter {
             local_def_capture_index,
             local_def_value_capture_index,
             local_ref_capture_index,
-            text: Rope::new(),
-            parser,
-            tree: None,
         })
+    }
+
+    fn cached_injection_query(lang: &str) -> Result<(SharedString, Arc<Query>)> {
+        let Some(config) = LanguageRegistry::singleton().language(lang) else {
+            return Err(anyhow!(
+                "injection language {:?} is not registered in `LanguageRegistry`",
+                lang
+            ));
+        };
+        let slot = {
+            let mut cache = INJECTION_QUERIES.lock().unwrap();
+            cache
+                .entry(config.name.clone())
+                .or_insert_with(|| Arc::new(OnceLock::new()))
+                .clone()
+        };
+        let query = slot
+            .get_or_init(|| {
+                Query::new(&config.language, &config.highlights)
+                    .map(Arc::new)
+                    .map_err(|err| err.to_string())
+            })
+            .clone()
+            .map_err(|err| anyhow!(err))?;
+        Ok((config.name, query))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -365,17 +446,74 @@ impl SyntaxHighlighter {
 
         self.tree = Some(new_tree);
         self.text = text.clone();
+        self.prepare_injection_queries();
+    }
+
+    /// Compile only the embedded-language queries that this document actually
+    /// uses. This runs alongside the initial parse on the background executor,
+    /// avoiding the old cost of compiling every supported grammar for each
+    /// Markdown or TypeScript file.
+    fn prepare_injection_queries(&mut self) {
+        if self.supported_injection_languages.is_empty() {
+            return;
+        }
+
+        let needed_languages = {
+            let Some(tree) = &self.tree else {
+                return;
+            };
+            let Some(query) = &self.query else {
+                return;
+            };
+            let mut needed_languages = HashSet::new();
+            let mut cursor = QueryCursor::new();
+            let mut matches =
+                cursor.matches(query.as_ref(), tree.root_node(), TextProvider(&self.text));
+
+            while let Some(query_match) = matches.next() {
+                let (Some(language_name), Some(_), _) =
+                    self.injection_for_match(None, query.as_ref(), query_match)
+                else {
+                    continue;
+                };
+                let Some(config) = LanguageRegistry::singleton().language(language_name.as_ref())
+                else {
+                    continue;
+                };
+                if self.supported_injection_languages.contains(&config.name)
+                    && !self.injection_queries.contains_key(&config.name)
+                {
+                    needed_languages.insert(config.name);
+                }
+            }
+            needed_languages
+        };
+
+        for language in needed_languages {
+            match Self::cached_injection_query(language.as_ref()) {
+                Ok((language, query)) => {
+                    self.injection_queries.insert(language, query);
+                }
+                Err(err) => {
+                    tracing::error!(
+                        "failed to build injection query for {:?}: {:?}",
+                        language,
+                        err
+                    );
+                }
+            }
+        }
     }
 
     /// Match the visible ranges of nodes in the Tree for highlighting.
     fn match_styles(&self, range: Range<usize>) -> Vec<HighlightItem> {
-        let mut highlights = vec![];
+        let mut prioritized_highlights = vec![];
         let Some(tree) = &self.tree else {
-            return highlights;
+            return vec![];
         };
 
         let Some(query) = &self.query else {
-            return highlights;
+            return vec![];
         };
 
         let root_node = tree.root_node();
@@ -383,17 +521,20 @@ impl SyntaxHighlighter {
         let source = &self.text;
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(range);
-        let mut matches = cursor.matches(&query, root_node, TextProvider(&source));
+        let mut matches = cursor.matches(query.as_ref(), root_node, TextProvider(source));
 
         while let Some(query_match) = matches.next() {
             // Ref:
             // https://github.com/tree-sitter/tree-sitter/blob/460118b4c82318b083b4d527c9c750426730f9c0/highlight/src/lib.rs#L556
             if let (Some(language_name), Some(content_node), _) =
-                self.injection_for_match(None, query, query_match)
+                self.injection_for_match(None, query.as_ref(), query_match)
             {
                 let styles = self.handle_injection(&language_name, content_node);
                 for (node_range, highlight_name) in styles {
-                    highlights.push(HighlightItem::new(node_range.clone(), highlight_name));
+                    prioritized_highlights.push((
+                        usize::MAX,
+                        HighlightItem::new(node_range.clone(), highlight_name),
+                    ));
                 }
 
                 continue;
@@ -411,9 +552,22 @@ impl SyntaxHighlighter {
 
                 let node_range: Range<usize> = node.start_byte()..node.end_byte();
                 let highlight_name = SharedString::from(highlight_name.to_string());
-                highlights.push(HighlightItem::new(node_range, highlight_name));
+                prioritized_highlights.push((
+                    query_match.pattern_index,
+                    HighlightItem::new(node_range, highlight_name),
+                ));
             }
         }
+
+        // Query cursors emit by node position, which can put a broad child-node
+        // pattern after a more specific parent-node pattern. Tree-sitter query
+        // order is the intended precedence, and injected grammar styles must
+        // remain above the parent language's broad fence capture.
+        prioritized_highlights.sort_by_key(|(pattern_index, _)| *pattern_index);
+        let highlights = prioritized_highlights
+            .into_iter()
+            .map(|(_, highlight)| highlight)
+            .collect();
 
         // DO NOT REMOVE THIS PRINT, it's useful for debugging
         // for item in highlights {
@@ -433,33 +587,33 @@ impl SyntaxHighlighter {
         let start_offset = self.text.clip_offset(node.start_byte(), Bias::Left);
         let end_offset = self.text.clip_offset(node.end_byte(), Bias::Right);
 
-        let mut cache = vec![];
-        let Some(query) = &self.injection_queries.get(injection_language) else {
-            return cache;
+        let mut prioritized_cache = vec![];
+        let Some(config) = LanguageRegistry::singleton().language(injection_language) else {
+            return vec![];
+        };
+        let Some(query) = self.injection_queries.get(&config.name) else {
+            return vec![];
         };
 
         let content = self.text.slice(start_offset..end_offset);
         if content.len() == 0 {
-            return cache;
+            return vec![];
         };
         // FIXME: Avoid to_string.
         let content = content.to_string();
 
-        let Some(config) = LanguageRegistry::singleton().language(injection_language) else {
-            return cache;
-        };
         let mut parser = Parser::new();
         if parser.set_language(&config.language).is_err() {
-            return cache;
+            return vec![];
         }
 
         let source = content.as_bytes();
         let Some(tree) = parser.parse(source, None) else {
-            return cache;
+            return vec![];
         };
 
         let mut query_cursor = QueryCursor::new();
-        let mut matches = query_cursor.matches(query, tree.root_node(), source);
+        let mut matches = query_cursor.matches(query.as_ref(), tree.root_node(), source);
 
         while let Some(m) = matches.next() {
             for cap in m.captures {
@@ -476,12 +630,20 @@ impl SyntaxHighlighter {
                     if is_ignored_highlight_capture(highlight_name) {
                         continue;
                     }
-                    cache.push((node_range, highlight_name.to_string()));
+                    prioritized_cache.push((
+                        m.pattern_index,
+                        node_range,
+                        highlight_name.to_string(),
+                    ));
                 }
             }
         }
 
-        cache
+        prioritized_cache.sort_by_key(|(pattern_index, _, _)| *pattern_index);
+        prioritized_cache
+            .into_iter()
+            .map(|(_, range, name)| (range, name))
+            .collect()
     }
 
     /// Ref:
@@ -498,7 +660,7 @@ impl SyntaxHighlighter {
         query_match: &QueryMatch<'a, 'a>,
     ) -> (Option<SharedString>, Option<Node<'a>>, bool) {
         let content_capture_index = self.injection_content_capture_index;
-        // let language_capture_index = self.injection_language_capture_index;
+        let language_capture_index = self.injection_language_capture_index;
 
         let mut language_name: Option<SharedString> = None;
         let mut content_node = None;
@@ -507,6 +669,13 @@ impl SyntaxHighlighter {
             let index = Some(capture.index);
             if index == content_capture_index {
                 content_node = Some(capture.node);
+            } else if index == language_capture_index && language_name.is_none() {
+                let language_range = capture.node.byte_range();
+                let captured_language = self.text.slice(language_range).to_string();
+                let captured_language = captured_language.trim();
+                if !captured_language.is_empty() {
+                    language_name = Some(captured_language.to_ascii_lowercase().into());
+                }
             }
         }
 
@@ -829,5 +998,25 @@ mod tests {
                 (60..65, clean),
             ],
         );
+    }
+
+    #[test]
+    fn compiled_queries_are_shared_and_markdown_injections_are_lazy() {
+        let first = SyntaxHighlighter::new("swift");
+        let second = SyntaxHighlighter::new("swift");
+        assert!(Arc::ptr_eq(
+            first.query.as_ref().unwrap(),
+            second.query.as_ref().unwrap()
+        ));
+
+        let mut markdown = SyntaxHighlighter::new("markdown");
+        let supported_count = markdown.supported_injection_languages.len();
+        markdown.update(
+            None,
+            &Rope::from("# Example\n\n```rust\nfn main() {}\n```\n"),
+        );
+
+        assert!(markdown.injection_queries.contains_key("rust"));
+        assert!(markdown.injection_queries.len() < supported_count);
     }
 }

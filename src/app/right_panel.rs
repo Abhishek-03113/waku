@@ -577,8 +577,6 @@ mod tests {
 
     #[test]
     fn file_highlighter_language_follows_file_name_and_extension() {
-        use gpui_component::Colorize as _;
-
         assert_eq!(file_highlighter_language("src/app.rs"), "rust");
         assert_eq!(file_highlighter_language("ui/panel.tsx"), "tsx");
         assert_eq!(file_highlighter_language("Sources/App.swift"), "swift");
@@ -587,10 +585,8 @@ mod tests {
             "swift"
         );
         let theme = gpui_component::highlighter::HighlightTheme::default_light();
-        assert_eq!(
-            theme.style("comment").unwrap().color.unwrap().to_hex(),
-            "#808080"
-        );
+        assert_eq!(theme.name, "GitHub Light Default");
+        let comment_color = theme.style("comment").unwrap().color.unwrap();
 
         let source = "// ordinary\n/// documentation\nimport AppKit\n";
         let text = gpui_component::Rope::from(source);
@@ -603,7 +599,7 @@ mod tests {
                 .find(|(range, _)| range.contains(&offset))
                 .and_then(|(_, style)| style.color)
                 .unwrap();
-            assert_eq!(color.to_hex(), "#808080");
+            assert_eq!(color, comment_color);
         }
         assert_eq!(file_highlighter_language("Makefile"), "make");
         assert_eq!(file_highlighter_language("src/native.hpp"), "cpp");
@@ -634,6 +630,152 @@ mod tests {
                 "{language} grammar should be available"
             );
         }
+    }
+
+    #[test]
+    fn editor_highlight_themes_match_github_defaults() {
+        let authored: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/vendor/gpui-component/src/theme/default-theme.json"
+        )))
+        .unwrap();
+        let themes = authored["themes"].as_array().unwrap();
+
+        let assert_theme =
+            |name: &str, editor_colors: &[(&str, &str)], syntax_colors: &[(&str, &str)]| {
+                let theme = themes.iter().find(|theme| theme["name"] == name).unwrap();
+                for (key, expected) in editor_colors {
+                    assert_eq!(theme["highlight"][key].as_str(), Some(*expected), "{key}");
+                }
+                for (capture, expected) in syntax_colors {
+                    assert_eq!(
+                        theme["highlight"]["syntax"][capture]["color"].as_str(),
+                        Some(*expected),
+                        "{name} {capture}"
+                    );
+                }
+            };
+
+        assert_theme(
+            "GitHub Light Default",
+            &[
+                ("editor.foreground", "#1f2328"),
+                ("editor.background", "#ffffff"),
+                ("editor.caret", "#0969da"),
+                ("editor.active_line.background", "#eaeef280"),
+                ("editor.line_number", "#8c959f"),
+                ("editor.active_line_number", "#1f2328"),
+            ],
+            &[
+                ("comment", "#6e7781"),
+                ("constant", "#0550ae"),
+                ("function", "#8250df"),
+                ("keyword", "#cf222e"),
+                ("string", "#0a3069"),
+                ("tag", "#116329"),
+                ("type", "#953800"),
+            ],
+        );
+        assert_theme(
+            "GitHub Dark Default",
+            &[
+                ("editor.foreground", "#e6edf3"),
+                ("editor.background", "#0d1117"),
+                ("editor.caret", "#2f81f7"),
+                ("editor.active_line.background", "#6e76811a"),
+                ("editor.line_number", "#6e7681"),
+                ("editor.active_line_number", "#e6edf3"),
+            ],
+            &[
+                ("comment", "#8b949e"),
+                ("constant", "#79c0ff"),
+                ("function", "#d2a8ff"),
+                ("keyword", "#ff7b72"),
+                ("string", "#a5d6ff"),
+                ("tag", "#7ee787"),
+                ("type", "#ffa657"),
+            ],
+        );
+
+        let light = gpui_component::highlighter::HighlightTheme::default_light();
+        assert_eq!(light.name, "GitHub Light Default");
+        assert!(light.style.editor_foreground.is_some());
+        assert!(light.style.editor_background.is_some());
+        assert!(light.style.editor_caret.is_some());
+
+        let dark = gpui_component::highlighter::HighlightTheme::default_dark();
+        assert_eq!(dark.name, "GitHub Dark Default");
+        assert!(dark.style.editor_foreground.is_some());
+        assert!(dark.style.editor_background.is_some());
+        assert!(dark.style.editor_caret.is_some());
+    }
+
+    #[test]
+    fn markdown_fences_and_tsx_use_their_embedded_grammars() {
+        use gpui_component::Colorize as _;
+
+        fn color_at(language: &str, source: &str, needle: &str) -> String {
+            let text = gpui_component::Rope::from(source);
+            let mut highlighter = gpui_component::highlighter::SyntaxHighlighter::new(language);
+            assert_eq!(highlighter.language(), language);
+            highlighter.update(None, &text);
+
+            let offset = source.find(needle).unwrap();
+            highlighter
+                .styles(
+                    &(0..source.len()),
+                    &gpui_component::highlighter::HighlightTheme::default_light(),
+                )
+                .into_iter()
+                .find(|(range, _)| range.contains(&offset))
+                .and_then(|(_, style)| style.color)
+                .unwrap()
+                .to_hex()
+        }
+
+        fn theme_color(capture: &str) -> String {
+            gpui_component::highlighter::HighlightTheme::default_light()
+                .style(capture)
+                .unwrap()
+                .color
+                .unwrap()
+                .to_hex()
+        }
+
+        let tsx = r#"export function Card({ title }: { title: string }) {
+  return <section className="card">{title}</section>;
+}
+"#;
+        assert_eq!(color_at("tsx", tsx, "return"), theme_color("keyword"));
+        assert_eq!(color_at("tsx", tsx, "className"), theme_color("attribute"));
+        assert_eq!(color_at("tsx", tsx, "\"card\""), theme_color("string"));
+
+        let markdown = r#"# Embedded languages
+
+```rs
+fn main() {
+    let status = "ready";
+}
+```
+
+```tsx
+export function Badge() {
+    return <span className="badge">ready</span>;
+}
+```
+"#;
+        assert_eq!(
+            color_at("markdown", markdown, "fn main"),
+            theme_color("keyword")
+        );
+        assert_eq!(
+            color_at("markdown", markdown, "\"ready\""),
+            theme_color("string")
+        );
+        assert_eq!(
+            color_at("markdown", markdown, "className"),
+            theme_color("attribute")
+        );
     }
 
     #[test]

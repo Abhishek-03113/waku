@@ -521,7 +521,7 @@ impl InputState {
         new_language: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        match &mut self.mode {
+        let changed = match &mut self.mode {
             InputMode::CodeEditor {
                 language,
                 highlighter,
@@ -530,8 +530,12 @@ impl InputState {
                 *language = new_language.into();
                 *highlighter.borrow_mut() = None;
                 self._pending_update = true;
+                true
             }
-            _ => {}
+            _ => false,
+        };
+        if changed {
+            self.start_pending_highlighter(cx);
         }
         cx.notify();
     }
@@ -689,6 +693,9 @@ impl InputState {
         if self.mode.is_code_editor() {
             self._pending_update = true;
             self.lsp.reset();
+            // Start query preparation and parsing as soon as the file contents
+            // are installed instead of waiting for the editor's first render.
+            self.start_pending_highlighter(cx);
         }
 
         // Move scroll to top
