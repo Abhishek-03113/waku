@@ -32,6 +32,42 @@ struct LayoutInsertion {
     before_source_boundary: bool,
 }
 
+#[derive(Debug)]
+struct CodeBackgroundSegment {
+    left: Pixels,
+    right: Pixels,
+    top: Pixels,
+}
+
+fn append_code_background_segment(
+    segments: &mut Vec<CodeBackgroundSegment>,
+    bounds: &Bounds<Pixels>,
+    start: Point<Pixels>,
+    end: Point<Pixels>,
+) {
+    // GPUI maps an index exactly on a soft-wrap boundary to the end of the
+    // preceding visual line. If the next character position is on a later
+    // line, that character belongs to the later line; painting from `start`
+    // to the old line edge would leave a phantom capsule behind.
+    let (left, right, top) = if start.y == end.y {
+        (start.x.min(end.x), start.x.max(end.x), start.y)
+    } else {
+        (bounds.left(), end.x, end.y)
+    };
+    let left = left.max(bounds.left());
+    let right = right.min(bounds.right());
+    if right <= left {
+        return;
+    }
+
+    if let Some(segment) = segments.last_mut().filter(|segment| segment.top == top) {
+        segment.left = segment.left.min(left);
+        segment.right = segment.right.max(right);
+    } else {
+        segments.push(CodeBackgroundSegment { left, right, top });
+    }
+}
+
 impl LayoutText {
     fn new(source: &str, code_ranges: &[Range<usize>]) -> Self {
         let mut source_ranges = code_ranges
@@ -401,24 +437,27 @@ impl Inline {
         };
 
         for range in &self.code_ranges {
-            let Some(start) = text_layout.position_for_index(range.start) else {
+            let Some(code_text) = self.text.get(range.clone()) else {
                 continue;
             };
-            let Some(end) = text_layout.position_for_index(range.end) else {
-                continue;
-            };
-
-            let mut paint_segment = |left: Pixels, right: Pixels, top: Pixels| {
-                let left = left.max(bounds.left());
-                let right = right.min(bounds.right());
-                if right <= left {
-                    return;
+            let mut segments = Vec::new();
+            let mut index = range.start;
+            for character in code_text.chars() {
+                let next_index = index + character.len_utf8();
+                if let (Some(start), Some(end)) = (
+                    text_layout.position_for_index(index),
+                    text_layout.position_for_index(next_index),
+                ) {
+                    append_code_background_segment(&mut segments, bounds, start, end);
                 }
+                index = next_index;
+            }
 
+            for segment in segments {
                 window.paint_quad(quad(
                     Bounds::from_corners(
-                        point(left, top + vertical_inset),
-                        point(right, top + line_height - vertical_inset),
+                        point(segment.left, segment.top + vertical_inset),
+                        point(segment.right, segment.top + line_height - vertical_inset),
                     ),
                     corner_radius,
                     background,
@@ -426,25 +465,6 @@ impl Inline {
                     gpui::transparent_black(),
                     BorderStyle::default(),
                 ));
-            };
-
-            if start.y == end.y {
-                paint_segment(start.x, end.x, start.y);
-                continue;
-            }
-
-            paint_segment(start.x, bounds.right(), start.y);
-
-            let mut line_top = start.y + line_height;
-            while line_top < end.y {
-                paint_segment(bounds.left(), bounds.right(), line_top);
-                line_top += line_height;
-            }
-
-            // A range ending exactly on a wrap boundary has no content on the
-            // final line, so avoid painting an empty capsule there.
-            if end.x > bounds.left() + px(0.5) {
-                paint_segment(bounds.left(), end.x, end.y);
             }
         }
     }
@@ -641,7 +661,8 @@ fn point_in_text_selection(
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineState, LEADING_CODE_GUTTER, LayoutText, TRAILING_CODE_GUTTER, point_in_text_selection,
+        InlineState, LEADING_CODE_GUTTER, LayoutText, TRAILING_CODE_GUTTER,
+        append_code_background_segment, point_in_text_selection,
     };
     use gpui::{Bounds, point, px, size};
 
@@ -670,6 +691,33 @@ mod tests {
 
         state.selection = Some(code_range.into());
         assert_eq!(state.selected_text(), "cargo");
+    }
+
+    #[test]
+    fn inline_code_background_starts_on_the_line_containing_the_wrapped_character() {
+        let bounds = Bounds::from_corners(point(px(10.), px(0.)), point(px(110.), px(40.)));
+        let mut segments = Vec::new();
+
+        // The first code character starts at a soft-wrap boundary. GPUI
+        // reports that boundary at the end of the old line and its trailing
+        // edge on the new line.
+        append_code_background_segment(
+            &mut segments,
+            &bounds,
+            point(px(80.), px(0.)),
+            point(px(20.), px(20.)),
+        );
+        append_code_background_segment(
+            &mut segments,
+            &bounds,
+            point(px(20.), px(20.)),
+            point(px(50.), px(20.)),
+        );
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].left, px(10.));
+        assert_eq!(segments[0].right, px(50.));
+        assert_eq!(segments[0].top, px(20.));
     }
 
     #[test]
