@@ -49,7 +49,15 @@ impl HeadlessDriver {
                 "Amp currently supports Build with Full access only"
             ));
         }
-        let existing_session_id = match existing_cursor {
+        let amp_fork_context = match existing_cursor.as_ref() {
+            Some(ProviderResumeCursor::Amp { fork_context, .. })
+                if provider == ProviderKind::Amp =>
+            {
+                fork_context.clone()
+            }
+            _ => None,
+        };
+        let existing_session_id = match existing_cursor.as_ref() {
             Some(cursor) if cursor.provider() == provider => Some(cursor.native_id().to_owned()),
             Some(cursor) => {
                 return Err(anyhow!(
@@ -78,14 +86,34 @@ impl HeadlessDriver {
                 let mut can_resume = had_existing_session;
                 if provider_session_id.is_some() {
                     let _ = events.send(DriverEvent::Connected {
-                        provider_cursor: provider_session_id
-                            .clone()
-                            .map(|id| ProviderResumeCursor::from_session_id(provider, id)),
+                        provider_cursor: provider_session_id.clone().map(|id| {
+                            if provider == ProviderKind::Amp {
+                                ProviderResumeCursor::Amp {
+                                    thread_id: id,
+                                    fork_context: amp_fork_context.clone(),
+                                }
+                            } else {
+                                ProviderResumeCursor::from_session_id(provider, id)
+                            }
+                        }),
                     });
                 }
+                let mut amp_fork_context = amp_fork_context;
                 while let Ok(message) = command_rx.recv() {
                     match message {
                         CommandMessage::Prompt(prompt) => {
+                            let prompt = if provider == ProviderKind::Amp {
+                                amp_fork_context
+                                    .as_deref()
+                                    .map(|context| {
+                                        crate::amp_session::prompt_with_fork_context(
+                                            context, &prompt,
+                                        )
+                                    })
+                                    .unwrap_or(prompt)
+                            } else {
+                                prompt
+                            };
                             if let Some(session_id) = run_prompt(
                                 provider,
                                 &binary,
@@ -103,6 +131,7 @@ impl HeadlessDriver {
                             ) {
                                 provider_session_id = Some(session_id);
                                 can_resume = true;
+                                amp_fork_context = None;
                             }
                         }
                         CommandMessage::Shutdown => break,
@@ -137,7 +166,7 @@ impl DriverControl for HeadlessDriver {
 
     fn respond(&self, _request_id: String, _option_id: String) {}
 
-    fn rollback(&self, _turns: usize) -> anyhow::Result<()> {
+    fn rollback(&self, _turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
         Err(anyhow!(
             "conversation rollback is not supported by this provider transport"
         ))
@@ -415,6 +444,7 @@ impl StreamParser {
                     let _ = events.send(DriverEvent::Connected {
                         provider_cursor: Some(ProviderResumeCursor::Amp {
                             thread_id: id.to_owned(),
+                            fork_context: None,
                         }),
                     });
                 }
@@ -988,7 +1018,10 @@ mod tests {
         assert!(matches!(
             receiver.recv().unwrap(),
             DriverEvent::Connected {
-                provider_cursor: Some(ProviderResumeCursor::Amp { thread_id })
+                provider_cursor: Some(ProviderResumeCursor::Amp {
+                    thread_id,
+                    fork_context: None,
+                })
             } if thread_id == "T-thread-123"
         ));
         assert!(matches!(

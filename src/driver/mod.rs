@@ -27,7 +27,7 @@ impl DriverHandle {
         self.inner.respond(request_id, option_id);
     }
 
-    pub fn rollback(&self, turns: usize) -> anyhow::Result<()> {
+    pub fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
         self.inner.rollback(turns)
     }
 
@@ -40,7 +40,7 @@ pub trait DriverControl: Send + Sync {
     fn prompt(&self, prompt: String);
     fn cancel(&self);
     fn respond(&self, request_id: String, option_id: String);
-    fn rollback(&self, turns: usize) -> anyhow::Result<()>;
+    fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>>;
     fn fork(&self, _turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
         anyhow::bail!("conversation forking is not supported by this provider transport")
     }

@@ -252,13 +252,121 @@ impl Waku {
                     }
                     Ok((self.ensure_driver()?.fork(turns_to_remove)?, None))
                 }
-                _ => anyhow::bail!("This provider does not support conversation forks"),
+                ProviderKind::Amp => {
+                    let Some(ProviderResumeCursor::Amp {
+                        thread_id: native_thread_id,
+                        fork_context,
+                    }) = source.provider_cursor.as_ref()
+                    else {
+                        anyhow::bail!("Amp's native thread is unavailable");
+                    };
+                    let project_path = self
+                        .state
+                        .projects
+                        .iter()
+                        .find(|project| project.id == source.project_id)
+                        .map(|project| project.path.as_path())
+                        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+                    let binary = self
+                        .probes
+                        .iter()
+                        .find(|probe| probe.provider == ProviderKind::Amp)
+                        .and_then(|probe| probe.path.as_deref())
+                        .ok_or_else(|| anyhow::anyhow!("Amp is not installed"))?;
+                    Ok((
+                        crate::amp_session::fork_session_at_turn(
+                            binary,
+                            project_path,
+                            native_thread_id,
+                            fork_context.as_deref(),
+                            provider_turn_count,
+                        )?,
+                        None,
+                    ))
+                }
+                ProviderKind::OpenCode => {
+                    let Some(ProviderResumeCursor::OpenCode {
+                        session_id: native_session_id,
+                    }) = source.provider_cursor.as_ref()
+                    else {
+                        anyhow::bail!("OpenCode's native session is unavailable");
+                    };
+                    let project_path = self
+                        .state
+                        .projects
+                        .iter()
+                        .find(|project| project.id == source.project_id)
+                        .map(|project| project.path.as_path())
+                        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+                    let binary = self
+                        .probes
+                        .iter()
+                        .find(|probe| probe.provider == ProviderKind::OpenCode)
+                        .and_then(|probe| probe.path.as_deref())
+                        .ok_or_else(|| anyhow::anyhow!("OpenCode is not installed"))?;
+                    Ok((
+                        crate::opencode_session::fork_session_at_turn(
+                            binary,
+                            project_path,
+                            native_session_id,
+                            provider_turn_count,
+                        )?,
+                        None,
+                    ))
+                }
+                ProviderKind::Grok => {
+                    let Some(ProviderResumeCursor::Grok {
+                        session_id: native_session_id,
+                    }) = source.provider_cursor.as_ref()
+                    else {
+                        anyhow::bail!("Grok's native session is unavailable");
+                    };
+                    let project_path = self
+                        .state
+                        .projects
+                        .iter()
+                        .find(|project| project.id == source.project_id)
+                        .map(|project| project.path.as_path())
+                        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+                    let binary = self
+                        .probes
+                        .iter()
+                        .find(|probe| probe.provider == ProviderKind::Grok)
+                        .and_then(|probe| probe.path.as_deref())
+                        .ok_or_else(|| anyhow::anyhow!("Grok Build is not installed"))?;
+                    Ok((
+                        crate::grok_session::fork_session_at_turn(
+                            binary,
+                            project_path,
+                            native_session_id,
+                            provider_turn_count,
+                        )?,
+                        None,
+                    ))
+                }
+                ProviderKind::Pi => {
+                    if !matches!(
+                        source.provider_cursor.as_ref(),
+                        Some(ProviderResumeCursor::Pi {
+                            session_file: Some(_),
+                            ..
+                        })
+                    ) {
+                        anyhow::bail!("Pi's native session file is unavailable");
+                    }
+                    Ok((self.ensure_driver()?.fork(turns_to_remove)?, None))
+                }
             }
         })();
 
         let (provider_cursor, claude_message_ids) = match native_fork {
             Ok(fork) => fork,
             Err(error) => {
+                if source.provider == ProviderKind::Pi {
+                    // A failed restore after Pi creates a fork can leave the RPC
+                    // process on that fork. Recreate it from the source cursor.
+                    self.runtimes.remove(&session_id);
+                }
                 self.toast = Some(format!("Could not fork the task: {error}"));
                 cx.notify();
                 return;
@@ -497,6 +605,8 @@ impl Waku {
 
         let claude_reset =
             provider == ProviderKind::Claude && rollback_turns > 0 && retained_turn_count == 0;
+        let grok_reset =
+            provider == ProviderKind::Grok && rollback_turns > 0 && retained_turn_count == 0;
         let claude_rollback =
             if provider == ProviderKind::Claude && rollback_turns > 0 && retained_turn_count > 0 {
                 let Some(ProviderResumeCursor::Claude {
@@ -552,7 +662,8 @@ impl Waku {
         }
 
         let mut claude_fork = None;
-        if rollback_turns > 0 && !claude_reset {
+        let mut provider_rewind_cursor = None;
+        if rollback_turns > 0 && !claude_reset && !grok_reset {
             let rollback_result = if let Some((native_session_id, resume_at)) = &claude_rollback {
                 crate::claude_session::fork_session_at(
                     native_session_id,
@@ -562,9 +673,90 @@ impl Waku {
                 .map(|fork| {
                     claude_fork = Some((fork, resume_at.to_owned()));
                 })
+            } else if provider == ProviderKind::OpenCode {
+                let Some(ProviderResumeCursor::OpenCode {
+                    session_id: native_session_id,
+                }) = provider_cursor.as_ref()
+                else {
+                    self.toast = Some("OpenCode's native session cursor is unavailable.".into());
+                    cx.notify();
+                    return false;
+                };
+                let Some(binary) = self
+                    .probes
+                    .iter()
+                    .find(|probe| probe.provider == ProviderKind::OpenCode)
+                    .and_then(|probe| probe.path.as_deref())
+                else {
+                    self.toast = Some("OpenCode is not installed or could not be found.".into());
+                    cx.notify();
+                    return false;
+                };
+                crate::opencode_session::fork_session_at_turn(
+                    binary,
+                    &project_path,
+                    native_session_id,
+                    provider_turn_count,
+                )
+                .map(|cursor| provider_rewind_cursor = Some(cursor))
+            } else if provider == ProviderKind::Amp {
+                let Some(ProviderResumeCursor::Amp {
+                    thread_id: native_thread_id,
+                    fork_context,
+                }) = provider_cursor.as_ref()
+                else {
+                    self.toast = Some("Amp's native thread cursor is unavailable.".into());
+                    cx.notify();
+                    return false;
+                };
+                let Some(binary) = self
+                    .probes
+                    .iter()
+                    .find(|probe| probe.provider == ProviderKind::Amp)
+                    .and_then(|probe| probe.path.as_deref())
+                else {
+                    self.toast = Some("Amp is not installed or could not be found.".into());
+                    cx.notify();
+                    return false;
+                };
+                crate::amp_session::fork_session_at_turn(
+                    binary,
+                    &project_path,
+                    native_thread_id,
+                    fork_context.as_deref(),
+                    provider_turn_count,
+                )
+                .map(|cursor| provider_rewind_cursor = Some(cursor))
+            } else if provider == ProviderKind::Grok {
+                let Some(ProviderResumeCursor::Grok {
+                    session_id: native_session_id,
+                }) = provider_cursor.as_ref()
+                else {
+                    self.toast = Some("Grok's native session cursor is unavailable.".into());
+                    cx.notify();
+                    return false;
+                };
+                let Some(binary) = self
+                    .probes
+                    .iter()
+                    .find(|probe| probe.provider == ProviderKind::Grok)
+                    .and_then(|probe| probe.path.as_deref())
+                else {
+                    self.toast = Some("Grok Build is not installed or could not be found.".into());
+                    cx.notify();
+                    return false;
+                };
+                crate::grok_session::fork_session_at_turn(
+                    binary,
+                    &project_path,
+                    native_session_id,
+                    provider_turn_count,
+                )
+                .map(|cursor| provider_rewind_cursor = Some(cursor))
             } else {
                 self.ensure_driver()
                     .and_then(|driver| driver.rollback(rollback_turns))
+                    .map(|cursor| provider_rewind_cursor = cursor)
             };
             if let Err(error) = rollback_result {
                 let restore_result = checkpoint::restore_ref(&project_path, &safety_ref);
@@ -619,15 +811,24 @@ impl Waku {
                     session_id: fork.session_id.clone(),
                     resume_at: Some(remapped_resume_at),
                 });
-            } else if claude_reset {
+            } else if claude_reset || grok_reset {
                 session.provider_cursor = None;
+            } else if let Some(cursor) = provider_rewind_cursor.clone() {
+                session.provider_cursor = Some(cursor);
             }
             session.truncate_after_turn(retained_turn_count);
             session.status = SessionStatus::Idle;
         }
-        if claude_fork.is_some() || claude_reset {
-            // The headless Claude driver retains its original native session ID.
-            // Recreate it lazily so the next prompt resumes the fork instead.
+        if claude_fork.is_some()
+            || claude_reset
+            || grok_reset
+            || (matches!(
+                provider,
+                ProviderKind::Amp | ProviderKind::OpenCode | ProviderKind::Grok
+            ) && provider_rewind_cursor.is_some())
+        {
+            // Headless drivers retain their original native session ID. Recreate
+            // them lazily so the next prompt resumes the fork instead.
             self.runtimes.remove(&session_id);
         } else if let Some(runtime) = self.runtimes.get_mut(&session_id) {
             runtime.pending_events.clear();

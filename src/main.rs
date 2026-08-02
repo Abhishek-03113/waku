@@ -1,13 +1,16 @@
+mod amp_session;
 mod app;
 mod assets;
 mod checkpoint;
 mod claude_session;
 mod command_env;
 mod driver;
+mod grok_session;
 mod identity;
 mod input;
 mod model;
 mod model_catalog;
+mod opencode_session;
 mod persistence;
 mod platform;
 mod terminal;

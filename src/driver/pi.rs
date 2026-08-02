@@ -20,6 +20,14 @@ enum CommandMessage {
     Prompt(String),
     Cancel,
     CancelExtensionRequest(String),
+    Rollback {
+        turns: usize,
+        response: Sender<Result<ProviderResumeCursor, String>>,
+    },
+    Fork {
+        turns_to_remove: usize,
+        response: Sender<Result<ProviderResumeCursor, String>>,
+    },
     Shutdown,
 }
 
@@ -201,7 +209,7 @@ impl PiDriver {
                         return;
                     }
                 };
-                let Some(cursor) = cursor_from_state(&state) else {
+                let Some(mut cursor) = cursor_from_state(&state) else {
                     let _ = writer_events
                         .send(DriverEvent::Error("Pi did not report a session ID".into()));
                     let _ = writer_events.send(DriverEvent::TurnFinished {
@@ -211,7 +219,7 @@ impl PiDriver {
                     return;
                 };
                 let _ = writer_events.send(DriverEvent::Connected {
-                    provider_cursor: Some(cursor),
+                    provider_cursor: Some(cursor.clone()),
                 });
 
                 while let Ok(message) = command_rx.recv() {
@@ -259,6 +267,34 @@ impl PiDriver {
                                 break;
                             }
                         }
+                        CommandMessage::Rollback { turns, response } => {
+                            let result = fork_pi_session(
+                                &mut stdin,
+                                &writer_pending,
+                                &mut next_request_id,
+                                &cursor,
+                                turns,
+                                false,
+                            );
+                            if let Ok(next_cursor) = &result {
+                                cursor = next_cursor.clone();
+                            }
+                            let _ = response.send(result);
+                        }
+                        CommandMessage::Fork {
+                            turns_to_remove,
+                            response,
+                        } => {
+                            let result = fork_pi_session(
+                                &mut stdin,
+                                &writer_pending,
+                                &mut next_request_id,
+                                &cursor,
+                                turns_to_remove,
+                                true,
+                            );
+                            let _ = response.send(result);
+                        }
                         CommandMessage::Shutdown => break,
                     }
                 }
@@ -289,10 +325,36 @@ impl DriverControl for PiDriver {
 
     fn respond(&self, _request_id: String, _option_id: String) {}
 
-    fn rollback(&self, _turns: usize) -> anyhow::Result<()> {
-        Err(anyhow!(
-            "conversation rollback is not supported by Pi's RPC transport"
-        ))
+    fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
+        if turns == 0 {
+            return Ok(None);
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(CommandMessage::Rollback {
+                turns,
+                response: response_tx,
+            })
+            .context("Pi driver stopped before rollback")?;
+        response_rx
+            .recv_timeout(Duration::from_secs(45))
+            .context("timed out waiting for Pi conversation rollback")?
+            .map(Some)
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn fork(&self, turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(CommandMessage::Fork {
+                turns_to_remove,
+                response: response_tx,
+            })
+            .context("Pi driver stopped before forking")?;
+        response_rx
+            .recv_timeout(Duration::from_secs(45))
+            .context("timed out waiting for Pi conversation fork")?
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -367,6 +429,94 @@ fn cursor_from_state(response: &Value) -> Option<ProviderResumeCursor> {
         session_id: session_id.to_owned(),
         session_file,
     })
+}
+
+fn fork_pi_session(
+    stdin: &mut impl Write,
+    pending: &PendingResponses,
+    next_request_id: &mut u64,
+    original_cursor: &ProviderResumeCursor,
+    turns_to_remove: usize,
+    restore_original: bool,
+) -> Result<ProviderResumeCursor, String> {
+    let messages = send_request(
+        stdin,
+        pending,
+        next_request_id,
+        json!({"type": "get_fork_messages"}),
+    )?;
+    let messages = messages
+        .pointer("/data/messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Pi returned an invalid fork-message list".to_owned())?;
+    let request = pi_fork_request(messages, turns_to_remove)?;
+    let fork = send_request(stdin, pending, next_request_id, request)?;
+    if fork.pointer("/data/cancelled").and_then(Value::as_bool) == Some(true) {
+        return Err("Pi session fork was cancelled".into());
+    }
+    let fork_state = send_request(
+        stdin,
+        pending,
+        next_request_id,
+        json!({"type": "get_state"}),
+    )?;
+    let fork_cursor = cursor_from_state(&fork_state)
+        .ok_or_else(|| "Pi did not report the forked session cursor".to_owned())?;
+
+    if restore_original {
+        let ProviderResumeCursor::Pi {
+            session_file: Some(session_file),
+            ..
+        } = original_cursor
+        else {
+            return Err("Pi's original session file is unavailable".into());
+        };
+        let switched = send_request(
+            stdin,
+            pending,
+            next_request_id,
+            json!({
+                "type": "switch_session",
+                "sessionPath": session_file
+            }),
+        )?;
+        if switched.pointer("/data/cancelled").and_then(Value::as_bool) == Some(true) {
+            return Err("Pi could not return to the source session after forking".into());
+        }
+        let restored_state = send_request(
+            stdin,
+            pending,
+            next_request_id,
+            json!({"type": "get_state"}),
+        )?;
+        let restored_cursor = cursor_from_state(&restored_state)
+            .ok_or_else(|| "Pi did not report the restored source session".to_owned())?;
+        if restored_cursor.native_id() != original_cursor.native_id() {
+            return Err("Pi returned to the wrong source session after forking".into());
+        }
+    }
+
+    Ok(fork_cursor)
+}
+
+fn pi_fork_request(messages: &[Value], turns_to_remove: usize) -> Result<Value, String> {
+    if turns_to_remove > messages.len() {
+        return Err(format!(
+            "Pi has only {} native turns, but Waku needs to remove {turns_to_remove}",
+            messages.len()
+        ));
+    }
+    let retained_turns = messages.len() - turns_to_remove;
+    if turns_to_remove == 0 {
+        Ok(json!({"type": "clone"}))
+    } else {
+        let entry_id = messages
+            .get(retained_turns)
+            .and_then(|message| message.get("entryId"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Pi returned a fork message without an entry ID".to_owned())?;
+        Ok(json!({"type": "fork", "entryId": entry_id}))
+    }
 }
 
 #[derive(Default)]
@@ -632,6 +782,28 @@ mod tests {
             receiver,
             PiStreamState::default(),
         )
+    }
+
+    #[test]
+    fn pi_fork_selects_the_first_removed_user_turn_or_clones_the_tip() {
+        let messages = [
+            json!({"entryId": "turn-1"}),
+            json!({"entryId": "turn-2"}),
+            json!({"entryId": "turn-3"}),
+        ];
+        assert_eq!(
+            pi_fork_request(&messages, 0).unwrap(),
+            json!({"type": "clone"})
+        );
+        assert_eq!(
+            pi_fork_request(&messages, 2).unwrap(),
+            json!({"type": "fork", "entryId": "turn-2"})
+        );
+        assert_eq!(
+            pi_fork_request(&messages, 3).unwrap(),
+            json!({"type": "fork", "entryId": "turn-1"})
+        );
+        assert!(pi_fork_request(&messages, 4).is_err());
     }
 
     #[test]

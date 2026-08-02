@@ -408,9 +408,9 @@ impl DriverControl for CodexDriver {
         });
     }
 
-    fn rollback(&self, turns: usize) -> anyhow::Result<()> {
+    fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
         if turns == 0 {
-            return Ok(());
+            return Ok(None);
         }
         let (response_tx, response_rx) = bounded(1);
         self.commands
@@ -422,7 +422,8 @@ impl DriverControl for CodexDriver {
         response_rx
             .recv_timeout(Duration::from_secs(15))
             .context("timed out waiting for Codex conversation rollback")?
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::msg)?;
+        Ok(None)
     }
 
     fn fork(&self, turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {

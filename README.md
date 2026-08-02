@@ -9,12 +9,12 @@ The first MVP supports:
 
 | Provider | Transport | Session continuity | Checkpoint rollback |
 | --- | --- | --- | --- |
-| [Amp](https://ampcode.com/) | Claude-compatible `stream-json` | Native Amp thread ID | Not exposed by this transport |
+| [Amp](https://ampcode.com/) | Claude-compatible `stream-json` | Native Amp thread ID | New thread seeded from exported turn prefix |
 | Claude Code | `stream-json` | Native Claude session cursor | Message-point session fork |
 | Codex CLI | `app-server` JSON-RPC | `thread/start` and `thread/resume` | `thread/rollback` |
-| OpenCode | Native JSON events | Native OpenCode session cursor | Not exposed by this transport |
-| Grok Build | Native `streaming-json` | Native Grok session cursor | Not exposed by this transport |
-| Pi | Native RPC JSONL | Pi session file and ID | Not exposed by this transport |
+| OpenCode | Native JSON events | Native OpenCode session cursor | Message-point session fork |
+| Grok Build | Native `streaming-json` | Native Grok session cursor | Native ACP fork with exact turn truncation |
+| Pi | Native RPC JSONL | Pi session file and ID | RPC session fork/clone |
 
 Each provider is connected through its strongest structured interface and
 translated into Waku's small, provider-neutral event model. Grok uses its
@@ -127,8 +127,9 @@ notarization options.
 - Pi currently supports Build with Full access; unsupported Pi access modes
   fail explicitly instead of pretending to provide approval semantics.
 - Stop the active turn with `Escape`.
-- In a Git project, use **Rewind to here** beneath a Claude Code prompt or
-  **Edit** beneath a Codex prompt.
+- In a Git project, use **Rewind to here** beneath a provider prompt or **Edit**
+  beneath a Codex prompt; both restore Waku's pre-turn checkpoint and align the
+  provider conversation with the retained timeline.
 - Toggle the sidebar with `⌘⇧S` and focus the composer with `⌘L`.
 
 State is written atomically to the profile-specific platform-local application
@@ -169,10 +170,14 @@ prompt, ask the provider to roll back that prompt and every later native turn,
 then truncate Waku's matching messages and activity blocks. Codex's **Edit**
 button opens an inline editor in the original user bubble; Send performs
 `thread/rollback` and starts a replacement turn with the edited prompt.
-Claude's **Rewind to here** restores the original prompt into the main composer.
-Claude Code records the native message UUID for each completed turn and creates
-a fresh, remapped session fork through the preceding turn, so the original
-Claude conversation remains intact while Waku resumes from the rewound point.
+For providers without an in-place rollback, **Rewind to here** branches through
+the preceding turn and resumes the edited prompt there. Claude Code remaps its
+message UUID chain, OpenCode forks at the next native user message through its
+local server API, Grok creates a native ACP fork and truncates the fork's local
+history at the exact prompt boundary, and Pi forks its session tree through
+RPC. Amp, whose current CLI no longer exposes its former fork action, creates a
+new native thread and seeds its first prompt with the exact exported message
+prefix. The original provider conversations remain intact.
 Before any restore, Waku creates a temporary safety ref; if provider rollback
 fails, it restores the original working tree and leaves the local timeline
 unchanged. The revert action is capability-gated, so providers whose current

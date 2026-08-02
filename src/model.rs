@@ -71,11 +71,17 @@ impl ProviderKind {
     }
 
     pub fn supports_conversation_rollback(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
+        matches!(
+            self,
+            Self::Amp | Self::Claude | Self::Codex | Self::OpenCode | Self::Grok | Self::Pi
+        )
     }
 
     pub fn supports_conversation_fork(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
+        matches!(
+            self,
+            Self::Amp | Self::Claude | Self::Codex | Self::OpenCode | Self::Grok | Self::Pi
+        )
     }
 
     pub fn supports_model_discovery(self) -> bool {
@@ -92,6 +98,8 @@ impl ProviderKind {
 pub enum ProviderResumeCursor {
     Amp {
         thread_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fork_context: Option<String>,
     },
     Claude {
         session_id: String,
@@ -117,7 +125,10 @@ pub enum ProviderResumeCursor {
 impl ProviderResumeCursor {
     pub fn from_session_id(provider: ProviderKind, id: String) -> Self {
         match provider {
-            ProviderKind::Amp => Self::Amp { thread_id: id },
+            ProviderKind::Amp => Self::Amp {
+                thread_id: id,
+                fork_context: None,
+            },
             ProviderKind::Claude => Self::Claude {
                 session_id: id,
                 resume_at: None,
@@ -145,7 +156,7 @@ impl ProviderResumeCursor {
 
     pub fn native_id(&self) -> &str {
         match self {
-            Self::Amp { thread_id } => thread_id,
+            Self::Amp { thread_id, .. } => thread_id,
             Self::Claude { session_id, .. }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
@@ -1016,6 +1027,21 @@ mod tests {
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
+    }
+
+    #[test]
+    fn native_conversation_actions_include_every_provider() {
+        for provider in [
+            ProviderKind::Amp,
+            ProviderKind::Claude,
+            ProviderKind::Codex,
+            ProviderKind::OpenCode,
+            ProviderKind::Grok,
+            ProviderKind::Pi,
+        ] {
+            assert!(provider.supports_conversation_fork());
+            assert!(provider.supports_conversation_rollback());
+        }
     }
 
     #[test]
