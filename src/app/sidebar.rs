@@ -237,6 +237,48 @@ impl Waku {
             ))
     }
 
+    fn render_sidebar_session_actions(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .id("add-project")
+                    .w(px(20.0))
+                    .h(px(20.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_default()
+                    .hover(|element| element.bg(theme.overlay))
+                    .active(|element| element.bg(theme.overlay_strong))
+                    .child(icon("icons/folder-new.svg", 15.0, theme.text_ghost))
+                    .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
+            )
+            .child(
+                div()
+                    .id("new-session")
+                    .w(px(20.0))
+                    .h(px(20.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_default()
+                    .hover(|element| element.bg(theme.overlay))
+                    .active(|element| element.bg(theme.overlay_strong))
+                    .child(icon("icons/plus.svg", 15.0, theme.text_ghost))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(project_id) = this.state.selected_project {
+                            this.create_session_for(project_id, this.state.last_provider, cx);
+                        }
+                    })),
+            )
+    }
+
     pub(super) fn render_sidebar(&self, width: f32, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let is_resizing = self
@@ -246,7 +288,12 @@ impl Waku {
 
         let today = Local::now().date_naive();
         let mut grouped_sessions: [Vec<&AgentSession>; 6] = std::array::from_fn(|_| Vec::new());
-        let mut sorted_sessions = self.state.sessions.iter().collect::<Vec<_>>();
+        let mut sorted_sessions = self
+            .state
+            .sessions
+            .iter()
+            .filter(|session| session.has_started())
+            .collect::<Vec<_>>();
         sorted_sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         for session in sorted_sessions {
             grouped_sessions[session_date_group(session.updated_at, today).index()].push(session);
@@ -261,50 +308,9 @@ impl Waku {
             }
 
             let group_header = session_group_label(&theme, group).when(is_first_group, |element| {
-                element.justify_between().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .id("add-project")
-                                .w(px(20.0))
-                                .h(px(20.0))
-                                .rounded(px(6.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_default()
-                                .hover(|element| element.bg(theme.overlay))
-                                .active(|element| element.bg(theme.overlay_strong))
-                                .child(icon("icons/folder-new.svg", 15.0, theme.text_ghost))
-                                .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
-                        )
-                        .child(
-                            div()
-                                .id("new-session")
-                                .w(px(20.0))
-                                .h(px(20.0))
-                                .rounded(px(6.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_default()
-                                .hover(|element| element.bg(theme.overlay))
-                                .active(|element| element.bg(theme.overlay_strong))
-                                .child(icon("icons/plus.svg", 15.0, theme.text_ghost))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(project_id) = this.state.selected_project {
-                                        this.create_session_for(
-                                            project_id,
-                                            this.state.last_provider,
-                                            cx,
-                                        );
-                                    }
-                                })),
-                        ),
-                )
+                element
+                    .justify_between()
+                    .child(self.render_sidebar_session_actions(cx))
             });
             is_first_group = false;
             let mut group_element = div().flex().flex_col().child(group_header);
@@ -401,6 +407,13 @@ impl Waku {
                 );
             }
             sessions = sessions.child(group_element).child(div().h(px(10.0)));
+        }
+        if is_first_group {
+            sessions = sessions.child(
+                session_group_label(&theme, SessionDateGroup::Today)
+                    .justify_between()
+                    .child(self.render_sidebar_session_actions(cx)),
+            );
         }
 
         div()

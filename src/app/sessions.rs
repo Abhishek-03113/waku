@@ -78,6 +78,16 @@ impl Waku {
         provider: ProviderKind,
         cx: &mut Context<Self>,
     ) {
+        if let Some(draft_id) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.project_id == project_id && !session.has_started())
+            .map(|session| session.id)
+        {
+            self.select_session(draft_id, cx);
+            return;
+        }
         let session = self.state.new_session(project_id, provider);
         let id = session.id;
         self.state.sessions.push(session);

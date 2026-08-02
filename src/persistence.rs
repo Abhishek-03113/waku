@@ -47,6 +47,28 @@ pub struct PersistedState {
     pub right_panel_width: f32,
 }
 
+#[derive(Serialize)]
+struct PersistedStateSnapshot<'a> {
+    version: u32,
+    projects: &'a [Project],
+    sessions: Vec<&'a AgentSession>,
+    selected_project: Option<Uuid>,
+    selected_session: Option<Uuid>,
+    last_provider: ProviderKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_reasoning_effort: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_service_tier: Option<&'a str>,
+    favorite_models: &'a [FavoriteModel],
+    theme: ThemePreference,
+    sidebar_visible: bool,
+    right_panel_visible: bool,
+    sidebar_width: f32,
+    right_panel_width: f32,
+}
+
 fn default_sidebar_width() -> f32 {
     DEFAULT_SIDEBAR_WIDTH
 }
@@ -109,6 +131,68 @@ impl PersistedState {
         }
         session
     }
+
+    fn ensure_runtime_session(&mut self) {
+        if self.selected_session.is_some_and(|selected_session| {
+            self.sessions
+                .iter()
+                .any(|session| session.id == selected_session)
+        }) {
+            return;
+        }
+        self.selected_session = None;
+        let Some(project_id) = self.selected_project.filter(|selected_project| {
+            self.projects
+                .iter()
+                .any(|project| project.id == *selected_project)
+        }) else {
+            return;
+        };
+        let session = self.new_session(project_id, self.last_provider);
+        self.selected_session = Some(session.id);
+        self.sessions.push(session);
+    }
+
+    fn storage_snapshot(&self) -> PersistedStateSnapshot<'_> {
+        let sessions = self
+            .sessions
+            .iter()
+            .filter(|session| session.has_started())
+            .collect::<Vec<_>>();
+        let selected_session = self
+            .selected_session
+            .filter(|selected_session| {
+                sessions
+                    .iter()
+                    .any(|session| session.id == *selected_session)
+            })
+            .or_else(|| {
+                self.selected_project.and_then(|selected_project| {
+                    sessions
+                        .iter()
+                        .filter(|session| session.project_id == selected_project)
+                        .max_by_key(|session| session.updated_at)
+                        .map(|session| session.id)
+                })
+            });
+        PersistedStateSnapshot {
+            version: self.version,
+            projects: &self.projects,
+            sessions,
+            selected_project: self.selected_project,
+            selected_session,
+            last_provider: self.last_provider,
+            last_model: self.last_model.as_deref(),
+            last_reasoning_effort: self.last_reasoning_effort.as_deref(),
+            last_service_tier: self.last_service_tier.as_deref(),
+            favorite_models: &self.favorite_models,
+            theme: self.theme,
+            sidebar_visible: self.sidebar_visible,
+            right_panel_visible: self.right_panel_visible,
+            sidebar_width: self.sidebar_width,
+            right_panel_width: self.right_panel_width,
+        }
+    }
 }
 
 pub struct StateStore {
@@ -128,13 +212,15 @@ impl StateStore {
     }
 
     pub fn load_or_fresh(&self, cwd: PathBuf) -> PersistedState {
-        self.load().unwrap_or_else(|_| {
+        let mut state = self.load().unwrap_or_else(|_| {
             if cwd.parent().is_none() {
                 PersistedState::empty()
             } else {
                 PersistedState::fresh(cwd)
             }
-        })
+        });
+        state.ensure_runtime_session();
+        state
     }
 
     pub fn load(&self) -> io::Result<PersistedState> {
@@ -183,7 +269,7 @@ impl StateStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let data = serde_json::to_vec_pretty(state)
+        let data = serde_json::to_vec_pretty(&state.storage_snapshot())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let temporary_path = temporary_path(&self.path);
         fs::write(&temporary_path, data)?;
@@ -237,6 +323,8 @@ mod tests {
         state.right_panel_visible = false;
         state.sidebar_width = 318.0;
         state.right_panel_width = 612.0;
+        state.sessions[0].begin_turn("Persist this session");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
         state.sessions[0].transcript_blocks.extend([
             TranscriptBlock {
                 after_message: 1,
@@ -288,6 +376,42 @@ mod tests {
             TranscriptBlockContent::Reasoning(reasoning)
                 if reasoning.content == "Checking the source"
         ));
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn blank_sessions_stay_runtime_only() {
+        let directory = std::env::temp_dir().join(format!("waku-draft-{}", Uuid::new_v4()));
+        let store = StateStore::new(directory.join("state.json"));
+        let state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+
+        store.save(&state).unwrap();
+        let restored = store.load().unwrap();
+
+        assert!(restored.sessions.is_empty());
+        assert!(restored.selected_session.is_none());
+        assert_eq!(restored.selected_project, state.selected_project);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn selected_draft_falls_back_to_latest_started_session_on_disk() {
+        let directory = std::env::temp_dir().join(format!("waku-draft-{}", Uuid::new_v4()));
+        let store = StateStore::new(directory.join("state.json"));
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let started_id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Persist this session");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let draft = state.new_session(state.projects[0].id, ProviderKind::Codex);
+        state.selected_session = Some(draft.id);
+        state.sessions.push(draft);
+
+        store.save(&state).unwrap();
+        let restored = store.load().unwrap();
+
+        assert_eq!(restored.sessions.len(), 1);
+        assert_eq!(restored.sessions[0].id, started_id);
+        assert_eq!(restored.selected_session, Some(started_id));
         fs::remove_dir_all(directory).ok();
     }
 

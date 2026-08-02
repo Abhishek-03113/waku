@@ -491,6 +491,10 @@ impl AgentSession {
         }
     }
 
+    pub fn has_started(&self) -> bool {
+        !self.turns.is_empty() || !self.messages.is_empty() || self.provider_cursor.is_some()
+    }
+
     pub fn set_title_from_prompt(&mut self, prompt: &str) {
         if self.messages.len() > 1 || self.title != "New task" {
             return;
