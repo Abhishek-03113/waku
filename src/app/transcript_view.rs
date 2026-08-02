@@ -267,7 +267,7 @@ impl Render for ConversationNavigationRail {
                         theme.text
                     }
                 } else {
-                    theme.text_ghost
+                    theme.text_ghost.opacity(NAVIGATION_RAIL_INACTIVE_OPACITY)
                 };
                 let message_id = turn.message_id;
                 let click_focus = focus_handle.clone();
@@ -635,6 +635,34 @@ impl Waku {
         })
     }
 
+    pub(super) fn assistant_message_action_for_message(
+        &self,
+        message_index: usize,
+    ) -> Option<AssistantMessageAction> {
+        let session = self.selected_session()?;
+        let message = session.messages.get(message_index)?;
+        if message.role != MessageRole::Assistant
+            || assistant_response_footer_index(session, message_index) != Some(message_index)
+            || !matches!(session.status, SessionStatus::Idle | SessionStatus::Failed)
+            || !session.provider.supports_conversation_fork()
+            || session
+                .provider_cursor
+                .as_ref()
+                .is_none_or(|cursor| cursor.provider() != session.provider)
+        {
+            return None;
+        }
+        let turn_id = message.turn_id?;
+        let turn = session
+            .turns
+            .iter()
+            .find(|turn| turn.id == turn_id && turn.provider_turn_started)?;
+        Some(AssistantMessageAction {
+            session_id: session.id,
+            turn_count: turn.turn_count,
+        })
+    }
+
     pub(super) fn transcript_row(
         &mut self,
         index: usize,
@@ -703,6 +731,8 @@ impl Waku {
                     let assistant_footer_time = self
                         .selected_session()
                         .and_then(|session| assistant_response_footer_time(session, message_index));
+                    let assistant_message_action =
+                        self.assistant_message_action_for_message(message_index);
                     let user_message_action = self.user_message_action_for_message(message_index);
                     let message_edit_input = user_message_action.and_then(|action| {
                         self.message_edit
@@ -724,6 +754,7 @@ impl Waku {
                         assistant_footer_copy_content,
                         assistant_footer_time,
                         copied,
+                        assistant_message_action,
                         user_message_action,
                         message_edit_input,
                         self.state.selected_session.unwrap_or_default(),

@@ -105,6 +105,7 @@ fn render_message_footer(
     copied: bool,
     group_name: SharedString,
     align_right: bool,
+    assistant_message_action: Option<AssistantMessageAction>,
     user_message_action: Option<UserMessageAction>,
     waku: gpui::WeakEntity<Waku>,
 ) -> AnyElement {
@@ -164,11 +165,38 @@ fn render_message_footer(
         .when(!align_right, |element| element.ml(-px(7.0)))
         .when(align_right, |element| element.justify_end());
 
-    footer = if align_right {
-        footer.child(timestamp).child(copy_button)
+    if align_right {
+        footer = footer.child(timestamp).child(copy_button);
     } else {
-        footer.child(copy_button).child(timestamp)
-    };
+        footer = footer.child(copy_button);
+        if let Some(action) = assistant_message_action {
+            let fork_waku = waku.clone();
+            footer = footer.child(
+                div()
+                    .id(SharedString::from(format!("fork-response-{message_id}")))
+                    .w(px(27.0))
+                    .h(px(27.0))
+                    .rounded(px(8.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_default()
+                    .hover(|element| element.bg(theme.overlay_strong))
+                    .child(icon("icons/fork.svg", 14.0, footer_color))
+                    .tooltip(|window, cx| Tooltip::new("Fork task").build(window, cx))
+                    .on_click(move |_, _, cx| {
+                        let _ = fork_waku.update(cx, |this, cx| {
+                            this.fork_session_from_response(
+                                action.session_id,
+                                action.turn_count,
+                                cx,
+                            );
+                        });
+                    }),
+            );
+        }
+        footer = footer.child(timestamp);
+    }
 
     if let Some(action) = user_message_action {
         let edit_waku = waku;
@@ -205,6 +233,7 @@ pub(super) fn render_message(
     assistant_footer_copy_content: Option<String>,
     assistant_footer_time: Option<u64>,
     copied: bool,
+    assistant_message_action: Option<AssistantMessageAction>,
     user_message_action: Option<UserMessageAction>,
     message_edit_input: Option<Entity<ComposerInput>>,
     session_id: Uuid,
@@ -345,6 +374,7 @@ pub(super) fn render_message(
                     copied,
                     group_name,
                     true,
+                    None,
                     user_message_action,
                     waku.clone(),
                 ));
@@ -413,6 +443,7 @@ pub(super) fn render_message(
                     copied,
                     group_name,
                     false,
+                    assistant_message_action,
                     None,
                     waku.clone(),
                 ));
@@ -492,6 +523,19 @@ pub(super) fn render_message(
                             });
                         },
                     ));
+                }
+
+                if let Some(action) = assistant_message_action {
+                    let action_waku = waku.clone();
+                    menu = menu.item(PopupMenuItem::new("Fork Task").on_click(move |_, _, cx| {
+                        let _ = action_waku.update(cx, |this, cx| {
+                            this.fork_session_from_response(
+                                action.session_id,
+                                action.turn_count,
+                                cx,
+                            );
+                        });
+                    }));
                 }
 
                 menu

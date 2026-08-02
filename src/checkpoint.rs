@@ -156,6 +156,33 @@ pub fn delete_session_refs(
     Ok(())
 }
 
+pub fn copy_session_refs(
+    cwd: &Path,
+    source_session_id: Uuid,
+    target_session_id: Uuid,
+    through_turn_count: usize,
+) -> anyhow::Result<()> {
+    if !is_git_repository(cwd) {
+        return Ok(());
+    }
+
+    for turn_count in 0..=through_turn_count {
+        let source_ref = checkpoint_ref(source_session_id, turn_count);
+        let Some(commit) = resolve_ref(cwd, &source_ref) else {
+            continue;
+        };
+        git_output(
+            cwd,
+            [
+                "update-ref",
+                &checkpoint_ref(target_session_id, turn_count),
+                &commit,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn diff_files(cwd: &Path, from_ref: &str, to_ref: &str) -> anyhow::Result<Vec<CheckpointFile>> {
     let output = git_output(cwd, ["diff", "--numstat", from_ref, to_ref, "--", "."])?;
     let mut files = Vec::new();
@@ -333,6 +360,17 @@ mod tests {
         assert_eq!(
             git_text(&directory, &["diff", "--cached", "--name-only"]),
             "already-staged.txt"
+        );
+
+        let fork_session_id = Uuid::new_v4();
+        copy_session_refs(&directory, session_id, fork_session_id, 1).unwrap();
+        assert_eq!(
+            resolve_ref(&directory, &checkpoint_ref(fork_session_id, 0)),
+            resolve_ref(&directory, &checkpoint_ref(session_id, 0))
+        );
+        assert_eq!(
+            resolve_ref(&directory, &checkpoint_ref(fork_session_id, 1)),
+            resolve_ref(&directory, &checkpoint_ref(session_id, 1))
         );
 
         fs::write(directory.join("tracked.txt"), "later\n").unwrap();

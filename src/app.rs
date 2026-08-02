@@ -72,6 +72,7 @@ const NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO: f32 = 0.65;
 const NAVIGATION_RAIL_TICK_WIDTH: f32 = 32.0;
 const NAVIGATION_RAIL_TICK_HEIGHT: f32 = 2.0;
 const NAVIGATION_RAIL_TICK_GAP: f32 = 10.0;
+const NAVIGATION_RAIL_INACTIVE_OPACITY: f32 = 0.45;
 const NAVIGATION_RAIL_TURN_HEIGHT: f32 = NAVIGATION_RAIL_TICK_HEIGHT + NAVIGATION_RAIL_TICK_GAP;
 const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
@@ -350,6 +351,12 @@ fn traits_menu_choice(
 
 #[derive(Clone, Copy, Debug)]
 struct UserMessageAction {
+    session_id: Uuid,
+    turn_count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AssistantMessageAction {
     session_id: Uuid,
     turn_count: usize,
 }

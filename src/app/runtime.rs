@@ -162,6 +162,150 @@ impl Waku {
         }
     }
 
+    pub(super) fn fork_session_from_response(
+        &mut self,
+        session_id: Uuid,
+        turn_count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .cloned()
+        else {
+            self.toast = Some("That response is no longer available.".into());
+            cx.notify();
+            return;
+        };
+        if self.state.selected_session != Some(session_id)
+            || !matches!(source.status, SessionStatus::Idle | SessionStatus::Failed)
+            || !source.provider.supports_conversation_fork()
+            || source
+                .turns
+                .get(turn_count.saturating_sub(1))
+                .is_none_or(|turn| turn.turn_count != turn_count || !turn.provider_turn_started)
+        {
+            self.toast = Some("That response cannot be forked right now.".into());
+            cx.notify();
+            return;
+        }
+
+        let provider_turn_count = source
+            .turns
+            .iter()
+            .take(turn_count)
+            .filter(|turn| turn.provider_turn_started)
+            .count();
+        let turns_to_remove = source.provider_turns_after(turn_count);
+        let native_fork = (|| -> anyhow::Result<(
+            ProviderResumeCursor,
+            Option<std::collections::HashMap<String, String>>,
+        )> {
+            match source.provider {
+                ProviderKind::Claude => {
+                    let ProviderResumeCursor::Claude {
+                        session_id: native_session_id,
+                        ..
+                    } = source
+                        .provider_cursor
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Claude's native session is unavailable"))?
+                    else {
+                        anyhow::bail!("Claude's native session is unavailable");
+                    };
+                    let resume_at = source.turns[turn_count - 1]
+                        .provider_resume_at
+                        .clone()
+                        .map(Ok)
+                        .unwrap_or_else(|| {
+                            crate::claude_session::message_id_for_turn(
+                                native_session_id,
+                                provider_turn_count,
+                            )
+                        })?;
+                    let fork = crate::claude_session::fork_session_at(
+                        native_session_id,
+                        &resume_at,
+                        &format!("{} (fork)", source.title),
+                    )?;
+                    let fork_resume_at = fork
+                        .message_ids
+                        .get(&resume_at)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("Claude omitted the fork checkpoint"))?;
+                    Ok((
+                        ProviderResumeCursor::Claude {
+                            session_id: fork.session_id,
+                            resume_at: Some(fork_resume_at),
+                        },
+                        Some(fork.message_ids),
+                    ))
+                }
+                ProviderKind::Codex => {
+                    if !matches!(
+                        source.provider_cursor.as_ref(),
+                        Some(ProviderResumeCursor::Codex { .. })
+                    ) {
+                        anyhow::bail!("Codex's native thread is unavailable");
+                    }
+                    Ok((self.ensure_driver()?.fork(turns_to_remove)?, None))
+                }
+                _ => anyhow::bail!("This provider does not support conversation forks"),
+            }
+        })();
+
+        let (provider_cursor, claude_message_ids) = match native_fork {
+            Ok(fork) => fork,
+            Err(error) => {
+                self.toast = Some(format!("Could not fork the task: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(mut forked) = source.fork_through_turn(turn_count, provider_cursor) else {
+            self.toast = Some("That response could not be copied into a new task.".into());
+            cx.notify();
+            return;
+        };
+        if let Some(message_ids) = claude_message_ids {
+            for turn in &mut forked.turns {
+                if let Some(message_id) = turn.provider_resume_at.as_mut()
+                    && let Some(remapped) = message_ids.get(message_id)
+                {
+                    *message_id = remapped.clone();
+                }
+            }
+        }
+
+        let fork_id = forked.id;
+        for turn in &mut forked.turns {
+            if let Some(checkpoint) = turn.checkpoint.as_mut() {
+                checkpoint.git_ref = checkpoint::checkpoint_ref(fork_id, checkpoint.turn_count);
+            }
+        }
+        let checkpoint_warning = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == source.project_id)
+            .and_then(|project| {
+                checkpoint::copy_session_refs(&project.path, source.id, fork_id, turn_count).err()
+            });
+
+        self.state.sessions.push(forked);
+        self.select_session(fork_id, cx);
+        self.toast = Some(match checkpoint_warning {
+            Some(error) => {
+                format!("Forked task; some Git checkpoints could not be copied: {error}")
+            }
+            None => "Forked task from this response.".into(),
+        });
+        self.save();
+        cx.notify();
+    }
+
     pub(super) fn begin_message_edit(
         &mut self,
         session_id: Uuid,

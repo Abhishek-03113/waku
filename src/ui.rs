@@ -282,6 +282,7 @@ mod tests {
             "icons/check.svg",
             "icons/copy.svg",
             "icons/rewind.svg",
+            "icons/fork.svg",
             "icons/git-branch.svg",
             "icons/chevron-down.svg",
             "icons/chevron-right.svg",

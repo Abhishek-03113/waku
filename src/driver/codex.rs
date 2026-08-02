@@ -26,6 +26,10 @@ enum CommandMessage {
         turns: usize,
         response: Sender<Result<(), String>>,
     },
+    Fork {
+        turns_to_remove: usize,
+        response: Sender<Result<String, String>>,
+    },
     Shutdown,
 }
 
@@ -79,12 +83,20 @@ impl CodexDriver {
         let (commands, command_rx) = unbounded();
         let thread_id = Arc::new(Mutex::new(None::<String>));
         let turn_id = Arc::new(Mutex::new(None::<String>));
-        let pending_responses =
-            Arc::new(Mutex::new(HashMap::<u64, Sender<Result<(), String>>>::new()));
+        let turn_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let pending_rollbacks = Arc::new(Mutex::new(HashMap::<
+            u64,
+            (usize, Sender<Result<(), String>>),
+        >::new()));
+        let pending_forks = Arc::new(Mutex::new(
+            HashMap::<u64, Sender<Result<String, String>>>::new(),
+        ));
 
         let writer_thread_id = thread_id.clone();
         let writer_turn_id = turn_id.clone();
-        let writer_pending_responses = pending_responses.clone();
+        let writer_turn_ids = turn_ids.clone();
+        let writer_pending_rollbacks = pending_rollbacks.clone();
+        let writer_pending_forks = pending_forks.clone();
         let writer_events = events.clone();
         let cwd_string = cwd.display().to_string();
         thread::Builder::new()
@@ -229,7 +241,9 @@ impl CodexDriver {
                             };
                             next_request_id += 1;
                             let request_id = next_request_id;
-                            writer_pending_responses.lock().insert(request_id, response);
+                            writer_pending_rollbacks
+                                .lock()
+                                .insert(request_id, (turns, response));
                             let message = json!({
                                 "method": "thread/rollback",
                                 "id": request_id,
@@ -239,8 +253,47 @@ impl CodexDriver {
                                 }
                             });
                             if let Err(error) = write_json_line(&mut stdin, &message)
+                                && let Some((_, response)) =
+                                    writer_pending_rollbacks.lock().remove(&request_id)
+                            {
+                                let _ = response
+                                    .send(Err(format!("Codex transport write failed: {error}")));
+                            }
+                            continue;
+                        }
+                        CommandMessage::Fork {
+                            turns_to_remove,
+                            response,
+                        } => {
+                            let Some(thread_id) = wait_for_thread_id(&writer_thread_id) else {
+                                let _ = response
+                                    .send(Err("Codex did not finish opening its thread.".into()));
+                                continue;
+                            };
+                            let last_turn_id = {
+                                let turn_ids = writer_turn_ids.lock();
+                                match fork_last_turn_id(&turn_ids, turns_to_remove) {
+                                    Ok(turn_id) => turn_id,
+                                    Err(error) => {
+                                        let _ = response.send(Err(error));
+                                        continue;
+                                    }
+                                }
+                            };
+                            next_request_id += 1;
+                            let request_id = next_request_id;
+                            writer_pending_forks.lock().insert(request_id, response);
+                            let message = json!({
+                                "method": "thread/fork",
+                                "id": request_id,
+                                "params": {
+                                    "threadId": thread_id,
+                                    "lastTurnId": last_turn_id
+                                }
+                            });
+                            if let Err(error) = write_json_line(&mut stdin, &message)
                                 && let Some(response) =
-                                    writer_pending_responses.lock().remove(&request_id)
+                                    writer_pending_forks.lock().remove(&request_id)
                             {
                                 let _ = response
                                     .send(Err(format!("Codex transport write failed: {error}")));
@@ -260,7 +313,9 @@ impl CodexDriver {
 
         let reader_thread_id = thread_id.clone();
         let reader_turn_id = turn_id.clone();
-        let reader_pending_responses = pending_responses.clone();
+        let reader_turn_ids = turn_ids.clone();
+        let reader_pending_rollbacks = pending_rollbacks.clone();
+        let reader_pending_forks = pending_forks.clone();
         let reader_events = events.clone();
         thread::Builder::new()
             .name("waku-codex-reader".into())
@@ -274,7 +329,9 @@ impl CodexDriver {
                                     value,
                                     &reader_thread_id,
                                     &reader_turn_id,
-                                    &reader_pending_responses,
+                                    &reader_turn_ids,
+                                    &reader_pending_rollbacks,
+                                    &reader_pending_forks,
                                     &reader_events,
                                     &mut stream_state,
                                 ),
@@ -367,6 +424,21 @@ impl DriverControl for CodexDriver {
             .context("timed out waiting for Codex conversation rollback")?
             .map_err(anyhow::Error::msg)
     }
+
+    fn fork(&self, turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(CommandMessage::Fork {
+                turns_to_remove,
+                response: response_tx,
+            })
+            .context("Codex driver stopped before forking")?;
+        let thread_id = response_rx
+            .recv_timeout(Duration::from_secs(15))
+            .context("timed out waiting for Codex conversation fork")?
+            .map_err(anyhow::Error::msg)?;
+        Ok(ProviderResumeCursor::Codex { thread_id })
+    }
 }
 
 impl Drop for CodexDriver {
@@ -389,6 +461,15 @@ fn wait_for_thread_id(thread_id: &Mutex<Option<String>>) -> Option<String> {
         thread::sleep(Duration::from_millis(20));
     }
     None
+}
+
+fn fork_last_turn_id(turn_ids: &[String], turns_to_remove: usize) -> Result<String, String> {
+    turn_ids
+        .len()
+        .checked_sub(turns_to_remove + 1)
+        .and_then(|index| turn_ids.get(index))
+        .cloned()
+        .ok_or_else(|| "Codex has no completed turn at that response.".to_owned())
 }
 
 const CODEX_CITATION_START: char = '\u{e200}';
@@ -504,18 +585,45 @@ fn handle_codex_message(
     value: Value,
     thread_id: &Mutex<Option<String>>,
     turn_id: &Mutex<Option<String>>,
-    pending_responses: &Mutex<HashMap<u64, Sender<Result<(), String>>>>,
+    turn_ids: &Mutex<Vec<String>>,
+    pending_rollbacks: &Mutex<HashMap<u64, (usize, Sender<Result<(), String>>)>>,
+    pending_forks: &Mutex<HashMap<u64, Sender<Result<String, String>>>>,
     events: &Sender<DriverEvent>,
     stream_state: &mut CodexStreamState,
 ) {
     if let Some(id) = value.get("id").and_then(Value::as_u64)
         && id != 1
-        && let Some(response) = pending_responses.lock().remove(&id)
+        && let Some((turns, response)) = pending_rollbacks.lock().remove(&id)
     {
         let result = value
             .pointer("/error/message")
             .and_then(Value::as_str)
             .map_or_else(|| Ok(()), |error| Err(error.to_owned()));
+        if result.is_ok() {
+            let retained = turn_ids.lock().len().saturating_sub(turns);
+            turn_ids.lock().truncate(retained);
+        }
+        let _ = response.send(result);
+        return;
+    }
+
+    if let Some(id) = value.get("id").and_then(Value::as_u64)
+        && id != 1
+        && let Some(response) = pending_forks.lock().remove(&id)
+    {
+        let result = value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .map_or_else(
+                || {
+                    value
+                        .pointer("/result/thread/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| "Codex returned no forked thread ID.".to_owned())
+                },
+                |error| Err(error.to_owned()),
+            );
         let _ = response.send(result);
         return;
     }
@@ -523,6 +631,13 @@ fn handle_codex_message(
     if value.get("id").and_then(Value::as_u64) == Some(1) {
         if let Some(id) = value.pointer("/result/thread/id").and_then(Value::as_str) {
             *thread_id.lock() = Some(id.to_owned());
+            *turn_ids.lock() = value
+                .pointer("/result/thread/turns")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|turn| turn.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect();
             let _ = events.send(DriverEvent::Connected {
                 provider_cursor: Some(ProviderResumeCursor::Codex {
                     thread_id: id.to_owned(),
@@ -547,6 +662,10 @@ fn handle_codex_message(
             stream_state.begin_turn();
             if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
                 *turn_id.lock() = Some(id.to_owned());
+                let mut turn_ids = turn_ids.lock();
+                if turn_ids.last().is_none_or(|last| last != id) {
+                    turn_ids.push(id.to_owned());
+                }
             }
             let _ = events.send(DriverEvent::TurnStarted);
         }
@@ -852,9 +971,11 @@ mod tests {
     fn rollback_rpc_responses_are_routed_to_the_waiting_request() {
         let thread_id = Mutex::new(Some("thread-1".to_owned()));
         let turn_id = Mutex::new(None);
-        let pending = Mutex::new(HashMap::new());
+        let turn_ids = Mutex::new(vec!["turn-1".to_owned(), "turn-2".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
         let (response_tx, response_rx) = bounded(1);
-        pending.lock().insert(42, response_tx);
+        pending_rollbacks.lock().insert(42, (1, response_tx));
         let (event_tx, event_rx) = unbounded();
         let mut stream_state = CodexStreamState::default();
 
@@ -862,13 +983,16 @@ mod tests {
             json!({"id": 42, "result": {}}),
             &thread_id,
             &turn_id,
-            &pending,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_forks,
             &event_tx,
             &mut stream_state,
         );
 
         assert_eq!(response_rx.recv().unwrap(), Ok(()));
-        assert!(pending.lock().is_empty());
+        assert!(pending_rollbacks.lock().is_empty());
+        assert_eq!(*turn_ids.lock(), vec!["turn-1".to_owned()]);
         assert!(event_rx.try_recv().is_err());
     }
 
@@ -876,9 +1000,11 @@ mod tests {
     fn rollback_rpc_errors_are_returned_without_becoming_stream_errors() {
         let thread_id = Mutex::new(Some("thread-1".to_owned()));
         let turn_id = Mutex::new(None);
-        let pending = Mutex::new(HashMap::new());
+        let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
         let (response_tx, response_rx) = bounded(1);
-        pending.lock().insert(43, response_tx);
+        pending_rollbacks.lock().insert(43, (1, response_tx));
         let (event_tx, event_rx) = unbounded();
         let mut stream_state = CodexStreamState::default();
 
@@ -886,7 +1012,9 @@ mod tests {
             json!({"id": 43, "error": {"message": "cannot roll back"}}),
             &thread_id,
             &turn_id,
-            &pending,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_forks,
             &event_tx,
             &mut stream_state,
         );
@@ -895,7 +1023,45 @@ mod tests {
             response_rx.recv().unwrap(),
             Err("cannot roll back".to_owned())
         );
+        assert_eq!(*turn_ids.lock(), vec!["turn-1".to_owned()]);
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn fork_rpc_returns_the_new_native_thread() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(None);
+        let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
+        let (response_tx, response_rx) = bounded(1);
+        pending_forks.lock().insert(44, response_tx);
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+
+        handle_codex_message(
+            json!({"id": 44, "result": {"thread": {"id": "thread-fork"}}}),
+            &thread_id,
+            &turn_id,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_forks,
+            &event_tx,
+            &mut stream_state,
+        );
+
+        assert_eq!(response_rx.recv().unwrap(), Ok("thread-fork".to_owned()));
+        assert!(pending_forks.lock().is_empty());
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn fork_turn_selection_keeps_the_requested_completed_prefix() {
+        let turns = vec!["turn-1".into(), "turn-2".into(), "turn-3".into()];
+
+        assert_eq!(fork_last_turn_id(&turns, 0), Ok("turn-3".into()));
+        assert_eq!(fork_last_turn_id(&turns, 2), Ok("turn-1".into()));
+        assert!(fork_last_turn_id(&turns, 3).is_err());
     }
 
     #[test]

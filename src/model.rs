@@ -74,6 +74,10 @@ impl ProviderKind {
         matches!(self, Self::Claude | Self::Codex)
     }
 
+    pub fn supports_conversation_fork(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
+    }
+
     pub fn supports_model_discovery(self) -> bool {
         matches!(self, Self::Codex | Self::OpenCode | Self::Grok | Self::Pi)
     }
@@ -706,6 +710,51 @@ impl AgentSession {
         }
         self.updated_at = unix_time();
     }
+
+    pub fn fork_through_turn(
+        &self,
+        turn_count: usize,
+        provider_cursor: ProviderResumeCursor,
+    ) -> Option<Self> {
+        if turn_count == 0 || turn_count > self.turns.len() {
+            return None;
+        }
+
+        let mut fork = self.clone();
+        fork.truncate_after_turn(turn_count);
+        let fork_id = Uuid::new_v4();
+        let turn_ids = fork
+            .turns
+            .iter()
+            .map(|turn| (turn.id, Uuid::new_v4()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        for turn in &mut fork.turns {
+            turn.id = turn_ids[&turn.id];
+        }
+        for message in &mut fork.messages {
+            message.id = Uuid::new_v4();
+            if let Some(turn_id) = message.turn_id {
+                message.turn_id = turn_ids.get(&turn_id).copied();
+            }
+            message.streaming = false;
+        }
+        for block in &mut fork.transcript_blocks {
+            if let Some(turn_id) = block.turn_id {
+                block.turn_id = turn_ids.get(&turn_id).copied();
+            }
+        }
+
+        let now = unix_time();
+        fork.id = fork_id;
+        fork.title = format!("{} (fork)", self.title);
+        fork.status = SessionStatus::Idle;
+        fork.created_at = now;
+        fork.updated_at = now;
+        fork.provider_cursor = Some(provider_cursor);
+        fork.provider_session_id = None;
+        Some(fork)
+    }
 }
 
 fn strip_legacy_codex_citations(text: &str) -> String {
@@ -1026,6 +1075,45 @@ mod tests {
         assert_eq!(session.transcript_blocks.len(), 1);
         assert_eq!(session.transcript_blocks[0].turn_id, Some(first_turn));
         assert_eq!(session.transcript_blocks[0].after_message, 2);
+    }
+
+    #[test]
+    fn response_fork_is_a_distinct_idle_session_through_the_selected_turn() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+
+        let first_turn = session.begin_turn("first");
+        let first_message = session.push_message(MessageRole::Assistant, "first answer");
+        session.finish_active_turn(TurnStatus::Completed);
+        session.begin_turn("second");
+        session.push_message(MessageRole::Assistant, "second answer");
+        session.finish_active_turn(TurnStatus::Completed);
+
+        let fork = session
+            .fork_through_turn(
+                1,
+                ProviderResumeCursor::Codex {
+                    thread_id: "forked-thread".into(),
+                },
+            )
+            .unwrap();
+
+        assert_ne!(fork.id, session.id);
+        assert_eq!(fork.title, "New task (fork)");
+        assert_eq!(fork.status, SessionStatus::Idle);
+        assert_eq!(fork.turns.len(), 1);
+        assert_eq!(fork.messages.len(), 2);
+        assert_ne!(fork.turns[0].id, first_turn);
+        assert_ne!(fork.messages[1].id, first_message);
+        assert!(
+            fork.messages
+                .iter()
+                .all(|message| message.turn_id == Some(fork.turns[0].id))
+        );
+        assert!(matches!(
+            fork.provider_cursor,
+            Some(ProviderResumeCursor::Codex { ref thread_id }) if thread_id == "forked-thread"
+        ));
     }
 
     #[test]

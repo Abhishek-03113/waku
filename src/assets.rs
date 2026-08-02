@@ -129,6 +129,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "file-types/yarn",
     "file-types/zig",
     "file-types/zip",
+    "fork",
     "git-branch",
     "globe",
     "hexagon",
