@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -5,17 +6,22 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::computer_use::ComputerAppGrant;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{AgentSession, FavoriteModel, Project, ProviderKind};
 use crate::theme::ThemePreference;
 
-const STATE_VERSION: u32 = 3;
+const STATE_VERSION: u32 = 4;
 const OLDEST_SUPPORTED_STATE_VERSION: u32 = 1;
 
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
 pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
 
 fn default_panel_visibility() -> bool {
+    true
+}
+
+fn default_computer_use_enabled() -> bool {
     true
 }
 
@@ -45,6 +51,10 @@ pub struct PersistedState {
     pub sidebar_width: f32,
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: f32,
+    #[serde(default = "default_computer_use_enabled")]
+    pub computer_use_enabled: bool,
+    #[serde(default)]
+    pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
 }
 
 #[derive(Serialize)]
@@ -67,6 +77,8 @@ struct PersistedStateSnapshot<'a> {
     right_panel_visible: bool,
     sidebar_width: f32,
     right_panel_width: f32,
+    computer_use_enabled: bool,
+    computer_use_allowed_apps: &'a [ComputerAppGrant],
 }
 
 fn default_sidebar_width() -> f32 {
@@ -95,6 +107,8 @@ impl PersistedState {
             right_panel_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
+            computer_use_enabled: true,
+            computer_use_allowed_apps: Vec::new(),
         }
     }
 
@@ -117,6 +131,8 @@ impl PersistedState {
             right_panel_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
+            computer_use_enabled: true,
+            computer_use_allowed_apps: Vec::new(),
         }
     }
 
@@ -191,6 +207,8 @@ impl PersistedState {
             right_panel_visible: self.right_panel_visible,
             sidebar_width: self.sidebar_width,
             right_panel_width: self.right_panel_width,
+            computer_use_enabled: self.computer_use_enabled,
+            computer_use_allowed_apps: &self.computer_use_allowed_apps,
         }
     }
 }
@@ -242,6 +260,7 @@ impl StateStore {
         for session in &mut state.sessions {
             session.migrate_legacy_state();
         }
+        normalize_computer_app_grants(&mut state.computer_use_allowed_apps);
         if let Some(session) = state
             .selected_session
             .and_then(|selected_session| {
@@ -275,6 +294,13 @@ impl StateStore {
         fs::write(&temporary_path, data)?;
         fs::rename(temporary_path, &self.path)
     }
+}
+
+fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
+    let mut seen_bundle_ids = HashSet::new();
+    grants.retain(|grant| {
+        !grant.bundle_id.trim().is_empty() && seen_bundle_ids.insert(grant.bundle_id.clone())
+    });
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
@@ -323,6 +349,11 @@ mod tests {
         state.right_panel_visible = false;
         state.sidebar_width = 318.0;
         state.right_panel_width = 612.0;
+        state.computer_use_enabled = false;
+        state.computer_use_allowed_apps.push(ComputerAppGrant {
+            bundle_id: "com.apple.Safari".into(),
+            app_name: "Safari".into(),
+        });
         state.sessions[0].begin_turn("Persist this session");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
         state.sessions[0].transcript_blocks.extend([
@@ -370,6 +401,11 @@ mod tests {
         assert!(!restored.right_panel_visible);
         assert_eq!(restored.sidebar_width, 318.0);
         assert_eq!(restored.right_panel_width, 612.0);
+        assert!(!restored.computer_use_enabled);
+        assert_eq!(
+            restored.computer_use_allowed_apps,
+            state.computer_use_allowed_apps
+        );
         assert_eq!(restored.sessions[0].transcript_blocks.len(), 2);
         assert!(matches!(
             &restored.sessions[0].transcript_blocks[0].content,
@@ -377,6 +413,39 @@ mod tests {
                 if reasoning.content == "Checking the source"
         ));
         fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn legacy_signed_computer_grants_migrate_to_bundle_ids() {
+        let legacy = serde_json::json!({
+            "bundleId": "net.imput.helium",
+            "teamId": "S4Q33XPHB4",
+            "appName": "Helium"
+        });
+        let grant: ComputerAppGrant = serde_json::from_value(legacy).unwrap();
+        assert_eq!(grant.key(), "net.imput.helium");
+
+        let mut grants = vec![
+            grant,
+            ComputerAppGrant {
+                bundle_id: "net.imput.helium".into(),
+                app_name: "Helium Preview".into(),
+            },
+            ComputerAppGrant {
+                bundle_id: String::new(),
+                app_name: "Missing identity".into(),
+            },
+        ];
+        normalize_computer_app_grants(&mut grants);
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].app_name, "Helium");
+
+        let saved = serde_json::to_value(&grants[0]).unwrap();
+        assert_eq!(
+            saved.get("bundleId").and_then(|value| value.as_str()),
+            Some("net.imput.helium")
+        );
+        assert!(saved.get("teamId").is_none());
     }
 
     #[test]

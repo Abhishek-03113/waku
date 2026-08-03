@@ -641,6 +641,131 @@ pub(super) fn activity_summary(activities: &[ActivityItem]) -> String {
     )
 }
 
+pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
+    if activity.kind == crate::model::ActivityKind::Tool
+        && let Some(arguments) = activity.arguments.as_deref()
+        && let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments)
+        && let Some(title) = arguments
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+    {
+        return title.to_owned();
+    }
+    activity.title.clone()
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum ActivityDisclosureSectionKind {
+    Arguments,
+    Output,
+    Detail,
+}
+
+impl ActivityDisclosureSectionKind {
+    pub(super) fn id(self) -> &'static str {
+        match self {
+            Self::Arguments => "arguments",
+            Self::Output => "output",
+            Self::Detail => "detail",
+        }
+    }
+
+    pub(super) fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Arguments => Some("Arguments"),
+            Self::Output => Some("Output"),
+            Self::Detail => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ActivityDisclosureSection {
+    pub(super) kind: ActivityDisclosureSectionKind,
+    pub(super) content: String,
+}
+
+pub(super) fn activity_disclosure_sections(
+    activity: &ActivityItem,
+) -> Vec<ActivityDisclosureSection> {
+    let mut sections = Vec::new();
+    if let Some(arguments) = activity
+        .arguments
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(ActivityDisclosureSection {
+            kind: ActivityDisclosureSectionKind::Arguments,
+            content: arguments.to_owned(),
+        });
+    }
+    if let Some(output) = activity
+        .output
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(ActivityDisclosureSection {
+            kind: ActivityDisclosureSectionKind::Output,
+            content: output.to_owned(),
+        });
+    } else if !activity.image_urls.is_empty() {
+        sections.push(ActivityDisclosureSection {
+            kind: ActivityDisclosureSectionKind::Output,
+            content: String::new(),
+        });
+    }
+    if sections.is_empty()
+        && let Some(detail) = activity
+            .detail
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        sections.push(ActivityDisclosureSection {
+            kind: ActivityDisclosureSectionKind::Detail,
+            content: detail.to_owned(),
+        });
+    }
+    sections
+}
+
+pub(super) fn activity_disclosure_text(activity: &ActivityItem) -> Option<String> {
+    let sections = activity_disclosure_sections(activity);
+    (!sections.is_empty()).then(|| {
+        sections
+            .into_iter()
+            .map(
+                |section| match (section.kind.label(), section.content.is_empty()) {
+                    (Some(label), false) => format!("{label}\n{}", section.content),
+                    (Some(label), true) => label.to_owned(),
+                    (None, _) => section.content,
+                },
+            )
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    })
+}
+
+pub(super) fn activity_preview(activity: &ActivityItem) -> String {
+    let detail = activity.detail.as_deref().unwrap_or_default().trim();
+    if detail.eq_ignore_ascii_case("failed")
+        && let Some(output) = activity.output.as_deref()
+        && let Some(first_line) = output.lines().find(|line| !line.trim().is_empty())
+    {
+        return first_line.trim().to_owned();
+    }
+    if (detail.is_empty() || detail.eq_ignore_ascii_case("failed"))
+        && !activity.image_urls.is_empty()
+    {
+        return "Image output".to_owned();
+    }
+    detail.to_owned()
+}
+
 pub(super) fn git_branch(path: &std::path::Path) -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
@@ -713,5 +838,82 @@ mod message_time_tests {
                 format_message_time_at(unix_seconds(local_datetime(2026, 5, day, 9, 0)), now);
             assert!(formatted.starts_with(&format!("May {day}{suffix},")));
         }
+    }
+
+    #[test]
+    fn activity_disclosure_keeps_arguments_and_output() {
+        let activity = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "Use Helium",
+            Some("failed".into()),
+            true,
+        )
+        .with_arguments(Some("{\n  \"actions\": []\n}".into()))
+        .with_output(Some("Computer Use helper closed its session".into()))
+        .with_failed(true);
+
+        assert_eq!(
+            activity_disclosure_sections(&activity),
+            vec![
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Arguments,
+                    content: "{\n  \"actions\": []\n}".into(),
+                },
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Output,
+                    content: "Computer Use helper closed its session".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            activity_disclosure_text(&activity).as_deref(),
+            Some(
+                "Arguments\n{\n  \"actions\": []\n}\n\nOutput\nComputer Use helper closed its session"
+            )
+        );
+        assert_eq!(
+            activity_preview(&activity),
+            "Computer Use helper closed its session"
+        );
+
+        let image_only = ActivityItem::new(
+            Some("tool-2".into()),
+            crate::model::ActivityKind::Tool,
+            "Screenshot",
+            None,
+            true,
+        )
+        .with_image_urls(vec!["data:image/png;base64,aGVsbG8=".into()]);
+        assert_eq!(
+            activity_disclosure_text(&image_only).as_deref(),
+            Some("Output")
+        );
+        assert_eq!(activity_preview(&image_only), "Image output");
+    }
+
+    #[test]
+    fn activity_display_title_prefers_the_human_facing_tool_argument() {
+        let titled = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "Js",
+            None,
+            true,
+        )
+        .with_arguments(Some(
+            r#"{"title":"Inspect Helium browser","code":"sky.get_app_state()"}"#.into(),
+        ));
+        let untitled = ActivityItem::new(
+            Some("tool-2".into()),
+            crate::model::ActivityKind::Tool,
+            "Js",
+            None,
+            true,
+        )
+        .with_arguments(Some(r#"{"code":"sky.list_apps()"}"#.into()));
+
+        assert_eq!(activity_display_title(&titled), "Inspect Helium browser");
+        assert_eq!(activity_display_title(&untitled), "Js");
     }
 }

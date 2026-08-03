@@ -896,12 +896,14 @@ pub enum DriverEvent {
         detail: Option<String>,
         complete: bool,
     },
+    RichActivity(ActivityItem),
     Permission {
         request_id: String,
         title: String,
         detail: String,
         options: Vec<PermissionOption>,
     },
+    ComputerUseUpdated(crate::computer_use::ComputerUseState),
     TurnFinished {
         success: bool,
         summary: Option<String>,
@@ -925,6 +927,16 @@ pub struct ActivityItem {
     pub kind: ActivityKind,
     pub title: String,
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Images returned by a tool, kept separate from text so large data URLs
+    /// are never truncated or treated as literal activity output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_urls: Vec<String>,
+    #[serde(default)]
+    pub failed: bool,
     pub complete: bool,
 }
 
@@ -942,8 +954,32 @@ impl ActivityItem {
             kind,
             title: title.into(),
             detail,
+            arguments: None,
+            output: None,
+            image_urls: Vec::new(),
+            failed: false,
             complete,
         }
+    }
+
+    pub fn with_arguments(mut self, arguments: Option<String>) -> Self {
+        self.arguments = arguments;
+        self
+    }
+
+    pub fn with_output(mut self, output: Option<String>) -> Self {
+        self.output = output;
+        self
+    }
+
+    pub fn with_image_urls(mut self, image_urls: Vec<String>) -> Self {
+        self.image_urls = image_urls;
+        self
+    }
+
+    pub fn with_failed(mut self, failed: bool) -> Self {
+        self.failed = failed;
+        self
     }
 }
 

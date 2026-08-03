@@ -104,8 +104,18 @@ impl Waku {
                     activity.kind = item.kind;
                     activity.title = item.title;
                     activity.complete = item.complete;
+                    activity.failed = item.failed;
                     if item.detail.is_some() {
                         activity.detail = item.detail;
+                    }
+                    if item.arguments.is_some() {
+                        activity.arguments = item.arguments;
+                    }
+                    if item.output.is_some() {
+                        activity.output = item.output;
+                    }
+                    if !item.image_urls.is_empty() {
+                        activity.image_urls = item.image_urls;
                     }
                     session.updated_at = unix_time();
                     runtime.stream_phase = Some(StreamPhase::Activity);
@@ -190,6 +200,7 @@ impl Waku {
     ) -> bool {
         match event {
             DriverEvent::Connected { provider_cursor } => {
+                runtime.last_driver_error = None;
                 if let Some(session) = self
                     .state
                     .sessions
@@ -210,6 +221,7 @@ impl Waku {
                 }
             }
             DriverEvent::TurnStarted => {
+                runtime.last_driver_error = None;
                 if let Some(session) = self
                     .state
                     .sessions
@@ -246,6 +258,11 @@ impl Waku {
                     );
                 }
             }
+            DriverEvent::RichActivity(item) => {
+                if self.accepts_turn_output(session_id) {
+                    self.update_activity(session_id, runtime, item);
+                }
+            }
             DriverEvent::Permission {
                 request_id,
                 title,
@@ -269,7 +286,13 @@ impl Waku {
                     }
                 }
             }
+            DriverEvent::ComputerUseUpdated(state) => {
+                if self.accepts_turn_output(session_id) {
+                    Self::upsert_computer_use_preview(runtime, state);
+                }
+            }
             DriverEvent::TurnFinished { success, summary } => {
+                runtime.last_driver_error = None;
                 if self
                     .state
                     .sessions
@@ -314,9 +337,14 @@ impl Waku {
                     });
                 }
                 runtime.pending_permission = None;
+                runtime.pending_computer_approval = None;
+                runtime.driver.cancel_computer_use();
+                runtime.computer_use_previews.clear();
                 self.capture_latest_turn_checkpoint_for(session_id);
             }
             DriverEvent::Error(error) => {
+                let error = compact_driver_error(&error);
+                runtime.last_driver_error = Some(error.clone());
                 if self.state.selected_session == Some(session_id) {
                     self.toast = Some(error.clone());
                 }
@@ -355,6 +383,13 @@ impl Waku {
                 self.complete_turn_blocks(session_id);
                 runtime.stream_phase = None;
                 runtime.pending_permission = None;
+                runtime.pending_computer_approval = None;
+                runtime.driver.cancel_computer_use();
+                runtime.computer_use_previews.clear();
+                let needs_fallback = !self.turn_has_assistant_message(session_id);
+                let failure_message = runtime.last_driver_error.take().unwrap_or_else(|| {
+                    "Codex app-server exited before returning a response.".into()
+                });
                 let mut finished_turn = false;
                 if let Some(session) = self
                     .state
@@ -368,6 +403,9 @@ impl Waku {
                 {
                     session.status = SessionStatus::Failed;
                     session.updated_at = unix_time();
+                    if needs_fallback {
+                        session.push_message(MessageRole::Assistant, failure_message);
+                    }
                     finished_turn = session.finish_active_turn(TurnStatus::Failed).is_some();
                 }
                 if finished_turn {
@@ -377,6 +415,27 @@ impl Waku {
             }
         }
         true
+    }
+
+    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, mut state: ComputerUseState) {
+        if !state.visible {
+            return;
+        }
+        let Some(window_id) = state.target.as_ref().map(|target| target.window_id) else {
+            return;
+        };
+        if let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
+            preview
+                .target
+                .as_ref()
+                .is_some_and(|target| target.window_id == window_id)
+        }) {
+            let previous = runtime.computer_use_previews.remove(index);
+            if state.screenshot.is_none() {
+                state.screenshot = previous.screenshot;
+            }
+        }
+        runtime.computer_use_previews.push(state);
     }
 }
 
@@ -394,6 +453,27 @@ pub(super) fn stream_delta_text(event: &DriverEvent, kind: StreamDeltaKind) -> O
         | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => Some(text),
         _ => None,
     }
+}
+
+pub(super) fn compact_driver_error(error: &str) -> String {
+    const MAX_LINES: usize = 6;
+    const MAX_CHARS: usize = 800;
+
+    let lines = error.lines().collect::<Vec<_>>();
+    let mut compact = lines
+        .iter()
+        .take(MAX_LINES)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if lines.len() > MAX_LINES {
+        compact.push_str("\n…");
+    }
+    if compact.chars().count() > MAX_CHARS {
+        compact = compact.chars().take(MAX_CHARS - 1).collect();
+        compact.push('…');
+    }
+    compact
 }
 
 pub(super) fn stream_frame_budget(backlog: usize) -> usize {

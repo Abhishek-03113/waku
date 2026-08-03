@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::process::Stdio;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -9,11 +11,27 @@ use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+#[cfg(test)]
+use uuid::Uuid;
 
+use super::computer_use as computer_use_runtime;
+use crate::computer_use;
 use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
+    ActivityItem, ActivityKind, DriverEvent, InteractionMode, PermissionOption,
+    ProviderResumeCursor, RuntimeMode,
 };
+
+const DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN: &str =
+    "plugins.computer-use@openai-bundled.enabled=false";
+// Codex 0.146 only resolves plugin enablement from user/profile config layers, so a
+// process-local `-c` plugin override does not yet suppress its bundled capabilities.
+const DISABLE_EXTERNAL_COMPUTER_USE_MCP_COMMAND: &str =
+    "mcp_servers.computer-use.command=\"/usr/bin/true\"";
+const DISABLE_EXTERNAL_COMPUTER_USE_MCP: &str = "mcp_servers.computer-use.enabled=false";
+const DISABLE_EXTERNAL_COMPUTER_USE_SKILL: &str =
+    r#"skills.config=[{name="computer-use:computer-use",enabled=false}]"#;
+const DISABLE_CODEX_NODE_REPL: &str = "mcp_servers.node_repl.enabled=false";
 
 enum CommandMessage {
     Prompt(String),
@@ -35,6 +53,76 @@ enum CommandMessage {
 
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
+    computer_use_process_directory: Option<PathBuf>,
+    computer_use_server_path: Option<PathBuf>,
+    computer_use_preview_monitor: Option<computer_use_runtime::ComputerUsePreviewMonitor>,
+}
+
+struct CodexComputerUseConfig {
+    server_path: PathBuf,
+    server: String,
+    repl: String,
+    skill_root: PathBuf,
+    process_directory: PathBuf,
+    process_directory_config: String,
+}
+
+impl CodexComputerUseConfig {
+    fn load() -> anyhow::Result<Self> {
+        let server_path = computer_use::mcp_server_command()?;
+        let server = toml_string(&server_path.display().to_string());
+        let repl_path = computer_use::js_repl_server_path()?;
+        let repl = toml_string(&repl_path.display().to_string());
+        let skill_root = computer_use::skill_root_path()?;
+        let process_directory = computer_use_runtime::create_process_directory()?;
+        let process_directory_config = toml_string(&process_directory.display().to_string());
+        Ok(Self {
+            server_path,
+            server,
+            repl,
+            skill_root,
+            process_directory,
+            process_directory_config,
+        })
+    }
+}
+
+/// Register Waku's long-lived QuickJS MCP server and keep the raw native helper
+/// private behind its built-in `sky` object. Codex sees only the compact
+/// `js` / `js_reset` execution surface.
+fn configure_computer_use_command(command: &mut Command, config: Option<&CodexComputerUseConfig>) {
+    if let Some(config) = config {
+        command
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN)
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP_COMMAND)
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_MCP)
+            .arg("-c")
+            .arg(DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
+            .arg("-c")
+            .arg(DISABLE_CODEX_NODE_REPL)
+            .env("WAKU_COMPUTER_USE_SERVER", &config.server_path)
+            .env(
+                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
+                &config.process_directory,
+            )
+            .arg("-c")
+            .arg(format!("mcp_servers.waku_js_repl.command={}", config.repl))
+            .arg("-c")
+            .arg("mcp_servers.waku_js_repl.args=[]")
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.waku_js_repl.env.WAKU_COMPUTER_USE_SERVER={}",
+                config.server
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.waku_js_repl.env.WAKU_COMPUTER_USE_PROCESS_DIRECTORY={}",
+                config.process_directory_config
+            ));
+    }
 }
 
 impl CodexDriver {
@@ -47,6 +135,7 @@ impl CodexDriver {
             model,
             reasoning_effort,
             service_tier,
+            computer_use_enabled,
             provider_cursor,
         } = options;
         let provider_session_id = match provider_cursor {
@@ -59,8 +148,22 @@ impl CodexDriver {
             }
             None => None,
         };
-        let mut child = crate::command_env::command(binary)
-            .args(["app-server", "--stdio"])
+        let computer_use = computer_use_enabled
+            .then(CodexComputerUseConfig::load)
+            .transpose()?;
+        let computer_use_skill_root = computer_use
+            .as_ref()
+            .map(|config| config.skill_root.clone());
+        let computer_use_process_directory = computer_use
+            .as_ref()
+            .map(|config| config.process_directory.clone());
+        let computer_use_server_path = computer_use
+            .as_ref()
+            .map(|config| config.server_path.clone());
+        let mut command = crate::command_env::command(binary);
+        command.args(["app-server", "--stdio"]);
+        configure_computer_use_command(&mut command, computer_use.as_ref());
+        let mut child = command
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -80,6 +183,15 @@ impl CodexDriver {
             .stderr
             .take()
             .ok_or_else(|| anyhow!("Codex stderr unavailable"))?;
+        let computer_use_preview_monitor = computer_use_process_directory
+            .as_ref()
+            .map(|directory| {
+                computer_use_runtime::ComputerUsePreviewMonitor::start(
+                    directory.clone(),
+                    events.clone(),
+                )
+            })
+            .transpose()?;
         let (commands, command_rx) = unbounded();
         let thread_id = Arc::new(Mutex::new(None::<String>));
         let turn_id = Arc::new(Mutex::new(None::<String>));
@@ -131,6 +243,29 @@ impl CodexDriver {
                         "Failed to initialize Codex app-server".into(),
                     ));
                     return;
+                }
+
+                if let Some(computer_use_skill_root) = computer_use_skill_root {
+                    // Register Waku's bundled skill through Codex's discoverable-skill
+                    // mechanism. Keep the skill out of developerInstructions so it is
+                    // loaded and displayed like Codex's own bundled skills.
+                    if write_json_line(
+                        &mut stdin,
+                        &json!({
+                            "method": "skills/extraRoots/set",
+                            "id": "waku-computer-use-skill",
+                            "params": {
+                                "extraRoots": [computer_use_skill_root.display().to_string()]
+                            }
+                        }),
+                    )
+                    .is_err()
+                    {
+                        let _ = writer_events.send(DriverEvent::Error(
+                            "Failed to register Waku Computer Use skill with Codex".into(),
+                        ));
+                        return;
+                    }
                 }
 
                 let (approval_policy, sandbox, approvals_reviewer) =
@@ -317,7 +452,7 @@ impl CodexDriver {
         let reader_pending_rollbacks = pending_rollbacks.clone();
         let reader_pending_forks = pending_forks.clone();
         let reader_events = events.clone();
-        thread::Builder::new()
+        let reader_thread = thread::Builder::new()
             .name("waku-codex-reader".into())
             .spawn(move || {
                 let mut stream_state = CodexStreamState::default();
@@ -351,20 +486,51 @@ impl CodexDriver {
                         }
                     }
                 }
-                let _ = reader_events.send(DriverEvent::ProcessExited);
             })?;
 
-        thread::Builder::new()
+        let last_visible_stderr = Arc::new(Mutex::new(None::<String>));
+        let stderr_last_error = last_visible_stderr.clone();
+        let stderr_events = events.clone();
+        let stderr_thread = thread::Builder::new()
             .name("waku-codex-stderr".into())
             .spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                     if is_visible_stderr_notice(&line) {
-                        let _ = events.send(DriverEvent::Error(clean_stderr(&line)));
+                        let error = clean_stderr(&line);
+                        *stderr_last_error.lock() = Some(error.clone());
+                        let _ = stderr_events.send(DriverEvent::Error(error));
                     }
                 }
             })?;
 
-        Ok(Self { commands })
+        thread::Builder::new()
+            .name("waku-codex-process".into())
+            .spawn(move || {
+                let status = child.wait();
+                let _ = reader_thread.join();
+                let _ = stderr_thread.join();
+                match status {
+                    Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
+                        let _ = events.send(DriverEvent::Error(format!(
+                            "Codex app-server exited with {status}"
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = events.send(DriverEvent::Error(format!(
+                            "Could not read Codex app-server exit status: {error}"
+                        )));
+                    }
+                    _ => {}
+                }
+                let _ = events.send(DriverEvent::ProcessExited);
+            })?;
+
+        Ok(Self {
+            commands,
+            computer_use_process_directory,
+            computer_use_server_path,
+            computer_use_preview_monitor,
+        })
     }
 }
 
@@ -392,6 +558,10 @@ fn codex_sandbox_policy(sandbox: &str) -> Value {
     }
 }
 
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("a filesystem path is always valid JSON")
+}
+
 impl DriverControl for CodexDriver {
     fn prompt(&self, prompt: String) {
         let _ = self.commands.send(CommandMessage::Prompt(prompt));
@@ -399,6 +569,15 @@ impl DriverControl for CodexDriver {
 
     fn cancel(&self) {
         let _ = self.commands.send(CommandMessage::Cancel);
+    }
+
+    fn cancel_computer_use(&self) {
+        if let (Some(directory), Some(server_path)) = (
+            self.computer_use_process_directory.as_deref(),
+            self.computer_use_server_path.as_deref(),
+        ) {
+            computer_use_runtime::stop_registered_processes(directory, server_path);
+        }
     }
 
     fn respond(&self, request_id: String, option_id: String) {
@@ -444,6 +623,11 @@ impl DriverControl for CodexDriver {
 
 impl Drop for CodexDriver {
     fn drop(&mut self) {
+        self.cancel_computer_use();
+        drop(self.computer_use_preview_monitor.take());
+        if let Some(directory) = self.computer_use_process_directory.as_deref() {
+            let _ = fs::remove_dir_all(directory);
+        }
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
 }
@@ -592,7 +776,12 @@ fn handle_codex_message(
     events: &Sender<DriverEvent>,
     stream_state: &mut CodexStreamState,
 ) {
-    if let Some(id) = value.get("id").and_then(Value::as_u64)
+    // JSON-RPC IDs are scoped to each peer, so an app-server request may use
+    // the same numeric ID as one of Waku's earlier requests. Only messages
+    // without a method are responses to Waku-originated requests.
+    let is_response = value.get("method").is_none();
+    if is_response
+        && let Some(id) = value.get("id").and_then(Value::as_u64)
         && id != 1
         && let Some((turns, response)) = pending_rollbacks.lock().remove(&id)
     {
@@ -608,7 +797,8 @@ fn handle_codex_message(
         return;
     }
 
-    if let Some(id) = value.get("id").and_then(Value::as_u64)
+    if is_response
+        && let Some(id) = value.get("id").and_then(Value::as_u64)
         && id != 1
         && let Some(response) = pending_forks.lock().remove(&id)
     {
@@ -629,7 +819,7 @@ fn handle_codex_message(
         return;
     }
 
-    if value.get("id").and_then(Value::as_u64) == Some(1) {
+    if is_response && value.get("id").and_then(Value::as_u64) == Some(1) {
         if let Some(id) = value.pointer("/result/thread/id").and_then(Value::as_str) {
             *thread_id.lock() = Some(id.to_owned());
             *turn_ids.lock() = value
@@ -694,14 +884,21 @@ fn handle_codex_message(
                 let kind = codex_activity_kind(item);
                 if let Some(kind) = kind {
                     let title = codex_item_title(item);
-                    let detail = codex_item_detail(item);
-                    let _ = events.send(DriverEvent::Activity {
-                        id: item.get("id").and_then(Value::as_str).map(str::to_owned),
+                    let output = codex_item_output(item);
+                    let image_urls = codex_item_image_urls(item);
+                    let detail = codex_item_detail(item, output.as_deref());
+                    let activity = ActivityItem::new(
+                        item.get("id").and_then(Value::as_str).map(str::to_owned),
                         kind,
                         title,
                         detail,
                         complete,
-                    });
+                    )
+                    .with_arguments(codex_item_arguments(item))
+                    .with_output(output)
+                    .with_image_urls(image_urls)
+                    .with_failed(codex_item_failed(item));
+                    let _ = events.send(DriverEvent::RichActivity(activity));
                 }
             }
         }
@@ -794,6 +991,15 @@ fn codex_item_title(item: &Value) -> String {
     if item.get("type").and_then(Value::as_str) == Some("webSearch") {
         return codex_web_search_title(item);
     }
+    if item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
+        && let Some(title) = item
+            .pointer("/arguments/title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+    {
+        return title.to_owned();
+    }
     if let Some(name) = item.get("tool").and_then(Value::as_str) {
         return split_camel_case(name);
     }
@@ -859,12 +1065,164 @@ fn non_empty_string(value: Option<&Value>) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-fn codex_item_detail(item: &Value) -> Option<String> {
+fn codex_item_detail(item: &Value, output: Option<&str>) -> Option<String> {
+    if codex_item_failed(item)
+        && let Some(first_line) =
+            output.and_then(|output| output.lines().map(str::trim).find(|line| !line.is_empty()))
+    {
+        return Some(first_line.to_owned());
+    }
     item.get("cwd")
         .and_then(Value::as_str)
         .or_else(|| item.get("path").and_then(Value::as_str))
         .or_else(|| item.get("status").and_then(Value::as_str))
         .map(str::to_owned)
+}
+
+fn codex_item_arguments(item: &Value) -> Option<String> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("mcpToolCall") => item
+            .get("arguments")
+            .filter(|value| !value.is_null())
+            .and_then(format_activity_json),
+        Some("commandExecution") => {
+            let mut arguments = serde_json::Map::new();
+            if let Some(command) = item.get("command") {
+                arguments.insert("command".into(), command.clone());
+            }
+            if let Some(cwd) = item.get("cwd") {
+                arguments.insert("cwd".into(), cwd.clone());
+            }
+            (!arguments.is_empty())
+                .then(|| Value::Object(arguments))
+                .as_ref()
+                .and_then(format_activity_json)
+        }
+        _ => None,
+    }
+}
+
+fn codex_item_output(item: &Value) -> Option<String> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("mcpToolCall") => {
+            if let Some(message) = item.pointer("/error/message").and_then(Value::as_str) {
+                return non_empty_activity_text(message.to_owned());
+            }
+            let result = item.get("result").filter(|value| !value.is_null())?;
+            if let Some(structured) = result
+                .get("structuredContent")
+                .filter(|value| !value.is_null())
+            {
+                return format_activity_json(structured);
+            }
+            result
+                .get("content")
+                .filter(|value| !value.is_null())
+                .and_then(|content| {
+                    let text_items = content
+                        .as_array()?
+                        .iter()
+                        .filter(|item| !is_image_content_item(item));
+                    let output = text_items
+                        .filter_map(|item| {
+                            if item.get("type").and_then(Value::as_str) == Some("text") {
+                                item.get("text").and_then(Value::as_str).map(str::to_owned)
+                            } else {
+                                format_activity_json(item)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    non_empty_activity_text(output)
+                })
+        }
+        Some("commandExecution") => {
+            let output = item
+                .get("aggregatedOutput")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let exit = item.get("exitCode").and_then(Value::as_i64);
+            let text = match (output.trim().is_empty(), exit) {
+                (false, Some(exit)) => format!("{}\n\nExit code: {exit}", output.trim_end()),
+                (false, None) => output.trim_end().to_owned(),
+                (true, Some(exit)) => format!("Exit code: {exit}"),
+                (true, None) => return None,
+            };
+            non_empty_activity_text(text)
+        }
+        _ => None,
+    }
+}
+
+fn codex_item_image_urls(item: &Value) -> Vec<String> {
+    let content = match item.get("type").and_then(Value::as_str) {
+        Some("mcpToolCall") => item.pointer("/result/content"),
+        _ => None,
+    };
+    content
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(image_content_url)
+        .collect()
+}
+
+fn image_content_url(item: &Value) -> Option<String> {
+    let item_type = item.get("type").and_then(Value::as_str);
+    if !matches!(item_type, Some("inputImage" | "image")) {
+        return None;
+    }
+    item.get("imageUrl")
+        .or_else(|| item.get("image_url"))
+        .or_else(|| item.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            let data = item.get("data").and_then(Value::as_str)?;
+            let mime_type = item
+                .get("mimeType")
+                .or_else(|| item.get("mime_type"))
+                .and_then(Value::as_str)
+                .unwrap_or("image/png");
+            Some(format!("data:{mime_type};base64,{data}"))
+        })
+}
+
+fn is_image_content_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("inputImage" | "image")
+    )
+}
+
+fn codex_item_failed(item: &Value) -> bool {
+    item.get("status").and_then(Value::as_str) == Some("failed")
+        || item.get("success").and_then(Value::as_bool) == Some(false)
+        || item.get("error").is_some_and(|error| !error.is_null())
+        || item
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .is_some_and(|code| code != 0)
+}
+
+fn format_activity_json(value: &Value) -> Option<String> {
+    serde_json::to_string_pretty(value)
+        .ok()
+        .and_then(non_empty_activity_text)
+}
+
+fn non_empty_activity_text(value: String) -> Option<String> {
+    const MAX_CHARS: usize = 16_000;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return None;
+    }
+    if value.chars().count() <= MAX_CHARS {
+        return Some(value);
+    }
+    let mut truncated = value.chars().take(MAX_CHARS).collect::<String>();
+    truncated.push_str("\n\n… output truncated");
+    Some(truncated)
 }
 
 fn approval_copy(method: &str, params: &Value) -> (String, String) {
@@ -900,6 +1258,12 @@ fn parse_rpc_id(value: &str) -> Value {
 fn split_camel_case(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 4);
     for (index, character) in value.chars().enumerate() {
+        if character == '_' || character == '-' {
+            if !output.ends_with(' ') {
+                output.push(' ');
+            }
+            continue;
+        }
         if index > 0 && character.is_ascii_uppercase() {
             output.push(' ');
         }
@@ -926,6 +1290,7 @@ fn is_visible_stderr_notice(line: &str) -> bool {
         return false;
     }
     line.contains(" ERROR ")
+        || lowercase.starts_with("error:")
         || line.contains('⚠')
         || lowercase.contains("fatal")
         || lowercase.contains("warning")
@@ -966,6 +1331,113 @@ mod tests {
         assert!(is_visible_stderr_notice(
             "env: node: No such file or directory"
         ));
+    }
+
+    #[test]
+    fn startup_configuration_errors_are_visible() {
+        assert!(is_visible_stderr_notice(
+            "Error: error loading default config after config error: invalid transport"
+        ));
+    }
+
+    #[test]
+    fn computer_use_command_configuration_follows_the_setting() {
+        let mut disabled = Command::new("/usr/bin/true");
+        configure_computer_use_command(&mut disabled, None);
+        let disabled_arguments = disabled
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(disabled_arguments.is_empty());
+        assert!(
+            disabled
+                .get_envs()
+                .all(|(name, _)| { !name.to_string_lossy().starts_with("WAKU_COMPUTER_USE_") })
+        );
+
+        let config = CodexComputerUseConfig {
+            server_path: PathBuf::from("/tmp/waku-computer-use-server"),
+            server: toml_string("/tmp/waku-computer-use-server"),
+            repl: toml_string("/tmp/waku"),
+            skill_root: PathBuf::from("/tmp/waku-computer-use-skill"),
+            process_directory: PathBuf::from("/tmp/waku-computer-use-processes"),
+            process_directory_config: toml_string("/tmp/waku-computer-use-processes"),
+        };
+        let mut enabled = Command::new("/usr/bin/true");
+        configure_computer_use_command(&mut enabled, Some(&config));
+        let enabled_arguments = enabled
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        // The raw helper must never be registered as a Codex MCP server: the
+        // Waku REPL owns it and exposes only `sky` inside JavaScript.
+        assert!(
+            !enabled_arguments
+                .iter()
+                .any(|argument| argument.contains("mcp_servers.waku_computer_use"))
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument.contains("mcp_servers.waku_js_repl.command"))
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| { argument == "mcp_servers.waku_js_repl.args=[]" })
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN)
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == DISABLE_EXTERNAL_COMPUTER_USE_MCP)
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == DISABLE_EXTERNAL_COMPUTER_USE_SKILL)
+        );
+        assert!(
+            enabled_arguments
+                .iter()
+                .any(|argument| argument == DISABLE_CODEX_NODE_REPL)
+        );
+        assert!(
+            enabled
+                .get_envs()
+                .any(|(name, _)| { name.to_string_lossy() == "WAKU_COMPUTER_USE_SERVER" })
+        );
+    }
+
+    #[test]
+    fn computer_use_process_registry_accepts_only_pid_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "waku-computer-use-process-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(directory.join("456")).unwrap();
+        fs::write(directory.join("123"), []).unwrap();
+        fs::write(directory.join("not-a-pid"), []).unwrap();
+
+        let processes = computer_use_runtime::registered_processes(&directory);
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].0, 123);
+        assert_eq!(processes[0].1, directory.join("123"));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn computer_use_cleanup_verifies_the_registered_executable() {
+        let current = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(
+            computer_use_runtime::process_executable(std::process::id() as i32),
+            Some(current)
+        );
     }
 
     #[test]
@@ -1111,6 +1583,28 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_title_prefers_the_human_facing_argument() {
+        let titled = json!({
+            "type": "mcpToolCall",
+            "server": "waku_js_repl",
+            "tool": "js",
+            "arguments": {
+                "title": "Inspect Helium browser",
+                "code": "sky.get_app_state({ app: 'Helium' })"
+            }
+        });
+        let untitled = json!({
+            "type": "mcpToolCall",
+            "server": "waku_js_repl",
+            "tool": "js",
+            "arguments": { "code": "sky.list_apps()" }
+        });
+
+        assert_eq!(codex_item_title(&titled), "Inspect Helium browser");
+        assert_eq!(codex_item_title(&untitled), "Js");
+    }
+
+    #[test]
     fn citation_markers_become_stable_markdown_links_across_deltas() {
         let mut state = CodexStreamState::default();
         state.begin_turn();
@@ -1139,6 +1633,28 @@ mod tests {
         assert_eq!(
             state.rewrite_citation_delta("Claim.\u{e200}cite\u{e202}turn9search0\u{e201} After."),
             "Claim. After."
+        );
+    }
+
+    #[test]
+    fn mcp_image_content_is_removed_from_text_and_kept_as_an_image() {
+        let item = json!({
+            "type": "mcpToolCall",
+            "result": {
+                "content": [
+                    {"type": "text", "text": "Screenshot captured."},
+                    {"type": "image", "mimeType": "image/png", "data": "aGVsbG8="}
+                ]
+            }
+        });
+
+        assert_eq!(
+            codex_item_output(&item).as_deref(),
+            Some("Screenshot captured.")
+        );
+        assert_eq!(
+            codex_item_image_urls(&item),
+            vec!["data:image/png;base64,aGVsbG8=".to_owned()]
         );
     }
 }

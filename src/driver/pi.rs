@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::thread;
@@ -11,6 +11,7 @@ use crossbeam_channel::{Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
+use super::{activity, computer_use as computer_use_runtime};
 use crate::driver::{DriverControl, DriverStartOptions};
 use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
 
@@ -35,6 +36,26 @@ type PendingResponses = Arc<Mutex<HashMap<String, Sender<Result<Value, String>>>
 
 pub struct PiDriver {
     commands: Sender<CommandMessage>,
+    computer_use: Option<computer_use_runtime::ComputerUseRuntime>,
+}
+
+fn configure_pi_computer_use_command(
+    command: &mut std::process::Command,
+    config: Option<(&computer_use_runtime::ComputerUseConfig, &Path)>,
+) {
+    if let Some((config, extension)) = config {
+        command
+            .arg("--extension")
+            .arg(extension)
+            .arg("--skill")
+            .arg(&config.skill_path)
+            .env("WAKU_JS_REPL_SERVER", &config.repl_path)
+            .env("WAKU_COMPUTER_USE_SERVER", &config.server_path)
+            .env(
+                "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
+                &config.process_directory,
+            );
+    }
 }
 
 impl PiDriver {
@@ -47,6 +68,7 @@ impl PiDriver {
             model,
             reasoning_effort,
             service_tier: _,
+            computer_use_enabled,
             provider_cursor,
         } = options;
         if mode != RuntimeMode::FullAccess || interaction_mode != InteractionMode::Build {
@@ -74,9 +96,25 @@ impl PiDriver {
             parse_model_slug(model)?;
         }
 
-        let mut child = crate::command_env::command(binary)
+        let computer_use = computer_use_enabled
+            .then(|| computer_use_runtime::ComputerUseRuntime::start(events.clone()))
+            .transpose()?;
+        let pi_extension = computer_use
+            .as_ref()
+            .map(|_| crate::computer_use::pi_extension_path())
+            .transpose()?;
+        let mut command = crate::command_env::command(binary);
+        command
             .args(["--mode", "rpc", "--approve"])
-            .env("PI_SKIP_VERSION_CHECK", "1")
+            .env("PI_SKIP_VERSION_CHECK", "1");
+        configure_pi_computer_use_command(
+            &mut command,
+            computer_use
+                .as_ref()
+                .zip(pi_extension.as_deref())
+                .map(|(runtime, extension)| (&runtime.config, extension)),
+        );
+        let mut child = command
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -310,7 +348,10 @@ impl PiDriver {
                 }
             })?;
 
-        Ok(Self { commands })
+        Ok(Self {
+            commands,
+            computer_use,
+        })
     }
 }
 
@@ -321,6 +362,12 @@ impl DriverControl for PiDriver {
 
     fn cancel(&self) {
         let _ = self.commands.send(CommandMessage::Cancel);
+    }
+
+    fn cancel_computer_use(&self) {
+        if let Some(computer_use) = self.computer_use.as_ref() {
+            computer_use.stop();
+        }
     }
 
     fn respond(&self, _request_id: String, _option_id: String) {}
@@ -360,6 +407,7 @@ impl DriverControl for PiDriver {
 
 impl Drop for PiDriver {
     fn drop(&mut self) {
+        self.cancel_computer_use();
         let _ = self.commands.send(CommandMessage::Shutdown);
     }
 }
@@ -617,32 +665,42 @@ fn handle_pi_message(
                 .get("toolName")
                 .and_then(Value::as_str)
                 .unwrap_or("Tool");
-            let (kind, title) = id
+            let (kind, mut title) = id
                 .as_ref()
                 .and_then(|id| state.tools.get(id))
                 .cloned()
                 .unwrap_or_else(|| (classify_tool(tool_name), tool_title(tool_name)));
             if event_type == "tool_execution_start"
+                && let Some(input_title) = activity::input_title(value.get("args"))
+            {
+                title = input_title;
+            }
+            if event_type == "tool_execution_start"
                 && let Some(id) = id.as_ref()
             {
                 state.tools.insert(id.clone(), (kind, title.clone()));
             }
-            let detail = match event_type {
-                "tool_execution_start" => value.get("args"),
+            let arguments = (event_type == "tool_execution_start")
+                .then(|| value.get("args"))
+                .flatten();
+            let output = match event_type {
                 "tool_execution_update" => value.get("partialResult"),
                 "tool_execution_end" => value.get("result"),
                 _ => None,
-            }
-            .filter(|value| !value.is_null())
-            .map(compact_json);
+            };
             let complete = event_type == "tool_execution_end";
-            let _ = events.send(DriverEvent::Activity {
-                id: id.clone(),
+            let failed = value.get("isError").and_then(Value::as_bool) == Some(true);
+            let item = activity::tool_activity(
+                id.clone(),
                 kind,
                 title,
-                detail,
+                arguments,
+                output,
+                output,
+                failed,
                 complete,
-            });
+            );
+            let _ = events.send(DriverEvent::RichActivity(item));
             if complete && let Some(id) = id {
                 state.tools.remove(&id);
             }
@@ -733,15 +791,6 @@ fn pi_error_message(value: &Value) -> String {
         .to_owned()
 }
 
-fn compact_json(value: &Value) -> String {
-    let value = serde_json::to_string(value).unwrap_or_default();
-    if value.chars().count() > 180 {
-        format!("{}…", value.chars().take(179).collect::<String>())
-    } else {
-        value
-    }
-}
-
 fn classify_tool(name: &str) -> ActivityKind {
     match name.to_ascii_lowercase().as_str() {
         "bash" => ActivityKind::Command,
@@ -785,6 +834,58 @@ mod tests {
     }
 
     #[test]
+    fn pi_computer_use_uses_only_session_scoped_extension_and_skill_arguments() {
+        let config = computer_use_runtime::ComputerUseConfig {
+            server_path: PathBuf::from("/tmp/Waku Computer Use"),
+            repl_path: PathBuf::from("/Applications/Waku.app/Resources/waku_js_repl"),
+            skill_path: PathBuf::from("/Applications/Waku.app/Resources/skills/SKILL.md"),
+            process_directory: PathBuf::from("/tmp/waku-computer-use/session"),
+        };
+        let mut command = std::process::Command::new("pi");
+
+        configure_pi_computer_use_command(
+            &mut command,
+            Some((
+                &config,
+                Path::new("/Applications/Waku.app/Resources/computer-use/pi-extension.ts"),
+            )),
+        );
+
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            [
+                "--extension",
+                "/Applications/Waku.app/Resources/computer-use/pi-extension.ts",
+                "--skill",
+                "/Applications/Waku.app/Resources/skills/SKILL.md",
+            ]
+        );
+        let environment = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            environment.get("WAKU_JS_REPL_SERVER"),
+            Some(&Some(
+                "/Applications/Waku.app/Resources/waku_js_repl".into()
+            ))
+        );
+        assert_eq!(
+            environment.get("WAKU_COMPUTER_USE_PROCESS_DIRECTORY"),
+            Some(&Some("/tmp/waku-computer-use/session".into()))
+        );
+    }
+
+    #[test]
     fn pi_fork_selects_the_first_removed_user_turn_or_clones_the_tip() {
         let messages = [
             json!({"entryId": "turn-1"}),
@@ -821,7 +922,7 @@ mod tests {
                 "type": "tool_execution_start",
                 "toolCallId": "tool-1",
                 "toolName": "read",
-                "args": {"path": "src/main.rs"}
+                "args": {"path": "src/main.rs", "title": "Inspect Pi source"}
             }),
             json!({
                 "type": "tool_execution_end",
@@ -845,14 +946,27 @@ mod tests {
             event_rx.recv().unwrap(),
             DriverEvent::ReasoningDelta(value) if value == "checking"
         ));
-        assert!(matches!(
-            event_rx.recv().unwrap(),
-            DriverEvent::Activity { complete: false, title, .. } if title == "Read file"
-        ));
-        assert!(matches!(
-            event_rx.recv().unwrap(),
-            DriverEvent::Activity { complete: true, .. }
-        ));
+        let DriverEvent::RichActivity(started) = event_rx.recv().unwrap() else {
+            panic!("expected a rich Pi tool activity");
+        };
+        assert_eq!(started.title, "Inspect Pi source");
+        assert!(
+            started
+                .arguments
+                .as_deref()
+                .is_some_and(|arguments| arguments.contains("src/main.rs"))
+        );
+        assert!(!started.complete);
+        let DriverEvent::RichActivity(completed) = event_rx.recv().unwrap() else {
+            panic!("expected a completed rich Pi tool activity");
+        };
+        assert!(
+            completed
+                .output
+                .as_deref()
+                .is_some_and(|output| output.contains("..."))
+        );
+        assert!(completed.complete);
         assert!(matches!(
             event_rx.recv().unwrap(),
             DriverEvent::TextDelta(value) if value == "done"
@@ -935,10 +1049,16 @@ mod tests {
         }
 
         assert!(matches!(event_rx.recv().unwrap(), DriverEvent::TurnStarted));
-        assert!(matches!(
-            event_rx.recv().unwrap(),
-            DriverEvent::Activity { complete: true, .. }
-        ));
+        let DriverEvent::RichActivity(completed) = event_rx.recv().unwrap() else {
+            panic!("expected a completed rich Pi tool activity");
+        };
+        assert!(completed.failed);
+        assert!(
+            completed
+                .output
+                .as_deref()
+                .is_some_and(|output| output.contains("missing"))
+        );
         assert!(matches!(
             event_rx.recv().unwrap(),
             DriverEvent::TurnFinished { success: true, .. }

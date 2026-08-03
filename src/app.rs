@@ -12,13 +12,17 @@ use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
     ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString, Size, Stateful,
-    StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, linear_color_stop,
-    linear_gradient, list, point, prelude::*, pulsating_between, px, rems, rgb, size,
+    ObjectFit, PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString, Size,
+    Stateful, StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, img,
+    linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px, rems, rgb,
+    size,
 };
 use uuid::Uuid;
 
 use crate::checkpoint;
+use crate::computer_use::{
+    ComputerPermissions, ComputerUsePhase, ComputerUseState, PendingComputerApproval,
+};
 use crate::driver::{self, DriverHandle, DriverStartOptions};
 use crate::input::{ComposerEvent, ComposerInput, preserve_composer_focus_for_context_menu};
 use crate::model::{
@@ -105,6 +109,7 @@ enum ModelPickerTab {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettingsPage {
     General,
+    ComputerUse,
     Appearance,
 }
 
@@ -553,6 +558,11 @@ struct SessionRuntime {
     stream_phase: Option<StreamPhase>,
     stream_remeasure_pending: bool,
     pending_permission: Option<PendingPermission>,
+    pending_computer_approval: Option<PendingComputerApproval>,
+    /// Back-to-front stack of window previews captured during the active turn.
+    computer_use_previews: Vec<ComputerUseState>,
+    computer_session_grants: HashSet<String>,
+    last_driver_error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -598,6 +608,12 @@ pub struct Waku {
     provider_probe_events: Receiver<ProviderProbe>,
     provider_model_discoveries: HashSet<ProviderKind>,
     provider_model_discoveries_pending: HashSet<ProviderKind>,
+    computer_permissions: ComputerPermissions,
+    computer_permission_tx: Sender<Result<ComputerPermissions, String>>,
+    computer_permission_events: Receiver<Result<ComputerPermissions, String>>,
+    computer_permission_request_pending: bool,
+    computer_use_app_icons: RefCell<HashMap<String, Option<std::sync::Arc<gpui::Image>>>>,
+    computer_use_app_icon_loads: RefCell<HashSet<String>>,
     model_picker_tab: ModelPickerTab,
     runtimes: HashMap<Uuid, SessionRuntime>,
     stream_state_dirty: bool,
@@ -633,6 +649,8 @@ pub struct Waku {
     toast: Option<String>,
     copied_message_feedback: HashMap<Uuid, u64>,
     copied_message_generation: u64,
+    copied_activity_feedback: HashMap<(Uuid, ActivityDisclosureSectionKind), u64>,
+    copied_activity_generation: u64,
     message_edit: Option<MessageEdit>,
     transcript_rows: ListState,
     /// Active turns use top alignment so row remeasurement cannot invoke the
@@ -656,6 +674,8 @@ pub struct Waku {
     transcript_resize_tx: crossbeam_channel::Sender<TranscriptMarkdownResize>,
     transcript_resize_rx: Receiver<TranscriptMarkdownResize>,
     message_text_states: HashMap<Uuid, Entity<TextViewState>>,
+    activity_text_states:
+        RefCell<HashMap<(Uuid, ActivityDisclosureSectionKind), Entity<TextViewState>>>,
     navigation_rail: Entity<ConversationNavigationRail>,
     navigation_rail_active_scale_enabled: Rc<Cell<bool>>,
     navigation_rail_reset_generation: Cell<u64>,
@@ -774,6 +794,18 @@ impl Waku {
             .map(ProviderProbe::pending)
             .collect::<Vec<_>>();
         let (provider_probe_tx, provider_probe_events) = unbounded();
+        let (computer_permission_tx, computer_permission_events) = unbounded();
+        {
+            let computer_permission_tx = computer_permission_tx.clone();
+            std::thread::Builder::new()
+                .name("waku-computer-permission-probe".into())
+                .spawn(move || {
+                    let result = crate::computer_use::probe_permissions(false)
+                        .map_err(|error| error.to_string());
+                    let _ = computer_permission_tx.send(result);
+                })
+                .ok();
+        }
         let model_picker_tab = ModelPickerTab::Provider(
             state
                 .selected_session
@@ -836,6 +868,9 @@ impl Waku {
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
                 if window.is_window_active() {
                     this.reload_clean_right_panel_file_editors(window, cx);
+                    if this.settings_page == Some(SettingsPage::ComputerUse) {
+                        this.request_computer_permissions(false, cx);
+                    }
                 }
             })
             .detach();
@@ -870,7 +905,10 @@ impl Waku {
                     cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
                     if this
                         .update(cx, |this, cx| {
-                            if this.drain_driver_events() || this.drain_provider_probe_events() {
+                            if this.drain_driver_events()
+                                || this.drain_provider_probe_events()
+                                || this.drain_computer_permission_events()
+                            {
                                 cx.notify();
                             }
                         })
@@ -893,6 +931,12 @@ impl Waku {
                 provider_probe_events,
                 provider_model_discoveries: HashSet::new(),
                 provider_model_discoveries_pending: HashSet::new(),
+                computer_permissions: ComputerPermissions::default(),
+                computer_permission_tx,
+                computer_permission_events,
+                computer_permission_request_pending: false,
+                computer_use_app_icons: RefCell::new(HashMap::new()),
+                computer_use_app_icon_loads: RefCell::new(HashSet::new()),
                 model_picker_tab,
                 runtimes: HashMap::new(),
                 stream_state_dirty: false,
@@ -925,6 +969,8 @@ impl Waku {
                 toast: None,
                 copied_message_feedback: HashMap::new(),
                 copied_message_generation: 0,
+                copied_activity_feedback: HashMap::new(),
+                copied_activity_generation: 0,
                 message_edit: None,
                 transcript_rows,
                 anchored_transcript_rows,
@@ -943,6 +989,7 @@ impl Waku {
                 transcript_resize_tx,
                 transcript_resize_rx,
                 message_text_states: HashMap::new(),
+                activity_text_states: RefCell::new(HashMap::new()),
                 navigation_rail: navigation_rail.clone(),
                 navigation_rail_active_scale_enabled,
                 navigation_rail_reset_generation: Cell::new(0),

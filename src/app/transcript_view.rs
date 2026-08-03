@@ -1,4 +1,5 @@
 use super::*;
+use base64::Engine as _;
 
 #[derive(Clone, Debug, PartialEq)]
 struct ConversationNavigationRailSnapshot {
@@ -776,9 +777,13 @@ impl Waku {
                     TranscriptBlockContent::Reasoning(reasoning) => {
                         self.render_reasoning_row(reasoning, block_index, &theme, cx)
                     }
-                    TranscriptBlockContent::Activities(activities) => {
-                        self.render_activities_row(activities, block_index, &theme, cx)
-                    }
+                    TranscriptBlockContent::Activities(activities) => self.render_activities_row(
+                        activities,
+                        block_index,
+                        &theme,
+                        transcript_viewport,
+                        cx,
+                    ),
                 })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
@@ -950,66 +955,102 @@ impl Waku {
 
     /// The turn's tool activity as a disclosure: the summary line toggles the
     /// row list, and each row with detail expands to its full content.
+    fn show_activity_section_copied(
+        &mut self,
+        activity_id: Uuid,
+        section_kind: ActivityDisclosureSectionKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.copied_activity_generation = self.copied_activity_generation.wrapping_add(1);
+        let generation = self.copied_activity_generation;
+        let key = (activity_id, section_kind);
+        self.copied_activity_feedback.insert(key, generation);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied_activity_feedback.get(&key) == Some(&generation) {
+                    this.copied_activity_feedback.remove(&key);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn render_activities_row(
         &self,
         activities: &[ActivityItem],
         block_index: usize,
         theme: &Theme,
+        transcript_viewport: TextViewScrollViewport,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let running = activities.iter().any(|activity| !activity.complete);
+        let live_turn = self
+            .selected_session()
+            .and_then(AgentSession::active_turn_id)
+            .is_some_and(|turn_id| {
+                self.selected_transcript_blocks()
+                    .get(block_index)
+                    .is_some_and(|block| block.turn_id == Some(turn_id))
+            });
         let expanded = self
             .activities_expanded
             .get(&block_index)
             .copied()
-            .unwrap_or(running);
-        let cluster = div().flex().flex_col().gap(px(2.0)).child(
-            div()
-                .id(SharedString::from(format!("activity-toggle-{block_index}")))
-                .h(px(22.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(11.0))
-                .line_height(px(14.0))
-                .cursor_default()
-                .child(icon(
-                    if expanded {
-                        "icons/chevron-down.svg"
-                    } else {
-                        "icons/chevron-right.svg"
-                    },
-                    9.0,
-                    theme.text_ghost,
-                ))
-                .when(running, |element| {
-                    element.child(pulse_dot(
-                        format!("activity-running-{block_index}"),
-                        5.0,
-                        theme.accent,
+            .unwrap_or(live_turn);
+        let cluster = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .id(SharedString::from(format!("activity-toggle-{block_index}")))
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(11.0))
+                    .line_height(px(14.0))
+                    .cursor_default()
+                    .child(icon(
+                        if expanded {
+                            "icons/chevron-down.svg"
+                        } else {
+                            "icons/chevron-right.svg"
+                        },
+                        9.0,
+                        theme.text_ghost,
                     ))
-                })
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_tertiary)
-                        .child(SharedString::from(activity_summary(activities))),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_activities(block_index, expanded, cx);
-                })),
-        );
+                    .when(running, |element| {
+                        element.child(pulse_dot(
+                            format!("activity-running-{block_index}"),
+                            5.0,
+                            theme.accent,
+                        ))
+                    })
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(activity_summary(activities))),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_activities(block_index, expanded, cx);
+                    })),
+            );
         if !expanded {
             return cluster.into_any_element();
         }
-        let mut items = div().flex().flex_col().pl(px(15.0));
+        let mut items = div().w_full().min_w_0().flex().flex_col().pl(px(15.0));
         for activity in activities {
             let id = activity.id;
-            let detail = activity
-                .detail
-                .clone()
-                .filter(|detail| !detail.trim().is_empty());
-            let has_detail = detail.is_some();
+            let sections = activity_disclosure_sections(activity);
+            let preview = activity_preview(activity);
+            let has_detail = !sections.is_empty();
             let item_expanded = has_detail && self.expanded_activity_items.contains(&id);
             let mut item = div().flex().flex_col().child(
                 div()
@@ -1054,7 +1095,7 @@ impl Waku {
                             .max_w(px(300.0))
                             .truncate()
                             .text_color(theme.text_secondary)
-                            .child(SharedString::from(activity.title.clone())),
+                            .child(SharedString::from(activity_display_title(activity))),
                     )
                     .child(
                         div()
@@ -1064,9 +1105,11 @@ impl Waku {
                             .text_size(px(11.0))
                             .text_color(theme.text_ghost)
                             .when(item_expanded, |element| element.invisible())
-                            .child(SharedString::from(detail.clone().unwrap_or_default())),
+                            .child(SharedString::from(preview)),
                     )
-                    .child(if activity.complete {
+                    .child(if activity.failed {
+                        icon("icons/x.svg", 10.0, theme.danger).into_any_element()
+                    } else if activity.complete {
                         icon("icons/check.svg", 10.0, theme.text_ghost).into_any_element()
                     } else {
                         pulse_dot(format!("activity-pulse-{id}"), 5.0, theme.accent)
@@ -1077,27 +1120,163 @@ impl Waku {
                         }
                     })),
             );
-            if let Some(detail) = detail.filter(|_| item_expanded) {
-                item = item.child(
-                    div()
-                        .ml(px(21.0))
-                        .mt(px(2.0))
-                        .mb(px(4.0))
-                        .p(px(8.0))
-                        .rounded(px(7.0))
-                        .bg(theme.inset)
-                        .border_1()
-                        .border_color(theme.border)
-                        .font_family("SF Mono")
-                        .text_size(px(10.5))
-                        .line_height(px(16.0))
-                        .text_color(theme.text_secondary)
-                        .whitespace_normal()
-                        .child(SharedString::from(detail)),
-                );
+            if item_expanded {
+                let transcript_rows = self.active_transcript_rows().clone();
+                let mut detail_card = div()
+                    .ml(px(21.0))
+                    .mr(px(4.0))
+                    .min_w_0()
+                    .mt(px(2.0))
+                    .mb(px(4.0))
+                    .p(px(8.0))
+                    .rounded(px(7.0))
+                    .bg(theme.inset)
+                    .border_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .font_family("SF Mono")
+                    .text_size(px(10.5))
+                    .line_height(px(16.0))
+                    .text_color(theme.text_secondary)
+                    .whitespace_normal()
+                    .overflow_hidden();
+                for section in sections {
+                    let section_kind = section.kind;
+                    let content = section.content;
+                    let text_state = {
+                        let mut states = self.activity_text_states.borrow_mut();
+                        states
+                            .entry((id, section_kind))
+                            .or_insert_with(|| cx.new(TextViewState::new))
+                            .clone()
+                    };
+                    let mut section_view = div().w_full().min_w_0().flex().flex_col().gap(px(3.0));
+                    if let Some(label) = section_kind.label() {
+                        let copy_content = content.clone();
+                        let copied = self
+                            .copied_activity_feedback
+                            .contains_key(&(id, section_kind));
+                        let copy_waku = cx.entity().downgrade();
+                        let copy_tooltip = SharedString::from(if copied {
+                            "Copied".to_owned()
+                        } else {
+                            format!("Copy {}", label.to_ascii_lowercase())
+                        });
+                        section_view = section_view.child(
+                            div()
+                                .h(px(20.0))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.text_secondary)
+                                        .child(label),
+                                )
+                                .when(!content.is_empty(), |header| {
+                                    header.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "copy-activity-{}-{}",
+                                                id,
+                                                section_kind.id()
+                                            )))
+                                            .size(px(20.0))
+                                            .rounded(px(5.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_default()
+                                            .hover(|button| button.bg(theme.overlay_strong))
+                                            .child(icon(
+                                                if copied {
+                                                    "icons/check.svg"
+                                                } else {
+                                                    "icons/copy.svg"
+                                                },
+                                                11.0,
+                                                theme.text_ghost,
+                                            ))
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(copy_tooltip.clone()).build(window, cx)
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    copy_content.clone(),
+                                                ));
+                                                let _ = copy_waku.update(cx, |this, cx| {
+                                                    this.show_activity_section_copied(
+                                                        id,
+                                                        section_kind,
+                                                        cx,
+                                                    );
+                                                });
+                                            }),
+                                    )
+                                }),
+                        );
+                    }
+                    if !content.is_empty() {
+                        section_view = section_view.child(
+                            selectable_plain_text(
+                                SharedString::from(format!(
+                                    "activity-detail-{}-{}",
+                                    id,
+                                    section_kind.id()
+                                )),
+                                &content,
+                                text_state,
+                                cx,
+                            )
+                            .selection_scroll_handle(&transcript_rows)
+                            .block_viewport(transcript_viewport)
+                            .font_family("SF Mono")
+                            .text_size(px(10.5))
+                            .line_height(px(16.0))
+                            .text_color(theme.text_secondary),
+                        );
+                    }
+                    detail_card = detail_card.child(section_view);
+                }
+                for (image_index, image_url) in activity.image_urls.iter().enumerate() {
+                    detail_card =
+                        detail_card.child(render_activity_image(image_url, id, image_index));
+                }
+                item = item.child(detail_card);
             }
             items = items.child(item);
         }
         cluster.child(items).into_any_element()
     }
+}
+
+fn render_activity_image(image_url: &str, activity_id: Uuid, image_index: usize) -> AnyElement {
+    let element = match decode_activity_image(image_url) {
+        Some(image) => img(image),
+        None => img(image_url.to_owned()),
+    };
+    element
+        .id(SharedString::from(format!(
+            "activity-image-{activity_id}-{image_index}"
+        )))
+        .w(px(ACTIVITY_IMAGE_WIDTH))
+        .max_w(gpui::relative(1.0))
+        .max_h(px(ACTIVITY_IMAGE_HEIGHT))
+        .mt(px(8.0))
+        .rounded(px(4.0))
+        .object_fit(ObjectFit::Contain)
+        .into_any_element()
+}
+
+fn decode_activity_image(image_url: &str) -> Option<std::sync::Arc<gpui::Image>> {
+    let (header, encoded) = image_url.split_once(",")?;
+    let mime_type = header.strip_prefix("data:")?.split(';').next()?;
+    let format = gpui::ImageFormat::from_mime_type(mime_type)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    (!bytes.is_empty()).then(|| std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
 }
