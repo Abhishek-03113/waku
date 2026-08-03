@@ -148,22 +148,25 @@ impl Waku {
     pub(super) fn new_session_action(
         &mut self,
         _: &NewSession,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.settings_page = None;
         if let Some(project_id) = self.state.selected_project {
             self.create_session_for(project_id, self.state.last_provider, cx);
         }
+        let focus_handle = self.composer_focus(cx);
+        window.focus(&focus_handle, cx);
     }
 
     pub(super) fn open_settings_action(
         &mut self,
         _: &OpenSettings,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.settings_page = Some(SettingsPage::Appearance);
+        window.focus(&self.settings_focus, cx);
         cx.notify();
     }
 
@@ -390,8 +393,10 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.settings_page = None;
         let focus_handle = self.composer_focus(cx);
         window.focus(&focus_handle, cx);
+        cx.notify();
     }
 
     pub(super) fn cancel_turn_action(
@@ -401,6 +406,8 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         if self.settings_page.take().is_some() {
+            let focus_handle = self.composer_focus(cx);
+            window.focus(&focus_handle, cx);
             cx.notify();
             return;
         }

@@ -8,6 +8,7 @@ impl Waku {
 
         div()
             .key_context("Waku")
+            .track_focus(&self.settings_focus)
             .on_action(|_: &CloseWindow, window, _| crate::platform::hide_window(window))
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::open_settings_action))

@@ -73,6 +73,21 @@ fn main() {
             crate::input::init(cx);
             crate::theme::init_component_theme(cx);
             cx.set_reduce_motion(crate::platform::reduce_motion_enabled());
+
+            cx.bind_keys([
+                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-w", CloseWindow, None),
+                KeyBinding::new("cmd-n", NewSession, None),
+                KeyBinding::new("cmd-,", OpenSettings, None),
+                KeyBinding::new("cmd-b", ToggleSidebar, None),
+                KeyBinding::new("cmd-shift-b", ToggleRightPanel, None),
+                KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
+                KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
+                KeyBinding::new("cmd-l", FocusComposer, None),
+                KeyBinding::new("cmd-s", SaveFile, None),
+                KeyBinding::new("escape", CancelTurn, Some("Waku")),
+            ]);
+
             cx.set_menus(vec![
                 Menu {
                     name: APP_NAME.into(),
@@ -94,20 +109,11 @@ fn main() {
                         MenuItem::action("Focus Composer", FocusComposer),
                     ],
                 },
-            ]);
-
-            cx.bind_keys([
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-w", CloseWindow, None),
-                KeyBinding::new("cmd-n", NewSession, None),
-                KeyBinding::new("cmd-,", OpenSettings, None),
-                KeyBinding::new("cmd-b", ToggleSidebar, None),
-                KeyBinding::new("cmd-shift-b", ToggleRightPanel, None),
-                KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
-                KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
-                KeyBinding::new("cmd-l", FocusComposer, None),
-                KeyBinding::new("cmd-s", SaveFile, None),
-                KeyBinding::new("escape", CancelTurn, Some("Waku")),
+                Menu {
+                    name: "Window".into(),
+                    disabled: false,
+                    items: vec![MenuItem::action("Close Window", CloseWindow)],
+                },
             ]);
 
             cx.on_action(|_: &Quit, cx| cx.quit());

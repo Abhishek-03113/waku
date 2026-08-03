@@ -603,6 +603,7 @@ pub struct Waku {
     composer: Entity<ComposerInput>,
     model_search: Entity<InputState>,
     settings_search: Entity<InputState>,
+    settings_focus: FocusHandle,
     probes: Vec<ProviderProbe>,
     provider_probe_tx: Sender<ProviderProbe>,
     provider_probe_events: Receiver<ProviderProbe>,
@@ -857,6 +858,8 @@ impl Waku {
         let (transcript_resize_tx, transcript_resize_rx) = unbounded();
 
         let entity = cx.new(|cx| {
+            let settings_focus = cx.focus_handle();
+
             cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
                 if this.state.theme == ThemePreference::System {
                     crate::theme::apply_theme_preference(this.state.theme, window, cx);
@@ -926,6 +929,7 @@ impl Waku {
                 composer,
                 model_search,
                 settings_search,
+                settings_focus,
                 probes,
                 provider_probe_tx,
                 provider_probe_events,
