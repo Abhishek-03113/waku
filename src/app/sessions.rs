@@ -188,6 +188,16 @@ impl Waku {
         self.set_right_panel_visible(!self.right_panel_visible, cx);
     }
 
+    pub(super) fn toggle_fps_counter_action(
+        &mut self,
+        _: &ToggleFpsCounter,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fps_counter_visible = !self.fps_counter_visible;
+        cx.notify();
+    }
+
     pub(super) fn set_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.sidebar_visible == visible {
             return;

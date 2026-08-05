@@ -37,6 +37,7 @@ actions!(
         OpenSettings,
         ToggleSidebar,
         ToggleRightPanel,
+        ToggleFpsCounter,
         NavigateBack,
         NavigateForward,
         FocusComposer,
@@ -81,6 +82,7 @@ fn main() {
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-shift-b", ToggleRightPanel, None),
+                KeyBinding::new("cmd-alt-f", ToggleFpsCounter, None),
                 KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
                 KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
                 KeyBinding::new("cmd-l", FocusComposer, None),
@@ -112,7 +114,10 @@ fn main() {
                 Menu {
                     name: "Window".into(),
                     disabled: false,
-                    items: vec![MenuItem::action("Close Window", CloseWindow)],
+                    items: vec![
+                        MenuItem::action("Toggle FPS Counter", ToggleFpsCounter),
+                        MenuItem::action("Close Window", CloseWindow),
+                    ],
                 },
             ]);
 

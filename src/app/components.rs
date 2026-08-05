@@ -687,23 +687,6 @@ pub(super) fn activity_disclosure_sections(
     sections
 }
 
-pub(super) fn activity_disclosure_text(activity: &ActivityItem) -> Option<String> {
-    let sections = activity_disclosure_sections(activity);
-    (!sections.is_empty()).then(|| {
-        sections
-            .into_iter()
-            .map(
-                |section| match (section.kind.label(), section.content.is_empty()) {
-                    (Some(label), false) => format!("{label}\n{}", section.content),
-                    (Some(label), true) => label.to_owned(),
-                    (None, _) => section.content,
-                },
-            )
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    })
-}
-
 pub(super) fn activity_preview(activity: &ActivityItem) -> String {
     let detail = activity.detail.as_deref().unwrap_or_default().trim();
     if detail.eq_ignore_ascii_case("failed")
@@ -734,6 +717,25 @@ pub(super) fn git_branch(path: &std::path::Path) -> Option<String> {
 mod message_time_tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// Test-only rendering of disclosure sections into plain text; production
+    /// renders them interactively via [`activity_disclosure_sections`].
+    fn activity_disclosure_text(activity: &ActivityItem) -> Option<String> {
+        let sections = activity_disclosure_sections(activity);
+        (!sections.is_empty()).then(|| {
+            sections
+                .into_iter()
+                .map(
+                    |section| match (section.kind.label(), section.content.is_empty()) {
+                        (Some(label), false) => format!("{label}\n{}", section.content),
+                        (Some(label), true) => label.to_owned(),
+                        (None, _) => section.content,
+                    },
+                )
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+    }
 
     fn local_datetime(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Local> {
         Local

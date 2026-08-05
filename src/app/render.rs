@@ -45,8 +45,26 @@ impl Waku {
     }
 }
 
+impl Waku {
+    /// Measure live frame rate by counting renders over a sliding one-second
+    /// window and keep requesting animation frames so the counter stays current.
+    fn tick_fps(&mut self, window: &Window) {
+        let now = Instant::now();
+        self.fps_frame_count = self.fps_frame_count.saturating_add(1);
+        if now.duration_since(self.fps_last_frame) >= Duration::from_secs(1) {
+            self.fps_value = self.fps_frame_count as u32;
+            self.fps_frame_count = 0;
+            self.fps_last_frame = now;
+        }
+        window.request_animation_frame();
+    }
+}
+
 impl Render for Waku {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.fps_counter_visible {
+            self.tick_fps(window);
+        }
         if self.settings_page.is_some() {
             return self.render_settings(cx).into_any_element();
         }
@@ -78,6 +96,7 @@ impl Render for Waku {
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
+            .on_action(cx.listener(Self::toggle_fps_counter_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
             .on_action(cx.listener(Self::focus_composer_action))

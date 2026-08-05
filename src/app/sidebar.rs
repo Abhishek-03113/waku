@@ -129,6 +129,36 @@ impl Waku {
     }
     // ── Sidebar ────────────────────────────────────────────────────────────
 
+    fn render_fps_counter(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let fps = self.fps_value;
+        let dot = if fps == 0 {
+            theme.text_ghost
+        } else if fps >= 55 {
+            theme.success
+        } else if fps >= 30 {
+            theme.warning
+        } else {
+            theme.danger
+        };
+        div()
+            .flex_none()
+            .h(px(26.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(px(11.0))
+            .line_height(px(0.0))
+            .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(dot))
+            .child(
+                div()
+                    .text_color(theme.text_tertiary)
+                    .font_family("SF Mono")
+                    .child(SharedString::from(format!("{fps} FPS"))),
+            )
+    }
+
     fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::current(cx);
         div()
@@ -550,7 +580,11 @@ impl Waku {
                 )
             })
             .when(!self.right_panel_visible, |element| {
-                element.child(self.render_right_panel_toggle(cx))
+                element
+                    .when(self.fps_counter_visible, |element| {
+                        element.child(self.render_fps_counter(cx))
+                    })
+                    .child(self.render_right_panel_toggle(cx))
             })
     }
 

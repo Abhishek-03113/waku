@@ -52,7 +52,7 @@ use crate::ui::{
 };
 use crate::{
     CancelTurn, CloseWindow, FocusComposer, NavigateBack, NavigateForward, NewSession,
-    OpenSettings, SaveFile, ToggleRightPanel, ToggleSidebar,
+    OpenSettings, SaveFile, ToggleFpsCounter, ToggleRightPanel, ToggleSidebar,
 };
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
@@ -463,6 +463,7 @@ pub struct Waku {
     sidebar_width: f32,
     right_panel_visible: bool,
     right_panel_width: f32,
+    fps_counter_visible: bool,
     panel_resize_drag: Option<PanelResizeDrag>,
     right_panel_session_states: HashMap<Uuid, RightPanelSessionState>,
     right_panel_surfaces: Vec<RightPanelSurface>,
@@ -501,6 +502,10 @@ pub struct Waku {
     navigation_rail: Entity<ConversationNavigationRail>,
     navigation_rail_active_scale_enabled: Rc<Cell<bool>>,
     navigation_rail_reset_generation: Cell<u64>,
+    /// Live frames-per-second measurement for the header counter.
+    fps_last_frame: Instant,
+    fps_frame_count: u64,
+    fps_value: u32,
 }
 
 mod components;
@@ -773,6 +778,7 @@ impl Waku {
                 sidebar_width,
                 right_panel_visible,
                 right_panel_width,
+                fps_counter_visible: false,
                 panel_resize_drag: None,
                 right_panel_session_states: HashMap::new(),
                 right_panel_surfaces: Vec::new(),
@@ -808,6 +814,9 @@ impl Waku {
                 navigation_rail: navigation_rail.clone(),
                 navigation_rail_active_scale_enabled,
                 navigation_rail_reset_generation: Cell::new(0),
+                fps_last_frame: Instant::now(),
+                fps_frame_count: 0,
+                fps_value: 0,
             }
         });
         navigation_rail.update(cx, |rail, _| rail.set_waku(entity.downgrade()));
