@@ -1,9 +1,12 @@
-//! Right-click context menus.
+//! Context menus and dropdown menus.
 //!
-//! A menu is built lazily: the item list is only constructed once a right-click
-//! actually opens it, and while closed the wrapper contributes one `Rc<Cell>`
-//! read and no children. The open menu renders through `deferred(anchored(..))`
-//! so it escapes the transcript row's clipping and paints above every sibling.
+//! Both share one card and one dismissal model; they differ only in where they
+//! anchor — a context menu at the pointer, a dropdown under its trigger.
+//!
+//! A menu is built lazily: the item list is only constructed once the menu
+//! actually opens, and while closed the wrapper contributes one `Rc<Cell>` read
+//! and no children. The open menu renders through `deferred(anchored(..))` so it
+//! escapes its row's clipping and paints above every sibling.
 //!
 //! Dismissal follows Zed's own context menus:
 //!
@@ -17,13 +20,14 @@
 //!   focusing any earlier silently does nothing — and then no key reaches the
 //!   menu at all.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ElementId, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, RenderOnce, SharedString, Styled,
-    Window, actions, anchored, deferred, div, prelude::FluentBuilder, px,
+    Anchor, AnyElement, App, Bounds, ElementId, FocusHandle, FontWeight, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
+    RenderOnce, SharedString, Styled, Window, actions, anchored, canvas, deferred, div,
+    prelude::FluentBuilder, px,
 };
 
 actions!(waku_menu, [DismissMenu]);
@@ -43,14 +47,29 @@ pub fn init(cx: &mut App) {
 use crate::theme::Theme;
 use crate::ui::icon;
 
-/// One row of a context menu.
+/// One row of a menu.
 pub enum MenuItem {
     Entry {
         label: SharedString,
         icon: Option<&'static str>,
+        /// Draws a trailing check, for menus that present a current choice.
+        selected: bool,
+        /// Shown greyed and inert. Preferred over omitting the row when the
+        /// action is temporarily unavailable, so the menu keeps a stable shape.
+        disabled: bool,
         #[allow(clippy::type_complexity)]
         on_click: Rc<dyn Fn(&mut Window, &mut App)>,
     },
+    /// A caller-drawn row, for choices that need more than a label — a badge, a
+    /// secondary line, an inline swatch. Clickable when `on_click` is set.
+    Custom {
+        #[allow(clippy::type_complexity)]
+        render: Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>,
+        #[allow(clippy::type_complexity)]
+        on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    },
+    /// A non-interactive caption grouping the rows beneath it.
+    Header(SharedString),
     Separator,
 }
 
@@ -62,8 +81,39 @@ impl MenuItem {
         Self::Entry {
             label: label.into(),
             icon: None,
+            selected: false,
+            disabled: false,
             on_click: Rc::new(on_click),
         }
+    }
+
+    /// A caller-drawn row. `render` runs on every frame the menu is open.
+    pub fn custom(render: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
+        Self::Custom {
+            render: Rc::new(render),
+            on_click: None,
+        }
+    }
+
+    pub fn on_click(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        if let Self::Custom { on_click, .. } = &mut self {
+            *on_click = Some(Rc::new(handler));
+        }
+        self
+    }
+
+    pub fn selected(mut self, value: bool) -> Self {
+        if let Self::Entry { selected, .. } = &mut self {
+            *selected = value;
+        }
+        self
+    }
+
+    pub fn disabled(mut self, value: bool) -> Self {
+        if let Self::Entry { disabled, .. } = &mut self {
+            *disabled = value;
+        }
+        self
     }
 
     pub fn icon(mut self, path: &'static str) -> Self {
@@ -74,7 +124,24 @@ impl MenuItem {
     }
 
     fn is_focusable(&self) -> bool {
-        matches!(self, Self::Entry { .. })
+        match self {
+            Self::Entry { disabled, .. } => !disabled,
+            Self::Custom { on_click, .. } => on_click.is_some(),
+            Self::Header(_) | Self::Separator => false,
+        }
+    }
+
+    fn click_handler(self) -> Option<Rc<dyn Fn(&mut Window, &mut App)>> {
+        match self {
+            Self::Entry {
+                disabled: false,
+                on_click,
+                ..
+            } => Some(on_click),
+            Self::Entry { disabled: true, .. } => None,
+            Self::Custom { on_click, .. } => on_click,
+            Self::Header(_) | Self::Separator => None,
+        }
     }
 }
 
@@ -91,10 +158,14 @@ struct MenuState {
 pub struct ContextMenuHandle {
     state: Rc<RefCell<MenuState>>,
     focus: FocusHandle,
-    /// Notified with the new open state whenever the menu toggles. The transcript
-    /// uses this to keep the composer's caret visible while a menu holds focus.
+    /// The trigger's bounds as of the last frame, so a dropdown can align under
+    /// it. Recorded by a zero-cost canvas inside the trigger.
+    trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Notified with the new open state whenever the menu toggles, in order.
+    /// The composer's caret preservation is one of these; a site can add its
+    /// own on top.
     #[allow(clippy::type_complexity)]
-    on_toggle: Option<Rc<dyn Fn(bool, &mut Window, &mut App)>>,
+    on_toggle: Rc<Vec<Rc<dyn Fn(bool, &mut Window, &mut App)>>>,
 }
 
 impl ContextMenuHandle {
@@ -102,14 +173,28 @@ impl ContextMenuHandle {
         Self {
             state: Rc::new(RefCell::new(MenuState::default())),
             focus: cx.focus_handle(),
-            on_toggle: None,
+            trigger_bounds: Rc::new(Cell::new(None)),
+            on_toggle: Rc::new(Vec::new()),
         }
     }
 
-    /// Observe open/close transitions. Called only on an actual change.
+    /// Observe open/close transitions. Called only on an actual change, in the
+    /// order the observers were added.
     pub fn on_toggle(mut self, handler: impl Fn(bool, &mut Window, &mut App) + 'static) -> Self {
-        self.on_toggle = Some(Rc::new(handler));
+        let mut handlers = (*self.on_toggle).clone();
+        handlers.push(Rc::new(handler));
+        self.on_toggle = Rc::new(handlers);
         self
+    }
+
+    fn notify_toggle(&self, open: bool, window: &mut Window, cx: &mut App) {
+        for handler in self.on_toggle.iter() {
+            handler(open, window, cx);
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.state.borrow().open.is_some()
     }
 
     pub fn close(&self, window: &mut Window, cx: &mut App) {
@@ -120,8 +205,8 @@ impl ContextMenuHandle {
             state.highlighted = None;
             was_open
         };
-        if was_open && let Some(handler) = &self.on_toggle {
-            handler(false, window, cx);
+        if was_open {
+            self.notify_toggle(false, window, cx);
         }
     }
 
@@ -133,9 +218,237 @@ impl ContextMenuHandle {
             state.highlighted = None;
             was_open
         };
-        if !was_open && let Some(handler) = &self.on_toggle {
-            handler(true, window, cx);
+        if !was_open {
+            self.notify_toggle(true, window, cx);
         }
+    }
+}
+
+/// Open at `position` and hand focus to the card.
+///
+/// The card is deferred, so its focus handle joins the dispatch tree only after
+/// the deferred draw. Focusing before then is a silent no-op that leaves the
+/// menu unable to see a keystroke — hence the two-frame wait, matching Zed.
+fn open_menu(
+    handle: &ContextMenuHandle,
+    position: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    handle.open_at(position, window, cx);
+    let focus = handle.focus.clone();
+    window.on_next_frame(move |window, _| {
+        window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+    });
+    window.refresh();
+}
+
+/// A zero-cost canvas that records its parent's bounds into the handle.
+///
+/// `inset_0` rather than `size_full`: an absolutely positioned child sizes
+/// against its containing block, so `size_full` inside a padded trigger reports
+/// the *content* box and the menu ends up indented by the trigger's padding.
+fn trigger_bounds_probe(handle: &ContextMenuHandle) -> impl IntoElement {
+    let bounds = handle.trigger_bounds.clone();
+    canvas(
+        move |probe: Bounds<Pixels>, _, _| bounds.set(Some(probe)),
+        |_, _, _, _| (),
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// Where a dropdown's card sits relative to its trigger.
+///
+/// Side matters as much as alignment here: the composer's controls live at the
+/// bottom of the window, so their menus have to grow upward or they open off
+/// screen and get snapped back over the trigger.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MenuAlign {
+    /// Below the trigger, left edges aligned.
+    #[default]
+    BelowLeft,
+    /// Below the trigger, right edges aligned.
+    BelowRight,
+    /// Above the trigger, left edges aligned.
+    AboveLeft,
+    /// Above the trigger, right edges aligned. No site needs this corner yet;
+    /// the four are kept together because they are one coordinate system, not
+    /// four independent options.
+    #[allow(dead_code)]
+    AboveRight,
+}
+
+impl MenuAlign {
+    fn above(self) -> bool {
+        matches!(self, Self::AboveLeft | Self::AboveRight)
+    }
+
+    fn right_aligned(self) -> bool {
+        matches!(self, Self::BelowRight | Self::AboveRight)
+    }
+
+    /// The card corner pinned to the anchor point.
+    fn corner(self) -> Anchor {
+        match self {
+            Self::BelowLeft => Anchor::TopLeft,
+            Self::BelowRight => Anchor::TopRight,
+            Self::AboveLeft => Anchor::BottomLeft,
+            Self::AboveRight => Anchor::BottomRight,
+        }
+    }
+
+    /// The point on the trigger the card's corner attaches to.
+    fn anchor_point(self, bounds: gpui::Bounds<Pixels>, gap: Pixels) -> Point<Pixels> {
+        let x = if self.right_aligned() {
+            bounds.right()
+        } else {
+            bounds.left()
+        };
+        let y = if self.above() {
+            bounds.top() - gap
+        } else {
+            bounds.bottom() + gap
+        };
+        Point::new(x, y)
+    }
+}
+
+/// A dropdown menu anchored under its trigger, toggled by a left click.
+///
+/// Unlike a context menu it aligns to the trigger rather than the pointer, so
+/// the handle carries the trigger's last-known bounds. Those are a frame old,
+/// which is invisible in practice: a trigger does not move between the click
+/// and the menu appearing.
+pub fn dropdown_menu<E>(
+    trigger: E,
+    id: impl Into<ElementId>,
+    handle: &ContextMenuHandle,
+    align: MenuAlign,
+    items: impl Fn(&mut App) -> Vec<MenuItem> + 'static,
+) -> AnyElement
+where
+    E: ParentElement + Styled + InteractiveElement + IntoElement + 'static,
+{
+    let id: ElementId = id.into();
+    let items = Rc::new(items);
+    anchored_surface(trigger, handle, align, move |handle| {
+        MenuCard {
+            id: id.clone(),
+            handle: handle.clone(),
+            items: items.clone(),
+        }
+        .into_any_element()
+    })
+}
+
+/// A dropdown-anchored panel holding arbitrary content.
+///
+/// Same trigger, anchoring and dismissal as [`dropdown_menu`], but the card
+/// draws no chrome — the content owns its own surface — and it does not take
+/// focus, so a search field inside can. Escape still works: the card declares
+/// the menu key context, and key dispatch walks up to it from the focused
+/// descendant.
+pub fn popover<E>(
+    trigger: E,
+    handle: &ContextMenuHandle,
+    align: MenuAlign,
+    content: impl Fn(&ContextMenuHandle, &mut Window, &mut App) -> AnyElement + 'static,
+) -> AnyElement
+where
+    E: ParentElement + Styled + InteractiveElement + IntoElement + 'static,
+{
+    let content = Rc::new(content);
+    anchored_surface(trigger, handle, align, move |handle| {
+        PopoverCard {
+            handle: handle.clone(),
+            content: content.clone(),
+        }
+        .into_any_element()
+    })
+}
+
+/// The shared half of both dropdown surfaces: a trigger that records its bounds
+/// and toggles the handle, plus the open card deferred and anchored to it.
+fn anchored_surface<E>(
+    trigger: E,
+    handle: &ContextMenuHandle,
+    align: MenuAlign,
+    card: impl Fn(&ContextMenuHandle) -> AnyElement + 'static,
+) -> AnyElement
+where
+    E: ParentElement + Styled + InteractiveElement + IntoElement + 'static,
+{
+    const GAP: f32 = 4.0;
+
+    let open_at = handle.state.borrow().open;
+    let toggle_handle = handle.clone();
+
+    let trigger = trigger
+        .relative()
+        .child(trigger_bounds_probe(handle))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            if toggle_handle.is_open() {
+                toggle_handle.close(window, cx);
+                window.refresh();
+                return;
+            }
+            let anchor = toggle_handle
+                .trigger_bounds
+                .get()
+                .map(|bounds| align.anchor_point(bounds, px(GAP)))
+                .unwrap_or_else(|| window.mouse_position());
+            open_menu(&toggle_handle, anchor, window, cx);
+            cx.stop_propagation();
+        });
+
+    let Some(position) = open_at else {
+        return trigger.into_any_element();
+    };
+
+    trigger
+        .child(
+            deferred(
+                anchored()
+                    .position(position)
+                    .anchor(align.corner())
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(card(handle)),
+            )
+            .with_priority(1),
+        )
+        .into_any_element()
+}
+
+/// A chrome-less card: dismissal and the menu key context, nothing else.
+#[derive(IntoElement)]
+struct PopoverCard {
+    handle: ContextMenuHandle,
+    #[allow(clippy::type_complexity)]
+    content: Rc<dyn Fn(&ContextMenuHandle, &mut Window, &mut App) -> AnyElement>,
+}
+
+impl RenderOnce for PopoverCard {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let body = (self.content)(&self.handle, window, cx);
+        div()
+            .occlude()
+            .key_context(MENU_CONTEXT)
+            .on_action({
+                let handle = self.handle.clone();
+                move |_: &DismissMenu, window, cx| {
+                    handle.close(window, cx);
+                    window.refresh();
+                }
+            })
+            .on_mouse_down_out({
+                let handle = self.handle.clone();
+                move |_, window, cx| {
+                    handle.close(window, cx);
+                    window.refresh();
+                }
+            })
+            .child(body)
     }
 }
 
@@ -160,18 +473,9 @@ where
     let element = element.relative().on_mouse_down(
         MouseButton::Right,
         move |event: &MouseDownEvent, window, cx| {
-            handle_for_down.open_at(event.position, window, cx);
+            open_menu(&handle_for_down, event.position, window, cx);
             cx.stop_propagation();
             window.prevent_default();
-
-            // The card is deferred, so its focus handle joins the dispatch tree
-            // only after the deferred draw. Focusing before then is a silent
-            // no-op that leaves the menu unable to see a keystroke.
-            let focus = handle_for_down.focus.clone();
-            window.on_next_frame(move |window, _| {
-                window.on_next_frame(move |window, cx| window.focus(&focus, cx));
-            });
-            window.refresh();
         },
     );
 
@@ -258,45 +562,103 @@ impl RenderOnce for MenuCard {
                     .h(px(1.0))
                     .bg(theme.border)
                     .into_any_element(),
+                MenuItem::Header(label) => div()
+                    .px(px(10.0))
+                    .pt(px(6.0))
+                    .pb(px(2.0))
+                    .text_size(px(10.0))
+                    .line_height(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_tertiary)
+                    .child(label)
+                    .into_any_element(),
                 MenuItem::Entry {
                     label,
                     icon: item_icon,
+                    selected,
+                    disabled,
                     on_click,
                 } => {
-                    let color = theme.text_secondary;
-                    let handle = self.handle.clone();
-                    div()
-                        .id(index)
-                        .mx(px(4.0))
-                        .px(px(8.0))
-                        .h(px(26.0))
-                        .rounded(px(6.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .text_size(px(11.5))
-                        .line_height(px(15.0))
-                        .text_color(color)
-                        .when(highlighted == Some(index), |element| {
-                            element.bg(theme.overlay_strong)
-                        })
-                        .cursor_default()
-                        .hover(|element| element.bg(theme.overlay))
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            handle.close(window, cx);
-                            on_click(window, cx);
-                            window.refresh();
-                        })
-                        .when_some(item_icon, |element, path| {
-                            element.child(icon(path, 12.0, color))
-                        })
-                        .child(div().flex_1().min_w_0().truncate().child(label))
-                        .into_any_element()
+                    let color = match (disabled, selected) {
+                        (true, _) => theme.text_ghost,
+                        (false, true) => theme.text,
+                        (false, false) => theme.text_secondary,
+                    };
+                    row(
+                        index,
+                        highlighted == Some(index),
+                        &theme,
+                        self.handle.clone(),
+                        (!disabled).then_some(on_click),
+                    )
+                    .text_color(color)
+                    .when(selected, |element| element.font_weight(FontWeight::MEDIUM))
+                    .when_some(item_icon, |element, path| {
+                        element.child(icon(path, 12.0, color))
+                    })
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .when(selected, |element| {
+                        element.child(icon("icons/check.svg", 11.0, theme.text_tertiary))
+                    })
+                    .into_any_element()
+                }
+                MenuItem::Custom { render, on_click } => {
+                    let body = render(window, cx);
+                    match on_click {
+                        Some(on_click) => row(
+                            index,
+                            highlighted == Some(index),
+                            &theme,
+                            self.handle.clone(),
+                            Some(on_click),
+                        )
+                        .child(body)
+                        .into_any_element(),
+                        // Non-interactive rows still need the row's insets so
+                        // they line up with the entries around them.
+                        None => div().mx(px(4.0)).px(px(8.0)).child(body).into_any_element(),
+                    }
                 }
             });
         }
         card
     }
+}
+
+/// The shared row: consistent insets, plus hover, keyboard highlight and
+/// close-then-act when it has a handler. A `None` handler renders the same
+/// geometry inert, which is how a disabled entry keeps the menu's shape.
+fn row(
+    index: usize,
+    highlighted: bool,
+    theme: &Theme,
+    handle: ContextMenuHandle,
+    on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+) -> gpui::Stateful<gpui::Div> {
+    let hover = theme.overlay;
+    let highlight = theme.overlay_strong;
+    div()
+        .id(index)
+        .mx(px(4.0))
+        .px(px(8.0))
+        .min_h(px(26.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(11.5))
+        .line_height(px(15.0))
+        .when(highlighted, |element| element.bg(highlight))
+        .when_some(on_click, |element, on_click| {
+            element
+                .cursor_default()
+                .hover(move |element| element.bg(hover))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    handle.close(window, cx);
+                    on_click(window, cx);
+                    window.refresh();
+                })
+        })
 }
 
 fn focusable_indexes(items: &[MenuItem]) -> Rc<Vec<usize>> {
@@ -364,10 +726,7 @@ fn on_menu_key(
         let activated = items(cx)
             .into_iter()
             .nth(highlighted)
-            .and_then(|item| match item {
-                MenuItem::Entry { on_click, .. } => Some(on_click),
-                MenuItem::Separator => None,
-            });
+            .and_then(MenuItem::click_handler);
         if let Some(on_click) = activated {
             handle.close(window, cx);
             on_click(window, cx);

@@ -1,15 +1,16 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use crate::md::highlight::{self, Lang, TokenClass};
+use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, DismissEvent, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString,
-    StyledText, Subscription, Task, TextLayout, TextRun, UTF16Selection, UnderlineStyle, Window,
-    actions, div, fill, point, prelude::*, px, size,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
+    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, StyledText, Subscription,
+    Task, TextLayout, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point,
+    prelude::*, px, size,
 };
-use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::Theme;
@@ -170,10 +171,29 @@ impl BlinkCursor {
 #[derive(Clone)]
 pub enum ComposerEvent {
     Submit(String),
+    /// The field took focus. A code editor uses this to re-read its file, so
+    /// clicking back into it picks up changes made on disk meanwhile.
+    Focus,
+}
+
+/// What the field is for. The difference is small but load-bearing: Enter
+/// submits a prompt and inserts a newline in code.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FieldMode {
+    #[default]
+    Composer,
+    Code,
 }
 
 pub struct ComposerInput {
     focus_handle: FocusHandle,
+    mode: FieldMode,
+    read_only: bool,
+    /// Language for paint-only syntax colouring, in code mode.
+    language: Option<Lang>,
+    /// Cached token spans over `content`, as absolute byte ranges. Recomputed
+    /// only when the content changes, so painting a large file is free.
+    highlight: Vec<(Range<usize>, TokenClass)>,
     content: SharedString,
     placeholder: SharedString,
     selected_range: Range<usize>,
@@ -183,6 +203,7 @@ pub struct ComposerInput {
     is_selecting: bool,
     selected_word_range: Option<Range<usize>>,
     external_context_menu_focus_holds: usize,
+    context_menu: ContextMenuHandle,
     blink_cursor: Entity<BlinkCursor>,
     _subscriptions: Vec<Subscription>,
 }
@@ -208,6 +229,10 @@ impl ComposerInput {
         ];
         Self {
             focus_handle,
+            mode: FieldMode::Composer,
+            read_only: false,
+            language: None,
+            highlight: Vec::new(),
             content: "".into(),
             placeholder: "Do anything…".into(),
             selected_range: 0..0,
@@ -217,6 +242,21 @@ impl ComposerInput {
             is_selecting: false,
             selected_word_range: None,
             external_context_menu_focus_holds: 0,
+            context_menu: {
+                // The menu takes real focus while open, so the composer holds
+                // its caret visible for the duration — otherwise right-clicking
+                // the input looks like it defocused.
+                let composer = cx.entity().downgrade();
+                ContextMenuHandle::new(cx).on_toggle(move |open, window, cx| {
+                    let _ = composer.update(cx, |composer: &mut Self, cx| {
+                        if open {
+                            composer.preserve_visual_focus_for_context_menu(window, cx);
+                        } else {
+                            composer.release_visual_focus_for_context_menu(window, cx);
+                        }
+                    });
+                })
+            },
             blink_cursor,
             _subscriptions,
         }
@@ -260,8 +300,68 @@ impl ComposerInput {
         self.external_context_menu_focus_holds > 0
     }
 
+    /// Placeholder shown while the field is empty.
+    pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Turn the field into a code editor: Enter inserts a newline instead of
+    /// submitting, and `language` (when recognised) colours the text.
+    pub fn code_editor(mut self, language: Option<&str>) -> Self {
+        self.mode = FieldMode::Code;
+        self.language = language.and_then(highlight::lang_for_tag);
+        self
+    }
+
+    /// Reject edits while still allowing selection and copy.
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// Re-tokenize after a content change. Cheap for a composer (no language),
+    /// one linear pass for a code editor.
+    fn refresh_highlight(&mut self) {
+        let Some(language) = self.language else {
+            return;
+        };
+        self.highlight.clear();
+        let mut line_start = 0;
+        for (line, tokens) in self
+            .content
+            .split('\n')
+            .zip(highlight::tokenize(language, &self.content))
+        {
+            self.highlight.extend(tokens.into_iter().map(|token| {
+                (
+                    line_start + token.range.start..line_start + token.range.end,
+                    token.class,
+                )
+            }));
+            line_start += line.len() + 1;
+        }
+    }
+
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Height of each logical line as laid out, so a gutter can put one number
+    /// per line even when soft wrap gives a line several visual rows.
+    ///
+    /// Read from the previous frame's layout — a gutter is therefore one frame
+    /// behind a reflow, which is invisible next to the reflow itself.
+    pub fn wrapped_line_heights(&self) -> Vec<Pixels> {
+        let Some(layout) = self.last_layout.as_ref() else {
+            return Vec::new();
+        };
+        let line_height = layout.line_height();
+        layout
+            .line_layouts()
+            .iter()
+            .map(|line| line_height * (line.wrap_boundaries().len() + 1) as f32)
+            .collect()
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -269,6 +369,7 @@ impl ComposerInput {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.highlight.clear();
         self.pause_blink_cursor(cx);
         cx.notify();
     }
@@ -279,12 +380,14 @@ impl ComposerInput {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.refresh_highlight();
         self.pause_blink_cursor(cx);
         cx.notify();
     }
 
     fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.blink_cursor.update(cx, |cursor, cx| cursor.start(cx));
+        cx.emit(ComposerEvent::Focus);
     }
 
     fn on_blur(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -443,7 +546,11 @@ impl ComposerInput {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+    fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == FieldMode::Code {
+            self.replace_text_in_range(None, "\n", window, cx);
+            return;
+        }
         let value = self.content.trim().to_owned();
         if !value.is_empty() {
             cx.emit(ComposerEvent::Submit(value));
@@ -452,9 +559,15 @@ impl ComposerInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace(['\n', '\r'], " "), window, cx);
-        }
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        let text = match self.mode {
+            // A composer is one prompt, so pasted line breaks become spaces.
+            FieldMode::Composer => text.replace(['\n', '\r'], " "),
+            FieldMode::Code => text.replace('\r', ""),
+        };
+        self.replace_text_in_range(None, &text, window, cx);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -697,6 +810,9 @@ impl EntityInputHandler for ComposerInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -707,6 +823,7 @@ impl EntityInputHandler for ComposerInput {
         let offset = range.start + new_text.len();
         self.selected_range = offset..offset;
         self.marked_range = None;
+        self.refresh_highlight();
         self.pause_blink_cursor(cx);
         cx.notify();
     }
@@ -780,34 +897,6 @@ impl EntityInputHandler for ComposerInput {
     }
 }
 
-pub fn preserve_composer_focus_for_context_menu(
-    composer: &Entity<ComposerInput>,
-    mut menu: PopupMenu,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    if let Some(action_context) = window.focused(cx) {
-        menu = menu.action_context(action_context);
-    }
-
-    let preserves_composer_focus = composer.update(cx, |composer, cx| {
-        composer.preserve_visual_focus_for_context_menu(window, cx)
-    });
-    if preserves_composer_focus {
-        let composer = composer.clone();
-        let menu_entity = cx.entity();
-        window
-            .subscribe(&menu_entity, cx, move |_, _: &DismissEvent, window, cx| {
-                composer.update(cx, |composer, cx| {
-                    composer.release_visual_focus_for_context_menu(window, cx);
-                });
-            })
-            .detach();
-    }
-
-    menu
-}
-
 fn cursor_should_be_visible(
     window_active: bool,
     input_focused: bool,
@@ -830,15 +919,22 @@ struct PrepaintState {
     cursor: Option<PaintQuad>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn input_text_runs(
     display_len: usize,
     base_run: TextRun,
     selected_range: Option<&Range<usize>>,
     marked_range: Option<&Range<usize>>,
     selection_color: Hsla,
+    highlight: &[(Range<usize>, TokenClass)],
+    token_color: impl Fn(TokenClass) -> Hsla,
 ) -> Vec<TextRun> {
     let mut boundaries = vec![0, display_len];
     for range in [selected_range, marked_range].into_iter().flatten() {
+        boundaries.push(range.start.min(display_len));
+        boundaries.push(range.end.min(display_len));
+    }
+    for (range, _) in highlight {
         boundaries.push(range.start.min(display_len));
         boundaries.push(range.end.min(display_len));
     }
@@ -850,8 +946,13 @@ fn input_text_runs(
         .filter_map(|boundary| {
             let start = boundary[0];
             let end = boundary[1];
+            let color = highlight
+                .iter()
+                .find(|(range, _)| range.start <= start && range.end >= end)
+                .map_or(base_run.color, |(_, class)| token_color(*class));
             (start < end).then(|| TextRun {
                 len: end - start,
+                color,
                 background_color: selected_range
                     .filter(|range| range.start < end && range.end > start)
                     .map(|_| selection_color),
@@ -899,7 +1000,8 @@ impl Element for InputElement {
         let content = input.content.clone();
         let style = window.text_style();
         let theme = Theme::current(cx);
-        let (display_text, text_color, selected_range, marked_range) = if content.is_empty() {
+        let content_is_empty = content.is_empty();
+        let (display_text, text_color, selected_range, marked_range) = if content_is_empty {
             (input.placeholder.clone(), theme.text_ghost, None, None)
         } else {
             (
@@ -917,12 +1019,19 @@ impl Element for InputElement {
             underline: None,
             strikethrough: None,
         };
+        let palette = crate::md::render::Palette::from_theme(&theme);
         let runs = input_text_runs(
             display_text.len(),
             base_run,
             selected_range,
             marked_range,
             theme.inverse.opacity(0.18),
+            if content_is_empty {
+                &[]
+            } else {
+                &input.highlight
+            },
+            |class| palette.token(class),
         );
         let mut text = StyledText::new(display_text).with_runs(runs);
         let (layout_id, text_layout_state) = text.request_layout(id, inspector_id, window, cx);
@@ -1016,7 +1125,7 @@ impl Render for ComposerInput {
         let theme = Theme::current(cx);
         let input = cx.entity();
         let context_menu_input = input.clone();
-        div()
+        let field = div()
             .key_context("ComposerInput")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
@@ -1049,12 +1158,22 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .min_h(px(24.0))
-            .line_height(px(22.0))
-            .text_size(px(13.5))
             .text_color(theme.text)
-            .child(InputElement { input })
-            .context_menu_with_id("composer-context-menu", move |menu, window, cx| {
+            // A composer owns its own metrics; a code editor inherits the
+            // caller's, so a gutter beside it can rely on the same line height.
+            .when(self.mode == FieldMode::Composer, |field| {
+                field
+                    .min_h(px(24.0))
+                    .line_height(px(22.0))
+                    .text_size(px(13.5))
+            })
+            .child(InputElement { input });
+
+        context_menu(
+            div().w_full().child(field),
+            "composer-context-menu",
+            &self.context_menu,
+            move |cx| {
                 let (has_selection, has_content, all_selected) = {
                     let input = context_menu_input.read(cx);
                     let has_selection = !input.selected_range.is_empty();
@@ -1069,30 +1188,56 @@ impl Render for ComposerInput {
                     .and_then(|item| item.text())
                     .is_some();
 
-                preserve_composer_focus_for_context_menu(&context_menu_input, menu, window, cx)
-                    .min_w(px(150.0))
-                    .item(
-                        PopupMenuItem::new("Cut")
-                            .action(Box::new(Cut))
-                            .disabled(!has_selection),
+                // Call the editing methods directly rather than dispatching the
+                // actions: by the time an item runs, focus is still unwinding
+                // from the menu card, so a dispatch would have nowhere to land.
+                let run = |input: &Entity<ComposerInput>,
+                           action: fn(
+                    &mut ComposerInput,
+                    &mut Window,
+                    &mut Context<ComposerInput>,
+                )| {
+                    let input = input.clone();
+                    move |window: &mut Window, cx: &mut App| {
+                        let focus = input.read(cx).focus_handle.clone();
+                        window.focus(&focus, cx);
+                        input.update(cx, |input, cx| action(input, window, cx));
+                    }
+                };
+
+                vec![
+                    MenuItem::new(
+                        "Cut",
+                        run(&context_menu_input, |input, window, cx| {
+                            input.cut(&Cut, window, cx)
+                        }),
                     )
-                    .item(
-                        PopupMenuItem::new("Copy")
-                            .action(Box::new(Copy))
-                            .disabled(!has_selection),
+                    .disabled(!has_selection),
+                    MenuItem::new(
+                        "Copy",
+                        run(&context_menu_input, |input, window, cx| {
+                            input.copy(&Copy, window, cx)
+                        }),
                     )
-                    .item(
-                        PopupMenuItem::new("Paste")
-                            .action(Box::new(Paste))
-                            .disabled(!can_paste),
+                    .disabled(!has_selection),
+                    MenuItem::new(
+                        "Paste",
+                        run(&context_menu_input, |input, window, cx| {
+                            input.paste(&Paste, window, cx)
+                        }),
                     )
-                    .separator()
-                    .item(
-                        PopupMenuItem::new("Select All")
-                            .action(Box::new(SelectAll))
-                            .disabled(!has_content || all_selected),
+                    .disabled(!can_paste),
+                    MenuItem::Separator,
+                    MenuItem::new(
+                        "Select All",
+                        run(&context_menu_input, |input, window, cx| {
+                            input.select_all(&SelectAll, window, cx)
+                        }),
                     )
-            })
+                    .disabled(!has_content || all_selected),
+                ]
+            },
+        )
     }
 }
 
@@ -1106,6 +1251,7 @@ impl Focusable for ComposerInput {
 mod tests {
     use gpui::{TextRun, font, hsla};
 
+    use super::TokenClass;
     use super::{
         cursor_should_be_visible, input_text_runs, next_word_boundary, previous_word_boundary,
         word_range_at,
@@ -1145,6 +1291,54 @@ mod tests {
         assert!(!cursor_should_be_visible(false, false, true, true));
     }
 
+    /// Syntax colours and the selection wash are independent layers over the
+    /// same text, so their boundaries have to interleave without either losing
+    /// coverage — the runs must still tile the content exactly.
+    #[test]
+    fn syntax_colours_and_selection_split_into_tiling_runs() {
+        let selection = 4..12;
+        let keyword = hsla(0.8, 0.5, 0.6, 1.0);
+        let plain = hsla(0.0, 0.0, 1.0, 1.0);
+        // "let" at 0..3 and "true" at 8..12, with a selection cutting across.
+        let highlight = vec![(0..3, TokenClass::Keyword), (8..12, TokenClass::Literal)];
+        let runs = input_text_runs(
+            12,
+            TextRun {
+                len: 12,
+                font: font(".SystemUIFont"),
+                color: plain,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            },
+            Some(&selection),
+            None,
+            hsla(0.0, 0.0, 1.0, 0.18),
+            &highlight,
+            |class| match class {
+                TokenClass::Keyword => keyword,
+                _ => plain,
+            },
+        );
+
+        assert_eq!(
+            runs.iter().map(|run| run.len).sum::<usize>(),
+            12,
+            "runs must tile the content: {runs:?}"
+        );
+        // The keyword keeps its colour and stays outside the selection.
+        assert_eq!(runs[0].len, 3);
+        assert_eq!(runs[0].color, keyword);
+        assert!(runs[0].background_color.is_none());
+        // Everything inside the selection carries the wash.
+        let selected_len: usize = runs
+            .iter()
+            .filter(|run| run.background_color.is_some())
+            .map(|run| run.len)
+            .sum();
+        assert_eq!(selected_len, selection.len());
+    }
+
     #[test]
     fn selection_and_ime_styles_survive_wrapped_text_run_splitting() {
         let selection = 2..8;
@@ -1162,6 +1356,8 @@ mod tests {
             Some(&selection),
             Some(&marked),
             hsla(0.0, 0.0, 1.0, 0.18),
+            &[],
+            |_| hsla(0.0, 0.0, 1.0, 1.0),
         );
 
         assert_eq!(

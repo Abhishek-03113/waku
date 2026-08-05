@@ -170,7 +170,7 @@ impl Waku {
             .child(
                 div()
                     .text_color(theme.text_tertiary)
-                    .font_family("SF Mono")
+                    .font_family(crate::md::render::MONO_FAMILY)
                     .child(SharedString::from(format!("{fps} FPS"))),
             )
     }
@@ -373,7 +373,10 @@ impl Waku {
                             .size_full(),
                         ),
                     )
-                    .vertical_scrollbar(&self.sidebar_list_state),
+                    .child(scrollbar::vertical(
+                        &self.sidebar_list_state,
+                        &self.sidebar_scrollbar,
+                    )),
             )
     }
 
@@ -491,8 +494,7 @@ impl Waku {
             .map(|project| project.name.clone())
             .unwrap_or_else(|| "Unknown project".to_owned());
         let waku = cx.entity().downgrade();
-        let composer = self.composer.clone();
-        div()
+        let row = div()
             .id(SharedString::from(format!("session-{}", session.id)))
             .w_full()
             .min_w_0()
@@ -553,20 +555,19 @@ impl Waku {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_session(session_id, cx);
             }))
-            .context_menu_with_id(
-                SharedString::from(format!("session-context-menu-{session_id}")),
-                move |menu, window, cx| {
-                    let waku = waku.clone();
-                    preserve_composer_focus_for_context_menu(&composer, menu, window, cx)
-                        .min_w(px(140.0))
-                        .item(PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
-                            let _ = waku.update(cx, |waku, cx| {
-                                waku.remove_session(session_id, cx);
-                            });
-                        }))
-                },
-            )
-            .into_any_element()
+            .into_any_element();
+        let menu = self.menu_handle(format!("session-{session_id}"), cx);
+        context_menu(
+            div().w_full().child(row),
+            SharedString::from(format!("session-menu-{session_id}")),
+            &menu,
+            move |_| {
+                let waku = waku.clone();
+                vec![MenuItem::new("Remove", move |_, cx| {
+                    let _ = waku.update(cx, |waku, cx| waku.remove_session(session_id, cx));
+                })]
+            },
+        )
     }
 
     // ── Header ─────────────────────────────────────────────────────────────
@@ -762,45 +763,39 @@ impl Waku {
             .map(|project| (project.id, project.name.clone()))
             .collect::<Vec<_>>();
         let weak = cx.entity().downgrade();
-        let composer = self.composer.clone();
-        let project_selector = ProjectNameSelector::new("empty-state-project", project_name)
-            .dropdown_menu(move |mut menu, _window, cx| {
-                menu = menu
-                    .action_context(composer.read(cx).focus())
-                    .min_w(px(160.0))
-                    .max_w(px(256.0))
-                    .max_h(px(320.0))
-                    .scrollable(true);
-                for (project_id, project_name) in project_options.clone() {
-                    let item_weak = weak.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(project_name)
-                            .checked(Some(project_id) == selected_project_id)
-                            .on_click(move |_, _, cx| {
-                                if Some(project_id) == selected_project_id {
-                                    return;
-                                }
-                                let _ = item_weak.update(cx, |this, cx| {
-                                    this.select_project(project_id, cx);
-                                });
-                            }),
-                    );
-                }
-                let add_project_weak = weak.clone();
-                menu.separator().item(
-                    PopupMenuItem::element(move |_, _| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(icon("icons/folder-new.svg", 13.0, theme.text_tertiary))
-                            .child("New project…")
+        let handle = self.menu_handle("empty-state-project", cx);
+        let project_selector = dropdown_menu(
+            ProjectNameSelector::new("empty-state-project", project_name)
+                .selected(handle.is_open()),
+            "empty-state-project-menu",
+            &handle,
+            MenuAlign::BelowLeft,
+            move |_| {
+                let mut items = project_options
+                    .clone()
+                    .into_iter()
+                    .map(|(project_id, project_name)| {
+                        let weak = weak.clone();
+                        MenuItem::new(project_name, move |_, cx| {
+                            if Some(project_id) == selected_project_id {
+                                return;
+                            }
+                            let _ = weak.update(cx, |this, cx| this.select_project(project_id, cx));
+                        })
+                        .selected(Some(project_id) == selected_project_id)
                     })
-                    .on_click(move |_, _, cx| {
-                        let _ = add_project_weak.update(cx, |this, cx| this.add_project(cx));
-                    }),
-                )
-            });
+                    .collect::<Vec<_>>();
+                items.push(MenuItem::Separator);
+                let weak = weak.clone();
+                items.push(
+                    MenuItem::new("New project…", move |_, cx| {
+                        let _ = weak.update(cx, |this, cx| this.add_project(cx));
+                    })
+                    .icon("icons/folder-new.svg"),
+                );
+                items
+            },
+        );
         div()
             .flex_1()
             .flex()

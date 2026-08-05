@@ -696,25 +696,44 @@ impl Waku {
         MarkdownCtx::new(row, palette, metrics, self.transcript_selection.clone())
     }
 
-    fn message_menu(&self, message_id: Uuid, cx: &mut App) -> ContextMenuHandle {
-        if let Some(handle) = self.message_menus.borrow().get(&message_id) {
+    /// The menu handle for `id`, created on first use.
+    ///
+    /// Every menu holds the composer's *visual* focus while it is open, so
+    /// opening one never looks like it defocused the input — the composer owns
+    /// real focus almost all the time, and the menu has to take it to see keys.
+    pub(super) fn menu_handle(
+        &self,
+        id: impl Into<SharedString>,
+        cx: &mut App,
+    ) -> ContextMenuHandle {
+        self.menu_handle_with(id, cx, |_, _, _| {})
+    }
+
+    /// [`Self::menu_handle`] with an extra toggle observer, run after the
+    /// composer's. `extra` is only consulted the first time a given id is seen.
+    pub(super) fn menu_handle_with(
+        &self,
+        id: impl Into<SharedString>,
+        cx: &mut App,
+        extra: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> ContextMenuHandle {
+        let id = id.into();
+        if let Some(handle) = self.menus.borrow().get(&id) {
             return handle.clone();
         }
         let composer = self.composer.clone();
-        // Keep the composer's caret visible while the menu owns real focus, so
-        // right-clicking a message does not look like it defocused the input.
-        let handle = ContextMenuHandle::new(cx).on_toggle(move |open, window, cx| {
-            composer.update(cx, |composer, cx| {
-                if open {
-                    composer.preserve_visual_focus_for_context_menu(window, cx);
-                } else {
-                    composer.release_visual_focus_for_context_menu(window, cx);
-                }
-            });
-        });
-        self.message_menus
-            .borrow_mut()
-            .insert(message_id, handle.clone());
+        let handle = ContextMenuHandle::new(cx)
+            .on_toggle(move |open, window, cx| {
+                composer.update(cx, |composer, cx| {
+                    if open {
+                        composer.preserve_visual_focus_for_context_menu(window, cx);
+                    } else {
+                        composer.release_visual_focus_for_context_menu(window, cx);
+                    }
+                });
+            })
+            .on_toggle(extra);
+        self.menus.borrow_mut().insert(id, handle.clone());
         handle
     }
 
@@ -763,7 +782,7 @@ impl Waku {
                             })
                             .map(|edit| edit.input.clone())
                     });
-                    let menu = self.message_menu(message.id, cx);
+                    let menu = self.menu_handle(format!("message-{}", message.id), cx);
                     let ctx = self.markdown_ctx(
                         format!("message-{}", message.id),
                         &palette,

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -25,8 +26,6 @@ use gpui::{
     ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task,
     TextRun, UnderlineStyle, Window, canvas, div, font, px, rgb,
 };
-use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::theme::ActiveTheme as _;
 use parking_lot::Mutex;
 
 use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
@@ -495,6 +494,7 @@ pub struct TerminalView {
     selecting: bool,
     cursor_blink: gpui::Entity<TerminalCursorBlink>,
     cursor_focus_tracking_started: bool,
+    context_menu: ContextMenuHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -525,6 +525,7 @@ impl TerminalView {
         })
         .detach();
 
+        let context_menu = ContextMenuHandle::new(cx);
         let cursor_blink = cx.new(|_| TerminalCursorBlink::new());
         let subscriptions = vec![cx.observe(&cursor_blink, |_, _, cx| cx.notify())];
 
@@ -541,6 +542,7 @@ impl TerminalView {
             selecting: false,
             cursor_blink,
             cursor_focus_tracking_started: false,
+            context_menu,
             _subscriptions: subscriptions,
         }
     }
@@ -806,7 +808,7 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cursor_focus_tracking(window, cx);
         let theme = Theme::current(cx);
-        let selection_color = cx.theme().selection;
+        let selection_color = theme.selection;
         let viewport = window.viewport_size();
         let panel_width = self.panel_width;
         let body_height = (f32::from(viewport.height) - 48.0 - TERMINAL_TOOLBAR_HEIGHT).max(120.0);
@@ -923,50 +925,45 @@ impl Render for TerminalView {
         );
 
         let context_terminal = cx.entity();
-        let focus_handle = self.focus_handle.clone();
-        let screen = screen.context_menu_with_id("terminal-context-menu", move |menu, _, cx| {
-            let has_selection = context_terminal.read(cx).selected_text().is_some();
-            let can_paste = cx
-                .read_from_clipboard()
-                .and_then(|item| item.text())
-                .is_some_and(|text| !text.is_empty());
-            let has_session = context_terminal.read(cx).session.is_some();
+        let screen = context_menu(
+            div().size_full().child(screen),
+            "terminal-context-menu",
+            &self.context_menu,
+            move |cx| {
+                let has_selection = context_terminal.read(cx).selected_text().is_some();
+                let can_paste = cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .is_some_and(|text| !text.is_empty());
+                let has_session = context_terminal.read(cx).session.is_some();
 
-            let copy_terminal = context_terminal.clone();
-            let paste_terminal = context_terminal.clone();
-            let select_all_terminal = context_terminal.clone();
-            menu.action_context(focus_handle.clone())
-                .min_w(px(150.0))
-                .item(
-                    PopupMenuItem::new("Copy")
-                        .disabled(!has_selection)
-                        .on_click(move |_, _, cx| {
-                            let selected_text = { copy_terminal.read(cx).selected_text() };
-                            if let Some(text) = selected_text {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                            }
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Paste")
-                        .disabled(!can_paste)
-                        .on_click(move |_, _, cx| {
-                            let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
-                            else {
-                                return;
-                            };
-                            paste_terminal.update(cx, |terminal, cx| terminal.paste(text, cx));
-                        }),
-                )
-                .separator()
-                .item(
-                    PopupMenuItem::new("Select All")
-                        .disabled(!has_session)
-                        .on_click(move |_, _, cx| {
-                            select_all_terminal.update(cx, |terminal, cx| terminal.select_all(cx));
-                        }),
-                )
-        });
+                let copy_terminal = context_terminal.clone();
+                let paste_terminal = context_terminal.clone();
+                let select_all_terminal = context_terminal.clone();
+                vec![
+                    MenuItem::new("Copy", move |_, cx| {
+                        let selected_text = { copy_terminal.read(cx).selected_text() };
+                        if let Some(text) = selected_text {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
+                    })
+                    .disabled(!has_selection),
+                    MenuItem::new("Paste", move |_, cx| {
+                        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                        else {
+                            return;
+                        };
+                        paste_terminal.update(cx, |terminal, cx| terminal.paste(text, cx));
+                    })
+                    .disabled(!can_paste),
+                    MenuItem::Separator,
+                    MenuItem::new("Select All", move |_, cx| {
+                        select_all_terminal.update(cx, |terminal, cx| terminal.select_all(cx));
+                    })
+                    .disabled(!has_session),
+                ]
+            },
+        );
 
         let grid = div()
             .flex_1()

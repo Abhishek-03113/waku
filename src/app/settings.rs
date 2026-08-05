@@ -36,7 +36,7 @@ impl Waku {
         let query = self
             .settings_search
             .read(cx)
-            .value()
+            .content()
             .trim()
             .to_ascii_lowercase();
         let mut navigation = div().flex().flex_col().gap(px(3.0));
@@ -141,16 +141,18 @@ impl Waku {
             )
             .child(
                 div().px(px(12.0)).pt(px(8.0)).child(
-                    Input::new(&self.settings_search)
-                        .appearance(false)
-                        .bordered(false)
-                        .focus_bordered(false)
+                    div()
                         .h(px(29.0))
+                        .px(px(8.0))
                         .bg(theme.overlay)
                         .border_1()
                         .border_color(theme.border)
                         .rounded(px(7.0))
-                        .prefix(icon("icons/search.svg", 13.0, theme.text_tertiary)),
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(icon("icons/search.svg", 13.0, theme.text_tertiary))
+                        .child(div().flex_1().min_w_0().child(self.settings_search.clone())),
                 ),
             )
             .child(div().h(px(18.0)))
@@ -258,28 +260,32 @@ impl Waku {
         let theme = Theme::current(cx);
         let selected = self.state.theme;
         let weak = cx.entity().downgrade();
-        let selector = MenuChip::new("theme-selector")
-            .label(selected.label())
-            .outlined()
-            .w(px(116.0))
-            .justify_between()
-            .dropdown_menu(move |mut menu, _window, _cx| {
-                menu = menu.min_w(px(148.0)).max_w(px(148.0));
-                for preference in ThemePreference::ALL {
-                    let weak = weak.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(preference.label())
-                            .selected(preference == selected)
-                            .on_click(move |_, window, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    this.set_theme_preference(preference, window, cx);
-                                });
-                            }),
-                    );
-                }
-                menu
-            })
-            .anchor(Anchor::TopRight);
+        let handle = self.menu_handle("theme-selector", cx);
+        let selector = dropdown_menu(
+            MenuChip::new("theme-selector")
+                .label(selected.label())
+                .outlined()
+                .selected(handle.is_open())
+                .w(px(116.0))
+                .justify_between(),
+            "theme-selector-menu",
+            &handle,
+            MenuAlign::BelowRight,
+            move |_| {
+                ThemePreference::ALL
+                    .into_iter()
+                    .map(|preference| {
+                        let weak = weak.clone();
+                        MenuItem::new(preference.label(), move |window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_theme_preference(preference, window, cx);
+                            });
+                        })
+                        .selected(preference == selected)
+                    })
+                    .collect()
+            },
+        );
 
         div()
             .mt(px(15.0))

@@ -84,7 +84,7 @@ impl Waku {
                             .p(px(8.0))
                             .rounded(px(7.0))
                             .bg(theme.inset)
-                            .font_family("SF Mono")
+                            .font_family(crate::md::render::MONO_FAMILY)
                             .text_size(px(10.5))
                             .line_height(px(16.0))
                             .text_color(theme.text_secondary)
@@ -505,7 +505,7 @@ impl Waku {
                 .into_any_element();
         }
 
-        let search_query = self.model_search.read(cx).value().to_string();
+        let search_query = self.model_search.read(cx).content().to_owned();
         let normalized_query = search_query.trim().to_ascii_lowercase();
         let searching = !normalized_query.is_empty();
         let selected_tab = self.model_picker_tab;
@@ -517,43 +517,52 @@ impl Waku {
         let search = self.model_search.clone();
         let search_focus = search.read(cx).focus_handle(cx);
 
-        let trigger = MenuChip::new("composer-provider-model")
-            .icon(
-                provider_icon(provider),
-                provider_color(&theme, provider).opacity(0.9),
-            )
-            .label(selected_model_name);
-
-        Popover::new("provider-model-picker")
-            .anchor(Anchor::BottomLeft)
-            .appearance(false)
-            .track_focus(&search_focus)
-            .on_open_change({
-                let weak = weak.clone();
-                let search = search.clone();
-                move |open, window, cx| {
-                    let _ = weak.update(cx, |this, cx| {
-                        if *open {
-                            let provider = this
-                                .selected_session()
-                                .map(|session| session.provider)
-                                .unwrap_or_default();
-                            this.model_picker_tab = ModelPickerTab::Provider(provider);
-                            this.request_provider_model_discovery(provider);
-                            search.update(cx, |search, cx| {
-                                search.set_value("", window, cx);
-                            });
-                        } else {
-                            let focus_handle = this.composer.read(cx).focus();
-                            window.focus(&focus_handle, cx);
-                        }
-                        cx.notify();
+        let handle = {
+            let reset_weak = weak.clone();
+            let reset_search = search.clone();
+            let picker_focus = search_focus.clone();
+            self.menu_handle_with("provider-model-picker", cx, move |open, window, cx| {
+                let _ = reset_weak.update(cx, |this, cx| {
+                    if open {
+                        let provider = this
+                            .selected_session()
+                            .map(|session| session.provider)
+                            .unwrap_or_default();
+                        this.model_picker_tab = ModelPickerTab::Provider(provider);
+                        this.request_provider_model_discovery(provider);
+                        reset_search.update(cx, |search, cx| search.clear(cx));
+                    } else {
+                        let focus_handle = this.composer.read(cx).focus();
+                        window.focus(&focus_handle, cx);
+                    }
+                    cx.notify();
+                });
+                if open {
+                    // The panel is deferred, so its input joins the dispatch
+                    // tree only after the deferred draw — same two-frame wait
+                    // the menus need before they can take focus.
+                    let picker_focus = picker_focus.clone();
+                    window.on_next_frame(move |window, _| {
+                        window.on_next_frame(move |window, cx| {
+                            window.focus(&picker_focus, cx);
+                        });
                     });
                 }
             })
-            .trigger(trigger)
-            .content(move |_state, _window, popover_cx| {
-                let popover = popover_cx.entity();
+        };
+
+        popover(
+            MenuChip::new("composer-provider-model")
+                .icon(
+                    provider_icon(provider),
+                    provider_color(&theme, provider).opacity(0.9),
+                )
+                .label(selected_model_name)
+                .selected(handle.is_open()),
+            &handle,
+            MenuAlign::AboveLeft,
+            move |popover, _window, _cx| {
+                let popover = popover.clone();
                 let mut available_models = probes
                     .iter()
                     .filter(|probe| probe.installed)
@@ -701,13 +710,17 @@ impl Waku {
                     .flex()
                     .items_center()
                     .child(
-                        Input::new(&search)
-                            .appearance(false)
-                            .bordered(false)
-                            .focus_bordered(false)
-                            .bg(theme.raised)
+                        div()
+                            .w_full()
+                            .h(px(34.0))
+                            .px(px(10.0))
                             .rounded(px(9.0))
-                            .prefix(icon("icons/search.svg", 15.0, theme.text_secondary)),
+                            .bg(theme.raised)
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(icon("icons/search.svg", 15.0, theme.text_secondary))
+                            .child(div().flex_1().min_w_0().child(search.clone())),
                     );
 
                 let mut rows = div()
@@ -848,9 +861,7 @@ impl Waku {
                                 let _ = select_weak.update(cx, |this, cx| {
                                     this.choose_model(kind, model_id.clone(), cx);
                                 });
-                                select_popover.update(cx, |popover, cx| {
-                                    popover.dismiss(window, cx);
-                                });
+                                select_popover.close(window, cx);
                             }),
                     );
                 }
@@ -878,8 +889,9 @@ impl Waku {
                             .child(search_input)
                             .child(rows),
                     )
-            })
-            .into_any_element()
+                    .into_any_element()
+            },
+        )
     }
 
     pub(super) fn render_model_traits_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -948,76 +960,69 @@ impl Waku {
             .clone()
             .unwrap_or_else(|| "default".to_owned());
         let weak = cx.entity().downgrade();
-        let composer = self.composer.clone();
-        let trigger = MenuChip::new("model-traits")
-            .when(fast, |trigger| {
-                trigger.icon("icons/zap.svg", theme.text_secondary)
-            })
-            .label(trigger_label);
-
-        Some(
-            trigger
-                .dropdown_menu(move |mut menu, _window, cx| {
-                    menu = menu
-                        .action_context(composer.read(cx).focus())
-                        .min_w(px(208.0))
-                        .max_w(px(208.0));
-                    if !reasoning_efforts.is_empty() {
-                        menu = menu.item(traits_menu_label(theme, "Reasoning"));
-                        for option in reasoning_efforts.clone() {
-                            let checked = selected_effort.as_deref() == Some(option.id.as_str());
-                            let is_default = default_effort.as_deref() == Some(option.id.as_str());
-                            let effort = option.id;
-                            let item_weak = weak.clone();
-                            menu = menu.item(
-                                traits_menu_choice(theme, option.label, is_default, checked)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = item_weak.update(cx, |this, cx| {
-                                            this.set_reasoning_effort(effort.clone(), cx);
-                                        });
-                                    }),
-                            );
-                        }
+        let handle = self.menu_handle("model-traits", cx);
+        Some(dropdown_menu(
+            MenuChip::new("model-traits")
+                .when(fast, |trigger| {
+                    trigger.icon("icons/zap.svg", theme.text_secondary)
+                })
+                .label(trigger_label)
+                .selected(handle.is_open()),
+            "model-traits-menu",
+            &handle,
+            MenuAlign::AboveLeft,
+            move |_| {
+                let mut items = Vec::new();
+                if !reasoning_efforts.is_empty() {
+                    items.push(MenuItem::Header("Reasoning".into()));
+                    for option in reasoning_efforts.clone() {
+                        let weak = weak.clone();
+                        let effort = option.id;
+                        let is_default = default_effort.as_deref() == Some(effort.as_str());
+                        items.push(
+                            traits_choice(theme, option.label, is_default)
+                                .selected(selected_effort.as_deref() == Some(effort.as_str()))
+                                .on_click(move |_, cx| {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.set_reasoning_effort(effort.clone(), cx);
+                                    });
+                                }),
+                        );
                     }
-                    if !service_tiers.is_empty() {
-                        if !reasoning_efforts.is_empty() {
-                            menu = menu.separator();
-                        }
-                        menu = menu.item(traits_menu_label(theme, "Service Tier"));
-                        let standard_weak = weak.clone();
-                        menu = menu.item(
-                            traits_menu_choice(
-                                theme,
-                                "Standard".to_owned(),
-                                default_tier == "default",
-                                selected_tier == "default",
-                            )
-                            .on_click(move |_, _, cx| {
-                                let _ = standard_weak.update(cx, |this, cx| {
+                }
+                if !service_tiers.is_empty() {
+                    if !reasoning_efforts.is_empty() {
+                        items.push(MenuItem::Separator);
+                    }
+                    items.push(MenuItem::Header("Service Tier".into()));
+                    let weak_standard = weak.clone();
+                    items.push(
+                        traits_choice(theme, "Standard".to_owned(), default_tier == "default")
+                            .selected(selected_tier == "default")
+                            .on_click(move |_, cx| {
+                                let _ = weak_standard.update(cx, |this, cx| {
                                     this.set_service_tier("default".to_owned(), cx);
                                 });
                             }),
+                    );
+                    for option in service_tiers.clone() {
+                        let weak = weak.clone();
+                        let tier = option.id;
+                        let is_default = default_tier == tier;
+                        items.push(
+                            traits_choice(theme, option.label, is_default)
+                                .selected(selected_tier == tier)
+                                .on_click(move |_, cx| {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.set_service_tier(tier.clone(), cx);
+                                    });
+                                }),
                         );
-                        for option in service_tiers.clone() {
-                            let checked = selected_tier == option.id;
-                            let is_default = default_tier == option.id;
-                            let tier = option.id;
-                            let item_weak = weak.clone();
-                            menu = menu.item(
-                                traits_menu_choice(theme, option.label, is_default, checked)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = item_weak.update(cx, |this, cx| {
-                                            this.set_service_tier(tier.clone(), cx);
-                                        });
-                                    }),
-                            );
-                        }
                     }
-                    menu
-                })
-                .anchor(Anchor::BottomLeft)
-                .into_any_element(),
-        )
+                }
+                items
+            },
+        ))
     }
 
     pub(super) fn render_access_control(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1028,41 +1033,44 @@ impl Waku {
             .filter(|mode| *mode != RuntimeMode::Plan)
             .unwrap_or_default();
         let weak = cx.entity().downgrade();
-        let composer = self.composer.clone();
-        MenuChip::new("runtime-mode")
-            .icon(selected_mode.icon(), theme.text_tertiary)
-            .label(selected_mode.label())
-            .dropdown_menu(move |mut menu, _window, cx| {
-                menu = menu
-                    .action_context(composer.read(cx).focus())
-                    .min_w(px(320.0))
-                    .max_w(px(320.0));
-                for option in RuntimeMode::ACCESS_OPTIONS {
-                    let item_weak = weak.clone();
-                    let item_theme = theme;
-                    let selected = option == selected_mode;
-                    menu = menu.item(
-                        PopupMenuItem::element(move |_, _| {
+        let handle = self.menu_handle("runtime-mode", cx);
+        dropdown_menu(
+            MenuChip::new("runtime-mode")
+                .icon(selected_mode.icon(), theme.text_tertiary)
+                .label(selected_mode.label())
+                .selected(handle.is_open()),
+            "runtime-mode-menu",
+            &handle,
+            MenuAlign::AboveLeft,
+            move |_| {
+                RuntimeMode::ACCESS_OPTIONS
+                    .into_iter()
+                    .map(|option| {
+                        let weak = weak.clone();
+                        let selected = option == selected_mode;
+                        MenuItem::custom(move |_, _| {
                             div()
-                                .w_full()
-                                .px(px(4.0))
-                                .py(px(3.0))
-                                .rounded(px(6.0))
+                                .w(px(288.0))
+                                .py(px(4.0))
                                 .flex()
                                 .items_center()
                                 .gap(px(10.0))
-                                .child(icon(option.icon(), 14.0, item_theme.text_tertiary))
+                                .child(icon(option.icon(), 14.0, theme.text_tertiary))
                                 .child(
                                     div()
-                                        .w(px(272.0))
-                                        .flex_none()
+                                        .flex_1()
+                                        .min_w_0()
                                         .child(
                                             div()
                                                 .w_full()
                                                 .truncate()
                                                 .text_size(px(12.0))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(item_theme.text)
+                                                .font_weight(if selected {
+                                                    FontWeight::SEMIBOLD
+                                                } else {
+                                                    FontWeight::MEDIUM
+                                                })
+                                                .text_color(theme.text)
                                                 .child(option.label()),
                                         )
                                         .child(
@@ -1072,23 +1080,26 @@ impl Waku {
                                                 .text_size(px(10.5))
                                                 .line_height(px(14.0))
                                                 .whitespace_normal()
-                                                .text_color(item_theme.text_tertiary)
+                                                .text_color(theme.text_tertiary)
                                                 .child(option.description()),
                                         ),
                                 )
+                                .when(selected, |element| {
+                                    element.child(icon(
+                                        "icons/check.svg",
+                                        11.0,
+                                        theme.text_tertiary,
+                                    ))
+                                })
+                                .into_any_element()
                         })
-                        .selected(selected)
-                        .on_click(move |_, _, cx| {
-                            let _ = item_weak.update(cx, |this, cx| {
-                                this.set_runtime_mode(option, cx);
-                            });
-                        }),
-                    );
-                }
-                menu
-            })
-            .anchor(Anchor::BottomLeft)
-            .into_any_element()
+                        .on_click(move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| this.set_runtime_mode(option, cx));
+                        })
+                    })
+                    .collect()
+            },
+        )
     }
 
     pub(super) fn render_interaction_mode_control(&self, cx: &mut Context<Self>) -> AnyElement {

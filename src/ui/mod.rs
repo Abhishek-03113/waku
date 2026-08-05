@@ -1,9 +1,8 @@
 use gpui::{
-    App, Div, ElementId, Hsla, InteractiveElement, Interactivity, PathBuilder, RenderOnce,
-    SharedString, Stateful, StyleRefinement, Styled, Svg, Window, canvas, div, point, prelude::*,
-    px, rgb, svg,
+    AnyElement, App, Div, ElementId, Hsla, InteractiveElement, Interactivity, ParentElement,
+    PathBuilder, RenderOnce, SharedString, Stateful, StyleRefinement, Styled, Svg, Window, canvas,
+    div, point, prelude::*, px, rgb, svg,
 };
-use gpui_component::{Selectable, menu::DropdownMenu};
 
 pub mod menu;
 pub mod scrollbar;
@@ -20,6 +19,22 @@ pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
         .h(px(size))
         .flex_none()
         .text_color(color)
+}
+
+/// A compact ghost icon button: the only button shape outside the composer's
+/// bespoke send control.
+pub fn icon_button(id: impl Into<ElementId>, path: &'static str, theme: Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(22.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_default()
+        .hover(|element| element.bg(theme.overlay))
+        .active(|element| element.bg(theme.overlay_strong))
+        .child(icon(path, 13.0, theme.text_tertiary))
 }
 
 /// Brand hue for each provider's official mark.
@@ -95,10 +110,8 @@ pub fn activity_noun(kind: ActivityKind) -> (&'static str, &'static str) {
     }
 }
 
-/// A compact composer chip that can act as a `gpui-component` dropdown-menu
-/// trigger while keeping Waku's own visual language. The library only asks
-/// its triggers to be styled, selectable, interactive elements — `selected`
-/// is driven by the menu's open state, which we render as a soft fill.
+/// A compact chip used as a dropdown-menu trigger. `selected` is driven by the
+/// menu's open state and renders as a soft fill.
 #[derive(IntoElement)]
 pub struct MenuChip {
     base: Stateful<Div>,
@@ -135,6 +148,12 @@ impl MenuChip {
         self.outlined = true;
         self
     }
+
+    /// Soft fill marking the chip as the open menu's trigger.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
 }
 
 impl Styled for MenuChip {
@@ -149,18 +168,11 @@ impl InteractiveElement for MenuChip {
     }
 }
 
-impl Selectable for MenuChip {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.selected
+impl ParentElement for MenuChip {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.base.extend(elements);
     }
 }
-
-impl DropdownMenu for MenuChip {}
 
 impl RenderOnce for MenuChip {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -210,6 +222,12 @@ impl ProjectNameSelector {
             selected: false,
         }
     }
+
+    /// Emphasised underline while its menu is open.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
 }
 
 impl Styled for ProjectNameSelector {
@@ -224,18 +242,11 @@ impl InteractiveElement for ProjectNameSelector {
     }
 }
 
-impl Selectable for ProjectNameSelector {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.selected
+impl ParentElement for ProjectNameSelector {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.base.extend(elements);
     }
 }
-
-impl DropdownMenu for ProjectNameSelector {}
 
 impl RenderOnce for ProjectNameSelector {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {

@@ -1,9 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::{IconName, Sizable};
-
 use super::*;
 
 const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
@@ -288,6 +285,8 @@ fn visible_working_tree_entries(
     entries
 }
 
+/// The language name for a file, as understood by [`crate::md::highlight`].
+/// Names the lexer does not know simply render unhighlighted.
 fn file_highlighter_language(relative_path: &str) -> &'static str {
     let path = Path::new(relative_path);
     let file_name = path
@@ -308,31 +307,56 @@ fn file_highlighter_language(relative_path: &str) -> &'static str {
         | "package-lock.json"
         | "package.resolved"
         | "packages.lock.json"
-        | "pipfile.lock" => Some(Language::Json),
-        "cargo.lock" | "pdm.lock" | "poetry.lock" | "uv.lock" => Some(Language::Toml),
+        | "pipfile.lock" => Some("json"),
+        "cargo.lock" | "pdm.lock" | "poetry.lock" | "uv.lock" => Some("toml"),
         "chart.lock" | "gemfile.lock" | "pnpm-lock.yaml" | "podfile.lock" | "pubspec.lock"
-        | "yarn.lock" => Some(Language::Yaml),
-        "mix.lock" => Some(Language::Elixir),
+        | "yarn.lock" => Some("yaml"),
+        "mix.lock" => Some("elixir"),
         _ => None,
     };
     if let Some(language) = lockfile_language {
-        return language.name();
+        return language;
     }
 
     if file_name == "Makefile" || file_name.starts_with("Makefile.") {
-        return Language::Make.name();
+        return "make";
+    }
+    if normalized_file_name == "dockerfile" || normalized_file_name.starts_with("dockerfile.") {
+        return "dockerfile";
     }
 
-    let extension = path.extension().and_then(|extension| extension.to_str());
-    let language = match extension {
-        Some("h") => Language::C,
-        Some("hpp" | "hh" | "hxx") => Language::Cpp,
-        Some("jsx" | "mjs" | "cjs") => Language::JavaScript,
-        Some("mts" | "cts") => Language::TypeScript,
-        Some(extension) => Language::from_str(extension),
-        None => Language::Plain,
-    };
-    language.name()
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("rs") => "rust",
+        Some("ts" | "mts" | "cts") => "typescript",
+        Some("tsx") => "tsx",
+        Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
+        Some("py" | "pyi") => "python",
+        Some("go") => "go",
+        Some("c") => "c",
+        Some("h" | "hpp" | "hh" | "hxx" | "cc" | "cpp" | "cxx") => "cpp",
+        Some("m" | "mm") => "objc",
+        Some("java" | "kt" | "kts") => "java",
+        Some("cs") => "csharp",
+        Some("scala" | "sc") => "scala",
+        Some("rb" | "rake" | "gemspec") => "ruby",
+        Some("swift") => "swift",
+        Some("json" | "jsonc" | "json5") => "json",
+        Some("yaml" | "yml") => "yaml",
+        Some("toml") => "toml",
+        Some("ini" | "cfg" | "conf") => "ini",
+        Some("sh" | "bash" | "zsh" | "fish") => "bash",
+        Some("css" | "scss" | "sass" | "less") => "css",
+        Some("html" | "htm" | "xml" | "svg" | "vue" | "svelte") => "html",
+        Some("sql") => "sql",
+        Some("diff" | "patch") => "diff",
+        Some("md" | "markdown" | "mdx") => "markdown",
+        _ => "text",
+    }
 }
 
 fn read_right_panel_file(project_path: &Path, relative_path: &str) -> (String, bool) {
@@ -580,27 +604,6 @@ mod tests {
         assert_eq!(file_highlighter_language("src/app.rs"), "rust");
         assert_eq!(file_highlighter_language("ui/panel.tsx"), "tsx");
         assert_eq!(file_highlighter_language("Sources/App.swift"), "swift");
-        assert_eq!(
-            gpui_component::highlighter::SyntaxHighlighter::new("swift").language(),
-            "swift"
-        );
-        let theme = gpui_component::highlighter::HighlightTheme::default_light();
-        assert_eq!(theme.name, "GitHub Light Default");
-        let comment_color = theme.style("comment").unwrap().color.unwrap();
-
-        let source = "// ordinary\n/// documentation\nimport AppKit\n";
-        let text = gpui_component::Rope::from(source);
-        let mut highlighter = gpui_component::highlighter::SyntaxHighlighter::new("swift");
-        highlighter.update(None, &text);
-        let styles = highlighter.styles(&(0..source.len()), &theme);
-        for offset in [0, source.find("documentation").unwrap()] {
-            let color = styles
-                .iter()
-                .find(|(range, _)| range.contains(&offset))
-                .and_then(|(_, style)| style.color)
-                .unwrap();
-            assert_eq!(color, comment_color);
-        }
         assert_eq!(file_highlighter_language("Makefile"), "make");
         assert_eq!(file_highlighter_language("src/native.hpp"), "cpp");
         assert_eq!(file_highlighter_language("LICENSE"), "text");
@@ -623,159 +626,47 @@ mod tests {
         ] {
             assert_eq!(file_highlighter_language(path), expected_language, "{path}");
         }
-        for language in ["json", "toml", "yaml", "elixir"] {
-            assert_eq!(
-                gpui_component::highlighter::SyntaxHighlighter::new(language).language(),
-                language,
-                "{language} grammar should be available"
-            );
+    }
+
+    /// The editor colours code with the in-house lexer, so what matters is that
+    /// the names `file_highlighter_language` produces are ones the lexer knows.
+    /// The few it does not are listed here deliberately: they render as plain
+    /// monospace rather than silently looking broken.
+    #[test]
+    fn mapped_languages_resolve_in_the_in_house_lexer() {
+        use crate::md::highlight::{Lang, lang_for_tag};
+
+        for (language, expected) in [
+            ("rust", Some(Lang::Rust)),
+            ("tsx", Some(Lang::Script)),
+            ("swift", Some(Lang::Swift)),
+            ("json", Some(Lang::Json)),
+            ("toml", Some(Lang::Toml)),
+            ("yaml", Some(Lang::Yaml)),
+            ("make", Some(Lang::Shell)),
+            ("cpp", Some(Lang::C)),
+            // Not yet lexed; these fall back to unhighlighted monospace.
+            ("elixir", None),
+            ("text", None),
+        ] {
+            assert_eq!(lang_for_tag(language), expected, "{language}");
         }
     }
 
     #[test]
-    fn editor_highlight_themes_match_github_defaults() {
-        let authored: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/vendor/gpui-component/src/theme/default-theme.json"
-        )))
-        .unwrap();
-        let themes = authored["themes"].as_array().unwrap();
+    fn the_editor_lexer_colours_code_it_recognises() {
+        use crate::md::highlight::{Carry, Lang, TokenClass, tokenize_line};
 
-        let assert_theme =
-            |name: &str, editor_colors: &[(&str, &str)], syntax_colors: &[(&str, &str)]| {
-                let theme = themes.iter().find(|theme| theme["name"] == name).unwrap();
-                for (key, expected) in editor_colors {
-                    assert_eq!(theme["highlight"][key].as_str(), Some(*expected), "{key}");
-                }
-                for (capture, expected) in syntax_colors {
-                    assert_eq!(
-                        theme["highlight"]["syntax"][capture]["color"].as_str(),
-                        Some(*expected),
-                        "{name} {capture}"
-                    );
-                }
-            };
+        let line = r#"export function Card({ title }: { title: string }) {"#;
+        let spans = tokenize_line(Lang::Script, line, Carry::None)
+            .0
+            .into_iter()
+            .map(|token| (&line[token.range], token.class))
+            .collect::<Vec<_>>();
 
-        assert_theme(
-            "GitHub Light Default",
-            &[
-                ("editor.foreground", "#1f2328"),
-                ("editor.background", "#ffffff"),
-                ("editor.caret", "#0969da"),
-                ("editor.active_line.background", "#eaeef280"),
-                ("editor.line_number", "#8c959f"),
-                ("editor.active_line_number", "#1f2328"),
-            ],
-            &[
-                ("comment", "#6e7781"),
-                ("constant", "#0550ae"),
-                ("function", "#8250df"),
-                ("keyword", "#cf222e"),
-                ("string", "#0a3069"),
-                ("tag", "#116329"),
-                ("type", "#953800"),
-            ],
-        );
-        assert_theme(
-            "GitHub Dark Default",
-            &[
-                ("editor.foreground", "#e6edf3"),
-                ("editor.background", "#0d1117"),
-                ("editor.caret", "#2f81f7"),
-                ("editor.active_line.background", "#6e76811a"),
-                ("editor.line_number", "#6e7681"),
-                ("editor.active_line_number", "#e6edf3"),
-            ],
-            &[
-                ("comment", "#8b949e"),
-                ("constant", "#79c0ff"),
-                ("function", "#d2a8ff"),
-                ("keyword", "#ff7b72"),
-                ("string", "#a5d6ff"),
-                ("tag", "#7ee787"),
-                ("type", "#ffa657"),
-            ],
-        );
-
-        let light = gpui_component::highlighter::HighlightTheme::default_light();
-        assert_eq!(light.name, "GitHub Light Default");
-        assert!(light.style.editor_foreground.is_some());
-        assert!(light.style.editor_background.is_some());
-        assert!(light.style.editor_caret.is_some());
-
-        let dark = gpui_component::highlighter::HighlightTheme::default_dark();
-        assert_eq!(dark.name, "GitHub Dark Default");
-        assert!(dark.style.editor_foreground.is_some());
-        assert!(dark.style.editor_background.is_some());
-        assert!(dark.style.editor_caret.is_some());
-    }
-
-    #[test]
-    fn markdown_fences_and_tsx_use_their_embedded_grammars() {
-        use gpui_component::Colorize as _;
-
-        fn color_at(language: &str, source: &str, needle: &str) -> String {
-            let text = gpui_component::Rope::from(source);
-            let mut highlighter = gpui_component::highlighter::SyntaxHighlighter::new(language);
-            assert_eq!(highlighter.language(), language);
-            highlighter.update(None, &text);
-
-            let offset = source.find(needle).unwrap();
-            highlighter
-                .styles(
-                    &(0..source.len()),
-                    &gpui_component::highlighter::HighlightTheme::default_light(),
-                )
-                .into_iter()
-                .find(|(range, _)| range.contains(&offset))
-                .and_then(|(_, style)| style.color)
-                .unwrap()
-                .to_hex()
-        }
-
-        fn theme_color(capture: &str) -> String {
-            gpui_component::highlighter::HighlightTheme::default_light()
-                .style(capture)
-                .unwrap()
-                .color
-                .unwrap()
-                .to_hex()
-        }
-
-        let tsx = r#"export function Card({ title }: { title: string }) {
-  return <section className="card">{title}</section>;
-}
-"#;
-        assert_eq!(color_at("tsx", tsx, "return"), theme_color("keyword"));
-        assert_eq!(color_at("tsx", tsx, "className"), theme_color("attribute"));
-        assert_eq!(color_at("tsx", tsx, "\"card\""), theme_color("string"));
-
-        let markdown = r#"# Embedded languages
-
-```rs
-fn main() {
-    let status = "ready";
-}
-```
-
-```tsx
-export function Badge() {
-    return <span className="badge">ready</span>;
-}
-```
-"#;
-        assert_eq!(
-            color_at("markdown", markdown, "fn main"),
-            theme_color("keyword")
-        );
-        assert_eq!(
-            color_at("markdown", markdown, "\"ready\""),
-            theme_color("string")
-        );
-        assert_eq!(
-            color_at("markdown", markdown, "className"),
-            theme_color("attribute")
-        );
+        assert!(spans.contains(&("export", TokenClass::Keyword)));
+        assert!(spans.contains(&("function", TokenClass::Keyword)));
+        assert!(spans.contains(&("Card", TokenClass::Function)));
     }
 
     #[test]
@@ -1468,57 +1359,39 @@ impl Waku {
                 RightPanelSurface::Files,
                 RightPanelSurface::Diff,
             ];
+            let handle = self.menu_handle("add-right-panel-surface", cx);
             header = header.child(
                 div()
                     .flex_none()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
-                    .child(
-                        Button::new("add-right-panel-surface")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Plus)
-                            .dropdown_menu(move |mut menu, _, _| {
-                                menu = menu.min_w(px(168.0)).max_w(px(168.0));
-                                for surface in options.clone() {
-                                    let item_weak = weak.clone();
-                                    let item_surface = surface.clone();
-                                    let item_theme = theme;
-                                    let icon_path = surface.icon_path();
-                                    let label = surface.label().to_owned();
-                                    let checked =
+                    .child(dropdown_menu(
+                        icon_button("add-right-panel-surface", "icons/plus.svg", theme),
+                        "add-right-panel-surface-menu",
+                        &handle,
+                        MenuAlign::BelowRight,
+                        move |_| {
+                            options
+                                .clone()
+                                .into_iter()
+                                .map(|surface| {
+                                    let weak = weak.clone();
+                                    let open_surface = surface.clone();
+                                    let already_open =
                                         reusable_surface_index(&existing_surfaces, &surface)
                                             .is_some();
-                                    menu =
-                                        menu.item(
-                                            PopupMenuItem::element(move |_, _| {
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(8.0))
-                                                    .child(icon(
-                                                        icon_path,
-                                                        13.0,
-                                                        item_theme.text_tertiary,
-                                                    ))
-                                                    .child(label.clone())
-                                            })
-                                            .checked(checked)
-                                            .on_click(move |_, _, cx| {
-                                                let _ = item_weak.update(cx, |this, cx| {
-                                                    this.open_right_panel_surface(
-                                                        item_surface.clone(),
-                                                        cx,
-                                                    );
-                                                });
-                                            }),
-                                        );
-                                }
-                                menu
-                            })
-                            .anchor(Anchor::TopLeft),
-                    ),
+                                    MenuItem::new(surface.label(), move |_, cx| {
+                                        let _ = weak.update(cx, |this, cx| {
+                                            this.open_right_panel_surface(open_surface.clone(), cx);
+                                        });
+                                    })
+                                    .icon(surface.icon_path())
+                                    .selected(already_open)
+                                })
+                                .collect()
+                        },
+                    )),
             );
         }
 
@@ -1812,7 +1685,24 @@ impl Waku {
                             .child(project_name),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(list).overflow_y_scrollbar())
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(
+                        div()
+                            .id("right-panel-files-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.right_panel_files_scroll_handle)
+                            .child(list),
+                    )
+                    .child(scrollbar::vertical(
+                        &self.right_panel_files_scroll_handle,
+                        &self.right_panel_files_scrollbar,
+                    )),
+            )
     }
 
     fn render_right_panel_file(
@@ -1824,7 +1714,7 @@ impl Waku {
     ) -> Div {
         let theme = Theme::current(cx);
         let file_tree_width = fitted_file_tree_width(panel_width, self.right_panel_file_tree_width);
-        let (editor_state, writable, _) =
+        let (editor_state, _writable, _) =
             self.ensure_right_panel_file_editor(&relative_path, window, cx);
 
         let editor = div()
@@ -1858,24 +1748,7 @@ impl Waku {
                             .child(relative_path.clone()),
                     ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .font_family("JetBrains Mono")
-                    .text_size(px(10.5))
-                    .child(
-                        Input::new(&editor_state)
-                            .h_full()
-                            .appearance(false)
-                            .bordered(false)
-                            .focus_bordered(false)
-                            .disabled(!writable)
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .line_height(px(16.0)),
-                    ),
-            );
+            .child(self.render_file_editor_body(&relative_path, &editor_state, cx));
 
         div()
             .flex_1()
@@ -1908,7 +1781,7 @@ impl Waku {
         relative_path: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Entity<InputState>, bool, bool) {
+    ) -> (Entity<ComposerInput>, bool, bool) {
         if let Some(editor) = self.right_panel_file_editors.get(relative_path) {
             return (editor.state.clone(), editor.writable, editor.dirty);
         }
@@ -1919,13 +1792,11 @@ impl Waku {
             .unwrap_or_else(|| ("No project is open.".into(), false));
         let language = file_highlighter_language(relative_path);
         let state = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor(language)
-                .soft_wrap(true)
+            ComposerInput::new(window, cx)
+                .code_editor(Some(language))
+                .read_only(!writable)
         });
-        state.update(cx, |state, cx| {
-            state.set_value(content.clone(), window, cx);
-        });
+        state.update(cx, |state, cx| state.set_content(content.clone(), cx));
 
         self.right_panel_file_editors.insert(
             relative_path.to_owned(),
@@ -1937,26 +1808,31 @@ impl Waku {
             },
         );
 
+        // The field notifies on every edit, which is all dirty tracking needs.
         let subscribed_path = relative_path.to_owned();
+        cx.observe(&state, move |this: &mut Self, state, cx| {
+            let value = state.read(cx).content().to_owned();
+            if let Some(editor) = this
+                .right_panel_file_editors
+                .get_mut(subscribed_path.as_str())
+            {
+                let dirty = editor.writable && value != editor.disk_content;
+                if editor.dirty != dirty {
+                    editor.dirty = dirty;
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+
+        let focused_path = relative_path.to_owned();
         cx.subscribe_in(
             &state,
             window,
-            move |this: &mut Self, state, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => {
-                    let value = state.read(cx).value();
-                    if let Some(editor) = this
-                        .right_panel_file_editors
-                        .get_mut(subscribed_path.as_str())
-                    {
-                        editor.dirty =
-                            editor.writable && value.as_str() != editor.disk_content.as_str();
-                        cx.notify();
-                    }
+            move |this: &mut Self, _, event: &ComposerEvent, window, cx| {
+                if matches!(event, ComposerEvent::Focus) {
+                    this.reload_right_panel_file_if_clean(focused_path.as_str(), window, cx);
                 }
-                InputEvent::Focus => {
-                    this.reload_right_panel_file_if_clean(subscribed_path.as_str(), window, cx);
-                }
-                InputEvent::PressEnter { .. } | InputEvent::Blur => {}
             },
         )
         .detach();
@@ -1964,10 +1840,126 @@ impl Waku {
         (state, writable, false)
     }
 
+    /// The editor body: a line-number gutter beside soft-wrapped text.
+    ///
+    /// The gutter is *painted*, not laid out — one canvas that shapes only the
+    /// numbers currently on screen, the way Zed's editor element does. A div per
+    /// line would put one layout node per line of the file in every frame, which
+    /// is what made large files crawl.
+    ///
+    /// Row heights come from the text's measured layout rather than a nominal
+    /// line height, so a soft-wrapped line still gets exactly one number and the
+    /// two columns cannot drift apart down a long file.
+    fn render_file_editor_body(
+        &self,
+        relative_path: &str,
+        editor_state: &Entity<ComposerInput>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        const LINE_HEIGHT: f32 = 16.0;
+        const TEXT_SIZE: f32 = 10.5;
+        const GUTTER_PAD_RIGHT: f32 = 8.0;
+        const CONTENT_PAD_TOP: f32 = 6.0;
+
+        let theme = Theme::current(cx);
+        let field = editor_state.read(cx);
+        let line_count = field.content().split('\n').count().max(1);
+        let heights = field.wrapped_line_heights();
+        let gutter_width = 20.0 + 6.0 * (line_count.to_string().len() as f32);
+        let content_height = if heights.is_empty() {
+            px(LINE_HEIGHT) * line_count as f32
+        } else {
+            heights.iter().fold(Pixels::ZERO, |total, h| total + *h)
+        };
+
+        let viewport = self.right_panel_editor_scroll_handle.clone();
+        let number_color = theme.text_ghost;
+        let gutter = canvas(
+            |_, _, _| (),
+            move |bounds: gpui::Bounds<Pixels>, _, window: &mut Window, cx: &mut App| {
+                let visible = viewport.bounds();
+                let mut y = bounds.origin.y;
+                for number in 1..=line_count {
+                    let height = heights
+                        .get(number - 1)
+                        .copied()
+                        .unwrap_or_else(|| px(LINE_HEIGHT));
+                    // Everything below the viewport is unreachable from here on.
+                    if y > visible.bottom() {
+                        break;
+                    }
+                    if y + height >= visible.top() {
+                        let text = SharedString::from(number.to_string());
+                        let run = gpui::TextRun {
+                            len: text.len(),
+                            font: gpui::font(md::render::MONO_FAMILY),
+                            color: number_color,
+                            ..Default::default()
+                        };
+                        let line =
+                            window
+                                .text_system()
+                                .shape_line(text, px(TEXT_SIZE), &[run], None);
+                        let origin = point(bounds.right() - line.width, y);
+                        let _ = line.paint(
+                            origin,
+                            px(LINE_HEIGHT),
+                            gpui::TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        );
+                    }
+                    y += height;
+                }
+            },
+        )
+        .flex_none()
+        .w(px(gutter_width - GUTTER_PAD_RIGHT))
+        .h(content_height);
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .bg(theme.surface)
+            .font_family(md::render::MONO_FAMILY)
+            .text_size(px(TEXT_SIZE))
+            .line_height(px(LINE_HEIGHT))
+            .child(
+                div()
+                    .id(SharedString::from(format!("file-editor-{relative_path}")))
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.right_panel_editor_scroll_handle)
+                    .child(
+                        div()
+                            .w_full()
+                            .pt(px(CONTENT_PAD_TOP))
+                            .pb(px(CONTENT_PAD_TOP))
+                            .flex()
+                            .items_start()
+                            .child(gutter)
+                            .child(div().w(px(GUTTER_PAD_RIGHT)).flex_none())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .pr(px(10.0))
+                                    .child(editor_state.clone()),
+                            ),
+                    ),
+            )
+            .child(scrollbar::vertical(
+                &self.right_panel_editor_scroll_handle,
+                &self.right_panel_editor_scrollbar,
+            ))
+    }
+
     fn reload_right_panel_file_if_clean(
         &mut self,
         relative_path: &str,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self
@@ -1993,9 +1985,7 @@ impl Waku {
         editor.writable = writable;
         editor.dirty = false;
         let state = editor.state.clone();
-        state.update(cx, |state, cx| {
-            state.set_value(content, window, cx);
-        });
+        state.update(cx, |state, cx| state.set_content(content, cx));
         cx.notify();
     }
 
@@ -2043,7 +2033,7 @@ impl Waku {
             return;
         }
 
-        let content = editor.state.read(cx).value().to_string();
+        let content = editor.state.read(cx).content().to_owned();
         match std::fs::write(project_path.join(&relative_path), content.as_bytes()) {
             Ok(()) => {
                 if let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) {
@@ -2161,7 +2151,24 @@ impl Waku {
                             .child(format!("-{deletions}")),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(rows).overflow_y_scrollbar())
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(
+                        div()
+                            .id("right-panel-diff-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.right_panel_diff_scroll_handle)
+                            .child(rows),
+                    )
+                    .child(scrollbar::vertical(
+                        &self.right_panel_diff_scroll_handle,
+                        &self.right_panel_diff_scrollbar,
+                    )),
+            )
     }
 
     fn render_right_panel_empty_message(

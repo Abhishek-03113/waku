@@ -461,6 +461,7 @@ impl Waku {
             &input,
             |this: &mut Self, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::Submit(_) => this.submit_message_edit(cx),
+                ComposerEvent::Focus => {}
             },
         )
         .detach();

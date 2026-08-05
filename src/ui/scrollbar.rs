@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, BorderStyle, Bounds, IntoElement, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Styled, Window, canvas, point, px, quad, size,
+    MouseUpEvent, Pixels, Point, ScrollHandle, Styled, Window, canvas, point, px, quad, size,
 };
 
 use crate::theme::Theme;
@@ -135,31 +135,77 @@ fn offset_for_thumb_top(track_top: Pixels, thumb_top: Pixels, geometry: &Geometr
     geometry.max_offset * progress
 }
 
-/// GPUI stores a list's scroll offset as a non-positive y; expose it as a
-/// downward distance so the arithmetic above reads the obvious way.
-fn scrolled_distance(list: &ListState) -> Pixels {
-    -list.scroll_px_offset_for_scrollbar().y
+/// The two things a scrollable surface has to expose. GPUI stores both kinds of
+/// offset as a non-positive y; implementations report a downward distance so the
+/// geometry above reads the obvious way.
+pub trait Scrollable {
+    /// Height of the visible area.
+    fn viewport_height(&self) -> Pixels;
+    /// Content height beyond the viewport.
+    fn max_offset(&self) -> Pixels;
+    /// How far the content is currently scrolled down.
+    fn scrolled(&self) -> Pixels;
+    fn scroll_to(&self, offset: Pixels);
 }
 
-fn scroll_to(list: &ListState, offset: Pixels, max_offset: Pixels) {
-    let clamped = offset.clamp(Pixels::ZERO, max_offset);
-    list.set_offset_from_scrollbar(point(Pixels::ZERO, -clamped));
+impl Scrollable for ListState {
+    fn viewport_height(&self) -> Pixels {
+        self.viewport_bounds().size.height
+    }
+
+    fn max_offset(&self) -> Pixels {
+        self.max_offset_for_scrollbar().y
+    }
+
+    fn scrolled(&self) -> Pixels {
+        -self.scroll_px_offset_for_scrollbar().y
+    }
+
+    fn scroll_to(&self, offset: Pixels) {
+        self.set_offset_from_scrollbar(point(Pixels::ZERO, -offset));
+    }
+}
+
+impl Scrollable for ScrollHandle {
+    fn viewport_height(&self) -> Pixels {
+        self.bounds().size.height
+    }
+
+    fn max_offset(&self) -> Pixels {
+        self.max_offset().y
+    }
+
+    fn scrolled(&self) -> Pixels {
+        -self.offset().y
+    }
+
+    fn scroll_to(&self, offset: Pixels) {
+        let x = self.offset().x;
+        self.set_offset(Point::new(x, -offset));
+    }
+}
+
+fn scroll_to(surface: &impl Scrollable, offset: Pixels, max_offset: Pixels) {
+    surface.scroll_to(offset.clamp(Pixels::ZERO, max_offset));
 }
 
 /// An overlay vertical scrollbar pinned to the right edge of its parent.
 ///
 /// The parent must be `relative()`; this element positions itself absolutely
 /// and never participates in layout, so adding it cannot change content size.
-pub fn vertical(list: &ListState, state: &Rc<ScrollbarState>) -> impl IntoElement {
-    let list = list.clone();
+pub fn vertical<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement
+where
+    S: Scrollable + Clone + 'static,
+{
+    let list = surface.clone();
     let state = state.clone();
     canvas(
         |_, _, _| (),
         move |track: Bounds<Pixels>, _, window: &mut Window, cx: &mut App| {
             let theme = Theme::current(cx);
-            let viewport_height = list.viewport_bounds().size.height;
-            let max_offset = list.max_offset_for_scrollbar().y;
-            let offset = scrolled_distance(&list);
+            let viewport_height = list.viewport_height();
+            let max_offset = Scrollable::max_offset(&list);
+            let offset = list.scrolled();
             let now = Instant::now();
             state.observe(offset, now);
 

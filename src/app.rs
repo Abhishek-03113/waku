@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local, Utc};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity,
-    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
-    StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, img, linear_color_stop,
-    linear_gradient, list, point, prelude::*, pulsating_between, px, rgb,
+    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity, FocusHandle,
+    Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit,
+    PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful, StyleRefinement,
+    WeakEntity, Window, canvas, div, ease_out_quint, fill, img, linear_color_stop, linear_gradient,
+    list, point, prelude::*, pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
@@ -23,7 +23,7 @@ use crate::computer_use::{
     ComputerPermissions, ComputerUsePhase, ComputerUseState, PendingComputerApproval,
 };
 use crate::driver::{self, DriverHandle, DriverStartOptions};
-use crate::input::{ComposerEvent, ComposerInput, preserve_composer_focus_for_context_menu};
+use crate::input::{ComposerEvent, ComposerInput};
 use crate::md;
 use crate::model::{
     ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, FavoriteModel,
@@ -31,18 +31,15 @@ use crate::model::{
     ProviderProbe, ProviderResumeCursor, ReasoningBlock, RuntimeMode, SessionStatus,
     TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
-use gpui_component::highlighter::Language;
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
-use gpui_component::popover::Popover;
-use gpui_component::scroll::ScrollableElement;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::md::render::{
     Ctx as MarkdownCtx, MarkdownView, Metrics as MarkdownMetrics, Palette as MarkdownPalette,
     TranscriptSelection,
 };
-use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
+use crate::ui::menu::{
+    ContextMenuHandle, MenuAlign, MenuItem, context_menu, dropdown_menu, popover,
+};
 use crate::ui::scrollbar::{self, ScrollbarState};
 use crate::ui::tooltip::Tooltip;
 
@@ -52,7 +49,7 @@ use crate::persistence::{
 use crate::terminal::TerminalView;
 use crate::theme::{Theme, ThemePreference};
 use crate::ui::{
-    MenuChip, ProjectNameSelector, activity_icon, activity_noun, icon, provider_color,
+    MenuChip, ProjectNameSelector, activity_icon, activity_noun, icon, icon_button, provider_color,
     provider_icon, status_color, status_label,
 };
 use crate::{
@@ -245,7 +242,7 @@ struct RightPanelDiffFile {
 }
 
 struct RightPanelFileEditor {
-    state: Entity<InputState>,
+    state: Entity<ComposerInput>,
     disk_content: String,
     writable: bool,
     dirty: bool,
@@ -287,34 +284,13 @@ impl RightPanelSessionState {
     }
 }
 
-fn traits_menu_label(theme: Theme, label: &'static str) -> PopupMenuItem {
-    PopupMenuItem::element(move |_, _| {
+/// One choice in the model-traits menu: a label plus a badge marking the
+/// provider's own default, so the current selection and the default read apart.
+fn traits_choice(theme: Theme, label: String, is_default: bool) -> MenuItem {
+    MenuItem::custom(move |_, _| {
         div()
-            .w_full()
-            .h(px(20.0))
-            .px(px(4.0))
-            .flex()
-            .items_center()
-            .text_size(px(10.5))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.text_tertiary)
-            .child(label)
-    })
-    .disabled(true)
-}
-
-fn traits_menu_choice(
-    theme: Theme,
-    label: String,
-    is_default: bool,
-    is_selected: bool,
-) -> PopupMenuItem {
-    PopupMenuItem::element(move |_, _| {
-        div()
-            .w_full()
-            .h(px(26.0))
-            .px(px(6.0))
-            .rounded(px(5.0))
+            .w(px(190.0))
+            .py(px(2.0))
             .flex()
             .items_center()
             .gap(px(10.0))
@@ -323,17 +299,7 @@ fn traits_menu_choice(
                     .min_w_0()
                     .flex_1()
                     .truncate()
-                    .text_size(px(11.5))
-                    .font_weight(if is_selected {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(if is_selected {
-                        theme.text
-                    } else {
-                        theme.text_secondary
-                    })
+                    .text_color(theme.text_secondary)
                     .child(label.clone()),
             )
             .when(is_default, |element| {
@@ -341,6 +307,7 @@ fn traits_menu_choice(
                     div()
                         .h(px(16.0))
                         .px(px(5.0))
+                        .flex_none()
                         .rounded(px(4.0))
                         .border_1()
                         .border_color(theme.border_strong)
@@ -353,8 +320,8 @@ fn traits_menu_choice(
                         .child("Default"),
                 )
             })
+            .into_any_element()
     })
-    .selected(is_selected)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -438,8 +405,8 @@ pub struct Waku {
     state: PersistedState,
     store: StateStore,
     composer: Entity<ComposerInput>,
-    model_search: Entity<InputState>,
-    settings_search: Entity<InputState>,
+    model_search: Entity<ComposerInput>,
+    settings_search: Entity<ComposerInput>,
     settings_focus: FocusHandle,
     probes: Vec<ProviderProbe>,
     provider_probe_tx: Sender<ProviderProbe>,
@@ -474,6 +441,12 @@ pub struct Waku {
     right_panel_surfaces: Vec<RightPanelSurface>,
     right_panel_active_surface: Option<usize>,
     right_panel_tabs_scroll_handle: ScrollHandle,
+    right_panel_files_scroll_handle: ScrollHandle,
+    right_panel_files_scrollbar: Rc<ScrollbarState>,
+    right_panel_diff_scroll_handle: ScrollHandle,
+    right_panel_diff_scrollbar: Rc<ScrollbarState>,
+    right_panel_editor_scroll_handle: ScrollHandle,
+    right_panel_editor_scrollbar: Rc<ScrollbarState>,
     right_panel_pending_tab_reveal: Option<usize>,
     right_panel_pending_terminal_focus: Option<Uuid>,
     right_panel_expanded_paths: HashSet<PathBuf>,
@@ -498,6 +471,7 @@ pub struct Waku {
     /// Virtualized list backing the sidebar session history, so only visible
     /// rows are built and laid out regardless of how many sessions exist.
     sidebar_list_state: ListState,
+    sidebar_scrollbar: Rc<ScrollbarState>,
     /// Snapshot of the sidebar rows the list state currently corresponds to.
     sidebar_row_cache: RefCell<Vec<SidebarRow>>,
     transcript_row_kinds: RefCell<Vec<TranscriptRowKind>>,
@@ -512,8 +486,9 @@ pub struct Waku {
     /// Transcript-wide text selection, spanning messages and tool output.
     transcript_selection: TranscriptSelection,
     transcript_scrollbar: Rc<ScrollbarState>,
-    /// One context-menu site per message row.
-    message_menus: RefCell<HashMap<Uuid, ContextMenuHandle>>,
+    /// Every menu site in the app, keyed by a stable id. Handles are created on
+    /// first use and live as long as the window.
+    menus: RefCell<HashMap<SharedString, ContextMenuHandle>>,
     navigation_rail: Entity<ConversationNavigationRail>,
     navigation_rail_active_scale_enabled: Rc<Cell<bool>>,
     navigation_rail_reset_generation: Cell<u64>,
@@ -544,16 +519,10 @@ use transcript_view::ConversationNavigationRail;
 impl Waku {
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
-        let model_search = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Search models...")
-                .clean_on_escape()
-        });
-        let settings_search = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Search Settings")
-                .clean_on_escape()
-        });
+        let model_search =
+            cx.new(|cx| ComposerInput::new(window, cx).placeholder("Search models..."));
+        let settings_search =
+            cx.new(|cx| ComposerInput::new(window, cx).placeholder("Search Settings"));
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
@@ -723,26 +692,17 @@ impl Waku {
                 &composer,
                 |this: &mut Self, _, event: &ComposerEvent, cx| match event {
                     ComposerEvent::Submit(prompt) => this.submit_prompt(prompt.clone(), cx),
+                    ComposerEvent::Focus => {}
                 },
             )
             .detach();
 
             cx.observe(&composer, |_, _, cx| cx.notify()).detach();
-            cx.subscribe(&model_search, |_: &mut Self, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            })
-            .detach();
-            cx.subscribe(
-                &settings_search,
-                |_: &mut Self, _, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        cx.notify();
-                    }
-                },
-            )
-            .detach();
+            // A field notifies its observers on every edit, which is all the
+            // searches need to re-filter.
+            cx.observe(&model_search, |_, _, cx| cx.notify()).detach();
+            cx.observe(&settings_search, |_, _, cx| cx.notify())
+                .detach();
 
             cx.spawn(async move |this, cx| {
                 loop {
@@ -801,6 +761,12 @@ impl Waku {
                 right_panel_surfaces: Vec::new(),
                 right_panel_active_surface: None,
                 right_panel_tabs_scroll_handle: ScrollHandle::new(),
+                right_panel_files_scroll_handle: ScrollHandle::new(),
+                right_panel_files_scrollbar: ScrollbarState::new(),
+                right_panel_diff_scroll_handle: ScrollHandle::new(),
+                right_panel_diff_scrollbar: ScrollbarState::new(),
+                right_panel_editor_scroll_handle: ScrollHandle::new(),
+                right_panel_editor_scrollbar: ScrollbarState::new(),
                 right_panel_pending_tab_reveal: None,
                 right_panel_pending_terminal_focus: None,
                 right_panel_expanded_paths: HashSet::new(),
@@ -821,6 +787,7 @@ impl Waku {
                 transcript_rows,
                 anchored_transcript_rows,
                 sidebar_list_state,
+                sidebar_scrollbar: ScrollbarState::new(),
                 sidebar_row_cache: RefCell::new(Vec::new()),
                 transcript_row_kinds: RefCell::new(Vec::new()),
                 transcript_anchor: Cell::new(None),
@@ -831,7 +798,7 @@ impl Waku {
                 message_markdown: RefCell::new(HashMap::new()),
                 transcript_selection: TranscriptSelection::default(),
                 transcript_scrollbar: ScrollbarState::new(),
-                message_menus: RefCell::new(HashMap::new()),
+                menus: RefCell::new(HashMap::new()),
                 navigation_rail: navigation_rail.clone(),
                 navigation_rail_active_scale_enabled,
                 navigation_rail_reset_generation: Cell::new(0),

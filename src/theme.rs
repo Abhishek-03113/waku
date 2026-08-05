@@ -189,73 +189,32 @@ struct ActiveWakuTheme(Theme);
 
 impl Global for ActiveWakuTheme {}
 
-fn apply_component_theme(theme: Theme, window: Option<&mut Window>, cx: &mut App) {
-    use gpui_component::theme::{Theme as ComponentTheme, ThemeMode};
-
-    ComponentTheme::change(
-        if theme.is_dark {
-            ThemeMode::Dark
-        } else {
-            ThemeMode::Light
-        },
-        window,
-        cx,
-    );
-    let component = ComponentTheme::global_mut(cx);
-    component.background = theme.surface;
-    component.foreground = theme.text;
-    component.popover = theme.raised;
-    component.popover_foreground = theme.text;
-    component.muted = theme.overlay;
-    component.muted_foreground = theme.text_tertiary;
-    component.accent = theme.overlay_strong;
-    component.accent_foreground = theme.text;
-    component.border = theme.border_strong;
-    component.input = theme.border_strong;
-    component.primary = theme.inverse;
-    component.primary_foreground = theme.on_inverse;
-    component.secondary = theme.raised;
-    component.secondary_foreground = theme.text_secondary;
-    component.secondary_hover = theme.overlay;
-    component.secondary_active = theme.overlay_strong;
-    component.ring = theme.accent;
-    component.selection = theme.selection;
-    component.sidebar = theme.sidebar;
-    component.sidebar_foreground = theme.text_secondary;
-    component.sidebar_accent = theme.overlay;
-    component.sidebar_accent_foreground = theme.text;
-    component.sidebar_border = theme.border;
-    component.title_bar = theme.surface;
-    component.title_bar_border = theme.border;
-    component.mono_font_family = "JetBrains Mono".into();
-    std::sync::Arc::make_mut(&mut component.highlight_theme)
-        .style
-        .editor_background = Some(theme.surface);
+/// Publish the resolved palette. [`Theme::current`] reads it back from the
+/// global, which is how every view gets its colors.
+fn set_active_theme(theme: Theme, cx: &mut App) {
     cx.set_global(ActiveWakuTheme(theme));
 }
 
-/// Bridges Waku's palette into `gpui-component`'s global theme so its
-/// components (popup menus, etc.) render in the same graphite language.
-pub fn init_component_theme(cx: &mut App) {
+/// Resolve and publish the startup palette, before any window exists.
+pub fn init(cx: &mut App) {
     let system_appearance = cx.window_appearance();
     let theme = if ThemePreference::System.resolves_to_dark(system_appearance) {
         Theme::dark()
     } else {
         Theme::light()
     };
-    apply_component_theme(theme, None, cx);
+    set_active_theme(theme, cx);
 }
 
 pub fn apply_theme_preference(preference: ThemePreference, window: &mut Window, cx: &mut App) {
     crate::platform::set_window_appearance(window, preference.native_override());
     let is_dark = preference.resolves_to_dark(cx.window_appearance());
-    apply_component_theme(
+    set_active_theme(
         if is_dark {
             Theme::dark()
         } else {
             Theme::light()
         },
-        Some(window),
         cx,
     );
     crate::platform::configure_sidebar_material(window, is_dark);

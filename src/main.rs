@@ -23,7 +23,7 @@ mod theme;
 mod ui;
 
 use gpui::{
-    App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
+    App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, point, px, size,
 };
 
@@ -71,11 +71,10 @@ fn main() {
         .with_assets(crate::assets::Assets)
         .with_main_window_reopen()
         .run(|cx: &mut App| {
-            gpui_component::init(cx);
             crate::assets::register_fonts(cx).expect("failed to register bundled fonts");
             crate::input::init(cx);
             crate::ui::menu::init(cx);
-            crate::theme::init_component_theme(cx);
+            crate::theme::init(cx);
             cx.set_reduce_motion(crate::platform::reduce_motion_enabled());
 
             cx.bind_keys([
@@ -150,10 +149,7 @@ fn main() {
                         let waku = Waku::new(window, cx);
                         let composer_focus = waku.read(cx).composer_focus(cx);
                         window.focus(&composer_focus, cx);
-                        cx.new(|cx| {
-                            gpui_component::Root::new(waku, window, cx)
-                                .background(gpui::transparent_black())
-                        })
+                        waku
                     },
                 )
                 .expect("failed to open Waku window");

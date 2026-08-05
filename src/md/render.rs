@@ -146,8 +146,9 @@ impl Palette {
     }
 
     /// Token colors. Deliberately restrained: three hues plus muted comments,
-    /// so a code block still reads as part of a graphite transcript.
-    fn token(&self, class: TokenClass) -> Hsla {
+    /// so a code block still reads as part of a graphite transcript. Shared with
+    /// the code editor, so both surfaces colour code identically.
+    pub fn token(&self, class: TokenClass) -> Hsla {
         let dark = self.is_dark;
         match class {
             TokenClass::Keyword => hue(dark, 0xC98BC0, 0x9A4B92),
