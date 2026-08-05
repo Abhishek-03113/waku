@@ -140,13 +140,18 @@ impl Waku {
         };
         let transcript_rows = self.active_transcript_rows();
         let last_row = transcript_rows.item_count().checked_sub(1);
-        let anchored_tail_height = last_row
-            .and_then(|last_row| {
-                let anchor = transcript_rows.bounds_for_item(anchor_row)?;
-                let last = transcript_rows.bounds_for_item(last_row)?;
-                Some((last.bottom() - anchor.top()).max(Pixels::ZERO))
-            })
-            .unwrap_or_default();
+        let anchored_tail_height = last_row.and_then(|last_row| {
+            let anchor = transcript_rows.bounds_for_item(anchor_row)?;
+            let last = transcript_rows.bounds_for_item(last_row)?;
+            Some((last.bottom() - anchor.top()).max(Pixels::ZERO))
+        });
+        // Unmeasured rows report no bounds. Treating that as a zero-height tail
+        // asks for a full viewport of end space, which pushes the transcript off
+        // screen; leave the padding alone until the rows have been measured.
+        let Some(anchored_tail_height) = anchored_tail_height else {
+            self.transcript_anchor_end_space.set(Pixels::ZERO);
+            return Pixels::ZERO;
+        };
         let end_space = transcript_anchor_end_space(viewport_height, anchored_tail_height);
         self.transcript_anchor_end_space.set(end_space);
         if maintain_transcript_anchor(
@@ -158,6 +163,24 @@ impl Waku {
             self.transcript_is_scrolled.set(true);
         }
         end_space
+    }
+
+    /// Invalidate the measurement of rows whose *content* changed, without
+    /// touching the row structure.
+    ///
+    /// `splice` would also work, but it re-arms GPUI's whole-list measuring
+    /// behaviour, so every disclosure toggle and every streamed batch would
+    /// re-measure the entire transcript. `remeasure_items` invalidates just the
+    /// range — and restores the reader's scroll position across the height
+    /// change on its own. This is what Zed's own agent chat uses.
+    pub(super) fn remeasure_transcript_rows(&self, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+        self.transcript_rows.remeasure_items(range.clone());
+        if self.transcript_anchor.get().is_some() {
+            self.anchored_transcript_rows.remeasure_items(range);
+        }
     }
 
     /// Re-render rows whose content changed in place so GPUI re-measures them.
@@ -183,9 +206,10 @@ impl Waku {
             return false;
         }
 
-        // Reflow every row at the new wrap width.
+        // Reflow every row at the new wrap width. The row set is unchanged, so
+        // this is a re-measure, not a splice.
         let count = self.active_transcript_rows().item_count();
-        self.splice_transcript_rows(Some((0..count, count)));
+        self.remeasure_transcript_rows(0..count);
         true
     }
 
@@ -217,31 +241,27 @@ impl Waku {
         self.sync_transcript_rows();
         let count = self.active_transcript_rows().item_count();
         let from = count.saturating_sub(STREAM_REMEASURE_TAIL_ROWS);
-        if from < count {
-            self.splice_transcript_rows(Some((from..count, count - from)));
-        }
+        self.remeasure_transcript_rows(from..count);
     }
 
     pub(super) fn remeasure_transcript_block(&self, block_index: usize) {
-        self.sync_transcript_rows();
-        let splice = self
-            .transcript_row_kinds
-            .borrow()
-            .iter()
-            .position(|kind| *kind == TranscriptRowKind::TurnBlock(block_index))
-            .map(|row_index| (row_index..row_index + 1, 1));
-        self.splice_transcript_rows(splice);
+        self.remeasure_transcript_row(TranscriptRowKind::TurnBlock(block_index));
     }
 
     pub(super) fn remeasure_transcript_message(&self, message_index: usize) {
+        self.remeasure_transcript_row(TranscriptRowKind::Message(message_index));
+    }
+
+    fn remeasure_transcript_row(&self, target: TranscriptRowKind) {
         self.sync_transcript_rows();
-        let splice = self
+        let row = self
             .transcript_row_kinds
             .borrow()
             .iter()
-            .position(|kind| *kind == TranscriptRowKind::Message(message_index))
-            .map(|row_index| (row_index..row_index + 1, 1));
-        self.splice_transcript_rows(splice);
+            .position(|kind| *kind == target);
+        if let Some(row) = row {
+            self.remeasure_transcript_rows(row..row + 1);
+        }
     }
 }
 
@@ -475,15 +495,18 @@ pub(super) fn transcript_row_splice(
     (prefix != old_end || new_count != 0).then_some((prefix..old_end, new_count))
 }
 
-/// Leading space that keeps a short bottom-aligned transcript pinned to the
-/// bottom of its viewport, or `None` when the content has not been measured
-/// yet and no scroll should be forced.
+/// Leading space above a short, bottom-aligned transcript, or `None` when the
+/// content height is unknown.
+///
+/// `None` matters more than the arithmetic: rows that have not been measured
+/// yet report no bounds, and treating that as a zero-height document asks for a
+/// leading space of the entire viewport — which pushes every row off screen and
+/// leaves the transcript blank until the reader scrolls it back.
 pub(super) fn disclosure_leading_space(
     viewport_height: Pixels,
-    measured_content_height: Option<Pixels>,
+    content_height: Option<Pixels>,
 ) -> Option<Pixels> {
-    let measured = measured_content_height?;
-    Some((viewport_height - measured).max(Pixels::ZERO))
+    content_height.map(|height| (viewport_height - height).max(Pixels::ZERO))
 }
 
 pub(super) fn transcript_anchor_end_space(

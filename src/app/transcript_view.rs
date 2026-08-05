@@ -555,22 +555,11 @@ impl Waku {
         cx: &mut Context<Self>,
         apply: impl FnOnce(&mut Self),
     ) {
-        // Read the reader's position before pinning: pinning rewrites the
-        // scroll offset, so capturing after it restores the rewritten value.
-        let anchor = self.active_transcript_rows().logical_scroll_top();
         self.pin_transcript_for_disclosure();
         apply(self);
+        // `remeasure_transcript_block` preserves the reader's scroll position
+        // across the row's height change on its own.
         self.remeasure_transcript_block(block_index);
-
-        let rows = self.active_transcript_rows();
-        let count = rows.item_count();
-        if count > 0 {
-            rows.scroll_to(ListOffset {
-                item_ix: anchor.item_ix.min(count - 1),
-                offset_in_item: anchor.offset_in_item,
-            });
-            self.transcript_is_scrolled.set(true);
-        }
         cx.notify();
     }
 
@@ -773,13 +762,18 @@ impl Waku {
         let palette = MarkdownPalette::from_theme(&theme);
         let composer = self.composer.clone();
         let waku = cx.entity().downgrade();
-        let row_count = self.transcript_row_count();
-        let kind = self
-            .transcript_row_kinds
-            .borrow()
-            .get(index)
-            .copied()
-            .unwrap_or(TranscriptRowKind::Message(index));
+        // Both from the cache `sync_transcript_rows` refreshed at the top of
+        // this frame. Recomputing the row list here would rebuild the whole
+        // transcript's row kinds — several allocations proportional to the
+        // session — once for every visible row, every frame.
+        let (row_count, kind) = {
+            let kinds = self.transcript_row_kinds.borrow();
+            let kind = kinds
+                .get(index)
+                .copied()
+                .unwrap_or(TranscriptRowKind::Message(index));
+            (kinds.len(), kind)
+        };
         let starts_followup_turn = match kind {
             TranscriptRowKind::Message(message_index) => {
                 self.selected_session().is_some_and(|session| {

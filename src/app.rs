@@ -636,9 +636,12 @@ impl Waku {
                     .find(|project| project.id == project_id)
             })
             .and_then(|project| git_branch(&project.path));
-        let transcript_rows = ListState::new(0, ListAlignment::Bottom, px(512.0)).measure_all();
-        let anchored_transcript_rows =
-            ListState::new(0, ListAlignment::Top, px(512.0)).measure_all();
+        // Measure visible rows only, with a generous overdraw — the same shape
+        // Zed's own agent chat uses. `measure_all` lays out every row in the
+        // session on the first frame and again after any structural splice,
+        // which a long transcript cannot afford.
+        let transcript_rows = ListState::new(0, ListAlignment::Bottom, px(2048.0));
+        let anchored_transcript_rows = ListState::new(0, ListAlignment::Top, px(2048.0));
         let sidebar_list_state = ListState::new(0, ListAlignment::Top, px(256.0));
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
