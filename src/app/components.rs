@@ -145,9 +145,11 @@ fn render_message_footer(
             14.0,
             footer_color,
         ))
-        .tooltip(move |window, cx| {
-            Tooltip::new(if copied { "Copied" } else { "Copy message" }).build(window, cx)
-        })
+        .tooltip(Tooltip::text(if copied {
+            "Copied"
+        } else {
+            "Copy message"
+        }))
         .on_click(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
             let _ = copy_waku.update(cx, |this, cx| {
@@ -183,7 +185,7 @@ fn render_message_footer(
                     .cursor_default()
                     .hover(|element| element.bg(theme.overlay_strong))
                     .child(icon("icons/fork.svg", 14.0, footer_color))
-                    .tooltip(|window, cx| Tooltip::new("Fork task").build(window, cx))
+                    .tooltip(Tooltip::text("Fork task"))
                     .on_click(move |_, _, cx| {
                         let _ = fork_waku.update(cx, |this, cx| {
                             this.fork_session_from_response(
@@ -214,7 +216,7 @@ fn render_message_footer(
                 .cursor_default()
                 .hover(|element| element.bg(theme.overlay_strong))
                 .child(icon("icons/rewind.svg", 14.0, footer_color))
-                .tooltip(|window, cx| Tooltip::new("Revert to here").build(window, cx))
+                .tooltip(Tooltip::text("Revert to here"))
                 .on_click(move |_, window, cx| {
                     let _ = edit_waku.update(cx, |this, cx| {
                         this.begin_message_edit(action.session_id, action.turn_count, window, cx);
@@ -226,28 +228,46 @@ fn render_message_footer(
     footer.into_any_element()
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_message(
-    theme: &Theme,
-    message: &Message,
-    assistant_footer_copy_content: Option<String>,
-    assistant_footer_time: Option<u64>,
-    copied: bool,
-    assistant_message_action: Option<AssistantMessageAction>,
-    user_message_action: Option<UserMessageAction>,
-    message_edit_input: Option<Entity<ComposerInput>>,
-    transcript_rows: ListState,
-    transcript_viewport: TextViewScrollViewport,
-    text_state: Entity<TextViewState>,
-    waku: gpui::WeakEntity<Waku>,
-    composer: Entity<ComposerInput>,
-    cx: &mut App,
-) -> AnyElement {
+/// Everything one transcript message row needs to render itself. Bundled
+/// because these travel together from `transcript_row` and nowhere else.
+pub(super) struct MessageRender<'a> {
+    pub(super) theme: &'a Theme,
+    pub(super) message: &'a Message,
+    pub(super) assistant_footer_copy_content: Option<String>,
+    pub(super) assistant_footer_time: Option<u64>,
+    pub(super) copied: bool,
+    pub(super) assistant_message_action: Option<AssistantMessageAction>,
+    pub(super) user_message_action: Option<UserMessageAction>,
+    pub(super) message_edit_input: Option<Entity<ComposerInput>>,
+    /// The parsed response body. `None` for user and system messages, which are
+    /// shown verbatim rather than as markdown.
+    pub(super) markdown: Option<&'a MarkdownView>,
+    pub(super) ctx: &'a MarkdownCtx<'a>,
+    pub(super) menu: ContextMenuHandle,
+    pub(super) waku: gpui::WeakEntity<Waku>,
+    pub(super) composer: Entity<ComposerInput>,
+}
+
+pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement {
+    let MessageRender {
+        theme,
+        message,
+        assistant_footer_copy_content,
+        assistant_footer_time,
+        copied,
+        assistant_message_action,
+        user_message_action,
+        message_edit_input,
+        markdown,
+        ctx,
+        menu,
+        waku,
+        composer,
+    } = params;
+
     let content = message.content.clone();
     let message_id = message.id;
     let role = message.role;
-    let code = fenced_code(&content);
-    let menu_content = content.clone();
     let element = match role {
         MessageRole::User => {
             let group_name = SharedString::from(format!("user-message-{message_id}"));
@@ -350,18 +370,13 @@ pub(super) fn render_message(
                         .py(px(8.0))
                         .text_size(px(14.0))
                         .line_height(px(20.0))
-                        .text_color(theme.text)
-                        .whitespace_normal()
-                        .child(
-                            selectable_plain_text(
-                                SharedString::from(format!("message-{message_id}-user")),
-                                &content,
-                                text_state,
-                                cx,
-                            )
-                            .selection_scroll_handle(&transcript_rows)
-                            .block_viewport(transcript_viewport),
-                        ),
+                        .child(md::render::plain_text(
+                            content.clone(),
+                            md::render::SANS_FAMILY,
+                            FontWeight::NORMAL,
+                            theme.text,
+                            ctx,
+                        )),
                 );
                 column = column.child(render_message_footer(
                     theme,
@@ -380,6 +395,19 @@ pub(super) fn render_message(
         }
         MessageRole::Assistant => {
             let group_name = SharedString::from(format!("assistant-message-{message_id}"));
+            let body = markdown
+                .and_then(|markdown| md::render::markdown(markdown, ctx))
+                // A response whose text has not reached the parser yet (or is
+                // pure whitespace) still needs a row, so fall back to verbatim.
+                .unwrap_or_else(|| {
+                    md::render::plain_text(
+                        content.clone(),
+                        md::render::SANS_FAMILY,
+                        FontWeight::NORMAL,
+                        theme.text,
+                        ctx,
+                    )
+                });
             let mut column = div()
                 .w_full()
                 .min_w_0()
@@ -388,20 +416,7 @@ pub(super) fn render_message(
                 .py(px(4.0))
                 .gap(px(3.0))
                 .group(group_name.clone())
-                .text_size(px(13.5))
-                .line_height(px(21.0))
-                .text_color(theme.text)
-                .whitespace_normal()
-                .child(
-                    selectable_plain_text(
-                        SharedString::from(format!("message-{message_id}-assistant")),
-                        &content,
-                        text_state,
-                        cx,
-                    )
-                    .selection_scroll_handle(&transcript_rows)
-                    .block_viewport(transcript_viewport),
-                );
+                .child(body);
             if message.streaming {
                 column = column.child(pulse_dot(
                     format!("stream-{}", message.id),
@@ -433,120 +448,107 @@ pub(super) fn render_message(
                 .bg(theme.overlay)
                 .text_size(px(11.0))
                 .line_height(px(16.0))
-                .text_color(theme.text_tertiary)
-                .child(
-                    selectable_plain_text(
-                        SharedString::from(format!("message-{message_id}-system")),
-                        &content,
-                        text_state,
-                        cx,
-                    )
-                    .selection_scroll_handle(&transcript_rows)
-                    .block_viewport(transcript_viewport),
-                ),
+                .child(md::render::plain_text(
+                    content.clone(),
+                    md::render::SANS_FAMILY,
+                    FontWeight::NORMAL,
+                    theme.text_tertiary,
+                    ctx,
+                )),
         ),
     };
 
-    element
-        .id(message_id)
-        .context_menu_with_id(
-            SharedString::from(format!("message-context-menu-{message_id}")),
-            move |menu, window, cx| {
-                let copy_content = menu_content.clone();
-                let mut menu =
-                    preserve_composer_focus_for_context_menu(&composer, menu, window, cx)
-                        .min_w(px(170.0))
-                        .item(
-                            PopupMenuItem::new("Copy Message").on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    copy_content.clone(),
-                                ));
-                            }),
-                        );
-
-                if role == MessageRole::User && user_message_action.is_none() {
-                    let composer = composer.clone();
-                    let edit_content = menu_content.clone();
-                    menu = menu.item(PopupMenuItem::new("Copy to Composer").on_click(
-                        move |_, window, cx| {
-                            composer.update(cx, |composer, cx| {
-                                composer.set_content(edit_content.clone(), cx);
-                            });
-                            let focus_handle = composer.read(cx).focus();
-                            window.focus(&focus_handle, cx);
-                        },
-                    ));
-                }
-
-                if let Some(code) = code.clone() {
-                    menu = menu.item(PopupMenuItem::new("Copy Code").on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                    }));
-                }
-
-                if let Some(action) = user_message_action {
-                    let action_waku = waku.clone();
-                    menu = menu.item(PopupMenuItem::new("Revert to Here").on_click(
-                        move |_, window, cx| {
-                            let _ = action_waku.update(cx, |this, cx| {
-                                this.begin_message_edit(
-                                    action.session_id,
-                                    action.turn_count,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        },
-                    ));
-                }
-
-                if let Some(action) = assistant_message_action {
-                    let action_waku = waku.clone();
-                    menu = menu.item(PopupMenuItem::new("Fork Task").on_click(move |_, _, cx| {
-                        let _ = action_waku.update(cx, |this, cx| {
-                            this.fork_session_from_response(
-                                action.session_id,
-                                action.turn_count,
-                                cx,
-                            );
-                        });
-                    }));
-                }
-
-                menu
-            },
-        )
-        .into_any_element()
+    let selection = ctx.selection().clone();
+    context_menu(
+        element.id(message_id),
+        SharedString::from(format!("message-menu-{message_id}")),
+        &menu,
+        move |cx| {
+            message_menu_items(
+                &content,
+                role,
+                user_message_action,
+                assistant_message_action,
+                &selection,
+                &composer,
+                &waku,
+                cx,
+            )
+        },
+    )
 }
 
-pub(super) fn selectable_plain_text(
-    id: impl Into<gpui::ElementId>,
+/// The message row's context menu. Rebuilt on each open, so availability checks
+/// here always reflect the current session state.
+#[allow(clippy::too_many_arguments)]
+fn message_menu_items(
     content: &str,
-    state: Entity<TextViewState>,
-    cx: &mut App,
-) -> TextView {
-    let html = if content.is_empty() {
-        "<p></p>".to_owned()
-    } else {
-        content
-            .split('\n')
-            .map(|line| format!("<p>{}</p>", escape_html(line)))
-            .collect::<String>()
-    };
-    TextView::html_with_state(id, html, state, cx)
-        .style(TextViewStyle::default().paragraph_gap(rems(0.0)))
-        .selectable(true)
-        .w_full()
-        .cursor_text()
-}
+    role: MessageRole,
+    user_message_action: Option<UserMessageAction>,
+    assistant_message_action: Option<AssistantMessageAction>,
+    selection: &TranscriptSelection,
+    composer: &Entity<ComposerInput>,
+    waku: &gpui::WeakEntity<Waku>,
+    _cx: &mut App,
+) -> Vec<MenuItem> {
+    let mut items = Vec::new();
 
-pub(super) fn escape_html(content: &str) -> String {
-    content
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+    if let Some(selected) = selection.selection.borrow().selected_text() {
+        items.push(MenuItem::new("Copy Selection", move |_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(selected.clone()));
+        }));
+    }
+
+    let copy_content = content.to_owned();
+    items.push(MenuItem::new("Copy Message", move |_, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
+    }));
+
+    if role == MessageRole::User && user_message_action.is_none() {
+        let composer = composer.clone();
+        let edit_content = content.to_owned();
+        items.push(MenuItem::new("Copy to Composer", move |window, cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_content(edit_content.clone(), cx);
+            });
+            let focus_handle = composer.read(cx).focus();
+            window.focus(&focus_handle, cx);
+        }));
+    }
+
+    if let Some(code) = fenced_code(content) {
+        items.push(MenuItem::new("Copy Code", move |_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+        }));
+    }
+
+    if let Some(action) = user_message_action {
+        let waku = waku.clone();
+        items.push(MenuItem::Separator);
+        items.push(
+            MenuItem::new("Revert to Here", move |window, cx| {
+                let _ = waku.update(cx, |this, cx| {
+                    this.begin_message_edit(action.session_id, action.turn_count, window, cx);
+                });
+            })
+            .icon("icons/rewind.svg"),
+        );
+    }
+
+    if let Some(action) = assistant_message_action {
+        let waku = waku.clone();
+        items.push(MenuItem::Separator);
+        items.push(
+            MenuItem::new("Fork Task", move |_, cx| {
+                let _ = waku.update(cx, |this, cx| {
+                    this.fork_session_from_response(action.session_id, action.turn_count, cx);
+                });
+            })
+            .icon("icons/fork.svg"),
+        );
+    }
+
+    items
 }
 
 pub(super) fn fenced_code(content: &str) -> Option<String> {

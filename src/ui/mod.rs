@@ -5,6 +5,10 @@ use gpui::{
 };
 use gpui_component::{Selectable, menu::DropdownMenu};
 
+pub mod menu;
+pub mod scrollbar;
+pub mod tooltip;
+
 use crate::model::{ActivityKind, ProviderKind, SessionStatus};
 use crate::theme::Theme;
 

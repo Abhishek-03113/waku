@@ -1,0 +1,850 @@
+//! Block-level markdown parsing over `pulldown-cmark`.
+//!
+//! A full parse produces a [`BlockTree`]: top-level blocks paired with their
+//! byte ranges in the source. The range start of the last top-level block is a
+//! *stable boundary* — appending to the source cannot change anything before
+//! it — which is what [`IncrementalParser`] exploits so a streamed delta costs
+//! roughly O(delta + last block) instead of O(document).
+//!
+//! Soundness guard: link reference definitions (`[label]: url`) resolve
+//! non-locally, so a source containing one drops back to full reparses.
+
+use std::ops::Range;
+
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
+
+// ── Tree model ─────────────────────────────────────────────────────────────
+
+/// Inline styling threaded through nested emphasis and links.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InlineStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub code: bool,
+    pub strikethrough: bool,
+    /// Destination URL when inside a link.
+    pub link: Option<String>,
+}
+
+/// One run of identically styled inline text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineRun {
+    pub text: String,
+    pub style: InlineStyle,
+}
+
+impl InlineRun {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            style: InlineStyle::default(),
+        }
+    }
+}
+
+/// GFM column alignment. Unspecified renders as `Left`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TableAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+/// A list item: its blocks plus an optional task-list checkbox state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListItem {
+    pub task: Option<bool>,
+    pub blocks: Vec<Block>,
+}
+
+/// A markdown block. Containers nest.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Block {
+    Paragraph {
+        runs: Vec<InlineRun>,
+    },
+    Heading {
+        level: u8,
+        runs: Vec<InlineRun>,
+    },
+    CodeBlock {
+        language: Option<String>,
+        code: String,
+    },
+    BlockQuote {
+        children: Vec<Block>,
+    },
+    List {
+        /// `Some(n)` for an ordered list starting at `n`.
+        ordered_start: Option<u64>,
+        items: Vec<ListItem>,
+    },
+    Table {
+        header: Vec<Vec<InlineRun>>,
+        rows: Vec<Vec<Vec<InlineRun>>>,
+        align: Vec<TableAlign>,
+    },
+    Rule,
+}
+
+/// A top-level block plus its byte range in the source.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TopBlock {
+    pub range: Range<usize>,
+    pub block: Block,
+}
+
+/// Top-level blocks in document order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BlockTree {
+    pub blocks: Vec<TopBlock>,
+}
+
+#[cfg(test)]
+impl BlockTree {
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+}
+
+// ── Full parse ─────────────────────────────────────────────────────────────
+
+fn options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+}
+
+/// Parse a whole source into a [`BlockTree`].
+pub fn parse(source: &str) -> BlockTree {
+    let events = Parser::new_ext(source, options())
+        .into_offset_iter()
+        .collect::<Vec<_>>();
+    let mut cursor = Cursor {
+        events: &events,
+        index: 0,
+    };
+    let mut blocks = Vec::new();
+    while let Some((event, range)) = cursor.peek() {
+        let range = range.clone();
+        match event {
+            Event::Rule => {
+                cursor.bump();
+                blocks.push(TopBlock {
+                    range,
+                    block: Block::Rule,
+                });
+            }
+            Event::Start(_) => {
+                for block in parse_started_block(&mut cursor) {
+                    blocks.push(TopBlock {
+                        range: range.clone(),
+                        block,
+                    });
+                }
+            }
+            // Stray inline events at the top level should not occur; skip them
+            // rather than looping forever.
+            _ => cursor.bump(),
+        }
+    }
+    BlockTree { blocks }
+}
+
+struct Cursor<'a, 'e> {
+    events: &'a [(Event<'e>, Range<usize>)],
+    index: usize,
+}
+
+impl<'e> Cursor<'_, 'e> {
+    fn peek(&self) -> Option<&(Event<'e>, Range<usize>)> {
+        self.events.get(self.index)
+    }
+
+    fn peek_event(&self) -> Option<&Event<'e>> {
+        self.peek().map(|(event, _)| event)
+    }
+
+    fn bump(&mut self) {
+        self.index += 1;
+    }
+
+    fn next_event(&mut self) -> Option<Event<'e>> {
+        let event = self.events.get(self.index).map(|(event, _)| event.clone());
+        if event.is_some() {
+            self.index += 1;
+        }
+        event
+    }
+}
+
+fn is_block_tag(tag: &Tag) -> bool {
+    matches!(
+        tag,
+        Tag::Paragraph
+            | Tag::Heading { .. }
+            | Tag::CodeBlock(_)
+            | Tag::BlockQuote(_)
+            | Tag::List(_)
+            | Tag::Item
+            | Tag::Table(_)
+            | Tag::HtmlBlock
+            | Tag::FootnoteDefinition(_)
+    )
+}
+
+fn heading_level(level: HeadingLevel) -> u8 {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
+
+/// Consume a `Start(tag)` and everything through its matching `End`. Unknown
+/// containers are transparent: their children splice into the parent.
+fn parse_started_block(cursor: &mut Cursor) -> Vec<Block> {
+    let Some(Event::Start(tag)) = cursor.next_event() else {
+        return Vec::new();
+    };
+    match tag {
+        Tag::Paragraph => vec![Block::Paragraph {
+            runs: parse_inline_container(cursor),
+        }],
+        Tag::Heading { level, .. } => vec![Block::Heading {
+            level: heading_level(level),
+            runs: parse_inline_container(cursor),
+        }],
+        Tag::CodeBlock(kind) => {
+            let language = match kind {
+                CodeBlockKind::Fenced(info) => info
+                    .split_whitespace()
+                    .next()
+                    .filter(|language| !language.is_empty())
+                    .map(str::to_owned),
+                CodeBlockKind::Indented => None,
+            };
+            let mut code = String::new();
+            loop {
+                match cursor.next_event() {
+                    Some(Event::Text(text)) => code.push_str(&text),
+                    Some(Event::End(_)) | None => break,
+                    Some(_) => {}
+                }
+            }
+            // Fenced blocks carry a trailing newline; rendering is per line so
+            // the empty final line would otherwise add a phantom row.
+            if code.ends_with('\n') {
+                code.pop();
+            }
+            vec![Block::CodeBlock { language, code }]
+        }
+        Tag::BlockQuote(_) => vec![Block::BlockQuote {
+            children: parse_block_sequence(cursor),
+        }],
+        Tag::List(ordered_start) => {
+            let mut items = Vec::new();
+            loop {
+                match cursor.peek_event() {
+                    Some(Event::Start(Tag::Item)) => {
+                        cursor.bump();
+                        items.push(parse_list_item(cursor));
+                    }
+                    Some(Event::End(_)) | None => {
+                        cursor.bump();
+                        break;
+                    }
+                    Some(_) => cursor.bump(),
+                }
+            }
+            vec![Block::List {
+                ordered_start,
+                items,
+            }]
+        }
+        Tag::Table(alignments) => {
+            let align = alignments
+                .iter()
+                .map(|alignment| match alignment {
+                    Alignment::Center => TableAlign::Center,
+                    Alignment::Right => TableAlign::Right,
+                    Alignment::None | Alignment::Left => TableAlign::Left,
+                })
+                .collect();
+            vec![parse_table(cursor, align)]
+        }
+        Tag::HtmlBlock => {
+            // Raw HTML renders literally: an agent transcript is far more
+            // likely to be *discussing* markup than asking us to apply it.
+            let mut text = String::new();
+            loop {
+                match cursor.next_event() {
+                    Some(Event::Html(chunk) | Event::Text(chunk)) => text.push_str(&chunk),
+                    Some(Event::End(_)) | None => break,
+                    Some(_) => {}
+                }
+            }
+            let text = text.trim_end_matches('\n').to_owned();
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![Block::Paragraph {
+                    runs: vec![InlineRun::plain(text)],
+                }]
+            }
+        }
+        // Transparent containers (footnote definitions, and anything a future
+        // pulldown-cmark adds).
+        _ => parse_block_sequence(cursor),
+    }
+}
+
+/// Parse a list item, lifting a leading task-list marker out of its content.
+fn parse_list_item(cursor: &mut Cursor) -> ListItem {
+    let task = match cursor.peek_event() {
+        Some(Event::TaskListMarker(checked)) => {
+            let checked = *checked;
+            cursor.bump();
+            Some(checked)
+        }
+        _ => None,
+    };
+    ListItem {
+        task,
+        blocks: parse_block_sequence(cursor),
+    }
+}
+
+/// Parse blocks until the container's `End` (which is consumed). Bare inline
+/// events — tight list items — accumulate into an implicit paragraph.
+fn parse_block_sequence(cursor: &mut Cursor) -> Vec<Block> {
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut inline: Vec<InlineRun> = Vec::new();
+    while let Some(event) = cursor.peek_event() {
+        match event {
+            Event::End(_) => {
+                cursor.bump();
+                break;
+            }
+            Event::Start(tag) if is_block_tag(tag) => {
+                flush_paragraph(&mut blocks, &mut inline);
+                blocks.extend(parse_started_block(cursor));
+            }
+            Event::Rule => {
+                flush_paragraph(&mut blocks, &mut inline);
+                cursor.bump();
+                blocks.push(Block::Rule);
+            }
+            _ => parse_inline_event(cursor, &mut inline, &InlineStyle::default()),
+        }
+    }
+    flush_paragraph(&mut blocks, &mut inline);
+    blocks
+}
+
+fn flush_paragraph(blocks: &mut Vec<Block>, inline: &mut Vec<InlineRun>) {
+    if !inline.is_empty() {
+        blocks.push(Block::Paragraph {
+            runs: merge_runs(std::mem::take(inline)),
+        });
+    }
+}
+
+fn parse_table(cursor: &mut Cursor, align: Vec<TableAlign>) -> Block {
+    let mut header = Vec::new();
+    let mut rows = Vec::new();
+    loop {
+        match cursor.peek_event() {
+            Some(Event::Start(Tag::TableHead)) => {
+                cursor.bump();
+                header = parse_table_row(cursor);
+            }
+            Some(Event::Start(Tag::TableRow)) => {
+                cursor.bump();
+                rows.push(parse_table_row(cursor));
+            }
+            Some(Event::End(_)) | None => {
+                cursor.bump();
+                break;
+            }
+            Some(_) => cursor.bump(),
+        }
+    }
+    Block::Table {
+        header,
+        rows,
+        align,
+    }
+}
+
+fn parse_table_row(cursor: &mut Cursor) -> Vec<Vec<InlineRun>> {
+    let mut cells = Vec::new();
+    loop {
+        match cursor.peek_event() {
+            Some(Event::Start(Tag::TableCell)) => {
+                cursor.bump();
+                cells.push(parse_inline_container(cursor));
+            }
+            Some(Event::End(_)) | None => {
+                cursor.bump();
+                break;
+            }
+            Some(_) => cursor.bump(),
+        }
+    }
+    cells
+}
+
+/// Collect inline runs until the container's `End` (which is consumed).
+fn parse_inline_container(cursor: &mut Cursor) -> Vec<InlineRun> {
+    let mut runs = Vec::new();
+    while let Some(event) = cursor.peek_event() {
+        if matches!(event, Event::End(_)) {
+            cursor.bump();
+            break;
+        }
+        parse_inline_event(cursor, &mut runs, &InlineStyle::default());
+    }
+    merge_runs(runs)
+}
+
+/// Consume one inline event, appending its runs with `style` applied. Nested
+/// emphasis and links recurse with an extended style.
+fn parse_inline_event(cursor: &mut Cursor, runs: &mut Vec<InlineRun>, style: &InlineStyle) {
+    let Some(event) = cursor.next_event() else {
+        return;
+    };
+    match event {
+        Event::Text(text) => runs.push(InlineRun {
+            text: text.to_string(),
+            style: style.clone(),
+        }),
+        Event::Code(text) => {
+            let mut style = style.clone();
+            style.code = true;
+            runs.push(InlineRun {
+                text: text.to_string(),
+                style,
+            });
+        }
+        // A hard or soft break inside a paragraph is a line break in the
+        // rendered run: shaped text splits on '\n' on its own.
+        Event::SoftBreak | Event::HardBreak => runs.push(InlineRun {
+            text: "\n".to_owned(),
+            style: style.clone(),
+        }),
+        Event::Start(tag) => {
+            let mut nested = style.clone();
+            match &tag {
+                Tag::Emphasis => nested.italic = true,
+                Tag::Strong => nested.bold = true,
+                Tag::Strikethrough => nested.strikethrough = true,
+                Tag::Link { dest_url, .. } => nested.link = Some(dest_url.to_string()),
+                // Images render as their alt text; a transcript pane is not a
+                // place to fetch remote assets.
+                Tag::Image { .. } => {}
+                _ => {}
+            }
+            while let Some(event) = cursor.peek_event() {
+                if matches!(event, Event::End(_)) {
+                    cursor.bump();
+                    break;
+                }
+                parse_inline_event(cursor, runs, &nested);
+            }
+        }
+        // Inline HTML renders literally, matching the block-level choice.
+        Event::Html(text) | Event::InlineHtml(text) => runs.push(InlineRun {
+            text: text.to_string(),
+            style: style.clone(),
+        }),
+        Event::FootnoteReference(label) => runs.push(InlineRun {
+            text: format!("[{label}]"),
+            style: style.clone(),
+        }),
+        Event::TaskListMarker(checked) => runs.push(InlineRun {
+            text: if checked { "[x] " } else { "[ ] " }.to_owned(),
+            style: style.clone(),
+        }),
+        Event::End(_) | Event::Rule | Event::InlineMath(_) | Event::DisplayMath(_) => {}
+    }
+}
+
+/// Coalesce neighbouring runs that share a style, so shaping sees the fewest
+/// possible `TextRun`s.
+fn merge_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
+    let mut merged: Vec<InlineRun> = Vec::with_capacity(runs.len());
+    for run in runs {
+        if run.text.is_empty() {
+            continue;
+        }
+        match merged.last_mut() {
+            Some(last) if last.style == run.style => last.text.push_str(&run.text),
+            _ => merged.push(run),
+        }
+    }
+    merged
+}
+
+// ── Incremental parse ──────────────────────────────────────────────────────
+
+/// Streaming parser over an append-only source.
+///
+/// Keeps the settled prefix of top-level blocks and reparses only the tail from
+/// the last stable boundary. `display_tree` additionally mends hanging inline
+/// markers (see [`super::mend`]) so a closing `**` never reflows text that is
+/// already on screen.
+pub struct IncrementalParser {
+    text: String,
+    tree: BlockTree,
+    /// Blocks before this index are settled: no append can change them.
+    stable_prefix: usize,
+    /// A link reference definition anywhere forces full reparses.
+    full_reparse_only: bool,
+}
+
+impl Default for IncrementalParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IncrementalParser {
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+            tree: BlockTree::default(),
+            stable_prefix: 0,
+            full_reparse_only: false,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn tree(&self) -> &BlockTree {
+        &self.tree
+    }
+
+    /// Point the parser at `text`. Appends reparse incrementally; any other
+    /// change falls back to a full reparse.
+    pub fn set_text(&mut self, text: &str) {
+        if text == self.text {
+            return;
+        }
+        match text.strip_prefix(self.text.as_str()) {
+            Some(delta) if !self.text.is_empty() && !self.full_reparse_only => {
+                let delta = delta.to_owned();
+                self.append(&delta);
+            }
+            _ => self.reset(text),
+        }
+    }
+
+    /// Discard all state and parse `text` from scratch.
+    pub fn reset(&mut self, text: &str) {
+        self.text = text.to_owned();
+        self.tree = parse(&self.text);
+        self.full_reparse_only = has_link_definition(&self.text);
+        self.stable_prefix = self.settled_prefix();
+    }
+
+    /// Append `delta`, reparsing only from the last stable block boundary.
+    pub fn append(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        if self.full_reparse_only {
+            let mut text = std::mem::take(&mut self.text);
+            text.push_str(delta);
+            self.reset(&text);
+            return;
+        }
+
+        let boundary = self
+            .tree
+            .blocks
+            .get(self.stable_prefix)
+            .map_or(self.text.len(), |block| block.range.start);
+        self.text.push_str(delta);
+        if has_link_definition(delta) {
+            let text = std::mem::take(&mut self.text);
+            self.reset(&text);
+            return;
+        }
+
+        let tail = parse(&self.text[boundary..]);
+        self.tree.blocks.truncate(self.stable_prefix);
+        self.tree
+            .blocks
+            .extend(tail.blocks.into_iter().map(|mut block| {
+                block.range.start += boundary;
+                block.range.end += boundary;
+                block
+            }));
+        self.stable_prefix = self.settled_prefix();
+    }
+
+    /// Replacement blocks for the final block while streaming, with its hanging
+    /// inline markers closed so styling does not flip as the closer arrives.
+    /// `None` means the canonical tree already renders correctly.
+    ///
+    /// This returns only the tail — never the whole tree — so a streaming
+    /// response re-derives O(last block) per delta rather than cloning every
+    /// settled block on every frame.
+    pub fn display_tail(&self) -> Option<Vec<TopBlock>> {
+        let last = self.tree.blocks.last()?;
+        // A code block's content is literal: mending would corrupt it, and a
+        // half-typed fence must not be reinterpreted.
+        if matches!(last.block, Block::CodeBlock { .. }) {
+            return None;
+        }
+        let mended = super::mend::close_hanging(&self.text[last.range.start..])?;
+        let offset = last.range.start;
+        Some(
+            parse(&mended)
+                .blocks
+                .into_iter()
+                .map(|mut block| {
+                    block.range.start += offset;
+                    block.range.end = (block.range.end + offset).min(self.text.len());
+                    block
+                })
+                .collect(),
+        )
+    }
+
+    /// The whole tree as it should be displayed. The renderer works from
+    /// [`Self::display_tail`] to avoid this clone; this exists so the mending
+    /// contract can be asserted directly.
+    #[cfg(test)]
+    pub fn display_tree(&self) -> BlockTree {
+        let Some(tail) = self.display_tail() else {
+            return self.tree.clone();
+        };
+        let mut blocks = self.tree.blocks[..self.tree.blocks.len() - 1].to_vec();
+        blocks.extend(tail);
+        BlockTree { blocks }
+    }
+
+    /// All blocks but the last are settled: markdown block structure only ever
+    /// extends the final block, so everything before it is immune to appends.
+    fn settled_prefix(&self) -> usize {
+        self.tree.blocks.len().saturating_sub(1)
+    }
+}
+
+/// Cheap scan for a link reference definition (`[label]: destination`), which
+/// resolves references anywhere in the document and so breaks locality.
+fn has_link_definition(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        let Some(rest) = line.strip_prefix('[') else {
+            return false;
+        };
+        rest.find("]:").is_some_and(|end| end > 0)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paragraph_text(block: &Block) -> String {
+        match block {
+            Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+                runs.iter().map(|run| run.text.as_str()).collect()
+            }
+            _ => panic!("expected a text block, got {block:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_top_level_blocks_with_source_ranges() {
+        let source = "# Title\n\nBody text.\n\n```rust\nfn main() {}\n```\n";
+        let tree = parse(source);
+
+        assert_eq!(tree.len(), 3);
+        assert!(matches!(
+            tree.blocks[0].block,
+            Block::Heading { level: 1, .. }
+        ));
+        assert_eq!(paragraph_text(&tree.blocks[0].block), "Title");
+        assert_eq!(paragraph_text(&tree.blocks[1].block), "Body text.");
+        assert_eq!(
+            tree.blocks[2].block,
+            Block::CodeBlock {
+                language: Some("rust".into()),
+                code: "fn main() {}".into(),
+            }
+        );
+        // Ranges point back into the source and are ascending.
+        assert!(tree.blocks[0].range.start < tree.blocks[1].range.start);
+        assert_eq!(&source[tree.blocks[1].range.clone()].trim(), &"Body text.");
+    }
+
+    #[test]
+    fn inline_styles_nest_and_merge() {
+        let tree = parse("plain **bold `code`** and *italic* [link](https://example.com)");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+
+        let bold_code = runs
+            .iter()
+            .find(|run| run.style.bold && run.style.code)
+            .expect("bold inline code should keep both styles");
+        assert_eq!(bold_code.text, "code");
+
+        let italic = runs
+            .iter()
+            .find(|run| run.style.italic)
+            .expect("italic run");
+        assert_eq!(italic.text, "italic");
+
+        let link = runs
+            .iter()
+            .find(|run| run.style.link.is_some())
+            .expect("link run");
+        assert_eq!(link.text, "link");
+        assert_eq!(link.style.link.as_deref(), Some("https://example.com"));
+
+        // Adjacent identically styled runs are coalesced.
+        assert_eq!(runs[0].text, "plain ");
+    }
+
+    #[test]
+    fn task_list_markers_lift_out_of_item_content() {
+        let tree = parse("- [x] done\n- [ ] pending\n- plain\n");
+        let Block::List { items, .. } = &tree.blocks[0].block else {
+            panic!("expected a list");
+        };
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].task, Some(true));
+        assert_eq!(items[1].task, Some(false));
+        assert_eq!(items[2].task, None);
+        assert_eq!(paragraph_text(&items[0].blocks[0]), "done");
+        assert_eq!(paragraph_text(&items[2].blocks[0]), "plain");
+    }
+
+    #[test]
+    fn tables_keep_alignment_and_cells() {
+        let tree = parse("| a | b |\n|:--|--:|\n| 1 | 2 |\n");
+        let Block::Table {
+            header,
+            rows,
+            align,
+        } = &tree.blocks[0].block
+        else {
+            panic!("expected a table");
+        };
+
+        assert_eq!(align, &[TableAlign::Left, TableAlign::Right]);
+        assert_eq!(header.len(), 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1][0].text, "2");
+    }
+
+    #[test]
+    fn soft_breaks_become_newlines_in_the_run() {
+        let tree = parse("first\nsecond");
+        assert_eq!(paragraph_text(&tree.blocks[0].block), "first\nsecond");
+    }
+
+    /// The incremental path must agree with a full parse at every prefix —
+    /// that equality is the whole justification for the fast path.
+    #[test]
+    fn incremental_appends_match_full_parses() {
+        let source = "# Heading\n\nA paragraph with **bold**.\n\n- one\n- two\n\n```js\nlet x = 1;\n```\n\nTail.";
+        for chunk_size in [1, 3, 7, 64] {
+            let mut incremental = IncrementalParser::new();
+            let mut built = String::new();
+            let mut chars = source.chars().peekable();
+            while chars.peek().is_some() {
+                let chunk = chars.by_ref().take(chunk_size).collect::<String>();
+                built.push_str(&chunk);
+                incremental.append(&chunk);
+                assert_eq!(
+                    incremental.tree(),
+                    &parse(&built),
+                    "divergence at {} bytes with chunk size {chunk_size}",
+                    built.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_text_appends_incrementally_and_resets_on_rewrite() {
+        let mut parser = IncrementalParser::new();
+        parser.set_text("hello");
+        parser.set_text("hello world");
+        assert_eq!(parser.text(), "hello world");
+        assert_eq!(parser.tree(), &parse("hello world"));
+
+        // A non-append edit still lands on the right tree.
+        parser.set_text("different");
+        assert_eq!(parser.tree(), &parse("different"));
+    }
+
+    #[test]
+    fn link_definitions_force_full_reparses() {
+        let mut parser = IncrementalParser::new();
+        parser.set_text("See [docs].\n\n[docs]: https://example.com\n");
+        assert!(parser.full_reparse_only);
+
+        parser.set_text("See [docs].\n\n[docs]: https://example.com\n\nMore.");
+        assert_eq!(
+            parser.tree(),
+            &parse("See [docs].\n\n[docs]: https://example.com\n\nMore.")
+        );
+        let Block::Paragraph { runs } = &parser.tree().blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(
+            runs.iter().find(|run| run.style.link.is_some()).is_some(),
+            true,
+            "the definition should resolve the earlier reference"
+        );
+    }
+
+    #[test]
+    fn display_tree_closes_hanging_emphasis_while_streaming() {
+        let mut parser = IncrementalParser::new();
+        parser.set_text("Settled.\n\nNow **bold");
+
+        // The canonical tree keeps the markers literal.
+        let Block::Paragraph { runs } = &parser.tree().blocks[1].block else {
+            panic!("expected a paragraph");
+        };
+        assert!(runs.iter().all(|run| !run.style.bold));
+
+        // The display tree styles it immediately.
+        let display = parser.display_tree();
+        assert_eq!(display.len(), 2);
+        let Block::Paragraph { runs } = &display.blocks[1].block else {
+            panic!("expected a paragraph");
+        };
+        assert!(
+            runs.iter().any(|run| run.style.bold && run.text == "bold"),
+            "streaming bold should be styled before its closer arrives: {runs:?}"
+        );
+        // Settled blocks are untouched.
+        assert_eq!(display.blocks[0], parser.tree().blocks[0]);
+    }
+
+    #[test]
+    fn display_tree_leaves_code_blocks_literal() {
+        let mut parser = IncrementalParser::new();
+        parser.set_text("```rust\nlet a = **b;\n");
+        assert_eq!(parser.display_tree(), *parser.tree());
+    }
+}

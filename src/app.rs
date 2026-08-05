@@ -13,8 +13,8 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
     ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
     ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
-    StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, img,
-    linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px, rems, rgb,
+    StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, img, linear_color_stop,
+    linear_gradient, list, point, prelude::*, pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
@@ -24,6 +24,7 @@ use crate::computer_use::{
 };
 use crate::driver::{self, DriverHandle, DriverStartOptions};
 use crate::input::{ComposerEvent, ComposerInput, preserve_composer_focus_for_context_menu};
+use crate::md;
 use crate::model::{
     ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, FavoriteModel,
     InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind, ProviderModel,
@@ -35,11 +36,15 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::text::{
-    TextView, TextViewScrollViewport, TextViewState, TextViewStyle,
-};
-use gpui_component::tooltip::Tooltip;
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::md::render::{
+    Ctx as MarkdownCtx, MarkdownView, Metrics as MarkdownMetrics, Palette as MarkdownPalette,
+    TranscriptSelection,
+};
+use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
+use crate::ui::scrollbar::{self, ScrollbarState};
+use crate::ui::tooltip::Tooltip;
 
 use crate::persistence::{
     DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH, PersistedState, StateStore,
@@ -51,8 +56,8 @@ use crate::ui::{
     provider_icon, status_color, status_label,
 };
 use crate::{
-    CancelTurn, CloseWindow, FocusComposer, NavigateBack, NavigateForward, NewSession,
-    OpenSettings, SaveFile, ToggleFpsCounter, ToggleRightPanel, ToggleSidebar,
+    CancelTurn, CloseWindow, CopySelection, FocusComposer, NavigateBack, NavigateForward,
+    NewSession, OpenSettings, SaveFile, ToggleFpsCounter, ToggleRightPanel, ToggleSidebar,
 };
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
@@ -501,9 +506,14 @@ pub struct Waku {
     transcript_anchor_following: Rc<Cell<bool>>,
     transcript_is_scrolled: Rc<Cell<bool>>,
     transcript_layout_width: Cell<Pixels>,
-    message_text_states: HashMap<Uuid, Entity<TextViewState>>,
-    activity_text_states:
-        RefCell<HashMap<(Uuid, ActivityDisclosureSectionKind), Entity<TextViewState>>>,
+    /// Parsed markdown per assistant message, keeping each response's
+    /// incremental parse and flattened blocks alive across frames.
+    message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// Transcript-wide text selection, spanning messages and tool output.
+    transcript_selection: TranscriptSelection,
+    transcript_scrollbar: Rc<ScrollbarState>,
+    /// One context-menu site per message row.
+    message_menus: RefCell<HashMap<Uuid, ContextMenuHandle>>,
     navigation_rail: Entity<ConversationNavigationRail>,
     navigation_rail_active_scale_enabled: Rc<Cell<bool>>,
     navigation_rail_reset_generation: Cell<u64>,
@@ -818,8 +828,10 @@ impl Waku {
                 transcript_anchor_following,
                 transcript_is_scrolled,
                 transcript_layout_width: Cell::new(Pixels::ZERO),
-                message_text_states: HashMap::new(),
-                activity_text_states: RefCell::new(HashMap::new()),
+                message_markdown: RefCell::new(HashMap::new()),
+                transcript_selection: TranscriptSelection::default(),
+                transcript_scrollbar: ScrollbarState::new(),
+                message_menus: RefCell::new(HashMap::new()),
                 navigation_rail: navigation_rail.clone(),
                 navigation_rail_active_scale_enabled,
                 navigation_rail_reset_generation: Cell::new(0),

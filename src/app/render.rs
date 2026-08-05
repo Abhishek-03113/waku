@@ -102,6 +102,7 @@ impl Render for Waku {
             .on_action(cx.listener(Self::focus_composer_action))
             .on_action(cx.listener(Self::save_right_panel_file_action))
             .on_action(cx.listener(Self::cancel_turn_action))
+            .on_action(cx.listener(Self::copy_selection_action))
             .capture_any_mouse_down(cx.listener(Self::navigation_mouse_down))
             .on_mouse_move(cx.listener(Self::resize_panel_mouse_move))
             .capture_any_mouse_up(cx.listener(Self::finish_panel_resize))

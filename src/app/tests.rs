@@ -2,7 +2,7 @@ use super::{
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
     TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
     assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
-    compact_driver_error, escape_html, fenced_code, fitted_file_tree_width, fitted_panel_widths,
+    compact_driver_error, fenced_code, fitted_file_tree_width, fitted_panel_widths,
     folded_transcript_row_kinds, format_worked_duration, maintain_transcript_anchor,
     message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
     navigation_rail_scale, pop_stream_chunk, should_show_navigation_rail, take_stream_prefix,
@@ -230,14 +230,6 @@ fn pending_expansion_reasserts_the_user_message_anchor() {
         true,
         gpui::Pixels::ZERO,
     ));
-}
-
-#[test]
-fn plain_message_html_is_escaped() {
-    assert_eq!(
-        escape_html("<tag a='b'>&\""),
-        "&lt;tag a=&#39;b&#39;&gt;&amp;&quot;"
-    );
 }
 
 #[test]

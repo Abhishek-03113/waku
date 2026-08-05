@@ -356,12 +356,10 @@ impl Waku {
                     .min_h_0()
                     .relative()
                     .child(
-                        div()
-                            .px(px(10.0))
-                            .pt(px(2.0))
-                            .size_full()
-                            .child(
-                                list(self.sidebar_list_state.clone(), move |index, _window, cx| {
+                        div().px(px(10.0)).pt(px(2.0)).size_full().child(
+                            list(
+                                self.sidebar_list_state.clone(),
+                                move |index, _window, cx| {
                                     entity
                                         .upgrade()
                                         .map(|entity| {
@@ -370,9 +368,10 @@ impl Waku {
                                             })
                                         })
                                         .unwrap_or_else(|| div().into_any_element())
-                                })
-                                .size_full(),
-                            ),
+                                },
+                            )
+                            .size_full(),
+                        ),
                     )
                     .vertical_scrollbar(&self.sidebar_list_state),
             )
@@ -390,7 +389,8 @@ impl Waku {
             .collect::<Vec<_>>();
         sorted_sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         for session in sorted_sessions {
-            grouped_sessions[session_date_group(session.updated_at, today).index()].push(session.id);
+            grouped_sessions[session_date_group(session.updated_at, today).index()]
+                .push(session.id);
         }
 
         let mut rows = Vec::new();
@@ -503,7 +503,9 @@ impl Waku {
             .py(px(7.0))
             .rounded(px(7.0))
             .cursor_default()
-            .when(selected, |element| element.bg(theme.sidebar_item_background))
+            .when(selected, |element| {
+                element.bg(theme.sidebar_item_background)
+            })
             .hover(|element| element.bg(theme.sidebar_item_background))
             .active(|element| element.bg(theme.sidebar_item_background))
             .child(
@@ -557,13 +559,11 @@ impl Waku {
                     let waku = waku.clone();
                     preserve_composer_focus_for_context_menu(&composer, menu, window, cx)
                         .min_w(px(140.0))
-                        .item(
-                            PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
-                                let _ = waku.update(cx, |waku, cx| {
-                                    waku.remove_session(session_id, cx);
-                                });
-                            }),
-                        )
+                        .item(PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
+                            let _ = waku.update(cx, |waku, cx| {
+                                waku.remove_session(session_id, cx);
+                            });
+                        }))
                 },
             )
             .into_any_element()

@@ -106,7 +106,6 @@ impl Waku {
             self.transcript_is_scrolled.set(false);
         }
         let entity = cx.entity().downgrade();
-        let transcript_viewport = TextViewScrollViewport::from_list(&transcript_rows);
         let scrollbar_handle = transcript_rows.clone();
         let viewport_size = transcript_rows.viewport_bounds().size;
         let transcript_scrollable = viewport_size.height > Pixels::ZERO
@@ -159,23 +158,58 @@ impl Waku {
             .min_h_0()
             .w_full()
             .relative()
+            // Painted before any row, so the frame's selection registry holds
+            // exactly the text elements this frame put on screen, in order.
+            .child(md::render::frame_reset(self.transcript_selection.clone()))
             .child(
                 list(transcript_rows, move |index, _window, cx| {
                     entity
                         .upgrade()
-                        .map(|entity| {
-                            entity.update(cx, |this, cx| {
-                                this.transcript_row(index, transcript_viewport, cx)
-                            })
-                        })
+                        .map(|entity| entity.update(cx, |this, cx| this.transcript_row(index, cx)))
                         .unwrap_or_else(|| div().into_any_element())
                 })
                 .size_full()
                 .pb(anchor_end_space),
             )
             .child(navigation_rail)
-            .vertical_scrollbar(&scrollbar_handle)
+            .child(scrollbar::vertical(
+                &scrollbar_handle,
+                &self.transcript_scrollbar,
+            ))
+            .child(self.transcript_selection_input())
             .into_any_element()
+    }
+
+    /// Copy the transcript's text selection.
+    ///
+    /// This is the fallback leg of `cmd-c`: the composer holds focus almost
+    /// always, so it handles the keystroke first and propagates when it has
+    /// nothing selected of its own.
+    pub(super) fn copy_selection_action(
+        &mut self,
+        _: &CopySelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self.transcript_selection.selection.borrow().selected_text();
+        match selected {
+            Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            None => cx.propagate(),
+        }
+    }
+
+    /// A zero-size canvas that installs the frame's selection mouse listeners.
+    /// One set for the whole transcript: the registry already knows every
+    /// painted element's geometry, so per-element listeners would be redundant.
+    fn transcript_selection_input(&self) -> impl IntoElement {
+        let selection = self.transcript_selection.clone();
+        canvas(
+            |_, _, _| (),
+            move |_, _, window, _| md::render::install_selection_input(window, &selection),
+        )
+        .absolute()
+        .w(px(0.0))
+        .h(px(0.0))
     }
 }
 
@@ -650,13 +684,43 @@ impl Waku {
         })
     }
 
-    pub(super) fn transcript_row(
-        &mut self,
-        index: usize,
-        transcript_viewport: TextViewScrollViewport,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The markdown render context for one transcript row. Element keys are
+    /// scoped to the row, so a virtualized remount recreates the same keys and
+    /// an in-progress selection survives scrolling.
+    fn markdown_ctx<'a>(
+        &self,
+        row: String,
+        palette: &'a MarkdownPalette,
+        metrics: MarkdownMetrics,
+    ) -> MarkdownCtx<'a> {
+        MarkdownCtx::new(row, palette, metrics, self.transcript_selection.clone())
+    }
+
+    fn message_menu(&self, message_id: Uuid, cx: &mut App) -> ContextMenuHandle {
+        if let Some(handle) = self.message_menus.borrow().get(&message_id) {
+            return handle.clone();
+        }
+        let composer = self.composer.clone();
+        // Keep the composer's caret visible while the menu owns real focus, so
+        // right-clicking a message does not look like it defocused the input.
+        let handle = ContextMenuHandle::new(cx).on_toggle(move |open, window, cx| {
+            composer.update(cx, |composer, cx| {
+                if open {
+                    composer.preserve_visual_focus_for_context_menu(window, cx);
+                } else {
+                    composer.release_visual_focus_for_context_menu(window, cx);
+                }
+            });
+        });
+        self.message_menus
+            .borrow_mut()
+            .insert(message_id, handle.clone());
+        handle
+    }
+
+    pub(super) fn transcript_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
+        let palette = MarkdownPalette::from_theme(&theme);
         let composer = self.composer.clone();
         let waku = cx.entity().downgrade();
         let row_count = self.transcript_row_count();
@@ -699,25 +763,37 @@ impl Waku {
                             })
                             .map(|edit| edit.input.clone())
                     });
-                    let text_state = self
-                        .message_text_states
-                        .entry(message.id)
-                        .or_insert_with(|| cx.new(TextViewState::new))
-                        .clone();
+                    let menu = self.message_menu(message.id, cx);
+                    let ctx = self.markdown_ctx(
+                        format!("message-{}", message.id),
+                        &palette,
+                        MarkdownMetrics::BODY,
+                    );
+                    // Only assistant responses are markdown. Reparsing happens
+                    // here rather than on every driver delta, so a response that
+                    // is off screen costs nothing.
+                    let mut markdown = self.message_markdown.borrow_mut();
+                    let view = (message.role == MessageRole::Assistant).then(|| {
+                        let view = markdown.entry(message.id).or_default();
+                        view.set_text(&message.content, message.streaming);
+                        &*view
+                    });
                     render_message(
-                        &theme,
-                        &message,
-                        assistant_footer_copy_content,
-                        assistant_footer_time,
-                        copied,
-                        assistant_message_action,
-                        user_message_action,
-                        message_edit_input,
-                        self.active_transcript_rows().clone(),
-                        transcript_viewport,
-                        text_state,
-                        waku,
-                        composer,
+                        MessageRender {
+                            theme: &theme,
+                            message: &message,
+                            assistant_footer_copy_content,
+                            assistant_footer_time,
+                            copied,
+                            assistant_message_action,
+                            user_message_action,
+                            message_edit_input,
+                            markdown: view,
+                            ctx: &ctx,
+                            menu,
+                            waku,
+                            composer,
+                        },
                         cx,
                     )
                 })
@@ -729,13 +805,9 @@ impl Waku {
                     TranscriptBlockContent::Reasoning(reasoning) => {
                         self.render_reasoning_row(reasoning, block_index, &theme, cx)
                     }
-                    TranscriptBlockContent::Activities(activities) => self.render_activities_row(
-                        activities,
-                        block_index,
-                        &theme,
-                        transcript_viewport,
-                        cx,
-                    ),
+                    TranscriptBlockContent::Activities(activities) => {
+                        self.render_activities_row(activities, block_index, &theme, cx)
+                    }
                 })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
@@ -935,7 +1007,6 @@ impl Waku {
         activities: &[ActivityItem],
         block_index: usize,
         theme: &Theme,
-        transcript_viewport: TextViewScrollViewport,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let running = activities.iter().any(|activity| !activity.complete);
@@ -1073,7 +1144,9 @@ impl Waku {
                     })),
             );
             if item_expanded {
-                let transcript_rows = self.active_transcript_rows().clone();
+                let palette = MarkdownPalette::from_theme(theme);
+                let ctx =
+                    self.markdown_ctx(format!("activity-{id}"), &palette, MarkdownMetrics::COMPACT);
                 let mut detail_card = div()
                     .ml(px(21.0))
                     .mr(px(4.0))
@@ -1088,7 +1161,7 @@ impl Waku {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .font_family("SF Mono")
+                    .font_family(md::render::MONO_FAMILY)
                     .text_size(px(10.5))
                     .line_height(px(16.0))
                     .text_color(theme.text_secondary)
@@ -1097,13 +1170,6 @@ impl Waku {
                 for section in sections {
                     let section_kind = section.kind;
                     let content = section.content;
-                    let text_state = {
-                        let mut states = self.activity_text_states.borrow_mut();
-                        states
-                            .entry((id, section_kind))
-                            .or_insert_with(|| cx.new(TextViewState::new))
-                            .clone()
-                    };
                     let mut section_view = div().w_full().min_w_0().flex().flex_col().gap(px(3.0));
                     if let Some(label) = section_kind.label() {
                         let copy_content = content.clone();
@@ -1152,9 +1218,7 @@ impl Waku {
                                                 11.0,
                                                 theme.text_ghost,
                                             ))
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(copy_tooltip.clone()).build(window, cx)
-                                            })
+                                            .tooltip(Tooltip::text(copy_tooltip.clone()))
                                             .on_click(move |_, _, cx| {
                                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                                     copy_content.clone(),
@@ -1173,22 +1237,18 @@ impl Waku {
                     }
                     if !content.is_empty() {
                         section_view = section_view.child(
-                            selectable_plain_text(
-                                SharedString::from(format!(
-                                    "activity-detail-{}-{}",
-                                    id,
-                                    section_kind.id()
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .text_size(px(10.5))
+                                .line_height(px(16.0))
+                                .child(md::render::plain_text(
+                                    content.clone(),
+                                    md::render::MONO_FAMILY,
+                                    FontWeight::NORMAL,
+                                    theme.text_secondary,
+                                    &ctx,
                                 )),
-                                &content,
-                                text_state,
-                                cx,
-                            )
-                            .selection_scroll_handle(&transcript_rows)
-                            .block_viewport(transcript_viewport)
-                            .font_family("SF Mono")
-                            .text_size(px(10.5))
-                            .line_height(px(16.0))
-                            .text_color(theme.text_secondary),
                         );
                     }
                     detail_card = detail_card.child(section_view);

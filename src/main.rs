@@ -12,6 +12,7 @@ mod driver;
 mod grok_session;
 mod identity;
 mod input;
+mod md;
 mod model;
 mod model_catalog;
 mod opencode_session;
@@ -42,7 +43,8 @@ actions!(
         NavigateForward,
         FocusComposer,
         SaveFile,
-        CancelTurn
+        CancelTurn,
+        CopySelection
     ]
 );
 
@@ -72,6 +74,7 @@ fn main() {
             gpui_component::init(cx);
             crate::assets::register_fonts(cx).expect("failed to register bundled fonts");
             crate::input::init(cx);
+            crate::ui::menu::init(cx);
             crate::theme::init_component_theme(cx);
             cx.set_reduce_motion(crate::platform::reduce_motion_enabled());
 
@@ -88,6 +91,7 @@ fn main() {
                 KeyBinding::new("cmd-l", FocusComposer, None),
                 KeyBinding::new("cmd-s", SaveFile, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
+                KeyBinding::new("cmd-c", CopySelection, Some("Waku")),
             ]);
 
             cx.set_menus(vec![

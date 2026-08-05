@@ -5,13 +5,13 @@ use std::{
 };
 
 use gpui::{
-    point, px, quad, App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId,
-    GlobalElementId, Half, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    LayoutId, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, TextLayout,
-    Window,
+    App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, GlobalElementId, Half,
+    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, TextLayout, Window,
+    point, px, quad,
 };
 
-use crate::{global_state::GlobalState, input::Selection, text::node::LinkMark, ActiveTheme};
+use crate::{ActiveTheme, global_state::GlobalState, input::Selection, text::node::LinkMark};
 
 // GPUI's text runs have no inline box model. Non-breaking spaces provide real
 // shaped layout gutters, while the adjacent word joiners keep those gutters

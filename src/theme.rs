@@ -73,6 +73,14 @@ pub struct Theme {
     pub accent: Hsla,
     pub resize_handle: Hsla,
 
+    /// Text-selection wash. Painted *under* the glyphs, so it stays
+    /// translucent and deliberately reads as the familiar browser blue rather
+    /// than as brand color.
+    pub selection: Hsla,
+    /// Inline `code` foreground and its rounded wash.
+    pub code_text: Hsla,
+    pub code_wash: Hsla,
+
     /// Light fill for primary buttons (send, allow), dark glyph on top.
     pub inverse: Hsla,
     pub on_inverse: Hsla,
@@ -119,6 +127,10 @@ impl Theme {
             accent: rgb(0xE2795B).into(),
             resize_handle: rgb(0x3B82F6).into(),
 
+            selection: hsla(211.0 / 360.0, 1.0, 0.50, 0.55),
+            code_text: rgb(0xE0A882).into(),
+            code_wash: hsla(220.0 / 360.0, 0.10, 0.90, 0.08),
+
             inverse: rgb(0xE7E9EC).into(),
             on_inverse: rgb(0x17181C).into(),
 
@@ -155,6 +167,10 @@ impl Theme {
 
             accent: rgb(0xC85F44).into(),
             resize_handle: rgb(0x2563EB).into(),
+
+            selection: hsla(211.0 / 360.0, 1.0, 0.50, 0.35),
+            code_text: rgb(0x9A5528).into(),
+            code_wash: hsla(220.0 / 360.0, 0.10, 0.12, 0.07),
 
             inverse: rgb(0x202227).into(),
             on_inverse: rgb(0xF8F8F9).into(),
@@ -203,9 +219,7 @@ fn apply_component_theme(theme: Theme, window: Option<&mut Window>, cx: &mut App
     component.secondary_hover = theme.overlay;
     component.secondary_active = theme.overlay_strong;
     component.ring = theme.accent;
-    // Match the conspicuous blue selection used by browser text selection.
-    // Inline selections paint their glyphs above this translucent fill.
-    component.selection = hsla(211.0 / 360.0, 1.0, 0.50, 0.55);
+    component.selection = theme.selection;
     component.sidebar = theme.sidebar;
     component.sidebar_foreground = theme.text_secondary;
     component.sidebar_accent = theme.overlay;

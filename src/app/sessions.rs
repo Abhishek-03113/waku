@@ -52,21 +52,6 @@ impl Waku {
         } else {
             self.ensure_right_panel_terminals(cx);
         }
-        let message_ids = self
-            .selected_session()
-            .map(|session| {
-                session
-                    .messages
-                    .iter()
-                    .map(|message| message.id)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for message_id in message_ids {
-            if let Some(text_state) = self.message_text_states.get(&message_id) {
-                text_state.update(cx, |state, _| state.reset_block_viewport_layout());
-            }
-        }
         self.reset_visible_state();
         self.branch = self
             .selected_project()
@@ -433,7 +418,11 @@ impl Waku {
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.expanded_turns.clear();
-        self.activity_text_states.borrow_mut().clear();
+        // Selection and per-message parses belong to the session being left.
+        self.transcript_selection.selection.borrow_mut().clear();
+        self.transcript_selection.registry.borrow_mut().clear();
+        self.message_markdown.borrow_mut().clear();
+        self.message_menus.borrow_mut().clear();
         self.message_edit = None;
         self.toast = None;
         self.navigation_rail_active_scale_enabled.set(false);
