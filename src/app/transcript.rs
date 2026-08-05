@@ -50,16 +50,24 @@ impl Waku {
                 // `scroll_px_offset_for_scrollbar` is zero for a short list in
                 // Zed's GPUI, so derive the actual content height from its
                 // rendered row bounds instead of treating the list as empty.
+                //
+                // Only when those bounds actually exist. Rows that have not
+                // been measured yet report `None`, and treating that as a
+                // zero-height document asks for a leading space of the whole
+                // viewport — which pushes every row off screen and leaves the
+                // transcript blank until the reader scrolls it back.
                 let measured_content_height = transcript_rows
                     .bounds_for_item(0)
                     .zip(transcript_rows.bounds_for_item(count - 1))
-                    .map(|(first, last)| (last.bottom() - first.top()).max(Pixels::ZERO))
-                    .unwrap_or_default();
-                let leading_space = (viewport_height - measured_content_height).max(Pixels::ZERO);
-                transcript_rows.scroll_to(ListOffset {
-                    item_ix: 0,
-                    offset_in_item: -leading_space,
-                });
+                    .map(|(first, last)| (last.bottom() - first.top()).max(Pixels::ZERO));
+                if let Some(leading_space) =
+                    disclosure_leading_space(viewport_height, measured_content_height)
+                {
+                    transcript_rows.scroll_to(ListOffset {
+                        item_ix: 0,
+                        offset_in_item: -leading_space,
+                    });
+                }
             }
         }
 
@@ -82,6 +90,7 @@ impl Waku {
     ) {
         let next_kinds = self.selected_transcript_row_kinds();
         let splice = transcript_row_splice(previous_kinds, &next_kinds);
+        *self.transcript_row_kinds.borrow_mut() = next_kinds;
         self.splice_transcript_rows(splice);
     }
 
@@ -180,10 +189,21 @@ impl Waku {
         true
     }
 
-    /// Keep the list's row count in sync with the transcript. Appends keep
-    /// the reader's place (or the pinned tail); shrinking resets the view.
+    /// Keep the list's row count *and its row kinds* in sync with the
+    /// transcript.
+    ///
+    /// The kinds cache is what tells `transcript_row` whether row `n` is a
+    /// message, a reasoning block, a tool-activity cluster or a turn fold.
+    /// Leaving it stale makes every row fall back to `Message(n)`, which
+    /// silently drops all reasoning and activity from the transcript.
+    ///
+    /// Appends keep the reader's place (or the pinned tail); shrinking resets
+    /// the view.
     pub(super) fn sync_transcript_rows(&self) {
-        let count = self.transcript_row_count();
+        let next_kinds = self.selected_transcript_row_kinds();
+        let count = next_kinds.len();
+        *self.transcript_row_kinds.borrow_mut() = next_kinds;
+
         let transcript_rows = self.active_transcript_rows();
         let current = transcript_rows.item_count();
         if count > current {
@@ -455,6 +475,17 @@ pub(super) fn transcript_row_splice(
     (prefix != old_end || new_count != 0).then_some((prefix..old_end, new_count))
 }
 
+/// Leading space that keeps a short bottom-aligned transcript pinned to the
+/// bottom of its viewport, or `None` when the content has not been measured
+/// yet and no scroll should be forced.
+pub(super) fn disclosure_leading_space(
+    viewport_height: Pixels,
+    measured_content_height: Option<Pixels>,
+) -> Option<Pixels> {
+    let measured = measured_content_height?;
+    Some((viewport_height - measured).max(Pixels::ZERO))
+}
+
 pub(super) fn transcript_anchor_end_space(
     viewport_height: Pixels,
     anchored_tail_height: Pixels,
@@ -517,9 +548,16 @@ pub(super) fn transcript_row_kinds(
     rows
 }
 
-/// A settled turn presents only its terminal assistant message by default.
-/// Earlier assistant commentary and ordered reasoning/tool blocks remain in
-/// the transcript, but move behind one expandable work summary row.
+/// A settled turn presents its terminal assistant message plus the one-line
+/// summaries of what it did — "Thought for 12s", "Ran 3 tool calls" — each
+/// expandable in place.
+///
+/// Only the turn's *interim assistant commentary* folds away, behind one work
+/// summary row. Reasoning and tool activity stay visible: they are already
+/// collapsed to a single line each, and hiding them behind a second fold left
+/// a settled turn saying nothing about what the agent actually did. This
+/// mirrors T3 Code, which keeps work entries inline in the timeline and
+/// collapses only overflow.
 pub(super) fn folded_transcript_row_kinds(
     session: &AgentSession,
     expanded_turns: &HashSet<Uuid>,
@@ -551,11 +589,8 @@ pub(super) fn folded_transcript_row_kinds(
                                 && message.turn_id == Some(turn.id)
                         })
                 }
-                TranscriptRowKind::TurnBlock(block_index) => session
-                    .transcript_blocks
-                    .get(block_index)
-                    .is_some_and(|block| block.turn_id == Some(turn.id)),
-                TranscriptRowKind::TurnFold(_) => false,
+                // Reasoning and activity summarise themselves; they stay.
+                TranscriptRowKind::TurnBlock(_) | TranscriptRowKind::TurnFold(_) => false,
             })
             .collect::<Vec<_>>();
         let Some(anchor) = hidden.first().copied() else {

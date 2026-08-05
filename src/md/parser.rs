@@ -58,11 +58,25 @@ pub struct ListItem {
     pub blocks: Vec<Block>,
 }
 
+/// One piece of inline content. Images interrupt a run of text rather than
+/// styling it, so they cannot be an [`InlineStyle`] flag.
+#[derive(Clone, Debug, PartialEq)]
+enum InlinePiece {
+    Run(InlineRun),
+    Image { url: String, alt: String },
+}
+
 /// A markdown block. Containers nest.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     Paragraph {
         runs: Vec<InlineRun>,
+    },
+    /// A standalone image. Inline images split their paragraph so the text
+    /// before and after keeps its order around them.
+    Image {
+        url: String,
+        alt: String,
     },
     Heading {
         level: u8,
@@ -214,12 +228,10 @@ fn parse_started_block(cursor: &mut Cursor) -> Vec<Block> {
         return Vec::new();
     };
     match tag {
-        Tag::Paragraph => vec![Block::Paragraph {
-            runs: parse_inline_container(cursor),
-        }],
+        Tag::Paragraph => pieces_into_blocks(parse_inline_container(cursor)),
         Tag::Heading { level, .. } => vec![Block::Heading {
             level: heading_level(level),
-            runs: parse_inline_container(cursor),
+            runs: pieces_into_runs(parse_inline_container(cursor)),
         }],
         Tag::CodeBlock(kind) => {
             let language = match kind {
@@ -325,7 +337,7 @@ fn parse_list_item(cursor: &mut Cursor) -> ListItem {
 /// events — tight list items — accumulate into an implicit paragraph.
 fn parse_block_sequence(cursor: &mut Cursor) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
-    let mut inline: Vec<InlineRun> = Vec::new();
+    let mut inline: Vec<InlinePiece> = Vec::new();
     while let Some(event) = cursor.peek_event() {
         match event {
             Event::End(_) => {
@@ -348,11 +360,9 @@ fn parse_block_sequence(cursor: &mut Cursor) -> Vec<Block> {
     blocks
 }
 
-fn flush_paragraph(blocks: &mut Vec<Block>, inline: &mut Vec<InlineRun>) {
+fn flush_paragraph(blocks: &mut Vec<Block>, inline: &mut Vec<InlinePiece>) {
     if !inline.is_empty() {
-        blocks.push(Block::Paragraph {
-            runs: merge_runs(std::mem::take(inline)),
-        });
+        blocks.extend(pieces_into_blocks(merge_pieces(std::mem::take(inline))));
     }
 }
 
@@ -389,7 +399,9 @@ fn parse_table_row(cursor: &mut Cursor) -> Vec<Vec<InlineRun>> {
         match cursor.peek_event() {
             Some(Event::Start(Tag::TableCell)) => {
                 cursor.bump();
-                cells.push(parse_inline_container(cursor));
+                // A table cell is one line of text; an image there degrades to
+                // its alt rather than breaking the row's geometry.
+                cells.push(pieces_into_runs(parse_inline_container(cursor)));
             }
             Some(Event::End(_)) | None => {
                 cursor.bump();
@@ -401,44 +413,108 @@ fn parse_table_row(cursor: &mut Cursor) -> Vec<Vec<InlineRun>> {
     cells
 }
 
-/// Collect inline runs until the container's `End` (which is consumed).
-fn parse_inline_container(cursor: &mut Cursor) -> Vec<InlineRun> {
-    let mut runs = Vec::new();
+/// Collect inline pieces until the container's `End` (which is consumed).
+fn parse_inline_container(cursor: &mut Cursor) -> Vec<InlinePiece> {
+    let mut pieces = Vec::new();
     while let Some(event) = cursor.peek_event() {
         if matches!(event, Event::End(_)) {
             cursor.bump();
             break;
         }
-        parse_inline_event(cursor, &mut runs, &InlineStyle::default());
+        parse_inline_event(cursor, &mut pieces, &InlineStyle::default());
     }
-    merge_runs(runs)
+    merge_pieces(pieces)
+}
+
+/// Split inline pieces into blocks, so images become their own block and the
+/// text around them keeps its order.
+fn pieces_into_blocks(pieces: Vec<InlinePiece>) -> Vec<Block> {
+    let mut blocks = Vec::new();
+    let mut runs: Vec<InlineRun> = Vec::new();
+    for piece in pieces {
+        match piece {
+            InlinePiece::Run(run) => runs.push(run),
+            InlinePiece::Image { url, alt } => {
+                if !runs.is_empty() {
+                    blocks.push(Block::Paragraph {
+                        runs: std::mem::take(&mut runs),
+                    });
+                }
+                blocks.push(Block::Image { url, alt });
+            }
+        }
+    }
+    if !runs.is_empty() {
+        blocks.push(Block::Paragraph { runs });
+    }
+    blocks
+}
+
+/// Flatten pieces to runs for contexts that cannot host a block-level image.
+fn pieces_into_runs(pieces: Vec<InlinePiece>) -> Vec<InlineRun> {
+    merge_runs(
+        pieces
+            .into_iter()
+            .map(|piece| match piece {
+                InlinePiece::Run(run) => run,
+                InlinePiece::Image { alt, .. } => InlineRun::plain(alt),
+            })
+            .collect(),
+    )
 }
 
 /// Consume one inline event, appending its runs with `style` applied. Nested
 /// emphasis and links recurse with an extended style.
-fn parse_inline_event(cursor: &mut Cursor, runs: &mut Vec<InlineRun>, style: &InlineStyle) {
+fn parse_inline_event(cursor: &mut Cursor, pieces: &mut Vec<InlinePiece>, style: &InlineStyle) {
     let Some(event) = cursor.next_event() else {
         return;
     };
+    let mut push_run = |run: InlineRun| pieces.push(InlinePiece::Run(run));
     match event {
-        Event::Text(text) => runs.push(InlineRun {
+        Event::Text(text) => push_run(InlineRun {
             text: text.to_string(),
             style: style.clone(),
         }),
         Event::Code(text) => {
             let mut style = style.clone();
             style.code = true;
-            runs.push(InlineRun {
+            push_run(InlineRun {
                 text: text.to_string(),
                 style,
             });
         }
         // A hard or soft break inside a paragraph is a line break in the
         // rendered run: shaped text splits on '\n' on its own.
-        Event::SoftBreak | Event::HardBreak => runs.push(InlineRun {
+        Event::SoftBreak | Event::HardBreak => push_run(InlineRun {
             text: "\n".to_owned(),
             style: style.clone(),
         }),
+        Event::Start(Tag::Image {
+            dest_url, title, ..
+        }) => {
+            // The image's children are its alt text.
+            let mut alt_pieces = Vec::new();
+            while let Some(event) = cursor.peek_event() {
+                if matches!(event, Event::End(_)) {
+                    cursor.bump();
+                    break;
+                }
+                parse_inline_event(cursor, &mut alt_pieces, &InlineStyle::default());
+            }
+            let alt = pieces_into_runs(alt_pieces)
+                .into_iter()
+                .map(|run| run.text)
+                .collect::<String>();
+            let alt = if alt.trim().is_empty() {
+                title.to_string()
+            } else {
+                alt
+            };
+            pieces.push(InlinePiece::Image {
+                url: dest_url.to_string(),
+                alt,
+            });
+        }
         Event::Start(tag) => {
             let mut nested = style.clone();
             match &tag {
@@ -446,9 +522,6 @@ fn parse_inline_event(cursor: &mut Cursor, runs: &mut Vec<InlineRun>, style: &In
                 Tag::Strong => nested.bold = true,
                 Tag::Strikethrough => nested.strikethrough = true,
                 Tag::Link { dest_url, .. } => nested.link = Some(dest_url.to_string()),
-                // Images render as their alt text; a transcript pane is not a
-                // place to fetch remote assets.
-                Tag::Image { .. } => {}
                 _ => {}
             }
             while let Some(event) = cursor.peek_event() {
@@ -456,24 +529,42 @@ fn parse_inline_event(cursor: &mut Cursor, runs: &mut Vec<InlineRun>, style: &In
                     cursor.bump();
                     break;
                 }
-                parse_inline_event(cursor, runs, &nested);
+                parse_inline_event(cursor, pieces, &nested);
             }
         }
         // Inline HTML renders literally, matching the block-level choice.
-        Event::Html(text) | Event::InlineHtml(text) => runs.push(InlineRun {
+        Event::Html(text) | Event::InlineHtml(text) => push_run(InlineRun {
             text: text.to_string(),
             style: style.clone(),
         }),
-        Event::FootnoteReference(label) => runs.push(InlineRun {
+        Event::FootnoteReference(label) => push_run(InlineRun {
             text: format!("[{label}]"),
             style: style.clone(),
         }),
-        Event::TaskListMarker(checked) => runs.push(InlineRun {
+        Event::TaskListMarker(checked) => push_run(InlineRun {
             text: if checked { "[x] " } else { "[ ] " }.to_owned(),
             style: style.clone(),
         }),
         Event::End(_) | Event::Rule | Event::InlineMath(_) | Event::DisplayMath(_) => {}
     }
+}
+
+/// Coalesce neighbouring runs that share a style, leaving images in place.
+fn merge_pieces(pieces: Vec<InlinePiece>) -> Vec<InlinePiece> {
+    let mut merged: Vec<InlinePiece> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        match piece {
+            InlinePiece::Run(run) if run.text.is_empty() => {}
+            InlinePiece::Run(run) => match merged.last_mut() {
+                Some(InlinePiece::Run(last)) if last.style == run.style => {
+                    last.text.push_str(&run.text)
+                }
+                _ => merged.push(InlinePiece::Run(run)),
+            },
+            image => merged.push(image),
+        }
+    }
+    merged
 }
 
 /// Coalesce neighbouring runs that share a style, so shaping sees the fewest
@@ -751,6 +842,41 @@ mod tests {
         assert_eq!(header.len(), 2);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][1][0].text, "2");
+    }
+
+    /// An image is content, not styling, so it becomes its own block and the
+    /// text around it keeps its order.
+    #[test]
+    fn images_split_their_paragraph_and_keep_order() {
+        let tree = parse("before ![a shot](https://example.com/x.png) after");
+        assert_eq!(tree.len(), 3);
+        assert_eq!(paragraph_text(&tree.blocks[0].block), "before ");
+        assert_eq!(
+            tree.blocks[1].block,
+            Block::Image {
+                url: "https://example.com/x.png".into(),
+                alt: "a shot".into(),
+            }
+        );
+        assert_eq!(paragraph_text(&tree.blocks[2].block), " after");
+    }
+
+    #[test]
+    fn a_standalone_image_is_one_block() {
+        let tree = parse("![](data:image/png;base64,aGk=)");
+        assert_eq!(tree.len(), 1);
+        assert!(matches!(tree.blocks[0].block, Block::Image { .. }));
+    }
+
+    /// A table cell has no room for a block-level image, so it degrades to alt
+    /// text rather than dropping the content entirely.
+    #[test]
+    fn images_in_table_cells_fall_back_to_alt_text() {
+        let tree = parse("| a | b |\n|---|---|\n| ![alt](x.png) | plain |\n");
+        let Block::Table { rows, .. } = &tree.blocks[0].block else {
+            panic!("expected a table");
+        };
+        assert_eq!(rows[0][0][0].text, "alt");
     }
 
     #[test]

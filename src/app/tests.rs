@@ -3,7 +3,8 @@ use super::{
     TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
     assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
     compact_driver_error, fenced_code, fitted_file_tree_width, fitted_panel_widths,
-    folded_transcript_row_kinds, format_worked_duration, maintain_transcript_anchor,
+    disclosure_leading_space, folded_transcript_row_kinds, format_worked_duration,
+    maintain_transcript_anchor,
     message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
     navigation_rail_scale, pop_stream_chunk, should_show_navigation_rail, take_stream_prefix,
     transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
@@ -364,8 +365,110 @@ fn multiple_blocks_at_one_boundary_preserve_event_order() {
     );
 }
 
+/// Row *kinds* and row *count* are derived from the same list, and
+/// `transcript_row` looks a row up by index in the cached kinds. If the two
+/// ever disagree — or the cache is left empty — every row silently falls back
+/// to `Message(n)` and all reasoning and tool activity vanish from the
+/// transcript. That is exactly the bug this guards.
+/// Expanding a disclosure pins a short transcript to the bottom of its
+/// viewport. Doing that needs the document's real height — treating an
+/// unmeasured list as zero-height asks for a leading space of the entire
+/// viewport, which pushes every row off screen and leaves the transcript blank
+/// until the reader scrolls it back.
 #[test]
-fn settled_turn_folds_interim_text_and_work_but_keeps_the_final_response() {
+fn a_disclosure_never_forces_a_scroll_it_cannot_measure() {
+    // Unmeasured: no scroll at all.
+    assert_eq!(disclosure_leading_space(px(718.0), None), None);
+
+    // Short content sits at the bottom, with the remainder as leading space.
+    assert_eq!(
+        disclosure_leading_space(px(718.0), Some(px(200.0))),
+        Some(px(518.0))
+    );
+
+    // Content taller than the viewport needs no leading space, and never a
+    // negative one.
+    assert_eq!(
+        disclosure_leading_space(px(718.0), Some(px(5_000.0))),
+        Some(Pixels::ZERO)
+    );
+}
+
+/// Expanding a disclosure re-measures exactly one row by splicing it in place.
+/// That splice went dead while the row-kind cache was empty, so this pins the
+/// behaviour it depends on: replacing one row with one row must not disturb the
+/// list's contents.
+#[test]
+fn splicing_one_row_in_place_preserves_the_list() {
+    let list = ListState::new(6, ListAlignment::Bottom, px(512.0)).measure_all();
+    assert_eq!(list.item_count(), 6);
+
+    list.splice(3..4, 1);
+    assert_eq!(
+        list.item_count(),
+        6,
+        "a 1-for-1 splice must keep the row count"
+    );
+
+    // The tail remeasure path splices a trailing window.
+    list.splice(3..6, 3);
+    assert_eq!(list.item_count(), 6);
+
+    // A range at the very end is still valid.
+    list.splice(5..6, 1);
+    assert_eq!(list.item_count(), 6);
+}
+
+#[test]
+fn row_kinds_and_row_count_describe_the_same_rows() {
+    let project_id = Uuid::new_v4();
+    let mut session = AgentSession::new(project_id, ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
+            content: "Looking around".into(),
+            started_at_ms: 1_000,
+            finished_at_ms: 2_000,
+        }),
+    });
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )]),
+    });
+    session.push_message(MessageRole::Assistant, "Done.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    let kinds = folded_transcript_row_kinds(&session, &HashSet::new());
+    // The work the agent did must be reachable by index, not just counted.
+    assert!(
+        kinds.iter().any(|kind| matches!(kind, TurnBlock(_))),
+        "reasoning and activity must survive into the rendered rows: {kinds:?}"
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| matches!(kind, TurnBlock(_)))
+            .count(),
+        2,
+        "both the reasoning block and the activity cluster: {kinds:?}"
+    );
+    // Every index below the count resolves to a real row.
+    for index in 0..kinds.len() {
+        assert!(kinds.get(index).is_some());
+    }
+}
+
+#[test]
+fn a_settled_turn_keeps_its_work_visible_and_folds_only_interim_commentary() {
     let project_id = Uuid::new_v4();
     let mut session = AgentSession::new(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
@@ -393,16 +496,26 @@ fn settled_turn_folds_interim_text_and_work_but_keeps_the_final_response() {
     session.push_message(MessageRole::Assistant, "Done. The change is ready.");
     session.finish_active_turn(TurnStatus::Completed);
 
+    // Reasoning and tool activity stay in the transcript — each is already a
+    // one-line summary the reader can expand. Only the interim assistant
+    // commentary (message 1) folds away behind the work summary.
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
-        vec![Message(0), TurnFold(turn_id), Message(2)]
+        vec![
+            Message(0),
+            TurnBlock(0),
+            TurnFold(turn_id),
+            TurnBlock(1),
+            Message(2)
+        ]
     );
+    // Expanding the fold brings the interim commentary back.
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
         vec![
             Message(0),
-            TurnFold(turn_id),
             TurnBlock(0),
+            TurnFold(turn_id),
             Message(1),
             TurnBlock(1),
             Message(2)

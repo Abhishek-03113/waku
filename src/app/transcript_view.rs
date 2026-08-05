@@ -537,9 +537,40 @@ impl Waku {
         current: bool,
         cx: &mut Context<Self>,
     ) {
+        self.toggle_block_disclosure(block_index, cx, |this| {
+            this.reasoning_expanded.insert(block_index, !current);
+        });
+    }
+
+    /// Open or close one turn-block disclosure, holding the reader's place.
+    ///
+    /// Re-measuring the row changes its height, and a bottom-aligned list keeps
+    /// its pixel offset across that change — which lands the viewport past the
+    /// end of the content and shows nothing until you scroll. Capturing the
+    /// logical position before the change and restoring it after keeps the row
+    /// exactly where it was.
+    fn toggle_block_disclosure(
+        &mut self,
+        block_index: usize,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut Self),
+    ) {
+        // Read the reader's position before pinning: pinning rewrites the
+        // scroll offset, so capturing after it restores the rewritten value.
+        let anchor = self.active_transcript_rows().logical_scroll_top();
         self.pin_transcript_for_disclosure();
-        self.reasoning_expanded.insert(block_index, !current);
+        apply(self);
         self.remeasure_transcript_block(block_index);
+
+        let rows = self.active_transcript_rows();
+        let count = rows.item_count();
+        if count > 0 {
+            rows.scroll_to(ListOffset {
+                item_ix: anchor.item_ix.min(count - 1),
+                offset_in_item: anchor.offset_in_item,
+            });
+            self.transcript_is_scrolled.set(true);
+        }
         cx.notify();
     }
 
@@ -549,27 +580,27 @@ impl Waku {
         current: bool,
         cx: &mut Context<Self>,
     ) {
-        self.pin_transcript_for_disclosure();
-        self.activities_expanded.insert(block_index, !current);
-        self.remeasure_transcript_block(block_index);
-        cx.notify();
+        self.toggle_block_disclosure(block_index, cx, |this| {
+            this.activities_expanded.insert(block_index, !current);
+        });
     }
 
     pub(super) fn toggle_activity_item(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        self.pin_transcript_for_disclosure();
-        if !self.expanded_activity_items.remove(&id) {
-            self.expanded_activity_items.insert(id);
-        }
-        if let Some(block_index) = self.selected_transcript_blocks().iter().position(|block| {
+        let block_index = self.selected_transcript_blocks().iter().position(|block| {
             matches!(
                 &block.content,
                 TranscriptBlockContent::Activities(activities)
                     if activities.iter().any(|activity| activity.id == id)
             )
-        }) {
-            self.remeasure_transcript_block(block_index);
-        }
-        cx.notify();
+        });
+        let Some(block_index) = block_index else {
+            return;
+        };
+        self.toggle_block_disclosure(block_index, cx, |this| {
+            if !this.expanded_activity_items.remove(&id) {
+                this.expanded_activity_items.insert(id);
+            }
+        });
     }
 
     pub(super) fn toggle_turn_fold(
@@ -983,14 +1014,26 @@ impl Waku {
                     })),
             )
             .when(expanded, |element| {
+                // Reasoning is model prose like any response, so it renders as
+                // markdown and takes part in transcript selection — it used to
+                // be an inert string that could not even be copied.
+                let mut palette = MarkdownPalette::from_theme(theme);
+                palette.text = theme.text_tertiary;
+                palette.secondary = theme.text_tertiary;
+                let ctx = self.markdown_ctx(
+                    format!("reasoning-{block_index}"),
+                    &palette,
+                    MarkdownMetrics::COMPACT,
+                );
+                let mut views = self.block_markdown.borrow_mut();
+                let view = views.entry(block_index).or_default();
+                view.set_text(&reasoning.content, live);
                 element.child(
                     div()
                         .pl(px(15.0))
-                        .text_size(px(12.0))
-                        .line_height(px(18.0))
-                        .text_color(theme.text_tertiary)
-                        .whitespace_normal()
-                        .child(SharedString::from(reasoning.content.clone())),
+                        .w_full()
+                        .min_w_0()
+                        .children(md::render::markdown(view, &ctx)),
                 )
             })
             .into_any_element()

@@ -422,6 +422,7 @@ impl Waku {
         self.transcript_selection.selection.borrow_mut().clear();
         self.transcript_selection.registry.borrow_mut().clear();
         self.message_markdown.borrow_mut().clear();
+        self.block_markdown.borrow_mut().clear();
         self.menus.borrow_mut().clear();
         self.message_edit = None;
         self.toast = None;

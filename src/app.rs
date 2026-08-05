@@ -483,6 +483,8 @@ pub struct Waku {
     /// Parsed markdown per assistant message, keeping each response's
     /// incremental parse and flattened blocks alive across frames.
     message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// Parsed markdown for reasoning blocks, keyed by transcript block index.
+    block_markdown: RefCell<HashMap<usize, MarkdownView>>,
     /// Transcript-wide text selection, spanning messages and tool output.
     transcript_selection: TranscriptSelection,
     transcript_scrollbar: Rc<ScrollbarState>,
@@ -796,6 +798,7 @@ impl Waku {
                 transcript_is_scrolled,
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),
+                block_markdown: RefCell::new(HashMap::new()),
                 transcript_selection: TranscriptSelection::default(),
                 transcript_scrollbar: ScrollbarState::new(),
                 menus: RefCell::new(HashMap::new()),

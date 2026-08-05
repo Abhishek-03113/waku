@@ -25,7 +25,7 @@ use gpui::{
     AnyElement, BorderStyle, Bounds, CursorStyle, DispatchPhase, Font, FontStyle, FontWeight, Hsla,
     InteractiveText, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement, Pixels, Point, SharedString, StrikethroughStyle, StyledText, TextLayout,
-    TextRun, UnderlineStyle, Window, canvas, div, font, point, prelude::*, px, quad, relative,
+    TextRun, UnderlineStyle, Window, canvas, div, font, img, point, prelude::*, px, quad, relative,
     size,
 };
 
@@ -836,6 +836,7 @@ fn render_block(block: &Block, ctx: &Ctx) -> AnyElement {
                 .child(text_element(&flat, key, ctx))
                 .into_any_element()
         }
+        Block::Image { url, alt } => render_image(url, alt, ctx),
         Block::CodeBlock { language, code } => render_code_block(language.as_deref(), code, ctx),
         Block::BlockQuote { children } => {
             let rendered = children
@@ -974,6 +975,56 @@ fn checkbox(checked: bool, ctx: &Ctx) -> AnyElement {
             ))
         })
         .into_any_element()
+}
+
+/// An inline image. Data URLs decode in place; anything else is handed to GPUI
+/// to load. The alt text renders beneath as a caption when there is one, so a
+/// failed or slow load still says what it was.
+fn render_image(url: &str, alt: &str, ctx: &Ctx) -> AnyElement {
+    const MAX_HEIGHT: f32 = 320.0;
+
+    let key = ctx.next_key();
+    let id = SharedString::from(format!("image-{}-{}", key.row, key.index));
+    let image = match decode_data_url(url) {
+        Some(decoded) => img(decoded).id(id),
+        None => img(url.to_owned()).id(id),
+    };
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            image
+                .max_w(relative(1.0))
+                .max_h(px(MAX_HEIGHT))
+                .rounded(px(6.0))
+                .object_fit(gpui::ObjectFit::ScaleDown),
+        )
+        .when(!alt.trim().is_empty(), |element| {
+            element.child(
+                div()
+                    .text_size(px(ctx.metrics.text_size - 2.0))
+                    .line_height(px(ctx.metrics.line_height - 4.0))
+                    .text_color(ctx.palette.ghost)
+                    .child(SharedString::from(alt.to_owned())),
+            )
+        })
+        .into_any_element()
+}
+
+/// Decode a `data:` image URL. Shared with the transcript's tool-output images.
+pub fn decode_data_url(url: &str) -> Option<std::sync::Arc<gpui::Image>> {
+    use base64::Engine as _;
+
+    let (header, encoded) = url.split_once(',')?;
+    let mime_type = header.strip_prefix("data:")?.split(';').next()?;
+    let format = gpui::ImageFormat::from_mime_type(mime_type)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    (!bytes.is_empty()).then(|| std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
 }
 
 fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElement {
@@ -1433,6 +1484,26 @@ mod tests {
         });
         assert!(!Rc::ptr_eq(&cached, &relit));
         assert_eq!(relit.runs[0].color, light.text);
+    }
+
+    /// Reasoning text goes through the same view as a response, so a plain
+    /// prose block must actually produce renderable blocks.
+    #[test]
+    fn a_view_over_plain_prose_yields_blocks() {
+        let mut view = MarkdownView::new();
+        view.set_text("Let me check the parser first.", false);
+        assert_eq!(view.blocks().count(), 1);
+
+        // Streaming (mended) content too.
+        let mut streaming = MarkdownView::new();
+        streaming.set_text("Let me check the **parser", true);
+        assert_eq!(streaming.blocks().count(), 1);
+
+        // Empty content has nothing to render, which is the only case where
+        // the renderer legitimately produces no element.
+        let mut empty = MarkdownView::new();
+        empty.set_text("", false);
+        assert_eq!(empty.blocks().count(), 0);
     }
 
     #[test]
