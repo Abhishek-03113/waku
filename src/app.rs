@@ -12,10 +12,9 @@ use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
     ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    ObjectFit, PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString, Size,
-    Stateful, StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, img,
+    ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
+    StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, img,
     linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px, rems, rgb,
-    size,
 };
 use uuid::Uuid;
 
@@ -35,9 +34,9 @@ use gpui_component::highlighter::Language;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
-use gpui_component::scroll::{ScrollableElement, ScrollbarHandle};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::{
-    TextView, TextViewBlockResize, TextViewScrollViewport, TextViewState, TextViewStyle,
+    TextView, TextViewScrollViewport, TextViewState, TextViewStyle,
 };
 use gpui_component::tooltip::Tooltip;
 use unicode_segmentation::UnicodeSegmentation;
@@ -80,7 +79,6 @@ const NAVIGATION_RAIL_INACTIVE_OPACITY: f32 = 0.45;
 const NAVIGATION_RAIL_TURN_HEIGHT: f32 = NAVIGATION_RAIL_TICK_HEIGHT + NAVIGATION_RAIL_TICK_GAP;
 const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
-const STREAM_MARKDOWN_DELAY: Duration = Duration::from_millis(32);
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 const STREAM_CATCH_UP_FRAMES: usize = 18;
 const STREAM_MIN_GRAPHEMES_PER_FRAME: usize = 12;
@@ -385,172 +383,6 @@ struct NavigationRailVisualState {
     emphasized_turn: Option<Uuid>,
 }
 
-/// Presents a stable, estimated document length to the scrollbar while the
-/// virtualized list replaces provisional row heights with exact measurements.
-/// Offsets are normalized against the list's live range, so the thumb remains
-/// anchored at the same logical position and dragging still reaches both ends.
-#[derive(Clone)]
-struct StableListScrollbarHandle {
-    list_state: ListState,
-    estimated_content_height: Rc<Cell<Pixels>>,
-    anchor_end_space: Rc<Cell<Pixels>>,
-    anchor_following: Rc<Cell<bool>>,
-    drag_estimated_height: Rc<Cell<Option<Pixels>>>,
-    is_scrolled: Rc<Cell<bool>>,
-    initial_measurement_pending: bool,
-}
-
-impl StableListScrollbarHandle {
-    fn new(
-        list_state: &ListState,
-        estimated_content_height: &Rc<Cell<Pixels>>,
-        anchor_end_space: &Rc<Cell<Pixels>>,
-        anchor_following: &Rc<Cell<bool>>,
-        drag_estimated_height: &Rc<Cell<Option<Pixels>>>,
-        is_scrolled: &Rc<Cell<bool>>,
-        initial_measurement_pending: bool,
-    ) -> Self {
-        Self {
-            list_state: list_state.clone(),
-            estimated_content_height: estimated_content_height.clone(),
-            anchor_end_space: anchor_end_space.clone(),
-            anchor_following: anchor_following.clone(),
-            drag_estimated_height: drag_estimated_height.clone(),
-            is_scrolled: is_scrolled.clone(),
-            initial_measurement_pending,
-        }
-    }
-
-    fn effective_content_height(&self) -> Pixels {
-        self.drag_estimated_height
-            .get()
-            .unwrap_or_else(|| self.estimated_content_height.get() + self.anchor_end_space.get())
-    }
-
-    fn actual_max_offset(&self) -> Size<Pixels> {
-        let viewport = self.list_state.viewport_bounds().size;
-        let base = self.list_state.max_offset_for_scrollbar();
-        let estimated_max = (self.effective_content_height() - viewport.height).max(Pixels::ZERO);
-        size(
-            base.x,
-            if base.y > Pixels::ZERO {
-                base.y + self.anchor_end_space.get()
-            } else {
-                estimated_max
-            },
-        )
-    }
-}
-
-fn scale_scrollbar_offset(
-    offset: Point<Pixels>,
-    source_max: Size<Pixels>,
-    target_max: Size<Pixels>,
-) -> Point<Pixels> {
-    let scale_axis = |offset: Pixels, source: Pixels, target: Pixels| {
-        if source <= Pixels::ZERO || target <= Pixels::ZERO {
-            Pixels::ZERO
-        } else {
-            (offset / source * target).clamp(-target, Pixels::ZERO)
-        }
-    };
-    point(
-        scale_axis(offset.x, source_max.width, target_max.width),
-        scale_axis(offset.y, source_max.height, target_max.height),
-    )
-}
-
-fn scroll_top_after_row_invalidation(
-    mut scroll_top: ListOffset,
-    range: Range<usize>,
-    anchor_delta: Pixels,
-) -> Option<ListOffset> {
-    if !range.contains(&scroll_top.item_ix) {
-        return None;
-    }
-    if scroll_top.item_ix == range.start {
-        scroll_top.offset_in_item += anchor_delta;
-    }
-    Some(scroll_top)
-}
-
-impl ScrollbarHandle for StableListScrollbarHandle {
-    fn offset(&self) -> Point<Pixels> {
-        let viewport = self.list_state.viewport_bounds().size;
-        let actual_max = self.actual_max_offset();
-        let estimated_max = size(
-            Pixels::ZERO,
-            (self.effective_content_height() - viewport.height).max(Pixels::ZERO),
-        );
-        scale_scrollbar_offset(
-            self.list_state.scroll_px_offset_for_scrollbar(),
-            actual_max,
-            estimated_max,
-        )
-    }
-
-    fn set_offset(&self, offset: Point<Pixels>) {
-        self.anchor_following.set(false);
-        let viewport = self.list_state.viewport_bounds().size;
-        let actual_max = self.actual_max_offset();
-        let estimated_max = size(
-            Pixels::ZERO,
-            (self.effective_content_height() - viewport.height).max(Pixels::ZERO),
-        );
-        let actual_offset = scale_scrollbar_offset(offset, estimated_max, actual_max);
-        self.list_state.set_offset_from_scrollbar(actual_offset);
-        let at_end = estimated_max.height <= Pixels::ZERO
-            || -offset.y >= (estimated_max.height - px(0.5)).max(Pixels::ZERO);
-        self.is_scrolled.set(!at_end);
-    }
-
-    fn content_size(&self) -> Size<Pixels> {
-        let viewport = self.list_state.viewport_bounds().size;
-        if self.initial_measurement_pending {
-            // A session replacement first lays out cheap estimated-height
-            // rows. Do not expose that provisional document size to the
-            // scrollbar: an overestimate otherwise paints a one-frame thumb
-            // for transcripts whose exact content fits the viewport.
-            return viewport;
-        }
-        if self.drag_estimated_height.get().is_none()
-            && viewport.height > Pixels::ZERO
-            && self.list_state.max_offset_for_scrollbar().y <= Pixels::ZERO
-        {
-            // Once GPUI has exact row geometry, its measured scroll range is
-            // authoritative for the fits-in-viewport case. Text-height
-            // estimates may remain a little taller until asynchronous text
-            // resize events arrive, which previously caused the thumb to
-            // flash for a single frame after switching sessions.
-            return viewport;
-        }
-        size(
-            viewport.width,
-            self.effective_content_height().max(viewport.height),
-        )
-    }
-
-    fn start_drag(&self) {
-        self.drag_estimated_height.set(Some(
-            self.estimated_content_height.get() + self.anchor_end_space.get(),
-        ));
-        self.list_state.scrollbar_drag_started();
-    }
-
-    fn end_drag(&self) {
-        self.list_state.scrollbar_drag_ended();
-        self.drag_estimated_height.set(None);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct TranscriptMarkdownResize {
-    session_id: Uuid,
-    message_id: Uuid,
-    delta: Pixels,
-    anchor_delta: Pixels,
-}
-
 struct SessionRuntime {
     driver: DriverHandle,
     events: Receiver<DriverEvent>,
@@ -658,22 +490,11 @@ pub struct Waku {
     /// bottom-aligned list's implicit pin and displace the sent-message anchor.
     anchored_transcript_rows: ListState,
     transcript_row_kinds: RefCell<Vec<TranscriptRowKind>>,
-    transcript_row_estimates: RefCell<Vec<Pixels>>,
-    transcript_row_height_adjustments: RefCell<HashMap<TranscriptRowKind, Pixels>>,
-    transcript_estimated_height: Rc<Cell<Pixels>>,
     transcript_anchor: Cell<Option<TranscriptAnchor>>,
     transcript_anchor_end_space: Rc<Cell<Pixels>>,
     transcript_anchor_following: Rc<Cell<bool>>,
-    transcript_drag_estimated_height: Rc<Cell<Option<Pixels>>>,
-    /// Height-only rows used only for explicit bulk document reflows.
-    transcript_provisional_rows: RefCell<HashSet<usize>>,
-    /// Real rows awaiting exact layout; these schedule a follow-up anchor pass
-    /// without hiding any transcript content.
-    transcript_exact_measurement_rows: RefCell<HashSet<usize>>,
     transcript_is_scrolled: Rc<Cell<bool>>,
     transcript_layout_width: Cell<Pixels>,
-    transcript_resize_tx: crossbeam_channel::Sender<TranscriptMarkdownResize>,
-    transcript_resize_rx: Receiver<TranscriptMarkdownResize>,
     message_text_states: HashMap<Uuid, Entity<TextViewState>>,
     activity_text_states:
         RefCell<HashMap<(Uuid, ActivityDisclosureSectionKind), Entity<TextViewState>>>,
@@ -855,8 +676,6 @@ impl Waku {
                 window.refresh();
             }
         });
-        let (transcript_resize_tx, transcript_resize_rx) = unbounded();
-
         let entity = cx.new(|cx| {
             let settings_focus = cx.focus_handle();
 
@@ -979,19 +798,11 @@ impl Waku {
                 transcript_rows,
                 anchored_transcript_rows,
                 transcript_row_kinds: RefCell::new(Vec::new()),
-                transcript_row_estimates: RefCell::new(Vec::new()),
-                transcript_row_height_adjustments: RefCell::new(HashMap::new()),
-                transcript_estimated_height: Rc::new(Cell::new(Pixels::ZERO)),
                 transcript_anchor: Cell::new(None),
                 transcript_anchor_end_space: Rc::new(Cell::new(Pixels::ZERO)),
                 transcript_anchor_following,
-                transcript_drag_estimated_height: Rc::new(Cell::new(None)),
-                transcript_provisional_rows: RefCell::new(HashSet::new()),
-                transcript_exact_measurement_rows: RefCell::new(HashSet::new()),
                 transcript_is_scrolled,
                 transcript_layout_width: Cell::new(Pixels::ZERO),
-                transcript_resize_tx,
-                transcript_resize_rx,
                 message_text_states: HashMap::new(),
                 activity_text_states: RefCell::new(HashMap::new()),
                 navigation_rail: navigation_rail.clone(),
@@ -1001,9 +812,7 @@ impl Waku {
         });
         navigation_rail.update(cx, |rail, _| rail.set_waku(entity.downgrade()));
         let initial_row_count = entity.read(cx).transcript_row_count();
-        entity
-            .read(cx)
-            .reset_transcript_rows_with_placeholders(initial_row_count);
+        entity.read(cx).reset_transcript_rows(initial_row_count);
         entity
     }
 }

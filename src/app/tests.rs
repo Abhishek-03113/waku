@@ -1,17 +1,13 @@
 use super::{
-    NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation,
-    StableListScrollbarHandle, StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
-    append_text_delta_to_session, apply_transcript_visibility_splice, assistant_response_footer,
-    assistant_response_footer_index, assistant_response_footer_time, compact_driver_error,
-    escape_html, estimated_message_height, estimated_text_height, fenced_code,
-    fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
-    format_worked_duration, maintain_transcript_anchor, markdown_estimation_source,
+    NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
+    TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
+    assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
+    compact_driver_error, escape_html, fenced_code, fitted_file_tree_width, fitted_panel_widths,
+    folded_transcript_row_kinds, format_worked_duration, maintain_transcript_anchor,
     message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
-    navigation_rail_scale, pop_stream_chunk, prepare_transcript_row_remeasurement,
-    scale_scrollbar_offset, scroll_top_after_row_invalidation, should_show_navigation_rail,
-    stabilized_transcript_anchor_end_space, take_stream_prefix, transcript_anchor_end_space,
-    transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
-    widened_panel_width_for_file_editor,
+    navigation_rail_scale, pop_stream_chunk, should_show_navigation_rail, take_stream_prefix,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
+    transcript_row_splice, widened_panel_width_for_file_editor,
 };
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
@@ -205,80 +201,6 @@ fn first_file_editor_opening_reserves_500_pixels() {
 }
 
 #[test]
-fn stable_scrollbar_maps_live_offsets_without_changing_progress() {
-    let actual_max = gpui::size(gpui::px(0.0), gpui::px(600.0));
-    let stable_max = gpui::size(gpui::px(0.0), gpui::px(2_400.0));
-
-    assert_eq!(
-        scale_scrollbar_offset(
-            gpui::point(gpui::px(0.0), gpui::px(-300.0)),
-            actual_max,
-            stable_max,
-        ),
-        gpui::point(gpui::px(0.0), gpui::px(-1_200.0))
-    );
-    assert_eq!(
-        scale_scrollbar_offset(
-            gpui::point(gpui::px(0.0), gpui::px(-2_400.0)),
-            stable_max,
-            actual_max,
-        ),
-        gpui::point(gpui::px(0.0), gpui::px(-600.0))
-    );
-}
-
-#[test]
-fn stable_scrollbar_freezes_its_document_height_during_a_drag() {
-    use gpui_component::scroll::ScrollbarHandle as _;
-
-    let rows = gpui::ListState::new(0, gpui::ListAlignment::Bottom, gpui::px(0.0));
-    let estimated = Rc::new(Cell::new(gpui::px(1_000.0)));
-    let anchor_end_space = Rc::new(Cell::new(gpui::px(300.0)));
-    let anchor_following = Rc::new(Cell::new(true));
-    let drag_estimate = Rc::new(Cell::new(None));
-    let is_scrolled = Rc::new(Cell::new(false));
-    let handle = StableListScrollbarHandle::new(
-        &rows,
-        &estimated,
-        &anchor_end_space,
-        &anchor_following,
-        &drag_estimate,
-        &is_scrolled,
-        false,
-    );
-
-    handle.start_drag();
-    estimated.set(gpui::px(2_000.0));
-    anchor_end_space.set(gpui::px(0.0));
-    assert_eq!(handle.content_size().height, gpui::px(1_300.0));
-    handle.end_drag();
-    assert_eq!(handle.content_size().height, gpui::px(2_000.0));
-}
-
-#[test]
-fn stable_scrollbar_hides_provisional_session_height() {
-    use gpui_component::scroll::ScrollbarHandle as _;
-
-    let rows = gpui::ListState::new(0, gpui::ListAlignment::Bottom, gpui::px(0.0));
-    let estimated = Rc::new(Cell::new(gpui::px(1_000.0)));
-    let anchor_end_space = Rc::new(Cell::new(gpui::Pixels::ZERO));
-    let anchor_following = Rc::new(Cell::new(false));
-    let drag_estimate = Rc::new(Cell::new(None));
-    let is_scrolled = Rc::new(Cell::new(false));
-    let handle = StableListScrollbarHandle::new(
-        &rows,
-        &estimated,
-        &anchor_end_space,
-        &anchor_following,
-        &drag_estimate,
-        &is_scrolled,
-        true,
-    );
-
-    assert_eq!(handle.content_size(), rows.viewport_bounds().size);
-}
-
-#[test]
 fn anchor_end_space_keeps_a_short_new_turn_at_the_viewport_top() {
     assert_eq!(
         transcript_anchor_end_space(gpui::px(700.0), gpui::px(180.0)),
@@ -287,37 +209,6 @@ fn anchor_end_space_keeps_a_short_new_turn_at_the_viewport_top() {
     assert_eq!(
         transcript_anchor_end_space(gpui::px(700.0), gpui::px(900.0)),
         gpui::px(0.0)
-    );
-}
-
-#[test]
-fn anchor_end_space_waits_for_exact_expanded_row_measurement() {
-    assert_eq!(
-        stabilized_transcript_anchor_end_space(
-            gpui::px(700.0),
-            gpui::px(260.0),
-            gpui::px(520.0),
-            true,
-        ),
-        gpui::px(520.0)
-    );
-    assert_eq!(
-        stabilized_transcript_anchor_end_space(
-            gpui::px(700.0),
-            gpui::px(260.0),
-            gpui::px(520.0),
-            false,
-        ),
-        gpui::px(440.0)
-    );
-    assert_eq!(
-        stabilized_transcript_anchor_end_space(
-            gpui::px(700.0),
-            gpui::px(180.0),
-            gpui::px(440.0),
-            true,
-        ),
-        gpui::px(520.0)
     );
 }
 
@@ -339,89 +230,6 @@ fn pending_expansion_reasserts_the_user_message_anchor() {
         true,
         gpui::Pixels::ZERO,
     ));
-}
-
-#[test]
-fn row_invalidation_preserves_the_intra_message_anchor() {
-    let scroll_top = gpui::ListOffset {
-        item_ix: 4,
-        offset_in_item: gpui::px(320.0),
-    };
-    let anchored = scroll_top_after_row_invalidation(scroll_top, 4..5, gpui::px(80.0))
-        .expect("the invalidated row contains the scroll top");
-    assert_eq!(anchored.item_ix, 4);
-    assert_eq!(anchored.offset_in_item, gpui::px(400.0));
-    assert!(scroll_top_after_row_invalidation(scroll_top, 5..6, gpui::px(80.0)).is_none());
-
-    let underfilled = gpui::ListOffset {
-        item_ix: 0,
-        offset_in_item: gpui::px(-140.0),
-    };
-    let anchored = scroll_top_after_row_invalidation(underfilled, 0..1, gpui::Pixels::ZERO)
-        .expect("the disclosure row contains the synthetic leading-space anchor");
-    assert_eq!(anchored.offset_in_item, gpui::px(-140.0));
-}
-
-#[test]
-fn transcript_estimates_count_explicit_markdown_lines() {
-    let markdown = (1..=200)
-        .map(|line| format!("{line}. A short sentence."))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(estimated_text_height(&markdown, 88, 21.0) >= gpui::px(4_200.0));
-}
-
-#[test]
-fn markdown_estimates_reserve_images_without_counting_long_sources_as_text() {
-    let markdown = "Before\n\n![preview](data:image/png;base64,AAAAAAAAAAAAAAAAAAAAAAAA)\n\nAfter";
-    let (visible, media_height) = markdown_estimation_source(markdown);
-    assert!(!visible.contains("base64"));
-    assert_eq!(media_height, gpui::px(160.0));
-
-    let message = Message::new(MessageRole::Assistant, markdown);
-    assert!(estimated_message_height(&message, gpui::px(720.0), false) >= gpui::px(200.0));
-}
-
-#[test]
-fn message_estimates_reserve_shared_footer() {
-    let user = Message::new(MessageRole::User, "A short prompt.");
-    let without_actions = estimated_message_height(&user, gpui::px(720.0), false);
-    let with_actions = estimated_message_height(&user, gpui::px(720.0), true);
-
-    assert_eq!(with_actions - without_actions, gpui::px(30.0));
-
-    let assistant = Message::new(MessageRole::Assistant, "A short response.");
-    let without_actions = estimated_message_height(&assistant, gpui::px(720.0), false);
-    let with_actions = estimated_message_height(&assistant, gpui::px(720.0), true);
-
-    assert_eq!(with_actions - without_actions, gpui::px(30.0));
-}
-
-#[test]
-fn markdown_estimates_only_visible_disclosure_content() {
-    let closed = "<details><summary>More</summary>hidden ![image](x.png)</details>";
-    let (visible, media_height) = markdown_estimation_source(closed);
-    assert!(visible.contains("More"));
-    assert!(!visible.contains("hidden"));
-    assert_eq!(media_height, gpui::Pixels::ZERO);
-
-    let open = "<details open><summary>More</summary>visible ![image](x.png)</details>";
-    let (visible, media_height) = markdown_estimation_source(open);
-    assert!(visible.contains("visible"));
-    assert_eq!(media_height, gpui::px(160.0));
-
-    let nested = "<DETAILS OPEN><SUMMARY>Outer</SUMMARY><details><summary>Inner</summary>hidden</details><IMG HEIGHT='245' src='x'></DETAILS>";
-    let (visible, media_height) = markdown_estimation_source(nested);
-    assert!(visible.contains("Outer"));
-    assert!(visible.contains("Inner"));
-    assert!(!visible.contains("hidden"));
-    assert_eq!(media_height, gpui::px(245.0));
-
-    let (visible, media_height) =
-        markdown_estimation_source("<details-panel>ordinary text</details-panel>");
-    assert!(visible.contains("ordinary text"));
-    assert_eq!(media_height, gpui::Pixels::ZERO);
 }
 
 #[test]
@@ -686,47 +494,6 @@ fn turn_fold_visibility_splice_preserves_surrounding_message_rows() {
         Some((2..5, 0))
     );
     assert_eq!(transcript_row_splice(&collapsed, &collapsed), None);
-
-    let transcript_rows = ListState::new(collapsed.len(), ListAlignment::Bottom, px(0.0));
-    let anchored_rows = ListState::new(collapsed.len(), ListAlignment::Top, px(0.0));
-    let provisional_rows = RefCell::new(HashSet::from([0, 1, 2]));
-    let exact_measurement_rows = RefCell::new(HashSet::from([1]));
-
-    apply_transcript_visibility_splice(
-        [&transcript_rows, &anchored_rows],
-        collapsed.len(),
-        expanded.len(),
-        expand_splice,
-        &provisional_rows,
-        &exact_measurement_rows,
-    );
-
-    assert_eq!(transcript_rows.item_count(), expanded.len());
-    assert_eq!(anchored_rows.item_count(), expanded.len());
-    assert!(provisional_rows.borrow().is_empty());
-    assert_eq!(*exact_measurement_rows.borrow(), HashSet::from([2, 3, 4]));
-}
-
-#[test]
-fn local_message_remeasurement_never_queues_blank_placeholder_rows() {
-    let provisional_rows = RefCell::new(HashSet::from([1, 4]));
-    let exact_measurement_rows = RefCell::new(HashSet::from([1, 2, 4]));
-
-    prepare_transcript_row_remeasurement(&provisional_rows, &exact_measurement_rows, 1..3, false);
-
-    assert_eq!(*provisional_rows.borrow(), HashSet::from([4]));
-    assert_eq!(*exact_measurement_rows.borrow(), HashSet::from([1, 2, 4]));
-}
-
-#[test]
-fn bulk_transcript_reflow_can_explicitly_queue_placeholder_rows() {
-    let provisional_rows = RefCell::new(HashSet::new());
-    let exact_measurement_rows = RefCell::new(HashSet::from([2]));
-
-    prepare_transcript_row_remeasurement(&provisional_rows, &exact_measurement_rows, 1..4, true);
-
-    assert_eq!(*provisional_rows.borrow(), HashSet::from([1, 2, 3]));
-    assert!(exact_measurement_rows.borrow().is_empty());
 }
 
 #[test]

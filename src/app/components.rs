@@ -236,9 +236,6 @@ pub(super) fn render_message(
     assistant_message_action: Option<AssistantMessageAction>,
     user_message_action: Option<UserMessageAction>,
     message_edit_input: Option<Entity<ComposerInput>>,
-    session_id: Uuid,
-    transcript_resize_tx: crossbeam_channel::Sender<TranscriptMarkdownResize>,
-    transcript_layout_width: Pixels,
     transcript_rows: ListState,
     transcript_viewport: TextViewScrollViewport,
     text_state: Entity<TextViewState>,
@@ -383,8 +380,6 @@ pub(super) fn render_message(
         }
         MessageRole::Assistant => {
             let group_name = SharedString::from(format!("assistant-message-{message_id}"));
-            let resize_tx = transcript_resize_tx.clone();
-            let resize_waku = waku.clone();
             let mut column = div()
                 .w_full()
                 .min_w_0()
@@ -396,36 +391,16 @@ pub(super) fn render_message(
                 .text_size(px(13.5))
                 .line_height(px(21.0))
                 .text_color(theme.text)
+                .whitespace_normal()
                 .child(
-                    TextView::markdown_with_state(
+                    selectable_plain_text(
                         SharedString::from(format!("message-{message_id}-assistant")),
-                        content,
+                        &content,
                         text_state,
                         cx,
                     )
-                    .update_delay(STREAM_MARKDOWN_DELAY)
-                    .style(assistant_markdown_style(theme))
-                    .selectable(true)
                     .selection_scroll_handle(&transcript_rows)
-                    .block_viewport(transcript_viewport)
-                    .block_layout_width(transcript_layout_width)
-                    .on_block_resize(move |resize: TextViewBlockResize, cx| {
-                        let _ = resize_tx.send(TranscriptMarkdownResize {
-                            session_id,
-                            message_id,
-                            delta: resize.delta,
-                            anchor_delta: if resize.above_viewport {
-                                resize.delta
-                            } else {
-                                Pixels::ZERO
-                            },
-                        });
-                        if let Some(waku) = resize_waku.upgrade() {
-                            cx.notify(waku.entity_id());
-                        }
-                    })
-                    .w_full()
-                    .cursor_text(),
+                    .block_viewport(transcript_viewport),
                 );
             if message.streaming {
                 column = column.child(pulse_dot(
@@ -542,27 +517,6 @@ pub(super) fn render_message(
             },
         )
         .into_any_element()
-}
-
-pub(super) fn assistant_markdown_style(theme: &Theme) -> TextViewStyle {
-    TextViewStyle::default()
-        .paragraph_gap(rems(0.75))
-        .heading_font_size(|level, base| match level {
-            1 => base * 1.5,
-            2 => base * 1.3,
-            3 => base * 1.15,
-            4 => base * 1.05,
-            _ => base,
-        })
-        .code_block(
-            StyleRefinement::default()
-                .bg(theme.inset)
-                .border_1()
-                .border_color(theme.border_strong)
-                .rounded(px(8.0))
-                .p(px(12.0))
-                .text_size(px(12.0)),
-        )
 }
 
 pub(super) fn selectable_plain_text(

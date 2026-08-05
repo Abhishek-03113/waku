@@ -90,11 +90,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.sync_transcript_rows();
-        if self.sync_transcript_layout_width(window) {
-            while self.transcript_resize_rx.try_recv().is_ok() {}
-        } else {
-            self.drain_transcript_resize_events();
-        }
+        self.sync_transcript_layout_width(window);
         let transcript_rows = self.active_transcript_rows().clone();
         let anchor_end_space = self.update_transcript_anchor_end_space(window);
         if self.transcript_anchor_following.get()
@@ -111,17 +107,7 @@ impl Waku {
         }
         let entity = cx.entity().downgrade();
         let transcript_viewport = TextViewScrollViewport::from_list(&transcript_rows);
-        let initial_measurement_pending = !self.transcript_provisional_rows.borrow().is_empty()
-            || !self.transcript_exact_measurement_rows.borrow().is_empty();
-        let scrollbar_handle = StableListScrollbarHandle::new(
-            &transcript_rows,
-            &self.transcript_estimated_height,
-            &self.transcript_anchor_end_space,
-            &self.transcript_anchor_following,
-            &self.transcript_drag_estimated_height,
-            &self.transcript_is_scrolled,
-            initial_measurement_pending,
-        );
+        let scrollbar_handle = transcript_rows.clone();
         let viewport_size = transcript_rows.viewport_bounds().size;
         let transcript_scrollable = viewport_size.height > Pixels::ZERO
             && transcript_rows.max_offset_for_scrollbar().y > px(0.5);
@@ -670,37 +656,6 @@ impl Waku {
         transcript_viewport: TextViewScrollViewport,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.transcript_provisional_rows.borrow_mut().remove(&index) {
-            // Keep the scrollbar suppressed for the pass that replaces this
-            // estimated-height row with its exact content. The following
-            // render can then trust ListState's measured scroll range.
-            self.transcript_exact_measurement_rows
-                .borrow_mut()
-                .insert(index);
-            cx.notify();
-            let estimated_height = self
-                .transcript_row_estimates
-                .borrow()
-                .get(index)
-                .copied()
-                .unwrap_or(px(44.0));
-            return div()
-                .w_full()
-                .h(estimated_height)
-                .flex_none()
-                .into_any_element();
-        }
-        if self
-            .transcript_exact_measurement_rows
-            .borrow_mut()
-            .remove(&index)
-        {
-            // This render replaces the provisional element. Schedule one more
-            // pass so the anchor reservation reads the exact post-layout row
-            // bounds instead of leaving the estimate in place indefinitely.
-            cx.notify();
-        }
-
         let theme = Theme::current(cx);
         let composer = self.composer.clone();
         let waku = cx.entity().downgrade();
@@ -758,9 +713,6 @@ impl Waku {
                         assistant_message_action,
                         user_message_action,
                         message_edit_input,
-                        self.state.selected_session.unwrap_or_default(),
-                        self.transcript_resize_tx.clone(),
-                        self.transcript_layout_width.get(),
                         self.active_transcript_rows().clone(),
                         transcript_viewport,
                         text_state,

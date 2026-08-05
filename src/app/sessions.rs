@@ -71,7 +71,7 @@ impl Waku {
         self.branch = self
             .selected_project()
             .and_then(|project| git_branch(&project.path));
-        self.reset_transcript_rows_with_placeholders(self.transcript_row_count());
+        self.reset_transcript_rows(self.transcript_row_count());
         self.save();
         cx.notify();
     }
@@ -432,7 +432,6 @@ impl Waku {
         self.transcript_anchor.set(None);
         self.transcript_anchor_end_space.set(Pixels::ZERO);
         self.transcript_anchor_following.set(false);
-        self.transcript_exact_measurement_rows.borrow_mut().clear();
     }
 
     pub(super) fn reset_session_runtime(&mut self, session_id: Uuid) {
