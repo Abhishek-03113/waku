@@ -490,6 +490,11 @@ pub struct Waku {
     /// Active turns use top alignment so row remeasurement cannot invoke the
     /// bottom-aligned list's implicit pin and displace the sent-message anchor.
     anchored_transcript_rows: ListState,
+    /// Virtualized list backing the sidebar session history, so only visible
+    /// rows are built and laid out regardless of how many sessions exist.
+    sidebar_list_state: ListState,
+    /// Snapshot of the sidebar rows the list state currently corresponds to.
+    sidebar_row_cache: RefCell<Vec<SidebarRow>>,
     transcript_row_kinds: RefCell<Vec<TranscriptRowKind>>,
     transcript_anchor: Cell<Option<TranscriptAnchor>>,
     transcript_anchor_end_space: Rc<Cell<Pixels>>,
@@ -521,6 +526,7 @@ mod transcript;
 mod transcript_view;
 
 use components::*;
+use sidebar::SidebarRow;
 use streaming::*;
 use transcript::*;
 use transcript_view::ConversationNavigationRail;
@@ -652,6 +658,7 @@ impl Waku {
         let transcript_rows = ListState::new(0, ListAlignment::Bottom, px(512.0)).measure_all();
         let anchored_transcript_rows =
             ListState::new(0, ListAlignment::Top, px(512.0)).measure_all();
+        let sidebar_list_state = ListState::new(0, ListAlignment::Top, px(256.0));
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
         let navigation_rail_active_scale_enabled = Rc::new(Cell::new(false));
@@ -803,6 +810,8 @@ impl Waku {
                 message_edit: None,
                 transcript_rows,
                 anchored_transcript_rows,
+                sidebar_list_state,
+                sidebar_row_cache: RefCell::new(Vec::new()),
                 transcript_row_kinds: RefCell::new(Vec::new()),
                 transcript_anchor: Cell::new(None),
                 transcript_anchor_end_space: Rc::new(Cell::new(Pixels::ZERO)),

@@ -3,7 +3,7 @@ use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
 use super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SessionDateGroup {
+pub(super) enum SessionDateGroup {
     Today,
     Yesterday,
     ThisWeek,
@@ -91,6 +91,22 @@ fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text_tertiary)
         .child(group.label())
+}
+
+/// Height of a session row in the virtualized sidebar list, used as the
+/// uniform height hint so the scrollbar is correctly sized before off-screen
+/// rows have been measured.
+const SIDEBAR_SESSION_ROW_HEIGHT: f32 = 51.0;
+
+/// One row of the virtualized sidebar session history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SidebarRow {
+    /// Date-group header; the first row also carries the session actions.
+    Header(SessionDateGroup),
+    /// A started session.
+    Session(Uuid),
+    /// Spacing between date groups.
+    GroupSpacer,
 }
 
 impl Waku {
@@ -314,137 +330,12 @@ impl Waku {
         let is_resizing = self
             .panel_resize_drag
             .is_some_and(|drag| drag.target == PanelResizeTarget::Sidebar);
-        let selected_session = self.state.selected_session;
 
-        let today = Local::now().date_naive();
-        let mut grouped_sessions: [Vec<&AgentSession>; 6] = std::array::from_fn(|_| Vec::new());
-        let mut sorted_sessions = self
-            .state
-            .sessions
-            .iter()
-            .filter(|session| session.has_started())
-            .collect::<Vec<_>>();
-        sorted_sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-        for session in sorted_sessions {
-            grouped_sessions[session_date_group(session.updated_at, today).index()].push(session);
-        }
-
-        let mut sessions = div().flex().flex_col();
-        let mut is_first_group = true;
-        for group in SessionDateGroup::ALL {
-            let group_sessions = &grouped_sessions[group.index()];
-            if group_sessions.is_empty() {
-                continue;
-            }
-
-            let group_header = session_group_label(&theme, group).when(is_first_group, |element| {
-                element
-                    .justify_between()
-                    .child(self.render_sidebar_session_actions(cx))
-            });
-            is_first_group = false;
-            let mut group_element = div().flex().flex_col().child(group_header);
-            for session in group_sessions {
-                let session_id = session.id;
-                let selected = selected_session == Some(session.id);
-                let active = !matches!(session.status, SessionStatus::Idle);
-                let project_name = self
-                    .state
-                    .projects
-                    .iter()
-                    .find(|project| project.id == session.project_id)
-                    .map(|project| project.name.clone())
-                    .unwrap_or_else(|| "Unknown project".to_owned());
-                let waku = cx.entity().downgrade();
-                let composer = self.composer.clone();
-                group_element = group_element.child(
-                    div()
-                        .id(SharedString::from(format!("session-{}", session.id)))
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .px(px(8.0))
-                        .py(px(7.0))
-                        .rounded(px(7.0))
-                        .cursor_default()
-                        .when(selected, |element| {
-                            element.bg(theme.sidebar_item_background)
-                        })
-                        .hover(|element| element.bg(theme.sidebar_item_background))
-                        .active(|element| element.bg(theme.sidebar_item_background))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .overflow_hidden()
-                                .line_height(px(18.0))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .whitespace_normal()
-                                        .line_clamp(1)
-                                        .text_overflow(gpui::TextOverflow::Truncate("...".into()))
-                                        .text_size(px(13.5))
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(session.title.clone())),
-                                )
-                                .when(active, |element| {
-                                    element.child(pulse_dot(
-                                        format!("session-pulse-{session_id}"),
-                                        5.0,
-                                        status_color(&theme, session.status),
-                                    ))
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(5.0))
-                                .text_size(px(11.5))
-                                .line_height(px(15.0))
-                                .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(theme.text_tertiary)
-                                        .child(SharedString::from(project_name)),
-                                ),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.select_session(session_id, cx);
-                        }))
-                        .context_menu_with_id(
-                            SharedString::from(format!("session-context-menu-{session_id}")),
-                            move |menu, window, cx| {
-                                let waku = waku.clone();
-                                preserve_composer_focus_for_context_menu(
-                                    &composer, menu, window, cx,
-                                )
-                                .min_w(px(140.0))
-                                .item(
-                                    PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
-                                        let _ = waku.update(cx, |waku, cx| {
-                                            waku.remove_session(session_id, cx);
-                                        });
-                                    }),
-                                )
-                            },
-                        ),
-                );
-            }
-            sessions = sessions.child(group_element).child(div().h(px(10.0)));
-        }
-        if is_first_group {
-            sessions = sessions.child(
-                session_group_label(&theme, SessionDateGroup::Today)
-                    .justify_between()
-                    .child(self.render_sidebar_session_actions(cx)),
-            );
-        }
+        // Building the row snapshot is cheap (a few bytes per session); the
+        // heavy element construction happens only for rows the list can see.
+        let rows = Rc::new(self.sidebar_rows(Local::now().date_naive()));
+        self.sync_sidebar_rows(&rows);
+        let entity = cx.entity().downgrade();
 
         div()
             .w(px(width))
@@ -463,9 +354,219 @@ impl Waku {
                     .id("sidebar-scroll")
                     .flex_1()
                     .min_h_0()
-                    .child(div().px(px(10.0)).pt(px(2.0)).child(sessions))
-                    .overflow_y_scrollbar(),
+                    .relative()
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .pt(px(2.0))
+                            .size_full()
+                            .child(
+                                list(self.sidebar_list_state.clone(), move |index, _window, cx| {
+                                    entity
+                                        .upgrade()
+                                        .map(|entity| {
+                                            entity.update(cx, |this, cx| {
+                                                this.sidebar_row(index, &rows, cx)
+                                            })
+                                        })
+                                        .unwrap_or_else(|| div().into_any_element())
+                                })
+                                .size_full(),
+                            ),
+                    )
+                    .vertical_scrollbar(&self.sidebar_list_state),
             )
+    }
+
+    /// Snapshot the session history as a flat list of lightweight rows, newest
+    /// first, grouped by calendar period like the previous eager render.
+    fn sidebar_rows(&self, today: NaiveDate) -> Vec<SidebarRow> {
+        let mut grouped_sessions: [Vec<Uuid>; 6] = std::array::from_fn(|_| Vec::new());
+        let mut sorted_sessions = self
+            .state
+            .sessions
+            .iter()
+            .filter(|session| session.has_started())
+            .collect::<Vec<_>>();
+        sorted_sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        for session in sorted_sessions {
+            grouped_sessions[session_date_group(session.updated_at, today).index()].push(session.id);
+        }
+
+        let mut rows = Vec::new();
+        for group in SessionDateGroup::ALL {
+            let group_sessions = &grouped_sessions[group.index()];
+            if group_sessions.is_empty() {
+                continue;
+            }
+            rows.push(SidebarRow::Header(group));
+            rows.extend(group_sessions.iter().copied().map(SidebarRow::Session));
+            rows.push(SidebarRow::GroupSpacer);
+        }
+        if rows.is_empty() {
+            // Keep the session actions row visible while there is no history.
+            rows.push(SidebarRow::Header(SessionDateGroup::Today));
+        }
+        rows
+    }
+
+    /// Keep the virtualized list in sync with the current row snapshot.
+    /// Rows are cheap values, so only the minimal changed suffix is spliced,
+    /// preserving scroll position and measured heights across unrelated churn
+    /// (e.g. the active session's `updated_at` bumping on every stream tick).
+    fn sync_sidebar_rows(&self, rows: &[SidebarRow]) {
+        let mut cached = self.sidebar_row_cache.borrow_mut();
+        if cached.as_slice() == rows {
+            return;
+        }
+        let prefix = cached
+            .iter()
+            .zip(rows.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let old_count = cached.len();
+        *cached = rows.to_vec();
+        if old_count == 0 {
+            self.sidebar_list_state
+                .reset_with_uniform_height(rows.len(), px(SIDEBAR_SESSION_ROW_HEIGHT));
+        } else {
+            self.sidebar_list_state
+                .splice(prefix..old_count, rows.len() - prefix);
+            // Newly inserted rows have no measured height yet; give them the
+            // uniform hint so the scrollbar keeps a correct total height.
+            self.sidebar_list_state
+                .clone()
+                .with_uniform_item_height(px(SIDEBAR_SESSION_ROW_HEIGHT));
+        }
+    }
+
+    fn sidebar_row(&self, index: usize, rows: &[SidebarRow], cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = rows.get(index) else {
+            return div().into_any_element();
+        };
+        match *row {
+            SidebarRow::Header(group) => self
+                .render_sidebar_group_header(group, index == 0, cx)
+                .into_any_element(),
+            SidebarRow::Session(session_id) => self
+                .render_sidebar_session_item(session_id, cx)
+                .into_any_element(),
+            SidebarRow::GroupSpacer => div().w_full().h(px(10.0)).into_any_element(),
+        }
+    }
+
+    fn render_sidebar_group_header(
+        &self,
+        group: SessionDateGroup,
+        first: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = Theme::current(cx);
+        session_group_label(&theme, group)
+            .w_full()
+            .when(first, |element| {
+                element
+                    .justify_between()
+                    .child(self.render_sidebar_session_actions(cx))
+            })
+    }
+
+    fn render_sidebar_session_item(&self, session_id: Uuid, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::current(cx);
+        let Some(session) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+        else {
+            return div().into_any_element();
+        };
+        let selected = self.state.selected_session == Some(session_id);
+        let active = !matches!(session.status, SessionStatus::Idle);
+        let project_name = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| "Unknown project".to_owned());
+        let waku = cx.entity().downgrade();
+        let composer = self.composer.clone();
+        div()
+            .id(SharedString::from(format!("session-{}", session.id)))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .px(px(8.0))
+            .py(px(7.0))
+            .rounded(px(7.0))
+            .cursor_default()
+            .when(selected, |element| element.bg(theme.sidebar_item_background))
+            .hover(|element| element.bg(theme.sidebar_item_background))
+            .active(|element| element.bg(theme.sidebar_item_background))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .overflow_hidden()
+                    .line_height(px(18.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .line_clamp(1)
+                            .text_overflow(gpui::TextOverflow::Truncate("...".into()))
+                            .text_size(px(13.5))
+                            .text_color(theme.text)
+                            .child(SharedString::from(session.title.clone())),
+                    )
+                    .when(active, |element| {
+                        element.child(pulse_dot(
+                            format!("session-pulse-{session_id}"),
+                            5.0,
+                            status_color(&theme, session.status),
+                        ))
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(px(11.5))
+                    .line_height(px(15.0))
+                    .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(project_name)),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.select_session(session_id, cx);
+            }))
+            .context_menu_with_id(
+                SharedString::from(format!("session-context-menu-{session_id}")),
+                move |menu, window, cx| {
+                    let waku = waku.clone();
+                    preserve_composer_focus_for_context_menu(&composer, menu, window, cx)
+                        .min_w(px(140.0))
+                        .item(
+                            PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
+                                let _ = waku.update(cx, |waku, cx| {
+                                    waku.remove_session(session_id, cx);
+                                });
+                            }),
+                        )
+                },
+            )
+            .into_any_element()
     }
 
     // ── Header ─────────────────────────────────────────────────────────────
