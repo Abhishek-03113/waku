@@ -38,7 +38,8 @@ use crate::md::render::{
     TranscriptSelection,
 };
 use crate::ui::menu::{
-    ContextMenuHandle, MenuAlign, MenuItem, context_menu, dropdown_menu, popover,
+    ConfirmEntry, ContextMenuHandle, MenuAlign, MenuItem, SelectNextEntry, SelectPreviousEntry,
+    context_menu, dropdown_menu, popover,
 };
 use crate::ui::scrollbar::{self, ScrollbarState};
 use crate::ui::tooltip::Tooltip;
@@ -420,6 +421,15 @@ pub struct Waku {
     computer_use_app_icons: RefCell<HashMap<String, Option<std::sync::Arc<gpui::Image>>>>,
     computer_use_app_icon_loads: RefCell<HashSet<String>>,
     model_picker_tab: ModelPickerTab,
+    /// Keyboard cursor over the model picker's filtered rows. `None` means the
+    /// keyboard has not moved yet, so `enter` takes the first row.
+    model_picker_highlight: Option<usize>,
+    /// The filter text the cursor above was positioned against. A field
+    /// notifies on every caret blink, so only a real change to this may reset
+    /// the cursor — comparing against it is what keeps the selection alive
+    /// between keystrokes.
+    model_picker_query: String,
+    model_picker_scroll: ScrollHandle,
     runtimes: HashMap<Uuid, SessionRuntime>,
     stream_state_dirty: bool,
     last_stream_save: Instant,
@@ -713,9 +723,21 @@ impl Waku {
             .detach();
 
             cx.observe(&composer, |_, _, cx| cx.notify()).detach();
+
             // A field notifies its observers on every edit, which is all the
-            // searches need to re-filter.
-            cx.observe(&model_search, |_, _, cx| cx.notify()).detach();
+            // searches need to re-filter. A changed query renumbers the rows,
+            // so the keyboard cursor cannot carry over — but the field also
+            // notifies on every caret blink, and resetting on those would wipe
+            // the selection half a second after each arrow key.
+            cx.observe(&model_search, |this: &mut Self, search, cx| {
+                let query = search.read(cx).content().to_owned();
+                if this.model_picker_query != query {
+                    this.model_picker_query = query;
+                    this.model_picker_highlight = None;
+                }
+                cx.notify();
+            })
+            .detach();
             cx.observe(&settings_search, |_, _, cx| cx.notify())
                 .detach();
 
@@ -758,6 +780,9 @@ impl Waku {
                 computer_use_app_icons: RefCell::new(HashMap::new()),
                 computer_use_app_icon_loads: RefCell::new(HashSet::new()),
                 model_picker_tab,
+                model_picker_highlight: None,
+                model_picker_query: String::new(),
+                model_picker_scroll: ScrollHandle::new(),
                 runtimes: HashMap::new(),
                 stream_state_dirty: false,
                 last_stream_save: Instant::now(),

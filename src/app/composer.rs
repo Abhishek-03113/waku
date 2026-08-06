@@ -529,6 +529,8 @@ impl Waku {
                             .map(|session| session.provider)
                             .unwrap_or_default();
                         this.model_picker_tab = ModelPickerTab::Provider(provider);
+                        this.model_picker_highlight = None;
+                        this.model_picker_query.clear();
                         this.request_provider_model_discovery(provider);
                         reset_search.update(cx, |search, cx| search.clear(cx));
                     } else {
@@ -551,6 +553,27 @@ impl Waku {
             })
         };
 
+        // Only while the panel is open: this clones every installed provider's
+        // model list, and the closed picker is on the composer's every frame.
+        // Built out here rather than in the body so the key handler and the
+        // rendered rows index one ordering and cannot disagree about what
+        // `enter` selects.
+        let available_models = Rc::new(if handle.is_open() {
+            visible_picker_models(
+                &probes,
+                &favorites,
+                locked_provider,
+                selected_tab,
+                &normalized_query,
+            )
+        } else {
+            Vec::new()
+        });
+        let highlight = self
+            .model_picker_highlight
+            .filter(|index| *index < available_models.len());
+        let scroll = self.model_picker_scroll.clone();
+
         popover(
             MenuChip::new("composer-provider-model")
                 .icon(
@@ -563,49 +586,7 @@ impl Waku {
             MenuAlign::AboveLeft,
             move |popover, _window, _cx| {
                 let popover = popover.clone();
-                let mut available_models = probes
-                    .iter()
-                    .filter(|probe| probe.installed)
-                    .flat_map(|probe| {
-                        probe
-                            .models
-                            .iter()
-                            .cloned()
-                            .map(move |model| (probe.provider, model))
-                    })
-                    .filter(|(kind, _)| locked_provider.is_none() || locked_provider == Some(*kind))
-                    .filter(|(kind, model)| {
-                        if searching {
-                            let searchable = format!(
-                                "{} {} {} {}",
-                                model.name,
-                                model.id,
-                                kind.short_name(),
-                                model.sub_provider.as_deref().unwrap_or("")
-                            )
-                            .to_ascii_lowercase();
-                            return normalized_query
-                                .split_whitespace()
-                                .all(|token| searchable.contains(token));
-                        }
-                        match selected_tab {
-                            ModelPickerTab::Favorites => favorites.iter().any(|favorite| {
-                                favorite.provider == *kind && favorite.model == model.id
-                            }),
-                            ModelPickerTab::Provider(provider) => provider == *kind,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                if !searching && selected_tab == ModelPickerTab::Favorites {
-                    available_models.sort_by_key(|(kind, model)| {
-                        favorites
-                            .iter()
-                            .position(|favorite| {
-                                favorite.provider == *kind && favorite.model == model.id
-                            })
-                            .unwrap_or(usize::MAX)
-                    });
-                }
+                let available_models = available_models.clone();
 
                 let mut sidebar = div()
                     .w(px(50.0))
@@ -728,6 +709,7 @@ impl Waku {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&scroll)
                     .p(px(9.0));
                 if available_models.is_empty() {
                     let label = if searching {
@@ -755,9 +737,11 @@ impl Waku {
                     );
                 }
 
-                for (kind, model) in available_models {
+                for (row_index, (kind, model)) in available_models.iter().enumerate() {
+                    let kind = *kind;
                     let is_selected =
                         kind == provider && selected_model.as_deref() == Some(model.id.as_str());
+                    let is_highlighted = highlight == Some(row_index);
                     let is_favorite = favorites
                         .iter()
                         .any(|favorite| favorite.provider == kind && favorite.model == model.id);
@@ -784,7 +768,17 @@ impl Waku {
                             .items_center()
                             .gap(px(10.0))
                             .cursor_default()
+                            // Reserved on every row so highlighting one cannot
+                            // resize it and shift the list by a pixel.
+                            .border_1()
+                            .border_color(gpui::transparent_black())
                             .when(is_selected, |element| element.bg(theme.overlay_strong))
+                            // The keyboard cursor reads as a ring rather than a
+                            // fill, so it stays legible on the current model's
+                            // already-filled row.
+                            .when(is_highlighted, |element| {
+                                element.bg(theme.overlay).border_color(theme.accent)
+                            })
                             .hover(|element| element.bg(theme.overlay))
                             .active(|element| element.opacity(0.85))
                             .child(
@@ -797,7 +791,7 @@ impl Waku {
                                             .text_size(px(13.0))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(theme.text)
-                                            .child(SharedString::from(model.name)),
+                                            .child(SharedString::from(model.name.clone())),
                                     )
                                     .child(
                                         div()
@@ -866,6 +860,13 @@ impl Waku {
                     );
                 }
 
+                let next_models = available_models.clone();
+                let previous_models = available_models.clone();
+                let confirm_models = available_models.clone();
+                let next_weak = weak.clone();
+                let previous_weak = weak.clone();
+                let confirm_weak = weak.clone();
+                let confirm_popover = popover.clone();
                 div()
                     .w(px(460.0))
                     .h(px(390.0))
@@ -876,6 +877,28 @@ impl Waku {
                     .bg(theme.raised)
                     .shadow_lg()
                     .flex()
+                    // The filter field keeps focus and the selected row is only
+                    // drawn, never focused — the same split Zed's picker uses.
+                    // These arrive as actions bound to `WakuMenu > ComposerInput`,
+                    // which is the only way to claim a key out from under a
+                    // focused text field.
+                    .on_action(move |_: &SelectNextEntry, _, cx| {
+                        let _ = next_weak.update(cx, |this, cx| {
+                            this.move_model_picker_highlight("down", &next_models, cx);
+                        });
+                    })
+                    .on_action(move |_: &SelectPreviousEntry, _, cx| {
+                        let _ = previous_weak.update(cx, |this, cx| {
+                            this.move_model_picker_highlight("up", &previous_models, cx);
+                        });
+                    })
+                    .on_action(move |_: &ConfirmEntry, window, cx| {
+                        let _ = confirm_weak.update(cx, |this, cx| {
+                            this.choose_highlighted_model(&confirm_models, cx);
+                        });
+                        confirm_popover.close(window, cx);
+                        window.refresh();
+                    })
                     .child(sidebar)
                     .child(
                         div()
@@ -892,6 +915,39 @@ impl Waku {
                     .into_any_element()
             },
         )
+    }
+
+    /// Move the picker's drawn selection. Nothing is focused: the filter field
+    /// keeps focus so typing continues to narrow the list.
+    fn move_model_picker_highlight(
+        &mut self,
+        key: &str,
+        models: &[(ProviderKind, ProviderModel)],
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .model_picker_highlight
+            .filter(|index| *index < models.len());
+        let Some(next) = next_picker_highlight(current, models.len(), key) else {
+            return;
+        };
+        self.model_picker_highlight = Some(next);
+        self.model_picker_scroll.scroll_to_item(next);
+        cx.notify();
+    }
+
+    /// Take the row the selection is on, defaulting to the first so `enter`
+    /// works the moment the panel opens.
+    fn choose_highlighted_model(
+        &mut self,
+        models: &[(ProviderKind, ProviderModel)],
+        cx: &mut Context<Self>,
+    ) {
+        let Some((kind, model)) = models.get(self.model_picker_highlight.unwrap_or(0)) else {
+            return;
+        };
+        let (kind, model_id) = (*kind, model.id.clone());
+        self.choose_model(kind, model_id, cx);
     }
 
     pub(super) fn render_model_traits_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1300,4 +1356,80 @@ impl Waku {
                     ),
             )
     }
+}
+
+/// Where the picker's keyboard cursor lands, wrapping at both ends.
+///
+/// `None` for `current` means the cursor has not moved yet, so `down` opens on
+/// the first row and `up` on the last. `None` in the result means the key does
+/// not navigate.
+pub(super) fn next_picker_highlight(
+    current: Option<usize>,
+    len: usize,
+    key: &str,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match key {
+        "down" => Some(current.map_or(0, |index| (index + 1) % len)),
+        "up" => Some(current.map_or(len - 1, |index| (index + len - 1) % len)),
+        _ => None,
+    }
+}
+
+/// The models the picker lists, in display order.
+///
+/// Shared by the panel body and by `enter`'s handler so a keyboard cursor index
+/// always means the same row in both.
+fn visible_picker_models(
+    probes: &[ProviderProbe],
+    favorites: &[FavoriteModel],
+    locked_provider: Option<ProviderKind>,
+    selected_tab: ModelPickerTab,
+    normalized_query: &str,
+) -> Vec<(ProviderKind, ProviderModel)> {
+    let searching = !normalized_query.is_empty();
+    let mut models = probes
+        .iter()
+        .filter(|probe| probe.installed)
+        .flat_map(|probe| {
+            probe
+                .models
+                .iter()
+                .cloned()
+                .map(move |model| (probe.provider, model))
+        })
+        .filter(|(kind, _)| locked_provider.is_none() || locked_provider == Some(*kind))
+        .filter(|(kind, model)| {
+            if searching {
+                let searchable = format!(
+                    "{} {} {} {}",
+                    model.name,
+                    model.id,
+                    kind.short_name(),
+                    model.sub_provider.as_deref().unwrap_or("")
+                )
+                .to_ascii_lowercase();
+                return normalized_query
+                    .split_whitespace()
+                    .all(|token| searchable.contains(token));
+            }
+            match selected_tab {
+                ModelPickerTab::Favorites => favorites
+                    .iter()
+                    .any(|favorite| favorite.provider == *kind && favorite.model == model.id),
+                ModelPickerTab::Provider(provider) => provider == *kind,
+            }
+        })
+        .collect::<Vec<_>>();
+    if !searching && selected_tab == ModelPickerTab::Favorites {
+        models.sort_by_key(|(kind, model)| {
+            favorites
+                .iter()
+                .position(|favorite| favorite.provider == *kind && favorite.model == model.id)
+                .unwrap_or(usize::MAX)
+        });
+    }
+    models
 }

@@ -9,6 +9,7 @@ use super::{
     take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
     transcript_row_kinds, transcript_row_splice, widened_panel_width_for_file_editor,
 };
+use super::composer::next_picker_highlight;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
     ReasoningBlock, SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus,
@@ -643,4 +644,22 @@ fn worked_duration_uses_readable_units() {
     assert_eq!(format_worked_duration(60), "1 minute");
     assert_eq!(format_worked_duration(88), "1 minute 28 seconds");
     assert_eq!(format_worked_duration(7_320), "2 hours 2 minutes");
+}
+
+#[test]
+fn model_picker_highlight_wraps_at_both_ends() {
+    // Nothing highlighted yet: down opens on the first row, up on the last.
+    assert_eq!(next_picker_highlight(None, 3, "down"), Some(0));
+    assert_eq!(next_picker_highlight(None, 3, "up"), Some(2));
+
+    assert_eq!(next_picker_highlight(Some(0), 3, "down"), Some(1));
+    assert_eq!(next_picker_highlight(Some(2), 3, "down"), Some(0));
+    assert_eq!(next_picker_highlight(Some(0), 3, "up"), Some(2));
+
+    // Keys the filter field owns must not move the cursor.
+    assert_eq!(next_picker_highlight(Some(1), 3, "home"), None);
+    assert_eq!(next_picker_highlight(Some(1), 3, "enter"), None);
+
+    // An empty result list has nothing to land on.
+    assert_eq!(next_picker_highlight(None, 0, "down"), None);
 }

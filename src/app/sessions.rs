@@ -486,6 +486,8 @@ impl Waku {
         }
         if self.model_picker_tab != tab {
             self.model_picker_tab = tab;
+            // A different tab renumbers the rows under the keyboard cursor.
+            self.model_picker_highlight = None;
             cx.notify();
         }
     }

@@ -30,18 +30,36 @@ use gpui::{
     prelude::FluentBuilder, px,
 };
 
-actions!(waku_menu, [DismissMenu]);
+actions!(
+    waku_menu,
+    [DismissMenu, SelectNextEntry, SelectPreviousEntry, ConfirmEntry]
+);
 
 /// Key context the open menu declares, and the scope its bindings live in.
 const MENU_CONTEXT: &str = "WakuMenu";
 
+/// A text field inside an open panel, such as a picker's filter box.
+///
+/// The field holds real focus the whole time — the list's selection is drawn,
+/// never focused, which is how Zed's picker works. So the list's keys have to
+/// be claimed from under the focused field, and only a binding can do that:
+/// `enter` and the arrows reach the field as *actions*, and an action consumes
+/// the keystroke before any `on_key_down` listener above it ever runs.
+const PANEL_FIELD_CONTEXT: &str = "WakuMenu > ComposerInput";
+
 /// Bind the menu's own keys. Called once at startup.
+///
+/// Must run after [`crate::input::init`]: these share a context depth with the
+/// field's own bindings, and the tie goes to whichever was registered last.
+/// That is what lets `enter` here beat the field's submit.
 pub fn init(cx: &mut App) {
-    cx.bind_keys([gpui::KeyBinding::new(
-        "escape",
-        DismissMenu,
-        Some(MENU_CONTEXT),
-    )]);
+    use gpui::KeyBinding;
+    cx.bind_keys([
+        KeyBinding::new("escape", DismissMenu, Some(MENU_CONTEXT)),
+        KeyBinding::new("down", SelectNextEntry, Some(PANEL_FIELD_CONTEXT)),
+        KeyBinding::new("up", SelectPreviousEntry, Some(PANEL_FIELD_CONTEXT)),
+        KeyBinding::new("enter", ConfirmEntry, Some(PANEL_FIELD_CONTEXT)),
+    ]);
 }
 
 use crate::theme::Theme;
@@ -224,7 +242,19 @@ impl ContextMenuHandle {
     }
 }
 
-/// Open at `position` and hand focus to the card.
+/// Whether the opened surface takes focus itself.
+///
+/// A [`MenuCard`] tracks the handle's focus and needs it to see arrow keys. A
+/// [`PopoverCard`] does not track it, so focusing the handle would detach focus
+/// from the window's dispatch tree — and blur whatever the panel's content
+/// focused for itself, such as a search field.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SurfaceFocus {
+    Card,
+    Content,
+}
+
+/// Open at `position`, handing focus to the card when it owns focus.
 ///
 /// The card is deferred, so its focus handle joins the dispatch tree only after
 /// the deferred draw. Focusing before then is a silent no-op that leaves the
@@ -232,14 +262,20 @@ impl ContextMenuHandle {
 fn open_menu(
     handle: &ContextMenuHandle,
     position: Point<Pixels>,
+    focus_target: SurfaceFocus,
     window: &mut Window,
     cx: &mut App,
 ) {
+    // Runs the toggle observers, which is where a content-focusing surface
+    // schedules its own focus. Ours is scheduled after, so it would win — only
+    // request it when the card is what should end up focused.
     handle.open_at(position, window, cx);
-    let focus = handle.focus.clone();
-    window.on_next_frame(move |window, _| {
-        window.on_next_frame(move |window, cx| window.focus(&focus, cx));
-    });
+    if focus_target == SurfaceFocus::Card {
+        let focus = handle.focus.clone();
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        });
+    }
     window.refresh();
 }
 
@@ -332,7 +368,7 @@ where
 {
     let id: ElementId = id.into();
     let items = Rc::new(items);
-    anchored_surface(trigger, handle, align, move |handle| {
+    anchored_surface(trigger, handle, align, SurfaceFocus::Card, move |handle| {
         MenuCard {
             id: id.clone(),
             handle: handle.clone(),
@@ -359,7 +395,7 @@ where
     E: ParentElement + Styled + InteractiveElement + IntoElement + 'static,
 {
     let content = Rc::new(content);
-    anchored_surface(trigger, handle, align, move |handle| {
+    anchored_surface(trigger, handle, align, SurfaceFocus::Content, move |handle| {
         PopoverCard {
             handle: handle.clone(),
             content: content.clone(),
@@ -374,6 +410,7 @@ fn anchored_surface<E>(
     trigger: E,
     handle: &ContextMenuHandle,
     align: MenuAlign,
+    focus_target: SurfaceFocus,
     card: impl Fn(&ContextMenuHandle) -> AnyElement + 'static,
 ) -> AnyElement
 where
@@ -398,7 +435,7 @@ where
                 .get()
                 .map(|bounds| align.anchor_point(bounds, px(GAP)))
                 .unwrap_or_else(|| window.mouse_position());
-            open_menu(&toggle_handle, anchor, window, cx);
+            open_menu(&toggle_handle, anchor, focus_target, window, cx);
             cx.stop_propagation();
         });
 
@@ -473,7 +510,13 @@ where
     let element = element.relative().on_mouse_down(
         MouseButton::Right,
         move |event: &MouseDownEvent, window, cx| {
-            open_menu(&handle_for_down, event.position, window, cx);
+            open_menu(
+                &handle_for_down,
+                event.position,
+                SurfaceFocus::Card,
+                window,
+                cx,
+            );
             cx.stop_propagation();
             window.prevent_default();
         },
