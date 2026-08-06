@@ -30,8 +30,9 @@ impl Waku {
     }
 
     /// Kick off discovery for every installed provider, so the model picker
-    /// never opens onto a lazy load. Runs once at launch; each provider's
-    /// fallback catalog stands in until its discovery lands.
+    /// never opens onto a lazy load. Runs once at launch; the catalog cached
+    /// by the last discovery (or the hardcoded fallback before any run has
+    /// cached one) stands in until this launch's discovery lands.
     pub(super) fn request_all_model_discoveries(&mut self) {
         for provider in ProviderKind::ALL {
             self.request_provider_model_discovery(provider);
@@ -57,6 +58,14 @@ impl Waku {
         if std::thread::Builder::new()
             .name(format!("waku-{}-model-discovery", provider.id()))
             .spawn(move || {
+                // Stale-while-revalidate: the catalog cached by the last
+                // successful discovery renders right away, and the CLI's
+                // answer replaces it (and the cache) whenever it lands.
+                if let Some(models) = crate::model_catalog::cached_models(provider) {
+                    let mut cached = probe.clone();
+                    cached.models = models;
+                    let _ = provider_probe_tx.send(cached);
+                }
                 let _ = provider_probe_tx.send(probe.discover_models());
             })
             .is_err()

@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -90,10 +90,61 @@ pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderMod
         ProviderKind::Pi => discover_pi_models(binary),
     };
     if discovered.is_empty() {
-        fallback_models(provider)
+        // A failed or empty probe keeps the last successful discovery over
+        // the hardcoded catalog, so one bad CLI run can't shrink the picker.
+        cached_models(provider).unwrap_or_else(|| fallback_models(provider))
     } else {
-        deduplicate(discovered)
+        let models = deduplicate(discovered);
+        write_cached_models(provider, &models);
+        models
     }
+}
+
+/// Where a provider's last discovered catalog is cached. Debug builds keep it
+/// in the checkout's gitignored `temp/` beside the debug database, so
+/// development never touches the installed app's cache.
+fn model_cache_path(provider: ProviderKind) -> PathBuf {
+    let directory = if cfg!(debug_assertions) {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("temp")
+            .join("model-cache")
+    } else {
+        dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(crate::identity::DATA_DIRECTORY_NAME)
+            .join("models")
+    };
+    directory.join(format!("{}.json", provider.id()))
+}
+
+/// The catalog cached by the last successful discovery, or `None` when no run
+/// has cached one or the file no longer parses. Reads the filesystem, so call
+/// it from the discovery thread, never from render.
+pub fn cached_models(provider: ProviderKind) -> Option<Vec<ProviderModel>> {
+    read_models_file(&model_cache_path(provider))
+}
+
+fn read_models_file(path: &Path) -> Option<Vec<ProviderModel>> {
+    let contents = std::fs::read(path).ok()?;
+    let models = serde_json::from_slice::<Vec<ProviderModel>>(&contents).ok()?;
+    (!models.is_empty()).then_some(models)
+}
+
+/// Best-effort: a cache that fails to write only costs the next launch its
+/// head start.
+fn write_cached_models(provider: ProviderKind, models: &[ProviderModel]) {
+    let _ = write_models_file(&model_cache_path(provider), models);
+}
+
+fn write_models_file(path: &Path, models: &[ProviderModel]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Write-then-rename so a crash mid-write can't leave a torn file for the
+    // next launch to trip over.
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(models)?)?;
+    std::fs::rename(temporary, path)
 }
 
 fn discover_cursor_models(binary: &Path) -> Vec<ProviderModel> {
@@ -669,6 +720,31 @@ fn deduplicate(models: Vec<ProviderModel>) -> Vec<ProviderModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_cache_round_trips_and_rejects_empty_or_invalid_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "waku-model-cache-test-{}",
+            std::process::id()
+        ));
+        let path = directory.join("codex.json");
+        let models = vec![
+            ProviderModel::new("gpt-5.6-sol", "GPT-5.6-Sol")
+                .default()
+                .reasoning(reasoning_options(["low", "high"]), "high"),
+        ];
+
+        assert_eq!(read_models_file(&path), None);
+        write_models_file(&path, &models).unwrap();
+        assert_eq!(read_models_file(&path), Some(models));
+
+        write_models_file(&path, &[]).unwrap();
+        assert_eq!(read_models_file(&path), None);
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(read_models_file(&path), None);
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn amp_catalog_uses_agent_modes_and_medium_by_default() {
