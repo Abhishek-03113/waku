@@ -832,12 +832,21 @@ impl Waku {
             .detach();
 
             // A changed query re-filters the picker rows and renumbers them,
-            // so the drawn selection cannot carry over.
+            // so the drawn selection cannot carry over. While a filter is
+            // active the cursor lands on the first match so `enter` has a
+            // visible target; clearing the query returns to the opening
+            // state — nothing highlighted, the current model's row in view.
             cx.subscribe(
                 &model_search,
-                |this: &mut Self, _, event: &ComposerEvent, cx| {
+                |this: &mut Self, search, event: &ComposerEvent, cx| {
                     if matches!(event, ComposerEvent::Edited) {
-                        this.model_picker_highlight = None;
+                        if search.read(cx).content().trim().is_empty() {
+                            this.model_picker_highlight = None;
+                            this.reveal_selected_picker_model();
+                        } else {
+                            this.model_picker_highlight = Some(0);
+                            this.model_picker_scroll.scroll_to_item(0);
+                        }
                         cx.notify();
                     }
                 },

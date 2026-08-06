@@ -531,6 +531,7 @@ impl Waku {
                         this.model_picker_tab = ModelPickerTab::Provider(provider);
                         this.model_picker_highlight = None;
                         reset_search.update(cx, |search, cx| search.clear(cx));
+                        this.reveal_selected_picker_model();
                     } else {
                         let focus_handle = this.composer.read(cx).focus();
                         window.focus(&focus_handle, cx);
@@ -540,11 +541,20 @@ impl Waku {
                 if open {
                     // The panel is deferred, so its input joins the dispatch
                     // tree only after the deferred draw — same two-frame wait
-                    // the menus need before they can take focus.
+                    // the menus need before they can take focus. The reveal is
+                    // re-issued here too: a parked scroll request resolves
+                    // against the viewport bounds of the *previous* paint, so
+                    // on the container's first-ever paint it reads a zeroed
+                    // viewport, lands wrong, and is consumed. By this frame
+                    // the panel has painted real bounds to resolve against.
                     let picker_focus = picker_focus.clone();
+                    let reveal_weak = reset_weak.clone();
                     window.on_next_frame(move |window, _| {
                         window.on_next_frame(move |window, cx| {
                             window.focus(&picker_focus, cx);
+                            let _ = reveal_weak.update(cx, |this, _| {
+                                this.reveal_selected_picker_model();
+                            });
                         });
                     });
                 }
@@ -932,6 +942,36 @@ impl Waku {
         self.model_picker_highlight = Some(next);
         self.model_picker_scroll.scroll_to_item(next);
         cx.notify();
+    }
+
+    /// Bring the current model's row into view whenever the picker shows the
+    /// unfiltered list — on open, on a cleared query, and on tab switches.
+    ///
+    /// The request parks in the scroll handle until the row list next paints,
+    /// so it may be issued from the open toggle before the deferred panel
+    /// exists, and a tab whose models are still loading reveals the row once
+    /// they arrive. Without a row to reveal it falls back to the top, so a
+    /// scroll offset from an earlier open never leaks into a fresh list.
+    pub(super) fn reveal_selected_picker_model(&self) {
+        let session = self.selected_session();
+        let provider = session.map(|session| session.provider).unwrap_or_default();
+        let selected_model = session.and_then(|session| self.model_for_session(session));
+        let locked_provider = session
+            .filter(|session| !session.messages.is_empty())
+            .map(|session| session.provider);
+        let index = visible_picker_models(
+            &self.probes,
+            &self.state.favorite_models,
+            locked_provider,
+            self.model_picker_tab,
+            "",
+        )
+        .iter()
+        .position(|(kind, model)| {
+            *kind == provider && selected_model == Some(model.id.as_str())
+        })
+        .unwrap_or(0);
+        self.model_picker_scroll.scroll_to_item(index);
     }
 
     /// Take the row the selection is on, defaulting to the first so `enter`
