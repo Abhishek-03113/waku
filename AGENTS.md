@@ -4,7 +4,7 @@
 
 - Assume `bun ./scripts/dev.ts` is already running and owns the current
   `Waku Debug.app` process. Source changes are rebuilt, signed, and relaunched
-  automatically.
+  automatically. Only run it yourself if not already launched.
 - During normal development and UI validation, do not run
   `scripts/bundle.sh debug`, start a second watcher, or manually quit/relaunch
   `Waku Debug.app`. Quitting the app also stops the watcher.
