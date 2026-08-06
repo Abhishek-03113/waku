@@ -1,2 +1,0 @@
-DROP INDEX `sessions_by_updated_at`;--> statement-breakpoint
-CREATE INDEX `sessions_list` ON `sessions` (`updated_at`,`id`,`project_id`,`title`,`provider`,`model`,`status`,`created_at`,`last_reply_at`);
