@@ -508,6 +508,10 @@ pub struct Waku {
     /// Snapshot of the sidebar rows the list state currently corresponds to.
     sidebar_row_cache: RefCell<Vec<SidebarRow>>,
     transcript_row_kinds: RefCell<Vec<TranscriptRowKind>>,
+    /// Fingerprint of the transcript inputs `transcript_row_kinds` was folded
+    /// from, so an unchanged transcript costs nothing on a frame. `None` until
+    /// the first fold. See `transcript_rows_fingerprint`.
+    transcript_row_kinds_fingerprint: Cell<Option<u64>>,
     /// Checkpoint-ref existence per (session, retained turn count), filled by
     /// `prefetch_checkpoint_refs` on the background executor. Rows read only
     /// this cache: resolving a ref forks a `git` subprocess, which must stay
@@ -880,6 +884,7 @@ impl Waku {
                 sidebar_scrollbar: ScrollbarState::new(),
                 sidebar_row_cache: RefCell::new(Vec::new()),
                 transcript_row_kinds: RefCell::new(Vec::new()),
+                transcript_row_kinds_fingerprint: Cell::new(None),
                 checkpoint_ref_cache: RefCell::new(HashMap::new()),
                 checkpoint_ref_generation: Cell::new(0),
                 checkpoint_ref_prefetch: Cell::new(None),

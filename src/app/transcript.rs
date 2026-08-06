@@ -3,7 +3,29 @@ use super::*;
 impl Waku {
     /// One list row per message plus each ordered non-message turn block.
     pub(super) fn transcript_row_count(&self) -> usize {
-        self.selected_transcript_row_kinds().len()
+        self.refresh_transcript_row_kinds()
+    }
+
+    /// Refold the cached row kinds, but only when the transcript they were
+    /// folded from actually changed. Returns the row count.
+    ///
+    /// `render` calls this on every frame and folding is O(turns × messages) —
+    /// a long session pays tens of thousands of operations plus a handful of
+    /// allocations to rebuild rows that are almost always identical to the ones
+    /// already cached. The fingerprint is one allocation-free linear pass, so a
+    /// settled transcript now costs a scan instead of a fold.
+    pub(super) fn refresh_transcript_row_kinds(&self) -> usize {
+        let fingerprint = self
+            .selected_session()
+            .map_or(EMPTY_TRANSCRIPT_FINGERPRINT, |session| {
+                transcript_rows_fingerprint(session, &self.expanded_turns)
+            });
+        if self.transcript_row_kinds_fingerprint.get() != Some(fingerprint) {
+            let next_kinds = self.selected_transcript_row_kinds();
+            *self.transcript_row_kinds.borrow_mut() = next_kinds;
+            self.transcript_row_kinds_fingerprint.set(Some(fingerprint));
+        }
+        self.transcript_row_kinds.borrow().len()
     }
 
     pub(super) fn selected_transcript_row_kinds(&self) -> Vec<TranscriptRowKind> {
@@ -88,9 +110,11 @@ impl Waku {
         &self,
         previous_kinds: &[TranscriptRowKind],
     ) {
-        let next_kinds = self.selected_transcript_row_kinds();
-        let splice = transcript_row_splice(previous_kinds, &next_kinds);
-        *self.transcript_row_kinds.borrow_mut() = next_kinds;
+        self.refresh_transcript_row_kinds();
+        let splice = {
+            let next_kinds = self.transcript_row_kinds.borrow();
+            transcript_row_splice(previous_kinds, &next_kinds)
+        };
         self.splice_transcript_rows(splice);
     }
 
@@ -224,9 +248,10 @@ impl Waku {
     /// Appends keep the reader's place (or the pinned tail); shrinking resets
     /// the view.
     pub(super) fn sync_transcript_rows(&self) {
-        let next_kinds = self.selected_transcript_row_kinds();
-        let count = next_kinds.len();
-        *self.transcript_row_kinds.borrow_mut() = next_kinds;
+        // The fold is cached; the list-state reconciliation below is not. It
+        // has to run every time because `active_transcript_rows` can switch
+        // lists under an unchanged transcript.
+        let count = self.refresh_transcript_row_kinds();
 
         let transcript_rows = self.active_transcript_rows();
         let current = transcript_rows.item_count();
@@ -571,6 +596,70 @@ pub(super) fn transcript_row_kinds(
     rows
 }
 
+/// Fingerprint of every field [`folded_transcript_row_kinds`] reads, so a frame
+/// can tell a settled transcript from a changed one without refolding it.
+///
+/// Keep this in step with that function and with [`row_turn_id`]. A field they
+/// consult but this one misses leaves the cached rows stale, and stale rows
+/// fall back to `Message(n)` — silently dropping every reasoning block and tool
+/// activity from the transcript. Cheap mixing, not a real hash: this runs on
+/// the frame path, and the values it folds in are already well distributed.
+pub(super) fn transcript_rows_fingerprint(
+    session: &AgentSession,
+    expanded_turns: &HashSet<Uuid>,
+) -> u64 {
+    let mut hash = mix_uuid(EMPTY_TRANSCRIPT_FINGERPRINT, session.id);
+
+    hash = mix(hash, session.messages.len() as u64);
+    for message in &session.messages {
+        hash = mix(hash, message.role as u64);
+        hash = mix_turn_id(hash, message.turn_id);
+    }
+
+    hash = mix(hash, session.transcript_blocks.len() as u64);
+    for block in &session.transcript_blocks {
+        // An in-flight activity block re-anchors itself, so the anchor has to
+        // be folded in rather than assumed fixed at insertion.
+        hash = mix(hash, block.after_message as u64);
+        hash = mix_turn_id(hash, block.turn_id);
+    }
+
+    hash = mix(hash, session.turns.len() as u64);
+    for turn in &session.turns {
+        hash = mix_uuid(hash, turn.id);
+        hash = mix(hash, turn.status as u64);
+    }
+
+    // A set has no stable iteration order, so combine its members with an
+    // order-independent sum instead of folding them in sequence.
+    let expanded = expanded_turns.iter().fold(0u64, |combined, turn_id| {
+        combined.wrapping_add(mix_uuid(EMPTY_TRANSCRIPT_FINGERPRINT, *turn_id))
+    });
+    mix(mix(hash, expanded_turns.len() as u64), expanded)
+}
+
+/// The fingerprint of "no session selected", and the seed everything else
+/// mixes its session id into.
+pub(super) const EMPTY_TRANSCRIPT_FINGERPRINT: u64 = 0xcbf2_9ce4_8422_2325;
+
+const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn mix(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(FINGERPRINT_PRIME)
+}
+
+fn mix_uuid(hash: u64, id: Uuid) -> u64 {
+    let bits = id.as_u128();
+    mix(mix(hash, bits as u64), (bits >> 64) as u64)
+}
+
+fn mix_turn_id(hash: u64, turn_id: Option<Uuid>) -> u64 {
+    match turn_id {
+        Some(turn_id) => mix_uuid(hash, turn_id),
+        None => mix(hash, u64::MAX),
+    }
+}
+
 /// A settled turn presents its terminal assistant message plus the one-line
 /// summaries of what it did — "Thought for 12s", "Ran 3 tool calls" — each
 /// expandable in place.
@@ -581,6 +670,9 @@ pub(super) fn transcript_row_kinds(
 /// a settled turn saying nothing about what the agent actually did. This
 /// mirrors T3 Code, which keeps work entries inline in the timeline and
 /// collapses only overflow.
+///
+/// Every field this reads is fingerprinted by [`transcript_rows_fingerprint`]
+/// so frames can skip the fold; consult a new one and that must learn it too.
 pub(super) fn folded_transcript_row_kinds(
     session: &AgentSession,
     expanded_turns: &HashSet<Uuid>,

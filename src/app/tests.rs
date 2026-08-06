@@ -7,7 +7,8 @@ use super::{
     maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
     navigation_rail_height, navigation_rail_scale, pop_stream_chunk, should_show_navigation_rail,
     take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
-    transcript_row_kinds, transcript_row_splice, widened_panel_width_for_file_editor,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor,
 };
 use super::composer::next_picker_highlight;
 use crate::model::{
@@ -465,6 +466,95 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
     for index in 0..kinds.len() {
         assert!(kinds.get(index).is_some());
     }
+}
+
+/// `refresh_transcript_row_kinds` skips the fold while this fingerprint holds
+/// still, so anything that moves the rows has to move the fingerprint too.
+/// Missing one leaves the transcript rendering stale rows, which drops every
+/// reasoning block and tool activity from the session.
+#[test]
+fn the_row_fingerprint_moves_whenever_the_fold_does() {
+    let mut base = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = base.begin_turn("Build it");
+    base.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
+            content: "Looking around".into(),
+            started_at_ms: 1_000,
+            finished_at_ms: 2_000,
+        }),
+    });
+    base.push_message(MessageRole::Assistant, "I found the relevant code.");
+    base.push_message(MessageRole::Assistant, "Done. The change is ready.");
+    base.finish_active_turn(TurnStatus::Completed);
+
+    let settled = HashSet::new();
+    let baseline_rows = folded_transcript_row_kinds(&base, &settled);
+    let baseline_fingerprint = transcript_rows_fingerprint(&base, &settled);
+
+    // Expansion lives outside the session, so check it against the same base.
+    assert_ne!(
+        transcript_rows_fingerprint(&base, &HashSet::from([turn_id])),
+        baseline_fingerprint,
+        "expanding a turn fold"
+    );
+
+    let mutations: Vec<(&str, fn(&mut AgentSession))> = vec![
+        ("a new message", |session| {
+            session.push_message(MessageRole::User, "One more thing");
+        }),
+        ("a new transcript block", |session| {
+            session.transcript_blocks.push(TranscriptBlock {
+                after_message: session.messages.len(),
+                turn_id: session.turns.first().map(|turn| turn.id),
+                content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+                    None,
+                    ActivityKind::Command,
+                    "Ran tests",
+                    None,
+                    true,
+                )]),
+            });
+        }),
+        // `update_activity` re-anchors the block it is still appending to, so
+        // the anchor cannot be treated as fixed at insertion.
+        ("an existing block re-anchored", |session| {
+            session.transcript_blocks[0].after_message = 2;
+        }),
+        ("a turn returning to running", |session| {
+            session.turns[0].status = TurnStatus::Running;
+        }),
+        ("a message reassigned to no turn", |session| {
+            session.messages[1].turn_id = None;
+        }),
+    ];
+
+    for (description, mutate) in mutations {
+        let mut session = base.clone();
+        mutate(&mut session);
+        assert_ne!(
+            folded_transcript_row_kinds(&session, &settled),
+            baseline_rows,
+            "{description} should change the rows — the case no longer proves anything"
+        );
+        assert_ne!(
+            transcript_rows_fingerprint(&session, &settled),
+            baseline_fingerprint,
+            "{description} changed the rows but not the fingerprint, so the \
+             cached rows would go stale"
+        );
+    }
+
+    // The point of the guard: streamed text lands in an existing message
+    // without moving a single row, and must not trigger a refold.
+    let mut streamed = base.clone();
+    streamed.messages[2].content.push_str(" Let me know.");
+    assert_eq!(
+        transcript_rows_fingerprint(&streamed, &settled),
+        baseline_fingerprint,
+        "appending to a message leaves the rows exactly where they were"
+    );
 }
 
 #[test]
