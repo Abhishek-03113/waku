@@ -112,6 +112,7 @@ cp "$cargo_target_dir/$profile/waku" "$contents/MacOS/$app_name"
 cp "$cargo_target_dir/$profile/waku_js_repl" "$repl_executable"
 chmod 755 "$repl_executable"
 cp resources/Info.plist "$contents/Info.plist"
+cp resources/AppIcon.icns "$contents/Resources/AppIcon.icns"
 cp resources/computer-use/pi-extension.ts "$contents/Resources/computer-use/pi-extension.ts"
 cp resources/computer-use/SKILL.md "$contents/Resources/skills/waku-computer-use/SKILL.md"
 plutil -replace CFBundleDisplayName -string "$app_name" "$contents/Info.plist"
@@ -119,6 +120,9 @@ plutil -replace CFBundleExecutable -string "$app_name" "$contents/Info.plist"
 plutil -replace CFBundleIdentifier -string "$bundle_identifier" "$contents/Info.plist"
 plutil -replace CFBundleName -string "$app_name" "$contents/Info.plist"
 cp -R "$cached_helper_bundle" "$helper_bundle"
+# Finder info and resource forks on copied resources make codesign reject the
+# bundle as "detritus"; strip extended attributes before signing.
+xattr -cr "$bundle"
 if [ "$codesign_identity" = "-" ]; then
   codesign --force --identifier "$bundle_identifier.js-repl" --sign - "$repl_executable"
   codesign --force --sign - "$bundle"

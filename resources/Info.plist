@@ -8,6 +8,8 @@
     <string>Waku</string>
     <key>CFBundleExecutable</key>
     <string>Waku</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>sh.waku</string>
     <key>CFBundleInfoDictionaryVersion</key>
