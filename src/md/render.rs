@@ -337,6 +337,12 @@ impl MarkdownView {
 
     /// Point the view at `text`. `mend` closes hanging inline markers, which is
     /// wanted while a response streams and not once it has settled.
+    /// Bytes of source this view retains. Parsed structures run to roughly
+    /// seventeen times this, so it is the honest unit for bounding a cache.
+    pub fn source_len(&self) -> usize {
+        self.parser.text().len()
+    }
+
     pub fn set_text(&mut self, text: &str, mend: bool) {
         let changed = self.parser.text() != text;
         if changed {

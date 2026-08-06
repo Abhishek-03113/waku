@@ -24,7 +24,27 @@ impl Waku {
         self.activate_session(session_id, cx);
     }
 
+    /// Loads a session's transcript if startup only fetched its list columns.
+    ///
+    /// One row plus that session's messages, so it stays well inside a frame;
+    /// the alternative is paying for all of history at launch.
+    pub(super) fn ensure_session_loaded(&mut self, session_id: Uuid) {
+        let Some(session) = self
+            .state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .filter(|session| !session.detail_loaded)
+        else {
+            return;
+        };
+        if let Err(error) = self.store.hydrate(session) {
+            self.toast = Some(format!("Could not open that session: {error}"));
+        }
+    }
+
     fn activate_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        self.ensure_session_loaded(session_id);
         let session_changed = self.state.selected_session != Some(session_id);
         if session_changed {
             self.store_selected_right_panel_state();
@@ -53,12 +73,48 @@ impl Waku {
             self.ensure_right_panel_terminals(cx);
         }
         self.reset_visible_state();
-        self.branch = self
-            .selected_project()
-            .and_then(|project| git_branch(&project.path));
+        self.refresh_branch(cx);
         self.reset_transcript_rows(self.transcript_row_count());
         self.save();
         cx.notify();
+    }
+
+    /// Resolves the checked-out branch for the selected project.
+    ///
+    /// `git` costs upwards of 10ms, more than a frame at 120Hz, so it is a
+    /// query: a cache hit is free, a miss draws the previous value and fills in
+    /// when the lookup lands.
+    pub(super) fn refresh_branch(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_project().map(|project| project.path.clone()) else {
+            self.branch = None;
+            return;
+        };
+        match self.branches.read(&path) {
+            Query::Ready(branch) => self.branch = (*branch).clone(),
+            // Leave the previous value on screen rather than flashing empty.
+            Query::Pending => {}
+            Query::Missing(token) => {
+                cx.spawn(async move |waku, cx| {
+                    let branch = cx
+                        .background_executor()
+                        .spawn({
+                            let path = path.clone();
+                            async move { git_branch(&path) }
+                        })
+                        .await;
+                    waku.update(cx, |waku, cx| {
+                        if waku.branches.fulfill(token, branch.clone())
+                            && waku.selected_project().is_some_and(|p| p.path == path)
+                        {
+                            waku.branch = branch;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
     }
 
     pub(super) fn create_session_for(
@@ -79,11 +135,14 @@ impl Waku {
         }
         let session = self.state.new_session(project_id, provider);
         let id = session.id;
-        self.state.sessions.push(session);
+        self.state.push_session(session);
         self.select_session(id, cx);
     }
 
     pub(super) fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        // The turn count drives checkpoint cleanup, so the transcript has to be
+        // loaded before it can be trusted.
+        self.ensure_session_loaded(session_id);
         let Some(index) = self
             .state
             .sessions
@@ -110,30 +169,30 @@ impl Waku {
         }
         self.invalidate_checkpoint_refs();
 
-        // Screenshots the deleted session owned are now unreferenced. Sweeping
-        // walks the blob directory, so it stays off the UI thread.
-        let sweep = self.store.blob_sweep(&self.state);
-        cx.background_executor().spawn(async move { sweep() }).detach();
-
-        if !was_selected {
+        if was_selected {
+            self.state.selected_session = None;
+            let next_session = self
+                .state
+                .sessions
+                .iter()
+                .filter(|session| session.project_id == project_id)
+                .max_by_key(|session| session.updated_at)
+                .map(|session| session.id);
+            if let Some(session_id) = next_session {
+                self.select_session(session_id, cx);
+            } else {
+                self.create_session_for(project_id, self.state.last_provider, cx);
+            }
+        } else {
             self.save();
             cx.notify();
-            return;
         }
 
-        self.state.selected_session = None;
-        let next_session = self
-            .state
-            .sessions
-            .iter()
-            .filter(|session| session.project_id == project_id)
-            .max_by_key(|session| session.updated_at)
-            .map(|session| session.id);
-        if let Some(session_id) = next_session {
-            self.select_session(session_id, cx);
-        } else {
-            self.create_session_for(project_id, self.state.last_provider, cx);
-        }
+        // Only now is the row gone, so the sweep can see which blobs are
+        // genuinely unreferenced. It reads the database and walks the blob
+        // directory, so it stays off the UI thread.
+        let sweep = self.store.blob_sweep();
+        cx.background_executor().spawn(async move { sweep() }).detach();
     }
 
     pub(super) fn new_session_action(
@@ -424,10 +483,24 @@ impl Waku {
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.expanded_turns.clear();
-        // Selection and per-message parses belong to the session being left.
+        // Selection belongs to the session being left.
         self.transcript_selection.selection.borrow_mut().clear();
         self.transcript_selection.registry.borrow_mut().clear();
-        self.message_markdown.borrow_mut().clear();
+        // Parsed messages are keyed by message id, which is unique across
+        // sessions, so they stay cached — switching back to a recent session
+        // then costs no re-parse. Bounded so a long-running window cannot grow
+        // without limit.
+        let mut message_markdown = self.message_markdown.borrow_mut();
+        let cached_bytes: usize = message_markdown
+            .values()
+            .map(md::render::MarkdownView::source_len)
+            .sum();
+        if cached_bytes > MAX_CACHED_MESSAGE_SOURCE_BYTES {
+            message_markdown.clear();
+        }
+        drop(message_markdown);
+        // Block parses are keyed by position within the session, so they would
+        // be read as another session's blocks.
         self.block_markdown.borrow_mut().clear();
         self.menus.borrow_mut().clear();
         self.message_edit = None;
@@ -616,11 +689,7 @@ impl Waku {
         }
         if has_active_turn {
             let needs_fallback = !self.turn_has_assistant_message(session_id);
-            if let Some(session) = self
-                .state
-                .sessions
-                .iter_mut()
-                .find(|session| session.id == session_id)
+            if let Some(session) = self.state.session_mut(session_id)
             {
                 session.status = SessionStatus::Idle;
                 if needs_fallback {
@@ -707,11 +776,7 @@ impl Waku {
             }
             runtime.driver.run_computer_tool(pending.request);
         }
-        if let Some(session) = self
-            .state
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
+        if let Some(session) = self.state.session_mut(session_id)
         {
             session.status = SessionStatus::Working;
         }

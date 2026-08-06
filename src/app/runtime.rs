@@ -15,12 +15,10 @@ impl Waku {
         self.state.sessions.iter().find(|session| session.id == id)
     }
 
+    /// Marks the session for the next save; see `PersistedState::session_mut`.
     pub(super) fn selected_session_mut(&mut self) -> Option<&mut AgentSession> {
         let id = self.state.selected_session?;
-        self.state
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == id)
+        self.state.session_mut(id)
     }
 
     pub(super) fn selected_runtime(&self) -> Option<&SessionRuntime> {
@@ -149,11 +147,7 @@ impl Waku {
             }
         };
         self.invalidate_checkpoint_refs();
-        if let Some(session) = self
-            .state
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
+        if let Some(session) = self.state.session_mut(session_id)
             && let Some(turn) = session
                 .turns
                 .iter_mut()
@@ -408,7 +402,7 @@ impl Waku {
             });
         self.invalidate_checkpoint_refs();
 
-        self.state.sessions.push(forked);
+        self.state.push_session(forked);
         self.select_session(fork_id, cx);
         self.toast = Some(match checkpoint_warning {
             Some(error) => {
@@ -808,12 +802,7 @@ impl Waku {
         self.invalidate_checkpoint_refs();
         self.sync_transcript_rows();
         let previous_kinds = self.transcript_row_kinds.borrow().clone();
-        if let Some(session) = self
-            .state
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-        {
+        if let Some(session) = self.state.session_mut(session_id) {
             if let Some((fork, source_resume_at)) = &claude_fork {
                 for turn in session.turns.iter_mut().take(retained_turn_count) {
                     if let Some(remapped) = turn

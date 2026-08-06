@@ -6,17 +6,22 @@
  * (see `apply_migrations` in `src/persistence.rs`). drizzle-orm never ships in
  * the binary — Rust owns every query.
  *
- * Session history stays in the `data` JSON column. Fields the sidebar sorts or
- * filters on are promoted to real columns so listing sessions never has to
- * deserialize a transcript.
+ * Session history is kept out of the `sessions` row: the row holds only what
+ * the session list renders, so listing is a scan over narrow rows. The
+ * transcript lives in `session_details` and messages in `messages`, both
+ * fetched only when a session is opened.
  */
 
 import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  path: text("path").notNull(),
+  /** Order shown in the sidebar. */
   position: integer("position").notNull(),
-  data: text("data").notNull(),
+  /** When the project was added, unix seconds. */
+  createdAt: integer("created_at").notNull(),
 });
 
 export const sessions = sqliteTable(
@@ -34,8 +39,6 @@ export const sessions = sqliteTable(
     updatedAt: integer("updated_at").notNull(),
     /** Completion of the most recent assistant turn, unix seconds. */
     lastReplyAt: integer("last_reply_at"),
-    /** The rest of `AgentSession` as JSON. Messages live in their own table. */
-    data: text("data").notNull(),
   },
   (table) => [
     index("sessions_by_project").on(table.projectId, table.updatedAt),
@@ -66,3 +69,16 @@ export const messages = sqliteTable(
   },
   (table) => [index("messages_by_session").on(table.sessionId, table.position)],
 );
+
+/**
+ * The rest of `AgentSession` as JSON — transcript blocks, turns, provider
+ * cursor.
+ *
+ * Split from `sessions` because it is large and rarely read: keeping it in the
+ * row would mean listing sessions pages through every transcript, and every
+ * title edit rewrites a transcript-sized row.
+ */
+export const sessionDetails = sqliteTable("session_details", {
+  sessionId: text("session_id").primaryKey(),
+  data: text("data").notNull(),
+});

@@ -19,6 +19,7 @@ mod model_catalog;
 mod opencode_session;
 mod persistence;
 mod platform;
+mod query;
 mod terminal;
 mod theme;
 mod ui;

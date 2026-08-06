@@ -15,6 +15,34 @@
       "when": 1785980905952,
       "tag": "0001_messages_table",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785983820256,
+      "tag": "0002_session_list_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785984923922,
+      "tag": "0003_split_session_details",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1785985779068,
+      "tag": "0004_project_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1785985810678,
+      "tag": "0005_drop_project_data",
+      "breakpoints": true
     }
   ]
 }

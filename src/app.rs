@@ -44,6 +44,7 @@ use crate::ui::menu::{
 use crate::ui::scrollbar::{self, ScrollbarState};
 use crate::ui::tooltip::Tooltip;
 
+use crate::query::{Query, QueryCache};
 use crate::persistence::{
     DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH, PersistedState, StateStore,
 };
@@ -83,6 +84,15 @@ const NAVIGATION_RAIL_TURN_HEIGHT: f32 = NAVIGATION_RAIL_TICK_HEIGHT + NAVIGATIO
 const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
+/// Source bytes of parsed messages kept across session switches.
+///
+/// Measured at ~17x expansion into parsed structures, plus flattened text and
+/// shaped runs on top, so this is bounded by source size rather than entry
+/// count — one long message costs far more than several short ones. 512 KB
+/// holds several sessions' transcripts for a few MB of structures.
+const MAX_CACHED_MESSAGE_SOURCE_BYTES: usize = 512 * 1024;
+/// Projects whose branch is remembered. Small: a window rarely has many.
+const MAX_CACHED_PROJECT_BRANCHES: usize = 32;
 const STREAM_CATCH_UP_FRAMES: usize = 18;
 const STREAM_MIN_GRAPHEMES_PER_FRAME: usize = 12;
 const STREAM_MAX_GRAPHEMES_PER_FRAME: usize = 256;
@@ -459,10 +469,15 @@ pub struct Waku {
     right_panel_file_tree_width: f32,
     right_panel_file_editors: HashMap<String, RightPanelFileEditor>,
     right_panel_diff_files: Vec<RightPanelDiffFile>,
+    /// Diff listing per project path, so a slow refresh cannot land on top of a
+    /// newer one.
+    right_panel_diffs: QueryCache<PathBuf, Vec<RightPanelDiffFile>>,
     right_panel_terminals: HashMap<Uuid, Entity<TerminalView>>,
     settings_page: Option<SettingsPage>,
     header_drag_armed: bool,
     branch: Option<String>,
+    /// Branch per project path. `git` is too slow for the UI thread.
+    branches: QueryCache<PathBuf, Option<String>>,
     toast: Option<String>,
     copied_message_feedback: HashMap<Uuid, u64>,
     copied_message_generation: u64,
@@ -642,7 +657,7 @@ impl Waku {
                 .map(|session| session.provider)
                 .unwrap_or(state.last_provider),
         );
-        let branch = state
+        let branch_path = state
             .selected_project
             .and_then(|project_id| {
                 state
@@ -650,7 +665,15 @@ impl Waku {
                     .iter()
                     .find(|project| project.id == project_id)
             })
-            .and_then(|project| git_branch(&project.path));
+            .map(|project| project.path.clone());
+        let branch = branch_path.as_deref().and_then(git_branch);
+        // Seed the cache so returning to this project never re-runs `git`.
+        let mut branches = QueryCache::new(MAX_CACHED_PROJECT_BRANCHES);
+        if let Some(path) = branch_path
+            && let Query::Missing(token) = branches.read(&path)
+        {
+            branches.fulfill(token, branch.clone());
+        }
         // Measure visible rows only, with a generous overdraw — the same shape
         // Zed's own agent chat uses. `measure_all` lays out every row in the
         // session on the first frame and again after any structural splice,
@@ -816,10 +839,12 @@ impl Waku {
                 right_panel_file_tree_width: DEFAULT_FILE_TREE_WIDTH,
                 right_panel_file_editors: HashMap::new(),
                 right_panel_diff_files: Vec::new(),
+                right_panel_diffs: QueryCache::new(MAX_CACHED_PROJECT_BRANCHES),
                 right_panel_terminals: HashMap::new(),
                 settings_page: None,
                 header_drag_armed: false,
                 branch,
+                branches,
                 toast: None,
                 copied_message_feedback: HashMap::new(),
                 copied_message_generation: 0,

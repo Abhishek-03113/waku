@@ -9,14 +9,14 @@
 //! deserialize a transcript. The schema is defined in `db/schema.ts` and
 //! applied by [`apply_migrations`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ use crate::blob_store::BlobStore;
 use crate::computer_use::ComputerAppGrant;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
-    AgentSession, FavoriteModel, Message, MessageRole, Project, ProviderKind,
+    AgentSession, FavoriteModel, InteractionMode, Message, Project, ProviderKind, RuntimeMode,
     TranscriptBlockContent,
 };
 use crate::theme::ThemePreference;
@@ -114,9 +114,36 @@ pub struct PersistedState {
     pub computer_use_enabled: bool,
     #[serde(default)]
     pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
+    /// Sessions changed since the last save.
+    ///
+    /// The app knows what it touched, so it says so rather than making the
+    /// store rediscover it. Every `&mut AgentSession` is handed out by
+    /// [`Self::session_mut`], which records the id here; a save then writes
+    /// exactly these rows instead of re-serializing the whole history to work
+    /// out what moved.
+    #[serde(skip)]
+    dirty_sessions: HashSet<Uuid>,
 }
 
 impl PersistedState {
+    /// The only way to get a mutable session. Marks it for the next save.
+    pub fn session_mut(&mut self, id: Uuid) -> Option<&mut AgentSession> {
+        let session = self.sessions.iter_mut().find(|session| session.id == id)?;
+        self.dirty_sessions.insert(id);
+        Some(session)
+    }
+
+    /// Records a session as changed without borrowing it, for the few paths
+    /// that mutate through a slice or add a session outright.
+    pub fn mark_session_dirty(&mut self, id: Uuid) {
+        self.dirty_sessions.insert(id);
+    }
+
+    pub fn push_session(&mut self, session: AgentSession) {
+        self.dirty_sessions.insert(session.id);
+        self.sessions.push(session);
+    }
+
     pub fn empty() -> Self {
         Self {
             version: STATE_VERSION,
@@ -136,6 +163,7 @@ impl PersistedState {
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             computer_use_enabled: true,
             computer_use_allowed_apps: Vec::new(),
+            dirty_sessions: HashSet::new(),
         }
     }
 
@@ -241,15 +269,17 @@ impl PersistedState {
         self.sessions.push(session);
     }
 
-    fn migrate_loaded(&mut self, from_version: u32) {
-        if from_version < 3 {
-            for session in &mut self.sessions {
-                session.migrate_pre_access_modes();
-            }
-        }
+    fn migrate_loaded(&mut self) {
         for session in &mut self.sessions {
+            let before = (session.turns.len(), session.last_reply_at, session.provider_cursor.is_some());
             session.migrate_legacy_state();
             session.backfill_last_reply_at();
+            // Migration rewrote this session, so the stored row is stale.
+            if before
+                != (session.turns.len(), session.last_reply_at, session.provider_cursor.is_some())
+            {
+                self.dirty_sessions.insert(session.id);
+            }
         }
         self.version = STATE_VERSION;
         normalize_computer_app_grants(&mut self.computer_use_allowed_apps);
@@ -285,7 +315,10 @@ impl PersistedState {
 /// Done on the way to disk so a screenshot is written once and then dropped
 /// from memory: the transcript keeps a short reference, and rendering loads the
 /// file through GPUI's image cache instead of base64-decoding on every frame.
-fn externalize_blobs(sessions: &mut [AgentSession], blobs: &BlobStore) {
+fn externalize_blobs<'a>(
+    sessions: impl IntoIterator<Item = &'a mut AgentSession>,
+    blobs: &BlobStore,
+) {
     for session in sessions {
         for block in &mut session.transcript_blocks {
             let TranscriptBlockContent::Activities(activities) = &mut block.content else {
@@ -306,23 +339,33 @@ fn externalize_blobs(sessions: &mut [AgentSession], blobs: &BlobStore) {
     }
 }
 
-fn live_blob_references(sessions: &[AgentSession]) -> HashSet<String> {
+/// Every blob reference named by any stored session.
+///
+/// Read from the database rather than from memory: a session that has not been
+/// hydrated has an empty transcript in memory, and treating that as "owns no
+/// images" would delete screenshots that are still in use.
+fn live_blob_references(connection: &Connection) -> io::Result<HashSet<String>> {
+    let mut statement = connection
+        .prepare("SELECT data FROM session_details")
+        .map_err(to_io_error)?;
     let mut references = HashSet::new();
-    for session in sessions {
-        for block in &session.transcript_blocks {
-            let TranscriptBlockContent::Activities(activities) = &block.content else {
-                continue;
-            };
-            for activity in activities {
-                for image in &activity.image_urls {
-                    if crate::blob_store::is_blob_reference(image) {
-                        references.insert(image.clone());
-                    }
-                }
-            }
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(to_io_error)?;
+    for data in rows.filter_map(Result::ok) {
+        // Scanning the raw JSON keeps this independent of how deeply the
+        // reference is nested inside a transcript block.
+        let mut rest = data.as_str();
+        while let Some(start) = rest.find(crate::blob_store::BLOB_SCHEME) {
+            rest = &rest[start..];
+            let end = rest
+                .find('"')
+                .unwrap_or(rest.len());
+            references.insert(rest[..end].to_owned());
+            rest = &rest[end..];
         }
     }
-    references
+    Ok(references)
 }
 
 fn fingerprint(value: &str) -> u64 {
@@ -385,9 +428,9 @@ pub fn apply_migrations(connection: &Connection) -> io::Result<usize> {
 
 struct Storage {
     connection: Connection,
-    /// Fingerprint of each session row as last written, so a save can skip rows
-    /// whose contents did not change.
-    saved_sessions: HashMap<Uuid, u64>,
+    /// Sessions known to have a row. Used to spot deletions and to catch a
+    /// session that became persistable without being marked dirty.
+    persisted_sessions: HashSet<Uuid>,
     saved_projects: u64,
     saved_settings: u64,
 }
@@ -462,6 +505,16 @@ impl StateStore {
             }
         });
         state.ensure_runtime_session();
+        // The session that opens on launch is the one session whose transcript
+        // is needed immediately; the rest stay as list rows until selected.
+        if let Some(selected) = state.selected_session
+            && let Some(session) = state
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == selected)
+        {
+            let _ = self.hydrate(session);
+        }
         state
     }
 
@@ -486,110 +539,179 @@ impl StateStore {
         let connection = self.open()?;
         let mut state = PersistedState::empty();
 
-        let Some(settings) = self.read_settings()? else {
-            // Nothing stored yet: adopt the legacy JSON document if present.
-            let migrated = self.migrate_legacy_document(&connection)?;
-            *self.storage.lock() = Some(Storage {
-                connection,
-                saved_sessions: HashMap::new(),
-                saved_projects: 0,
-                saved_settings: 0,
-            });
-            return Ok(migrated);
-        };
-
-        let from_version = settings.version;
+        // A missing settings file just means defaults; the database is still
+        // the source of truth for projects and sessions.
+        let settings = self.read_settings()?;
+        let from_version = settings.as_ref().map_or(STATE_VERSION, |settings| settings.version);
         if !(OLDEST_SUPPORTED_STATE_VERSION..=STATE_VERSION).contains(&from_version) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported Waku state version",
             ));
         }
-        state.apply_settings(settings);
+        if let Some(settings) = settings {
+            state.apply_settings(settings);
+        }
 
         let mut projects = connection
-            .prepare("SELECT data FROM projects ORDER BY position")
+            .prepare("SELECT id, name, path, created_at FROM projects ORDER BY position")
             .map_err(to_io_error)?;
         state.projects = projects
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
             .map_err(to_io_error)?
             .filter_map(Result::ok)
-            .filter_map(|data| serde_json::from_str::<Project>(&data).ok())
+            .filter_map(|(id, name, path, created_at)| {
+                Some(Project {
+                    id: Uuid::parse_str(&id).ok()?,
+                    name,
+                    path: PathBuf::from(path),
+                    created_at: created_at as u64,
+                })
+            })
             .collect();
         drop(projects);
 
+        // Only the columns the session list needs. Transcripts and messages are
+        // fetched per session by `hydrate`, so startup cost does not grow with
+        // how much history exists.
         let mut sessions = connection
-            .prepare("SELECT data FROM sessions ORDER BY updated_at")
+            .prepare(
+                "SELECT id, project_id, title, provider, model, status,
+                        created_at, updated_at, last_reply_at
+                 FROM sessions ORDER BY updated_at",
+            )
             .map_err(to_io_error)?;
-        // Seed each row's fingerprint from the bytes as stored, so the first
-        // save after launch writes only what actually changed. A session that
-        // migration rewrote will not match its stored form, and so is written.
-        let mut saved_sessions = HashMap::new();
+        let mut persisted_sessions = HashSet::new();
         state.sessions = sessions
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                ))
+            })
             .map_err(to_io_error)?
             .filter_map(Result::ok)
-            .filter_map(|data| {
-                let session = serde_json::from_str::<AgentSession>(&data).ok()?;
-                saved_sessions.insert(session.id, fingerprint(&data));
+            .filter_map(|row| {
+                let session = session_skeleton(row)?;
+                persisted_sessions.insert(session.id);
                 Some(session)
             })
             .collect();
         drop(sessions);
 
-        let mut by_session = read_messages(&connection)?;
-        for session in &mut state.sessions {
-            session.messages = by_session.remove(&session.id).unwrap_or_default();
-            if let Some(seed) = saved_sessions.get_mut(&session.id) {
-                *seed ^= fingerprint(
-                    &serde_json::to_string(&session.messages).map_err(to_io_error)?,
-                );
-            }
-        }
-
-        state.migrate_loaded(from_version);
+        state.migrate_loaded();
 
         *self.storage.lock() = Some(Storage {
             connection,
-            saved_sessions,
+            persisted_sessions,
             saved_projects: 0,
             saved_settings: 0,
         });
         Ok(state)
     }
 
-    /// Reads a pre-SQLite `state.json`, writes it into the database, and keeps
-    /// the original as a `.backup` rather than deleting it.
-    fn migrate_legacy_document(&self, connection: &Connection) -> io::Result<PersistedState> {
-        let legacy_path = self.path.with_file_name("state.json");
-        let bytes = fs::read(&legacy_path)?;
-        let mut state = serde_json::from_slice::<PersistedState>(&bytes)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let from_version = state.version;
-        if !(OLDEST_SUPPORTED_STATE_VERSION..=STATE_VERSION).contains(&from_version) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported Waku state version",
-            ));
+    /// Fills in a session's transcript, turns and messages.
+    ///
+    /// Startup loads only list columns, so this runs when a session is first
+    /// selected. It reads one row plus that session's messages — cheap enough
+    /// to do inline, and a no-op once the session is already loaded.
+    pub fn hydrate(&self, session: &mut AgentSession) -> io::Result<()> {
+        if session.detail_loaded {
+            return Ok(());
         }
-        state.migrate_loaded(from_version);
-        externalize_blobs(&mut state.sessions, &self.blobs);
-        write_all(connection, &state)?;
-        self.write_settings(&state.settings())?;
-        fs::rename(&legacy_path, legacy_path.with_extension("json.backup")).ok();
-        Ok(state)
+        let mut guard = self.storage.lock();
+        if guard.is_none() {
+            *guard = Some(Storage {
+                connection: self.open()?,
+                persisted_sessions: HashSet::new(),
+                saved_projects: 0,
+                saved_settings: 0,
+            });
+        }
+        let connection = &guard.as_ref().expect("storage opened above").connection;
+        let id = session.id.to_string();
+
+        let data: Option<String> = connection
+            .query_row(
+                "SELECT data FROM session_details WHERE session_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(to_io_error)?;
+        // A session with no row has nothing stored to load; it is already whole.
+        let Some(data) = data else {
+            session.detail_loaded = true;
+            return Ok(());
+        };
+        let stored = serde_json::from_str::<AgentSession>(&data).map_err(to_io_error)?;
+        session.transcript_blocks = stored.transcript_blocks;
+        session.turns = stored.turns;
+        session.provider_cursor = stored.provider_cursor;
+        session.runtime_mode = stored.runtime_mode;
+        session.interaction_mode = stored.interaction_mode;
+        session.reasoning_effort = stored.reasoning_effort;
+        session.service_tier = stored.service_tier;
+
+        let mut statement = connection
+            .prepare(
+                "SELECT id, turn_id, role, content, created_at, streaming
+                 FROM messages WHERE session_id = ?1 ORDER BY position",
+            )
+            .map_err(to_io_error)?;
+        session.messages = statement
+            .query_map(params![id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(to_io_error)?
+            .filter_map(Result::ok)
+            .filter_map(message_from_row)
+            .collect();
+
+        session.detail_loaded = true;
+        Ok(())
     }
 
-    /// Persists whatever changed. Sessions whose serialized form matches the
-    /// last write are skipped, so a streaming save writes one row.
+    /// Persists whatever the app marked as changed, so a streaming turn writes
+    /// one session row and a selection change writes no rows at all.
     pub fn save(&self, state: &mut PersistedState) -> io::Result<()> {
-        externalize_blobs(&mut state.sessions, &self.blobs);
+        // Only changed sessions can hold a new inline payload, so the blob walk
+        // follows the same set rather than every transcript on every save.
+        let dirty = state.dirty_sessions.clone();
+        externalize_blobs(
+            state
+                .sessions
+                .iter_mut()
+                .filter(|session| dirty.contains(&session.id)),
+            &self.blobs,
+        );
 
         let mut guard = self.storage.lock();
         if guard.is_none() {
             *guard = Some(Storage {
                 connection: self.open()?,
-                saved_sessions: HashMap::new(),
+                persisted_sessions: HashSet::new(),
                 saved_projects: 0,
                 saved_settings: 0,
             });
@@ -615,11 +737,13 @@ impl StateStore {
             for (position, project) in state.projects.iter().enumerate() {
                 transaction
                     .execute(
-                        "INSERT INTO projects(id, position, data) VALUES(?1, ?2, ?3)",
+                        INSERT_PROJECT,
                         params![
                             project.id.to_string(),
+                            project.name,
+                            project.path.to_string_lossy(),
                             position as i64,
-                            serde_json::to_string(project).map_err(to_io_error)?
+                            project.created_at as i64
                         ],
                     )
                     .map_err(to_io_error)?;
@@ -627,30 +751,41 @@ impl StateStore {
             storage.saved_projects = projects_fingerprint;
         }
 
+        // Only sessions the app reported as changed are written. A draft that
+        // has not started yet owns no row, so it counts as removed until it does.
         let mut live = HashSet::with_capacity(state.sessions.len());
         for session in state.sessions.iter().filter(|session| session.has_started()) {
             live.insert(session.id);
-            let data = session_data(session)?;
-            // Messages are their own rows, so they must be part of what decides
-            // whether this session changed.
-            let session_fingerprint = fingerprint(&data)
-                ^ fingerprint(&serde_json::to_string(&session.messages).map_err(to_io_error)?);
-            if storage.saved_sessions.get(&session.id) == Some(&session_fingerprint) {
+            // A skeleton's empty transcript means "not fetched", not "empty".
+            // Writing one would erase the stored history.
+            if !session.detail_loaded {
                 continue;
             }
+            if !state.dirty_sessions.contains(&session.id)
+                && storage.persisted_sessions.contains(&session.id)
+            {
+                continue;
+            }
+            let data = session_data(session)?;
             transaction
                 .execute(
                     UPSERT_SESSION,
-                    rusqlite::params_from_iter(session_params(session, &data)),
+                    rusqlite::params_from_iter(session_params(session)),
+                )
+                .map_err(to_io_error)?;
+            transaction
+                .execute(
+                    UPSERT_SESSION_DETAIL,
+                    params![session.id.to_string(), data],
                 )
                 .map_err(to_io_error)?;
             write_messages(&transaction, session)?;
-            storage.saved_sessions.insert(session.id, session_fingerprint);
+            storage.persisted_sessions.insert(session.id);
         }
 
         let removed = storage
-            .saved_sessions
-            .keys()
+            .persisted_sessions
+            .iter()
             .copied()
             .filter(|id| !live.contains(id))
             .collect::<Vec<_>>();
@@ -660,71 +795,98 @@ impl StateStore {
                 .execute("DELETE FROM sessions WHERE id = ?1", params![key])
                 .map_err(to_io_error)?;
             transaction
+                .execute(
+                    "DELETE FROM session_details WHERE session_id = ?1",
+                    params![key],
+                )
+                .map_err(to_io_error)?;
+            transaction
                 .execute("DELETE FROM messages WHERE session_id = ?1", params![key])
                 .map_err(to_io_error)?;
-            storage.saved_sessions.remove(&id);
+            storage.persisted_sessions.remove(&id);
         }
 
-        transaction.commit().map_err(to_io_error)
+        transaction.commit().map_err(to_io_error)?;
+        state.dirty_sessions.clear();
+        Ok(())
     }
 
-    /// Builds a blob sweep for the current state. Collecting the live set is
-    /// cheap and happens on the caller's thread; run the returned closure on a
-    /// background executor, since it walks the blob directory.
-    pub fn blob_sweep(&self, state: &PersistedState) -> impl FnOnce() + Send + 'static {
+    /// Builds a blob sweep.
+    ///
+    /// Both halves are filesystem and database work, so the whole thing runs on
+    /// a background executor; it opens its own connection rather than borrowing
+    /// the store's.
+    pub fn blob_sweep(&self) -> impl FnOnce() + Send + 'static {
         let blobs = Arc::clone(&self.blobs);
-        let live = live_blob_references(&state.sessions);
+        let path = self.path.clone();
         move || {
+            let Ok(connection) = Connection::open(&path) else {
+                return;
+            };
+            let Ok(live) = live_blob_references(&connection) else {
+                return;
+            };
             let _ = blobs.retain(&live);
         }
     }
 }
 
-/// Reads every message row, grouped by session and in conversation order.
-///
-/// One pass over the table rather than a query per session, so loading stays
-/// proportional to the data rather than to the session count.
-fn read_messages(connection: &Connection) -> io::Result<HashMap<Uuid, Vec<Message>>> {
-    let mut statement = connection
-        .prepare(
-            "SELECT session_id, id, turn_id, role, content, created_at, streaming
-             FROM messages ORDER BY session_id, position",
-        )
-        .map_err(to_io_error)?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-            ))
-        })
-        .map_err(to_io_error)?;
+type SessionColumns = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+);
 
-    let mut by_session: HashMap<Uuid, Vec<Message>> = HashMap::new();
-    for row in rows.filter_map(Result::ok) {
-        let (session_id, id, turn_id, role, content, created_at, streaming) = row;
-        let (Ok(session_id), Ok(id)) = (Uuid::parse_str(&session_id), Uuid::parse_str(&id)) else {
-            continue;
-        };
-        let Ok(role) = serde_json::from_value::<MessageRole>(serde_json::Value::String(role))
-        else {
-            continue;
-        };
-        by_session.entry(session_id).or_default().push(Message {
-            id,
-            turn_id: turn_id.as_deref().and_then(|id| Uuid::parse_str(id).ok()),
-            role,
-            content,
-            created_at: created_at as u64,
-            streaming: streaming != 0,
-        });
-    }
-    Ok(by_session)
+/// Builds a list-only session from its columns. `messages`,
+/// `transcript_blocks` and `turns` stay empty until [`StateStore::hydrate`].
+///
+/// Built field by field rather than through `AgentSession::new`, which would
+/// spend a random-number syscall per row on an id that is then overwritten.
+fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
+    let (id, project_id, title, provider, model, status, created_at, updated_at, last_reply_at) =
+        row;
+    Some(AgentSession {
+        id: Uuid::parse_str(&id).ok()?,
+        title,
+        project_id: Uuid::parse_str(&project_id).ok()?,
+        provider: serde_json::from_value(serde_json::Value::String(provider)).ok()?,
+        model,
+        // Hydration replaces these; the list never reads them.
+        runtime_mode: RuntimeMode::default(),
+        interaction_mode: InteractionMode::default(),
+        reasoning_effort: None,
+        service_tier: None,
+        status: serde_json::from_value(serde_json::Value::String(status)).ok()?,
+        created_at: created_at as u64,
+        updated_at: updated_at as u64,
+        last_reply_at: last_reply_at.map(|at| at as u64),
+        provider_cursor: None,
+        provider_session_id: None,
+        messages: Vec::new(),
+        transcript_blocks: Vec::new(),
+        turns: Vec::new(),
+        detail_loaded: false,
+    })
+}
+
+type MessageColumns = (String, Option<String>, String, String, i64, i64);
+
+fn message_from_row(row: MessageColumns) -> Option<Message> {
+    let (id, turn_id, role, content, created_at, streaming) = row;
+    Some(Message {
+        id: Uuid::parse_str(&id).ok()?,
+        turn_id: turn_id.as_deref().and_then(|id| Uuid::parse_str(id).ok()),
+        role: serde_json::from_value(serde_json::Value::String(role)).ok()?,
+        content,
+        created_at: created_at as u64,
+        streaming: streaming != 0,
+    })
 }
 
 /// Serializes a session for the `data` column, omitting `messages`.
@@ -793,8 +955,8 @@ fn write_messages(
 /// listing sessions never has to deserialize a transcript.
 const UPSERT_SESSION: &str = "INSERT INTO sessions(
          id, project_id, title, provider, model, status,
-         created_at, updated_at, last_reply_at, data
-     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         created_at, updated_at, last_reply_at
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
      ON CONFLICT(id) DO UPDATE SET
          project_id    = excluded.project_id,
          title         = excluded.title,
@@ -803,8 +965,20 @@ const UPSERT_SESSION: &str = "INSERT INTO sessions(
          status        = excluded.status,
          created_at    = excluded.created_at,
          updated_at    = excluded.updated_at,
-         last_reply_at = excluded.last_reply_at,
-         data          = excluded.data";
+         last_reply_at = excluded.last_reply_at";
+
+const INSERT_PROJECT: &str = "INSERT INTO projects(id, name, path, position, created_at)
+     VALUES(?1, ?2, ?3, ?4, ?5)
+     ON CONFLICT(id) DO UPDATE SET
+         name       = excluded.name,
+         path       = excluded.path,
+         position   = excluded.position,
+         created_at = excluded.created_at";
+
+/// The transcript, written alongside the list row it belongs to.
+const UPSERT_SESSION_DETAIL: &str = "INSERT INTO session_details(session_id, data)
+     VALUES(?1, ?2)
+     ON CONFLICT(session_id) DO UPDATE SET data = excluded.data";
 
 /// Serializes an enum to the same string the JSON blob uses, so a column and
 /// its JSON counterpart can never disagree about spelling.
@@ -815,55 +989,21 @@ fn tag_of(value: impl Serialize) -> String {
         .unwrap_or_default()
 }
 
-fn session_params(session: &AgentSession, data: &str) -> Vec<rusqlite::types::Value> {
+fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
     use rusqlite::types::Value;
     vec![
         Value::Text(session.id.to_string()),
         Value::Text(session.project_id.to_string()),
         Value::Text(session.title.clone()),
         Value::Text(tag_of(session.provider)),
-        session
-            .model
-            .clone()
-            .map_or(Value::Null, Value::Text),
+        session.model.clone().map_or(Value::Null, Value::Text),
         Value::Text(tag_of(session.status)),
         Value::Integer(session.created_at as i64),
         Value::Integer(session.updated_at as i64),
         session
             .last_reply_at
             .map_or(Value::Null, |at| Value::Integer(at as i64)),
-        Value::Text(data.to_owned()),
     ]
-}
-
-/// Writes projects and sessions wholesale, for the one-time legacy migration.
-/// Settings are written separately, to `settings.json`.
-fn write_all(connection: &Connection, state: &PersistedState) -> io::Result<()> {
-    let transaction = connection.unchecked_transaction().map_err(to_io_error)?;
-    for (position, project) in state.projects.iter().enumerate() {
-        transaction
-            .execute(
-                "INSERT INTO projects(id, position, data) VALUES(?1, ?2, ?3)
-                 ON CONFLICT(id) DO UPDATE SET position = excluded.position, data = excluded.data",
-                params![
-                    project.id.to_string(),
-                    position as i64,
-                    serde_json::to_string(project).map_err(to_io_error)?
-                ],
-            )
-            .map_err(to_io_error)?;
-    }
-    for session in state.sessions.iter().filter(|session| session.has_started()) {
-        let data = session_data(session)?;
-        transaction
-            .execute(
-                UPSERT_SESSION,
-                rusqlite::params_from_iter(session_params(session, &data)),
-            )
-            .map_err(to_io_error)?;
-        write_messages(&transaction, session)?;
-    }
-    transaction.commit().map_err(to_io_error)
 }
 
 fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
@@ -877,7 +1017,7 @@ fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
 mod tests {
     use super::*;
     use crate::model::{
-        ActivityItem, ActivityKind, FavoriteModel, ReasoningBlock, TranscriptBlock,
+        ActivityItem, ActivityKind, FavoriteModel, MessageRole, ReasoningBlock, TranscriptBlock,
         TranscriptBlockContent,
     };
     use base64::Engine as _;
@@ -888,6 +1028,168 @@ mod tests {
 
     fn store_in(directory: &Path) -> StateStore {
         StateStore::new(directory.join("app.db"))
+    }
+
+    /// `load` returns list-only sessions by design; tests that assert on
+    /// transcripts fetch them the way the app does when a session is opened.
+    fn load_hydrated(store: &StateStore) -> PersistedState {
+        let mut state = store.load().unwrap();
+        for session in &mut state.sessions {
+            store.hydrate(session).unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn projects_round_trip_as_columns_with_created_at() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/some project"));
+        let project = state.projects[0].clone();
+        assert!(project.created_at > 0, "a new project is dated");
+        store.save(&mut state).unwrap();
+
+        // Stored as columns, not as a JSON blob.
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        let (name, path, created_at): (String, String, i64) = connection
+            .query_row(
+                "SELECT name, path, created_at FROM projects WHERE id = ?1",
+                params![project.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(name, project.name);
+        assert_eq!(path, project.path.to_string_lossy());
+        assert_eq!(created_at as u64, project.created_at);
+        drop(connection);
+
+        let restored = store_in(&directory).load().unwrap();
+        assert_eq!(restored.projects[0].name, project.name);
+        assert_eq!(restored.projects[0].path, project.path);
+        assert_eq!(restored.projects[0].created_at, project.created_at);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn load_returns_list_columns_and_hydrate_fills_the_transcript() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        state.sessions[0].title = "Investigate".into();
+        state.sessions[0].begin_turn("Ask");
+        state.sessions[0].push_message(MessageRole::Assistant, "an answer");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        let session = &restored.sessions[0];
+        // The list has everything it renders...
+        assert_eq!(session.title, "Investigate");
+        assert_eq!(session.id, id);
+        assert!(session.last_reply_at.is_some());
+        // ...and none of what it does not.
+        assert!(!session.detail_loaded);
+        assert!(session.messages.is_empty());
+        assert!(session.turns.is_empty());
+        // A skeleton still counts as started, since only started sessions
+        // are stored at all.
+        assert!(session.has_started());
+
+        reopened.hydrate(&mut restored.sessions[0]).unwrap();
+        let session = &restored.sessions[0];
+        assert!(session.detail_loaded);
+        assert_eq!(session.turns.len(), 1);
+        assert!(
+            session
+                .messages
+                .iter()
+                .any(|message| message.content == "an answer")
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_skeleton_is_never_written_back_over_stored_history() {
+        // The failure this guards against is silent and total: saving a session
+        // whose transcript was never fetched would replace it with nothing.
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("Ask");
+        state.sessions[0].push_message(MessageRole::User, "keep me");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        assert!(!restored.sessions[0].detail_loaded);
+        // Mark it dirty anyway, the worst case.
+        let id = restored.sessions[0].id;
+        restored.mark_session_dirty(id);
+        reopened.save(&mut restored).unwrap();
+
+        let checked = load_hydrated(&store_in(&directory));
+        assert_eq!(checked.sessions[0].turns.len(), 1, "turns survived");
+        assert!(
+            checked.sessions[0]
+                .messages
+                .iter()
+                .any(|message| message.content == "keep me"),
+            "messages survived"
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn blob_sweep_keeps_images_of_sessions_that_are_not_loaded() {
+        // Sweeping from memory would treat an unhydrated session as owning no
+        // images and delete screenshots that are still referenced.
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let payload = vec![4u8; 32 * 1024];
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&payload)
+        );
+        let id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Screenshot");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state
+            .session_mut(id)
+            .unwrap()
+            .transcript_blocks
+            .push(TranscriptBlock {
+                after_message: 0,
+                turn_id: None,
+                content: TranscriptBlockContent::Activities(vec![
+                    ActivityItem::new(None, ActivityKind::Tool, "Screenshot", None, true)
+                        .with_image_urls(vec![data_url]),
+                ]),
+            });
+        store.save(&mut state).unwrap();
+
+        // Reopen without hydrating anything, then sweep.
+        let reopened = store_in(&directory);
+        let restored = reopened.load().unwrap();
+        assert!(!restored.sessions[0].detail_loaded);
+        reopened.blob_sweep()();
+
+        let checked = load_hydrated(&store_in(&directory));
+        let TranscriptBlockContent::Activities(activities) =
+            &checked.sessions[0].transcript_blocks[0].content
+        else {
+            panic!("expected activities");
+        };
+        let path = store.blobs().path_for(&activities[0].image_urls[0]).unwrap();
+        assert_eq!(fs::read(path).unwrap(), payload, "the image survived");
+
+        fs::remove_dir_all(directory).ok();
     }
 
     #[test]
@@ -959,7 +1261,7 @@ mod tests {
         ]);
         store.save(&mut state).unwrap();
 
-        let restored = store_in(&directory).load().unwrap();
+        let restored = load_hydrated(&store_in(&directory));
         assert_eq!(restored.projects[0].name, "project");
         assert_eq!(restored.sessions.len(), 1);
         assert_eq!(restored.sessions[0].model.as_deref(), Some("gpt-5.6-luna"));
@@ -1012,21 +1314,84 @@ mod tests {
         state.sessions.push(quiet);
         store.save(&mut state).unwrap();
 
-        // Touch one session; the other must keep its stored row untouched.
-        let before = {
-            let guard = store.storage.lock();
-            let storage = guard.as_ref().unwrap();
-            storage.saved_sessions[&quiet_id]
-        };
-        state.sessions[0].begin_turn("Second");
+        // Stamp the quiet session's row so any write would overwrite the mark.
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        connection
+            .execute(
+                "UPDATE sessions SET title = 'untouched' WHERE id = ?1",
+                params![quiet_id.to_string()],
+            )
+            .unwrap();
+
+        // Change the other session, through the accessor that marks it dirty.
+        let active_id = state.sessions[0].id;
+        let session = state.session_mut(active_id).unwrap();
+        session.begin_turn("Second");
+        session.finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let quiet_title: String = connection
+            .query_row(
+                "SELECT title FROM sessions WHERE id = ?1",
+                params![quiet_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            quiet_title, "untouched",
+            "a session nobody touched was not rewritten"
+        );
+        drop(connection);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_session_changed_without_the_accessor_is_not_written() {
+        // The dirty set is the contract: bypassing `session_mut` means the
+        // change does not reach disk. This pins that so the invariant is
+        // visible rather than discovered later as data loss.
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        state.sessions[0].begin_turn("First");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
         store.save(&mut state).unwrap();
 
-        let guard = store.storage.lock();
-        let storage = guard.as_ref().unwrap();
-        assert_eq!(storage.saved_sessions[&quiet_id], before);
-        drop(guard);
+        state.sessions[0].title = "bypassed".into();
+        store.save(&mut state).unwrap();
+        assert_eq!(
+            store_in(&directory).load().unwrap().sessions[0].title,
+            "New task",
+            "an unmarked change stays in memory"
+        );
 
+        // Going through the accessor persists it.
+        state.session_mut(id).unwrap().title = "marked".into();
+        store.save(&mut state).unwrap();
+        assert_eq!(
+            store_in(&directory).load().unwrap().sessions[0].title,
+            "marked"
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_new_session_is_written_even_without_being_marked() {
+        // Safety net: a session with no row yet is always written, so a missed
+        // mark can never lose a whole session.
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("Unmarked");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.dirty_sessions.clear();
+
+        store.save(&mut state).unwrap();
+
+        assert_eq!(store_in(&directory).load().unwrap().sessions.len(), 1);
         fs::remove_dir_all(directory).ok();
     }
 
@@ -1142,7 +1507,7 @@ mod tests {
         // The JSON column must not carry a second copy that could drift.
         let connection = Connection::open(directory.join("app.db")).unwrap();
         let data: String = connection
-            .query_row("SELECT data FROM sessions LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT data FROM session_details LIMIT 1", [], |row| row.get(0))
             .unwrap();
         assert!(
             !serde_json::from_str::<serde_json::Value>(&data)
@@ -1154,7 +1519,7 @@ mod tests {
         );
         drop(connection);
 
-        let restored = store_in(&directory).load().unwrap();
+        let restored = load_hydrated(&store_in(&directory));
         let messages = &restored.sessions[0].messages;
         assert_eq!(messages.len(), expected.len());
         assert!(expected.len() >= 2, "the turn and both replies are present");
@@ -1181,7 +1546,8 @@ mod tests {
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
         store.save(&mut state).unwrap();
 
-        state.sessions[0].messages.truncate(1);
+        let id = state.sessions[0].id;
+        state.session_mut(id).unwrap().messages.truncate(1);
         store.save(&mut state).unwrap();
 
         let connection = Connection::open(directory.join("app.db")).unwrap();
@@ -1191,7 +1557,7 @@ mod tests {
         assert_eq!(count, 1, "the tail row was deleted, not left behind");
         drop(connection);
 
-        assert_eq!(store_in(&directory).load().unwrap().sessions[0].messages.len(), 1);
+        assert_eq!(load_hydrated(&store_in(&directory)).sessions[0].messages.len(), 1);
         fs::remove_dir_all(directory).ok();
     }
 
@@ -1239,11 +1605,12 @@ mod tests {
 
         // Nothing outside the message list changes, so the session JSON is
         // identical; only the message row differs.
-        state.sessions[0].messages[0].content = "after".into();
+        let id = state.sessions[0].id;
+        state.session_mut(id).unwrap().messages[0].content = "after".into();
         store.save(&mut state).unwrap();
 
         assert_eq!(
-            store_in(&directory).load().unwrap().sessions[0].messages[0].content,
+            load_hydrated(&store_in(&directory)).sessions[0].messages[0].content,
             "after"
         );
         fs::remove_dir_all(directory).ok();
@@ -1382,21 +1749,22 @@ mod tests {
         // A fresh store reloads and then saves without any edits in between.
         let reopened = store_in(&directory);
         let mut restored = reopened.load().unwrap();
-        let seeded = {
-            let guard = reopened.storage.lock();
-            guard.as_ref().unwrap().saved_sessions.clone()
-        };
-        assert_eq!(seeded.len(), 1, "load seeds a fingerprint per stored row");
+        assert!(
+            restored.dirty_sessions.is_empty(),
+            "loading marks nothing dirty"
+        );
 
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        connection
+            .execute_batch("UPDATE sessions SET title = 'untouched'")
+            .unwrap();
         reopened.save(&mut restored).unwrap();
 
-        let guard = reopened.storage.lock();
-        assert_eq!(
-            guard.as_ref().unwrap().saved_sessions,
-            seeded,
-            "an unedited session keeps its fingerprint, so no row was rewritten"
-        );
-        drop(guard);
+        let title: String = connection
+            .query_row("SELECT title FROM sessions LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "untouched", "no row was rewritten after a plain load");
+        drop(connection);
 
         fs::remove_dir_all(directory).ok();
     }
@@ -1413,18 +1781,23 @@ mod tests {
         );
         state.sessions[0].begin_turn("Screenshot");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
-        state.sessions[0].transcript_blocks.push(TranscriptBlock {
-            after_message: 0,
-            turn_id: None,
-            content: TranscriptBlockContent::Activities(vec![
-                ActivityItem::new(None, ActivityKind::Tool, "Screenshot", None, true)
-                    .with_image_urls(vec![data_url]),
-            ]),
-        });
+        let id = state.sessions[0].id;
+        state
+            .session_mut(id)
+            .unwrap()
+            .transcript_blocks
+            .push(TranscriptBlock {
+                after_message: 0,
+                turn_id: None,
+                content: TranscriptBlockContent::Activities(vec![
+                    ActivityItem::new(None, ActivityKind::Tool, "Screenshot", None, true)
+                        .with_image_urls(vec![data_url]),
+                ]),
+            });
 
         store.save(&mut state).unwrap();
 
-        let restored = store_in(&directory).load().unwrap();
+        let restored = load_hydrated(&store_in(&directory));
         let TranscriptBlockContent::Activities(activities) =
             &restored.sessions[0].transcript_blocks[0].content
         else {
@@ -1434,35 +1807,6 @@ mod tests {
         assert!(crate::blob_store::is_blob_reference(reference));
         let path = store.blobs().path_for(reference).unwrap();
         assert_eq!(fs::read(path).unwrap(), payload);
-
-        fs::remove_dir_all(directory).ok();
-    }
-
-    #[test]
-    fn legacy_json_document_migrates_into_sqlite() {
-        let directory = temporary_directory();
-        fs::create_dir_all(&directory).unwrap();
-        let mut legacy = PersistedState::fresh(PathBuf::from("/tmp/project"));
-        legacy.version = 4;
-        legacy.sessions[0].begin_turn("Legacy");
-        legacy.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
-        legacy.theme = ThemePreference::Light;
-        fs::write(
-            directory.join("state.json"),
-            serde_json::to_vec(&legacy).unwrap(),
-        )
-        .unwrap();
-
-        let restored = store_in(&directory).load().unwrap();
-
-        assert_eq!(restored.version, STATE_VERSION);
-        assert_eq!(restored.theme, ThemePreference::Light);
-        assert_eq!(restored.sessions.len(), 1);
-        assert!(directory.join("state.json.backup").exists());
-        assert!(!directory.join("state.json").exists());
-        // The migrated database is now the source of truth.
-        let reopened = store_in(&directory).load().unwrap();
-        assert_eq!(reopened.sessions.len(), 1);
 
         fs::remove_dir_all(directory).ok();
     }
@@ -1570,73 +1914,6 @@ mod tests {
     }
 
     #[test]
-    fn version_one_sessions_migrate_provider_ids_and_turns() {
-        let directory = temporary_directory();
-        fs::create_dir_all(&directory).unwrap();
-        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
-        state.version = 1;
-        state.sessions[0].messages.push(crate::model::Message::new(
-            crate::model::MessageRole::User,
-            "hello",
-        ));
-        state.sessions[0].messages.push(crate::model::Message::new(
-            crate::model::MessageRole::Assistant,
-            "hi",
-        ));
-        let mut value = serde_json::to_value(&state).unwrap();
-        for key in [
-            "favorite_models",
-            "theme",
-            "last_model",
-            "last_reasoning_effort",
-            "last_service_tier",
-            "sidebar_visible",
-            "right_panel_visible",
-            "sidebar_width",
-            "right_panel_width",
-        ] {
-            value.as_object_mut().unwrap().remove(key);
-        }
-        value["sessions"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("model");
-        value["sessions"][0]["provider_session_id"] =
-            serde_json::Value::String("thread-123".into());
-        fs::write(
-            directory.join("state.json"),
-            serde_json::to_vec(&value).unwrap(),
-        )
-        .unwrap();
-
-        let restored = store_in(&directory).load().unwrap();
-        assert_eq!(restored.version, STATE_VERSION);
-        assert!(restored.favorite_models.is_empty());
-        assert_eq!(restored.theme, ThemePreference::System);
-        assert!(restored.sidebar_visible);
-        assert!(restored.right_panel_visible);
-        assert_eq!(restored.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
-        assert_eq!(restored.right_panel_width, DEFAULT_RIGHT_PANEL_WIDTH);
-        assert!(restored.sessions[0].model.is_none());
-        assert_eq!(
-            restored.sessions[0]
-                .provider_cursor
-                .as_ref()
-                .map(crate::model::ProviderResumeCursor::native_id),
-            Some("thread-123")
-        );
-        assert_eq!(restored.sessions[0].turns.len(), 1);
-        assert!(
-            restored.sessions[0]
-                .messages
-                .iter()
-                .all(|message| message.turn_id.is_some())
-        );
-
-        fs::remove_dir_all(directory).ok();
-    }
-
-    #[test]
     fn selected_model_and_traits_are_used_for_new_sessions() {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.last_provider = ProviderKind::Grok;
@@ -1658,66 +1935,35 @@ mod tests {
     #[test]
     fn missing_remembered_selection_is_backfilled_from_selected_session() {
         let directory = temporary_directory();
-        fs::create_dir_all(&directory).unwrap();
+        let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
         state.sessions[0].begin_turn("Started");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
-        state.sessions[0].model = Some("gpt-5.6-luna".into());
-        state.sessions[0].reasoning_effort = Some("xhigh".into());
-        state.sessions[0].service_tier = Some("fast".into());
-        let mut value = serde_json::to_value(state).unwrap();
-        for key in ["last_model", "last_reasoning_effort", "last_service_tier"] {
-            value.as_object_mut().unwrap().remove(key);
-        }
-        fs::write(
-            directory.join("state.json"),
-            serde_json::to_vec(&value).unwrap(),
-        )
-        .unwrap();
+        let session = state.session_mut(id).unwrap();
+        session.model = Some("gpt-5.6-luna".into());
+        session.reasoning_effort = Some("xhigh".into());
+        session.service_tier = Some("fast".into());
+        store.save(&mut state).unwrap();
 
-        let restored = store_in(&directory).load().unwrap();
+        // Drop the remembered selection from settings, as a file written before
+        // those fields existed would have.
+        let settings_path = directory.join("settings.json");
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        for key in ["last_model", "last_reasoning_effort", "last_service_tier"] {
+            settings.as_object_mut().unwrap().remove(key);
+        }
+        fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        reopened.hydrate(&mut restored.sessions[0]).unwrap();
+        restored.backfill_remembered_selection();
 
         assert_eq!(restored.last_model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(restored.last_reasoning_effort.as_deref(), Some("xhigh"));
         assert_eq!(restored.last_service_tier.as_deref(), Some("fast"));
-        fs::remove_dir_all(directory).ok();
-    }
-
-    #[test]
-    fn version_two_combined_modes_migrate_to_access_and_interaction_settings() {
-        let directory = temporary_directory();
-        fs::create_dir_all(&directory).unwrap();
-        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
-        state.version = 2;
-        state.sessions[0].runtime_mode = crate::model::RuntimeMode::Plan;
-        state.sessions[0].begin_turn("One");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
-        let mut auto_session = AgentSession::new(state.projects[0].id, ProviderKind::Codex);
-        auto_session.runtime_mode = crate::model::RuntimeMode::Auto;
-        auto_session.begin_turn("Two");
-        auto_session.finish_active_turn(crate::model::TurnStatus::Completed);
-        state.sessions.push(auto_session);
-        fs::write(
-            directory.join("state.json"),
-            serde_json::to_vec(&state).unwrap(),
-        )
-        .unwrap();
-
-        let restored = store_in(&directory).load().unwrap();
-        assert_eq!(restored.version, STATE_VERSION);
-        let plan = restored
-            .sessions
-            .iter()
-            .find(|session| session.interaction_mode == crate::model::InteractionMode::Plan)
-            .expect("plan session");
-        let build = restored
-            .sessions
-            .iter()
-            .find(|session| session.interaction_mode == crate::model::InteractionMode::Build)
-            .expect("build session");
-        assert_eq!(plan.runtime_mode, crate::model::RuntimeMode::Ask);
-        assert_eq!(build.runtime_mode, crate::model::RuntimeMode::AutoAcceptEdits);
-
         fs::remove_dir_all(directory).ok();
     }
 
@@ -1730,4 +1976,3 @@ mod tests {
         fs::remove_dir_all(directory).ok();
     }
 }
-

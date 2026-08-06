@@ -855,7 +855,7 @@ impl Waku {
         self.replace_active_right_panel_state(state);
         self.state.right_panel_visible = self.right_panel_visible;
         if self.active_right_panel_surface() == Some(&RightPanelSurface::Diff) {
-            self.refresh_right_panel_diff();
+            self.refresh_right_panel_diff(cx);
         }
         self.ensure_right_panel_terminals(cx);
         if self.right_panel_visible {
@@ -960,7 +960,7 @@ impl Waku {
             self.ensure_initial_right_panel_file_editor_width();
         }
         if surface == RightPanelSurface::Diff {
-            self.refresh_right_panel_diff();
+            self.refresh_right_panel_diff(cx);
         }
         if let Some(terminal_id) = surface.terminal_id() {
             self.ensure_right_panel_terminal(terminal_id, cx);
@@ -2213,17 +2213,58 @@ impl Waku {
             )
     }
 
-    fn refresh_right_panel_diff(&mut self) {
+    /// Refreshes the diff surface's file list.
+    ///
+    /// Two `git` invocations plus a read per untracked file — upwards of 25ms,
+    /// several frames at 120Hz — so it is a query keyed by project path. The
+    /// panel keeps showing its previous list until the result lands.
+    fn refresh_right_panel_diff(&mut self, cx: &mut Context<Self>) {
         let Some(project) = self.selected_project() else {
             self.right_panel_diff_files.clear();
             return;
         };
         let project_path = project.path.clone();
-        let mut files = BTreeMap::<String, RightPanelDiffFile>::new();
+        // The working tree moves under us, so a cached list is only good until
+        // something asks for it again.
+        self.right_panel_diffs.invalidate(&project_path);
+        match self.right_panel_diffs.read(&project_path) {
+            Query::Ready(files) => self.right_panel_diff_files = (*files).clone(),
+            Query::Pending => {}
+            Query::Missing(token) => {
+                cx.spawn(async move |waku, cx| {
+                    let files = cx
+                        .background_executor()
+                        .spawn({
+                            let path = project_path.clone();
+                            async move { collect_diff_files(&path) }
+                        })
+                        .await;
+                    waku.update(cx, |waku, cx| {
+                        if waku.right_panel_diffs.fulfill(token, files.clone())
+                            && waku
+                                .selected_project()
+                                .is_some_and(|project| project.path == project_path)
+                        {
+                            waku.right_panel_diff_files = files;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+}
+
+/// Working-tree changes for the diff surface. Pure filesystem and `git`
+/// work, so it can run anywhere; callers keep it off the UI thread.
+fn collect_diff_files(project_path: &std::path::Path) -> Vec<RightPanelDiffFile> {
+    let mut files = BTreeMap::<String, RightPanelDiffFile>::new();
 
         if let Ok(output) = Command::new("git")
             .args(["diff", "--numstat", "HEAD", "--", "."])
-            .current_dir(&project_path)
+            .current_dir(project_path)
             .output()
             && output.status.success()
         {
@@ -2247,7 +2288,7 @@ impl Waku {
 
         if let Ok(output) = Command::new("git")
             .args(["ls-files", "--others", "--exclude-standard", "--", "."])
-            .current_dir(&project_path)
+            .current_dir(project_path)
             .output()
             && output.status.success()
         {
@@ -2268,7 +2309,5 @@ impl Waku {
                 );
             }
         }
-
-        self.right_panel_diff_files = files.into_values().collect();
-    }
+    files.into_values().collect()
 }

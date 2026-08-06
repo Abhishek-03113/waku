@@ -408,6 +408,9 @@ pub struct Project {
     pub id: Uuid,
     pub name: String,
     pub path: PathBuf,
+    /// When the project was added, unix seconds.
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 impl Project {
@@ -422,6 +425,7 @@ impl Project {
             id: Uuid::new_v4(),
             name,
             path,
+            created_at: unix_time(),
         }
     }
 }
@@ -515,13 +519,27 @@ pub struct AgentSession {
     #[serde(default, skip_serializing)]
     pub provider_session_id: Option<String>,
     /// Not stored in the session JSON — these are rows in the `messages`
-    /// table, reattached on load.
+    /// table, reattached when the session is hydrated.
     #[serde(default)]
     pub messages: Vec<Message>,
     #[serde(default)]
     pub transcript_blocks: Vec<TranscriptBlock>,
     #[serde(default)]
     pub turns: Vec<AgentTurn>,
+    /// Whether the transcript has been read from the database.
+    ///
+    /// Startup loads only the columns the session list needs, so a session
+    /// begins as a skeleton with empty `messages`, `transcript_blocks` and
+    /// `turns`. Those are empty because nothing fetched them, not because the
+    /// session is empty — never persist a skeleton, and never conclude from one
+    /// that a session has no history.
+    #[serde(skip, default = "detail_loaded_default")]
+    pub detail_loaded: bool,
+}
+
+/// Anything deserialized from a `data` blob carries its full detail.
+fn detail_loaded_default() -> bool {
+    true
 }
 
 impl AgentSession {
@@ -541,6 +559,7 @@ impl AgentSession {
             created_at: now,
             updated_at: now,
             last_reply_at: None,
+            detail_loaded: true,
             provider_cursor: None,
             provider_session_id: None,
             messages: Vec::new(),
@@ -565,7 +584,12 @@ impl AgentSession {
     }
 
     pub fn has_started(&self) -> bool {
-        !self.turns.is_empty() || !self.messages.is_empty() || self.provider_cursor.is_some()
+        // A skeleton came from a stored row, and only started sessions are
+        // stored, so it has started even though its transcript is not loaded.
+        !self.detail_loaded
+            || !self.turns.is_empty()
+            || !self.messages.is_empty()
+            || self.provider_cursor.is_some()
     }
 
     pub fn set_title_from_prompt(&mut self, prompt: &str) {
@@ -590,20 +614,6 @@ impl AgentSession {
             self.status,
             SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
         ) && (self.messages.is_empty() || self.provider == provider)
-    }
-
-    pub fn migrate_pre_access_modes(&mut self) {
-        match self.runtime_mode {
-            RuntimeMode::Plan => {
-                self.runtime_mode = RuntimeMode::Ask;
-                self.interaction_mode = InteractionMode::Plan;
-            }
-            // Waku's old Auto mode wrote inside the workspace without asking.
-            // Auto-accept edits is the closest safe equivalent in the split
-            // access model.
-            RuntimeMode::Auto => self.runtime_mode = RuntimeMode::AutoAcceptEdits,
-            _ => {}
-        }
     }
 
     pub fn migrate_legacy_state(&mut self) {
