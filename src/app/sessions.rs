@@ -715,6 +715,7 @@ impl Waku {
         }
         if has_active_turn {
             self.capture_latest_turn_checkpoint_for(session_id);
+            self.start_pending_checkpoint_captures(cx);
         }
         // A provider runtime owns its Waku JavaScript REPL and Computer Use descendants.
         // Stopping the turn must close that whole process tree so capture,

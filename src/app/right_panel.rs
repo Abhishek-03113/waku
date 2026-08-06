@@ -359,6 +359,10 @@ fn file_highlighter_language(relative_path: &str) -> &'static str {
     }
 }
 
+/// Reads a file for the editor, returning its text and whether it can be saved.
+///
+/// One unbounded `read_to_string`, so callers keep it off the UI thread; the
+/// only caller is [`Waku::read_right_panel_file_into_editor`].
 fn read_right_panel_file(project_path: &Path, relative_path: &str) -> (String, bool) {
     match std::fs::read_to_string(project_path.join(relative_path)) {
         Ok(content) => (content, true),
@@ -590,6 +594,30 @@ mod tests {
                 !body.contains(forbidden),
                 "render_right_panel_working_tree must not call `{forbidden}`; \
                  walk the tree in refresh_right_panel_working_tree instead"
+            );
+        }
+    }
+
+    /// Same guard for the file editor, which `render_right_panel_file` reaches
+    /// on every frame that draws a file tab. Opening a large file used to read
+    /// it inline, so the frame that revealed the tab paid for the whole file.
+    #[test]
+    fn the_file_editor_render_path_does_no_filesystem_work() {
+        let source = include_str!("right_panel.rs");
+        let start = source
+            .find("\n    fn ensure_right_panel_file_editor(")
+            .expect("ensure fn");
+        let body = &source[start + 1..];
+        let end = body
+            .find("\n    /// Reads a file into its editor")
+            .unwrap_or(body.len());
+        let body = &body[..end];
+
+        for forbidden in ["read_right_panel_file(", "std::fs::", "metadata("] {
+            assert!(
+                !body.contains(forbidden),
+                "ensure_right_panel_file_editor must not call `{forbidden}`; \
+                 read the file in read_right_panel_file_into_editor instead"
             );
         }
     }
@@ -883,6 +911,14 @@ impl Waku {
             session_id,
         );
         self.replace_active_right_panel_state(state);
+        // A read in flight when this session was switched away from had its
+        // result dropped, and the flag it left behind would stop the editor
+        // ever asking again. Clear it and read afresh, which also picks up
+        // edits made while another session was on screen.
+        for editor in self.right_panel_file_editors.values_mut() {
+            editor.reading = false;
+        }
+        self.reload_clean_right_panel_file_editors(cx);
         self.state.right_panel_visible = self.right_panel_visible;
         if self.active_right_panel_surface() == Some(&RightPanelSurface::Diff) {
             self.refresh_right_panel_diff(cx);
@@ -998,7 +1034,10 @@ impl Waku {
         if surface == RightPanelSurface::Diff {
             self.refresh_right_panel_diff(cx);
         }
-        if matches!(surface, RightPanelSurface::Files | RightPanelSurface::File(_)) {
+        if matches!(
+            surface,
+            RightPanelSurface::Files | RightPanelSurface::File(_)
+        ) {
             self.refresh_right_panel_working_tree(cx);
         }
         if let Some(terminal_id) = surface.terminal_id() {
@@ -1827,25 +1866,25 @@ impl Waku {
             return (editor.state.clone(), editor.writable, editor.dirty);
         }
 
-        let (content, writable) = self
-            .selected_project()
-            .map(|project| read_right_panel_file(&project.path, relative_path))
-            .unwrap_or_else(|| ("No project is open.".into(), false));
+        // Reached from `render`, so the file cannot be read here. The editor
+        // starts empty and locked, and `read_right_panel_file_into_editor`
+        // fills it in from the background executor a frame or two later.
         let language = file_highlighter_language(relative_path);
         let state = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .code_editor(Some(language))
-                .read_only(!writable)
+                .read_only(true)
         });
-        state.update(cx, |state, cx| state.set_content(content.clone(), cx));
 
         self.right_panel_file_editors.insert(
             relative_path.to_owned(),
             RightPanelFileEditor {
                 state: state.clone(),
-                disk_content: content,
-                writable,
+                disk_content: String::new(),
+                writable: false,
                 dirty: false,
+                reading: false,
+                read_epoch: 0,
             },
         );
 
@@ -1875,18 +1914,110 @@ impl Waku {
         .detach();
 
         let focused_path = relative_path.to_owned();
-        cx.subscribe_in(
+        cx.subscribe(
             &state,
-            window,
-            move |this: &mut Self, _, event: &ComposerEvent, window, cx| {
+            move |this: &mut Self, _, event: &ComposerEvent, cx| {
                 if matches!(event, ComposerEvent::Focus) {
-                    this.reload_right_panel_file_if_clean(focused_path.as_str(), window, cx);
+                    this.reload_right_panel_file_if_clean(focused_path.as_str(), cx);
                 }
             },
         )
         .detach();
 
-        (state, writable, false)
+        self.read_right_panel_file_into_editor(relative_path.to_owned(), cx);
+        (state, false, false)
+    }
+
+    /// Reads a file into its editor off the UI thread.
+    ///
+    /// One `read_to_string` of an arbitrarily large file — hundreds of frames
+    /// for a big one — so it never runs in a frame. The editor keeps whatever
+    /// it is already showing until the read lands.
+    ///
+    /// The result is applied only if the same session is still selected and the
+    /// editor is still the one that asked, so a read started before a project
+    /// or session switch cannot write another workspace's text into the view.
+    fn read_right_panel_file_into_editor(&mut self, relative_path: String, cx: &mut Context<Self>) {
+        let project_path = self.selected_project().map(|project| project.path.clone());
+        let (Some(project_path), Some(session_id)) = (project_path, self.state.selected_session)
+        else {
+            // Nothing to read from. Say so in the editor rather than leaving it
+            // looking like an empty file.
+            if let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) {
+                editor.reading = false;
+                editor.disk_content = "No project is open.".into();
+                editor.writable = false;
+                let state = editor.state.clone();
+                let content = editor.disk_content.clone();
+                state.update(cx, |state, cx| state.set_content(content, cx));
+            }
+            return;
+        };
+        let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) else {
+            return;
+        };
+        // A second asker would only duplicate the read and race to apply it.
+        if editor.reading {
+            return;
+        }
+        editor.reading = true;
+        editor.read_epoch += 1;
+        let epoch = editor.read_epoch;
+
+        cx.spawn(async move |waku, cx| {
+            let read = cx
+                .background_executor()
+                .spawn({
+                    let project_path = project_path.clone();
+                    let relative_path = relative_path.clone();
+                    async move { read_right_panel_file(&project_path, &relative_path) }
+                })
+                .await;
+            waku.update(cx, |waku, cx| {
+                if waku.state.selected_session != Some(session_id)
+                    || waku
+                        .selected_project()
+                        .is_none_or(|project| project.path != project_path)
+                {
+                    // The editor moved into another session's stored state, or
+                    // the project changed. Clear the flag so a later reload can
+                    // ask again, and drop the text.
+                    if let Some(editor) = waku.right_panel_file_editors.get_mut(&relative_path) {
+                        editor.reading = false;
+                    }
+                    return;
+                }
+                let (content, writable) = read;
+                let Some(editor) = waku.right_panel_file_editors.get_mut(&relative_path) else {
+                    return;
+                };
+                // A save landed while the read was in flight, so this text
+                // describes the file as it was before that save.
+                if editor.read_epoch != epoch {
+                    return;
+                }
+                editor.reading = false;
+                // An edit landed while the read was in flight; the user's text
+                // wins over the copy on disk.
+                if editor.dirty {
+                    return;
+                }
+                if editor.disk_content == content && editor.writable == writable {
+                    return;
+                }
+                editor.disk_content = content.clone();
+                editor.writable = writable;
+                editor.dirty = false;
+                let state = editor.state.clone();
+                state.update(cx, |state, cx| {
+                    state.set_read_only(!writable);
+                    state.set_content(content, cx);
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The editor body: a line-number gutter beside soft-wrapped text.
@@ -2005,12 +2136,11 @@ impl Waku {
             ))
     }
 
-    fn reload_right_panel_file_if_clean(
-        &mut self,
-        relative_path: &str,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Picks up an external edit to a file the user has not modified here.
+    ///
+    /// Reaches the filesystem, so it queues a background read rather than
+    /// blocking; the editor keeps showing its current text until that lands.
+    fn reload_right_panel_file_if_clean(&mut self, relative_path: &str, cx: &mut Context<Self>) {
         if self
             .right_panel_file_editors
             .get(relative_path)
@@ -2018,31 +2148,10 @@ impl Waku {
         {
             return;
         }
-
-        let Some(project_path) = self.selected_project().map(|project| project.path.clone()) else {
-            return;
-        };
-        let (content, writable) = read_right_panel_file(&project_path, relative_path);
-        let Some(editor) = self.right_panel_file_editors.get_mut(relative_path) else {
-            return;
-        };
-        if editor.disk_content == content && editor.writable == writable {
-            return;
-        }
-
-        editor.disk_content = content.clone();
-        editor.writable = writable;
-        editor.dirty = false;
-        let state = editor.state.clone();
-        state.update(cx, |state, cx| state.set_content(content, cx));
-        cx.notify();
+        self.read_right_panel_file_into_editor(relative_path.to_owned(), cx);
     }
 
-    pub(super) fn reload_clean_right_panel_file_editors(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn reload_clean_right_panel_file_editors(&mut self, cx: &mut Context<Self>) {
         let paths = self
             .right_panel_file_editors
             .iter()
@@ -2050,7 +2159,7 @@ impl Waku {
             .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
         for path in paths {
-            self.reload_right_panel_file_if_clean(&path, window, cx);
+            self.reload_right_panel_file_if_clean(&path, cx);
         }
     }
 
@@ -2075,9 +2184,11 @@ impl Waku {
             return;
         };
         if !editor.writable {
-            self.toast = Some(format!(
-                "Could not save {relative_path}: file is not editable"
-            ));
+            self.toast = Some(if editor.reading {
+                format!("Could not save {relative_path}: still opening")
+            } else {
+                format!("Could not save {relative_path}: file is not editable")
+            });
             cx.notify();
             return;
         }
@@ -2088,6 +2199,10 @@ impl Waku {
                 if let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) {
                     editor.disk_content = content;
                     editor.dirty = false;
+                    // Any read still in flight predates this write, so its
+                    // result must not land back over what was just saved.
+                    editor.reading = false;
+                    editor.read_epoch += 1;
                 }
                 cx.notify();
             }
@@ -2358,52 +2473,52 @@ impl Waku {
 fn collect_diff_files(project_path: &std::path::Path) -> Vec<RightPanelDiffFile> {
     let mut files = BTreeMap::<String, RightPanelDiffFile>::new();
 
-        if let Ok(output) = Command::new("git")
-            .args(["diff", "--numstat", "HEAD", "--", "."])
-            .current_dir(project_path)
-            .output()
-            && output.status.success()
-        {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let mut columns = line.splitn(3, '\t');
-                let additions = columns.next().unwrap_or("0").parse().unwrap_or(0);
-                let deletions = columns.next().unwrap_or("0").parse().unwrap_or(0);
-                let Some(path) = columns.next() else {
-                    continue;
-                };
-                files.insert(
-                    path.to_owned(),
-                    RightPanelDiffFile {
-                        path: path.to_owned(),
-                        additions,
-                        deletions,
-                    },
-                );
-            }
+    if let Ok(output) = Command::new("git")
+        .args(["diff", "--numstat", "HEAD", "--", "."])
+        .current_dir(project_path)
+        .output()
+        && output.status.success()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut columns = line.splitn(3, '\t');
+            let additions = columns.next().unwrap_or("0").parse().unwrap_or(0);
+            let deletions = columns.next().unwrap_or("0").parse().unwrap_or(0);
+            let Some(path) = columns.next() else {
+                continue;
+            };
+            files.insert(
+                path.to_owned(),
+                RightPanelDiffFile {
+                    path: path.to_owned(),
+                    additions,
+                    deletions,
+                },
+            );
         }
+    }
 
-        if let Ok(output) = Command::new("git")
-            .args(["ls-files", "--others", "--exclude-standard", "--", "."])
-            .current_dir(project_path)
-            .output()
-            && output.status.success()
-        {
-            for path in String::from_utf8_lossy(&output.stdout).lines() {
-                if path.is_empty() || files.contains_key(path) {
-                    continue;
-                }
-                let additions = std::fs::read_to_string(project_path.join(path))
-                    .map(|content| content.lines().count() as u64)
-                    .unwrap_or(0);
-                files.insert(
-                    path.to_owned(),
-                    RightPanelDiffFile {
-                        path: path.to_owned(),
-                        additions,
-                        deletions: 0,
-                    },
-                );
+    if let Ok(output) = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard", "--", "."])
+        .current_dir(project_path)
+        .output()
+        && output.status.success()
+    {
+        for path in String::from_utf8_lossy(&output.stdout).lines() {
+            if path.is_empty() || files.contains_key(path) {
+                continue;
             }
+            let additions = std::fs::read_to_string(project_path.join(path))
+                .map(|content| content.lines().count() as u64)
+                .unwrap_or(0);
+            files.insert(
+                path.to_owned(),
+                RightPanelDiffFile {
+                    path: path.to_owned(),
+                    additions,
+                    deletions: 0,
+                },
+            );
         }
+    }
     files.into_values().collect()
 }

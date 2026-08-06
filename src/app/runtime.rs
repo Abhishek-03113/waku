@@ -107,6 +107,14 @@ impl Waku {
         }
     }
 
+    /// Queues the newest finished turn's checkpoint for capture.
+    ///
+    /// Bookkeeping only. The capture itself is upwards of ten `git`
+    /// invocations, one of them a `git add -A` over the whole worktree, and the
+    /// hottest caller is the driver-event drain that shares the UI thread with
+    /// rendering — so the work belongs to
+    /// [`Self::start_pending_checkpoint_captures`], which every caller that
+    /// holds a `Context` runs straight after queueing.
     pub(super) fn capture_latest_turn_checkpoint_for(&mut self, session_id: Uuid) {
         let Some((project_id, turn_count)) = self
             .state
@@ -132,28 +140,75 @@ impl Waku {
         else {
             return;
         };
+        self.pending_checkpoint_captures
+            .push(PendingCheckpointCapture {
+                session_id,
+                turn_count,
+                project_path,
+            });
+    }
 
-        let checkpoint = match checkpoint::capture_turn(&project_path, session_id, turn_count) {
-            Ok(checkpoint) => checkpoint,
-            Err(error) => {
-                self.toast = Some(format!("Could not capture the turn checkpoint: {error}"));
-                Checkpoint {
-                    turn_count,
-                    git_ref: checkpoint::checkpoint_ref(session_id, turn_count),
-                    status: CheckpointStatus::Error,
-                    files: Vec::new(),
-                    created_at: unix_time(),
-                }
+    /// Runs queued turn checkpoints on the background executor.
+    ///
+    /// A capture lands a frame or many later, and the turn it belongs to may be
+    /// gone by then, so the result is matched back by turn count rather than
+    /// position. Nothing on screen waits for it: the transcript's rewind
+    /// affordance appears when `invalidate_checkpoint_refs` prompts the next
+    /// prefetch to notice the new ref.
+    pub(super) fn start_pending_checkpoint_captures(&mut self, cx: &mut Context<Self>) {
+        for request in std::mem::take(&mut self.pending_checkpoint_captures) {
+            let PendingCheckpointCapture {
+                session_id,
+                turn_count,
+                project_path,
+            } = request;
+            if !self
+                .checkpoint_captures_in_flight
+                .insert((session_id, turn_count))
+            {
+                continue;
             }
-        };
-        self.invalidate_checkpoint_refs();
-        if let Some(session) = self.state.session_mut(session_id)
-            && let Some(turn) = session
-                .turns
-                .iter_mut()
-                .find(|turn| turn.turn_count == turn_count)
-        {
-            turn.checkpoint = Some(checkpoint);
+            cx.spawn(async move |waku, cx| {
+                let captured =
+                    cx.background_executor()
+                        .spawn({
+                            let project_path = project_path.clone();
+                            async move {
+                                checkpoint::capture_turn(&project_path, session_id, turn_count)
+                            }
+                        })
+                        .await;
+                waku.update(cx, |waku, cx| {
+                    waku.checkpoint_captures_in_flight
+                        .remove(&(session_id, turn_count));
+                    let checkpoint = match captured {
+                        Ok(checkpoint) => checkpoint,
+                        Err(error) => {
+                            waku.toast =
+                                Some(format!("Could not capture the turn checkpoint: {error}"));
+                            Checkpoint {
+                                turn_count,
+                                git_ref: checkpoint::checkpoint_ref(session_id, turn_count),
+                                status: CheckpointStatus::Error,
+                                files: Vec::new(),
+                                created_at: unix_time(),
+                            }
+                        }
+                    };
+                    waku.invalidate_checkpoint_refs();
+                    if let Some(session) = waku.state.session_mut(session_id)
+                        && let Some(turn) = session
+                            .turns
+                            .iter_mut()
+                            .find(|turn| turn.turn_count == turn_count)
+                    {
+                        turn.checkpoint = Some(checkpoint);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
         }
     }
 
@@ -979,14 +1034,26 @@ impl Waku {
             .iter()
             .find(|project| project.id == project_id)
             .map(|project| project.path.clone());
-        let checkpoint_warning = project_path.as_deref().and_then(|path| {
-            let baseline_count = next_turn_count - 1;
-            let git_ref = checkpoint::checkpoint_ref(session_id, baseline_count);
-            (!checkpoint::has_ref(path, &git_ref))
-                .then(|| checkpoint::capture_turn(path, session_id, baseline_count).err())
-                .flatten()
-                .map(|error| format!("Could not capture the pre-turn checkpoint: {error}"))
-        });
+        // The pre-turn checkpoint is what a later rewind restores to, so unlike
+        // the post-turn one it is captured before the turn starts rather than
+        // queued: correctness over latency, on a keystroke the user just made.
+        // The exception is a capture already running for this same turn — the
+        // one the previous turn queued writes exactly this ref, so re-running
+        // it here would only fork a second `git add -A` over the same worktree.
+        let baseline_count = next_turn_count - 1;
+        let baseline_in_flight = self
+            .checkpoint_captures_in_flight
+            .contains(&(session_id, baseline_count));
+        let checkpoint_warning = project_path
+            .as_deref()
+            .filter(|_| !baseline_in_flight)
+            .and_then(|path| {
+                let git_ref = checkpoint::checkpoint_ref(session_id, baseline_count);
+                (!checkpoint::has_ref(path, &git_ref))
+                    .then(|| checkpoint::capture_turn(path, session_id, baseline_count).err())
+                    .flatten()
+                    .map(|error| format!("Could not capture the pre-turn checkpoint: {error}"))
+            });
         self.invalidate_checkpoint_refs();
         let transcript_anchor = if let Some(session) = self.selected_session_mut() {
             session.set_title_from_prompt(&prompt);
@@ -1033,6 +1100,7 @@ impl Waku {
         }
         if failed_to_start {
             self.capture_latest_turn_checkpoint();
+            self.start_pending_checkpoint_captures(cx);
         }
         self.save();
         cx.notify();

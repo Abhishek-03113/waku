@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use anyhow::{Context as _, anyhow, bail};
 use uuid::Uuid;
@@ -158,10 +159,12 @@ pub fn delete_turn_refs_after(
     retained_turn_count: usize,
     previous_turn_count: usize,
 ) -> anyhow::Result<()> {
-    for turn_count in retained_turn_count + 1..=previous_turn_count {
-        delete_ref(cwd, &checkpoint_ref(session_id, turn_count))?;
-    }
-    Ok(())
+    update_refs(
+        cwd,
+        (retained_turn_count + 1..=previous_turn_count)
+            .map(|turn_count| format!("delete {}\n", checkpoint_ref(session_id, turn_count)))
+            .collect::<String>(),
+    )
 }
 
 pub fn delete_session_refs(
@@ -169,10 +172,12 @@ pub fn delete_session_refs(
     session_id: Uuid,
     last_turn_count: usize,
 ) -> anyhow::Result<()> {
-    for turn_count in 0..=last_turn_count {
-        delete_ref(cwd, &checkpoint_ref(session_id, turn_count))?;
-    }
-    Ok(())
+    update_refs(
+        cwd,
+        (0..=last_turn_count)
+            .map(|turn_count| format!("delete {}\n", checkpoint_ref(session_id, turn_count)))
+            .collect::<String>(),
+    )
 }
 
 pub fn copy_session_refs(
@@ -185,21 +190,79 @@ pub fn copy_session_refs(
         return Ok(());
     }
 
-    for turn_count in 0..=through_turn_count {
-        let source_ref = checkpoint_ref(source_session_id, turn_count);
-        let Some(commit) = resolve_ref(cwd, &source_ref) else {
-            continue;
-        };
-        git_output(
-            cwd,
-            [
-                "update-ref",
-                &checkpoint_ref(target_session_id, turn_count),
-                &commit,
-            ],
-        )?;
+    let source = session_turn_ref_commits(cwd, source_session_id);
+    update_refs(
+        cwd,
+        (0..=through_turn_count)
+            .filter_map(|turn_count| {
+                let commit = source.get(&turn_count)?;
+                Some(format!(
+                    "update {} {commit}\n",
+                    checkpoint_ref(target_session_id, turn_count)
+                ))
+            })
+            .collect::<String>(),
+    )
+}
+
+/// Every turn count that has a checkpoint ref for `session_id`, with the commit
+/// it points at — the same single `git for-each-ref` as [`session_turn_refs`].
+fn session_turn_ref_commits(cwd: &Path, session_id: Uuid) -> HashMap<usize, String> {
+    let prefix = format!("refs/waku/session-{session_id}-turn-");
+    git_output(
+        cwd,
+        [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            &format!("{prefix}*"),
+        ],
+    )
+    .map(|output| {
+        output
+            .lines()
+            .filter_map(|line| {
+                let (refname, commit) = line.trim().split_once(' ')?;
+                let turn_count = refname.strip_prefix(prefix.as_str())?.parse().ok()?;
+                Some((turn_count, commit.to_owned()))
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Applies a batch of ref updates through one `git update-ref --stdin`.
+///
+/// Deleting a fifty-turn session's checkpoints was fifty `git` invocations run
+/// serially on the thread that had just been asked to remove the session. The
+/// batch form is one process, and it is atomic: either the whole set applies or
+/// none of it does. Deleting a ref that is already gone is not an error.
+///
+/// Checkpoint ref names are generated, never user text, so they cannot contain
+/// the space or newline this line-oriented format delimits on.
+fn update_refs(cwd: &Path, commands: String) -> anyhow::Result<()> {
+    if commands.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let mut child = Command::new("git")
+        .args(["update-ref", "--stdin"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to execute git")?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("git update-ref stdin is unavailable"))?
+        .write_all(commands.as_bytes())
+        .context("failed to send ref updates to git")?;
+    let output = child.wait_with_output().context("failed to execute git")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!("{}", command_error(&output))
+    }
 }
 
 fn diff_files(cwd: &Path, from_ref: &str, to_ref: &str) -> anyhow::Result<Vec<CheckpointFile>> {
@@ -378,6 +441,68 @@ mod tests {
         );
         assert_eq!(session_turn_refs(&directory, other), HashSet::from([5]));
         assert!(session_turn_refs(&directory, Uuid::new_v4()).is_empty());
+        fs::remove_dir_all(&directory).ok();
+    }
+
+    /// Deletes and copies go through one batched `git update-ref --stdin`
+    /// rather than a process per turn, so the semantics the loop used to give
+    /// for free — gaps are skipped, an already-missing ref is not an error —
+    /// are worth pinning down.
+    #[test]
+    fn refs_are_deleted_and_copied_in_batches() {
+        let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        git_ok(&directory, &["init", "--quiet"]);
+        fs::write(directory.join("tracked.txt"), "baseline\n").unwrap();
+        git_ok(&directory, &["add", "tracked.txt"]);
+        git_ok(
+            &directory,
+            &[
+                "-c",
+                "user.name=Waku Test",
+                "-c",
+                "user.email=waku@example.com",
+                "commit",
+                "--quiet",
+                "-m",
+                "baseline",
+            ],
+        );
+
+        let session = Uuid::new_v4();
+        for turn_count in [0, 1, 3] {
+            capture_turn(&directory, session, turn_count).unwrap();
+        }
+
+        // Turn 2 was never captured; the batch must tolerate the gap.
+        let fork = Uuid::new_v4();
+        copy_session_refs(&directory, session, fork, 3).unwrap();
+        assert_eq!(
+            session_turn_refs(&directory, fork),
+            HashSet::from([0, 1, 3]),
+            "a copy carries every ref the source actually has"
+        );
+        assert_eq!(
+            resolve_ref(&directory, &checkpoint_ref(fork, 1)),
+            resolve_ref(&directory, &checkpoint_ref(session, 1)),
+            "and points at the same commit"
+        );
+
+        delete_turn_refs_after(&directory, session, 1, 3).unwrap();
+        assert_eq!(
+            session_turn_refs(&directory, session),
+            HashSet::from([0, 1]),
+            "everything after the retained turn goes, missing ones included"
+        );
+
+        delete_session_refs(&directory, fork, 3).unwrap();
+        assert!(
+            session_turn_refs(&directory, fork).is_empty(),
+            "and a session's whole set goes in one call"
+        );
+
+        // Nothing left to remove is a no-op, not a failure.
+        delete_session_refs(&directory, fork, 3).unwrap();
         fs::remove_dir_all(&directory).ok();
     }
 

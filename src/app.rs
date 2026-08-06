@@ -256,11 +256,27 @@ struct RightPanelDiffFile {
     deletions: u64,
 }
 
+/// A turn whose checkpoint still has to be captured.
+struct PendingCheckpointCapture {
+    session_id: Uuid,
+    turn_count: usize,
+    project_path: PathBuf,
+}
+
 struct RightPanelFileEditor {
     state: Entity<ComposerInput>,
     disk_content: String,
     writable: bool,
     dirty: bool,
+    /// A read is in flight on the background executor. Set from the moment the
+    /// editor is created, because `render` may not touch the filesystem: until
+    /// the first read lands the editor is empty and locked, and that means
+    /// "not read yet", never "empty file".
+    reading: bool,
+    /// Bumped whenever the editor's idea of the file changes, so a read that
+    /// started earlier cannot apply over a newer truth — a save in particular,
+    /// which makes any read already in flight describe the pre-save file.
+    read_epoch: u64,
 }
 
 struct RightPanelSessionState {
@@ -522,6 +538,17 @@ pub struct Waku {
     checkpoint_ref_generation: Cell<u64>,
     /// The (session, generation) the latest scheduled prefetch covers.
     checkpoint_ref_prefetch: Cell<Option<(Uuid, u64)>>,
+    /// Turn checkpoints asked for but not started yet.
+    ///
+    /// `capture_turn` is upwards of ten `git` invocations, one of them a
+    /// `git add -A` over the whole worktree, and the driver-event drain that
+    /// asks for it shares the UI thread with rendering. Requests queue here and
+    /// `start_pending_checkpoint_captures` runs them on the background executor.
+    pending_checkpoint_captures: Vec<PendingCheckpointCapture>,
+    /// The (session, turn) captures currently running, so a repeated request —
+    /// a turn that finishes while its own capture is still going — does not
+    /// fork a second `git add -A` over the same worktree.
+    checkpoint_captures_in_flight: HashSet<(Uuid, usize)>,
     transcript_anchor: Cell<Option<TranscriptAnchor>>,
     transcript_anchor_end_space: Rc<Cell<Pixels>>,
     transcript_anchor_following: Rc<Cell<bool>>,
@@ -599,6 +626,7 @@ impl Waku {
             .iter()
             .map(|project| (project.id, project.path.clone()))
             .collect::<HashMap<_, _>>();
+        let mut interrupted_turn_checkpoints = Vec::new();
         for session in &mut state.sessions {
             session.migrate_legacy_state();
             if session.status != SessionStatus::Idle {
@@ -615,22 +643,18 @@ impl Waku {
             } else {
                 None
             };
+            // A crash mid-turn leaves work in the tree worth checkpointing, but
+            // one `capture_turn` per interrupted session is upwards of ten
+            // `git` invocations each — paid here, before the window has drawn
+            // once. Queue them and let the first frames go out first.
             if let Some(turn_count) = interrupted_turn
                 && let Some(project_path) = project_paths.get(&session.project_id)
             {
-                let turn_checkpoint =
-                    checkpoint::capture_turn(project_path, session.id, turn_count).unwrap_or_else(
-                        |_| Checkpoint {
-                            turn_count,
-                            git_ref: checkpoint::checkpoint_ref(session.id, turn_count),
-                            status: CheckpointStatus::Error,
-                            files: Vec::new(),
-                            created_at: unix_time(),
-                        },
-                    );
-                if let Some(turn) = session.turns.last_mut() {
-                    turn.checkpoint = Some(turn_checkpoint);
-                }
+                interrupted_turn_checkpoints.push(PendingCheckpointCapture {
+                    session_id: session.id,
+                    turn_count,
+                    project_path: project_path.clone(),
+                });
             }
             for message in &mut session.messages {
                 message.streaming = false;
@@ -674,23 +698,12 @@ impl Waku {
                 .map(|session| session.provider)
                 .unwrap_or(state.last_provider),
         );
-        let branch_path = state
-            .selected_project
-            .and_then(|project_id| {
-                state
-                    .projects
-                    .iter()
-                    .find(|project| project.id == project_id)
-            })
-            .map(|project| project.path.clone());
-        let branch = branch_path.as_deref().and_then(git_branch);
-        // Seed the cache so returning to this project never re-runs `git`.
-        let mut branches = QueryCache::new(MAX_CACHED_WORKSPACES);
-        if let Some(path) = branch_path
-            && let Query::Missing(token) = branches.read(&path)
-        {
-            branches.fulfill(token, branch.clone());
-        }
+        // The branch is a query like any other: `git branch --show-current` is
+        // a subprocess, and running it here would hold the first frame for it.
+        // `refresh_branch` below fills the cache off-thread, and the header
+        // simply has no branch to draw until it lands.
+        let branch = None;
+        let branches = QueryCache::new(MAX_CACHED_WORKSPACES);
         // Measure visible rows only, with a generous overdraw — the same shape
         // Zed's own agent chat uses. `measure_all` lays out every row in the
         // session on the first frame and again after any structural splice,
@@ -740,7 +753,7 @@ impl Waku {
 
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
                 if window.is_window_active() {
-                    this.reload_clean_right_panel_file_editors(window, cx);
+                    this.reload_clean_right_panel_file_editors(cx);
                     // The working tree and branch may have moved while another
                     // app had focus — a checkout in a terminal, an edit in an
                     // editor. Coming back is the moment to re-check.
@@ -802,6 +815,10 @@ impl Waku {
                             if std::mem::take(&mut this.workspace_queries_stale) {
                                 this.invalidate_workspace_queries(cx);
                             }
+                            // A finished turn asks for a checkpoint from a
+                            // handler with no `Context`; this is where that
+                            // `git` work actually leaves the UI thread.
+                            this.start_pending_checkpoint_captures(cx);
                         })
                         .is_err()
                     {
@@ -888,6 +905,8 @@ impl Waku {
                 checkpoint_ref_cache: RefCell::new(HashMap::new()),
                 checkpoint_ref_generation: Cell::new(0),
                 checkpoint_ref_prefetch: Cell::new(None),
+                pending_checkpoint_captures: interrupted_turn_checkpoints,
+                checkpoint_captures_in_flight: HashSet::new(),
                 transcript_anchor: Cell::new(None),
                 transcript_anchor_end_space: Rc::new(Cell::new(Pixels::ZERO)),
                 transcript_anchor_following,
@@ -909,6 +928,14 @@ impl Waku {
         navigation_rail.update(cx, |rail, _| rail.set_waku(entity.downgrade()));
         let initial_row_count = entity.read(cx).transcript_row_count();
         entity.read(cx).reset_transcript_rows(initial_row_count);
+        // Everything launch needs from `git` or the filesystem, started now
+        // that there is an entity to notify and deliberately not before the
+        // first frame: checkpoints for turns a previous run left running, and
+        // the selected project's branch.
+        entity.update(cx, |this, cx| {
+            this.start_pending_checkpoint_captures(cx);
+            this.refresh_branch(cx);
+        });
         entity
     }
 }

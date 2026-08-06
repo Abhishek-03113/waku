@@ -9,7 +9,7 @@
 //! deserialize a transcript. The schema is defined in `db/schema.ts` and
 //! applied by [`apply_migrations`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -271,12 +271,20 @@ impl PersistedState {
 
     fn migrate_loaded(&mut self) {
         for session in &mut self.sessions {
-            let before = (session.turns.len(), session.last_reply_at, session.provider_cursor.is_some());
+            let before = (
+                session.turns.len(),
+                session.last_reply_at,
+                session.provider_cursor.is_some(),
+            );
             session.migrate_legacy_state();
             session.backfill_last_reply_at();
             // Migration rewrote this session, so the stored row is stale.
             if before
-                != (session.turns.len(), session.last_reply_at, session.provider_cursor.is_some())
+                != (
+                    session.turns.len(),
+                    session.last_reply_at,
+                    session.provider_cursor.is_some(),
+                )
             {
                 self.dirty_sessions.insert(session.id);
             }
@@ -289,11 +297,7 @@ impl PersistedState {
     fn backfill_remembered_selection(&mut self) {
         let Some(session) = self
             .selected_session
-            .and_then(|selected| {
-                self.sessions
-                    .iter()
-                    .find(|session| session.id == selected)
-            })
+            .and_then(|selected| self.sessions.iter().find(|session| session.id == selected))
             .cloned()
         else {
             return;
@@ -358,9 +362,7 @@ fn live_blob_references(connection: &Connection) -> io::Result<HashSet<String>> 
         let mut rest = data.as_str();
         while let Some(start) = rest.find(crate::blob_store::BLOB_SCHEME) {
             rest = &rest[start..];
-            let end = rest
-                .find('"')
-                .unwrap_or(rest.len());
+            let end = rest.find('"').unwrap_or(rest.len());
             references.insert(rest[..end].to_owned());
             rest = &rest[end..];
         }
@@ -431,6 +433,10 @@ struct Storage {
     /// Sessions known to have a row. Used to spot deletions and to catch a
     /// session that became persistable without being marked dirty.
     persisted_sessions: HashSet<Uuid>,
+    /// Per session, the fingerprint of each message row as this connection last
+    /// wrote it, so a save only touches the messages that actually changed.
+    /// See [`write_messages`].
+    written_messages: HashMap<Uuid, HashMap<Uuid, u64>>,
     saved_projects: u64,
     saved_settings: u64,
 }
@@ -522,7 +528,9 @@ impl StateStore {
         let Ok(bytes) = fs::read(&self.settings_path) else {
             return Ok(None);
         };
-        serde_json::from_slice(&bytes).map(Some).map_err(to_io_error)
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(to_io_error)
     }
 
     fn write_settings(&self, settings: &AppSettings) -> io::Result<()> {
@@ -542,7 +550,9 @@ impl StateStore {
         // A missing settings file just means defaults; the database is still
         // the source of truth for projects and sessions.
         let settings = self.read_settings()?;
-        let from_version = settings.as_ref().map_or(STATE_VERSION, |settings| settings.version);
+        let from_version = settings
+            .as_ref()
+            .map_or(STATE_VERSION, |settings| settings.version);
         if !(OLDEST_SUPPORTED_STATE_VERSION..=STATE_VERSION).contains(&from_version) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -618,6 +628,9 @@ impl StateStore {
         *self.storage.lock() = Some(Storage {
             connection,
             persisted_sessions,
+            // A fresh connection has written nothing yet. Sessions loaded here
+            // are skeletons anyway, so the first save of one is a full write.
+            written_messages: HashMap::new(),
             saved_projects: 0,
             saved_settings: 0,
         });
@@ -638,6 +651,7 @@ impl StateStore {
             *guard = Some(Storage {
                 connection: self.open()?,
                 persisted_sessions: HashSet::new(),
+                written_messages: HashMap::new(),
                 saved_projects: 0,
                 saved_settings: 0,
             });
@@ -712,6 +726,7 @@ impl StateStore {
             *guard = Some(Storage {
                 connection: self.open()?,
                 persisted_sessions: HashSet::new(),
+                written_messages: HashMap::new(),
                 saved_projects: 0,
                 saved_settings: 0,
             });
@@ -726,7 +741,10 @@ impl StateStore {
             storage.saved_settings = settings_fingerprint;
         }
 
-        let transaction = storage.connection.unchecked_transaction().map_err(to_io_error)?;
+        let transaction = storage
+            .connection
+            .unchecked_transaction()
+            .map_err(to_io_error)?;
 
         let projects = serde_json::to_string(&state.projects).map_err(to_io_error)?;
         let projects_fingerprint = fingerprint(&projects);
@@ -754,7 +772,15 @@ impl StateStore {
         // Only sessions the app reported as changed are written. A draft that
         // has not started yet owns no row, so it counts as removed until it does.
         let mut live = HashSet::with_capacity(state.sessions.len());
-        for session in state.sessions.iter().filter(|session| session.has_started()) {
+        // Applied only after the commit below, so a transaction that rolls back
+        // does not leave this connection believing rows it never wrote are on
+        // disk — which would make the next save skip them for good.
+        let mut written_messages = Vec::new();
+        for session in state
+            .sessions
+            .iter()
+            .filter(|session| session.has_started())
+        {
             live.insert(session.id);
             // A skeleton's empty transcript means "not fetched", not "empty".
             // Writing one would erase the stored history.
@@ -774,12 +800,16 @@ impl StateStore {
                 )
                 .map_err(to_io_error)?;
             transaction
-                .execute(
-                    UPSERT_SESSION_DETAIL,
-                    params![session.id.to_string(), data],
-                )
+                .execute(UPSERT_SESSION_DETAIL, params![session.id.to_string(), data])
                 .map_err(to_io_error)?;
-            write_messages(&transaction, session)?;
+            written_messages.push((
+                session.id,
+                write_messages(
+                    &transaction,
+                    session,
+                    storage.written_messages.get(&session.id).unwrap_or(&EMPTY),
+                )?,
+            ));
             storage.persisted_sessions.insert(session.id);
         }
 
@@ -804,9 +834,14 @@ impl StateStore {
                 .execute("DELETE FROM messages WHERE session_id = ?1", params![key])
                 .map_err(to_io_error)?;
             storage.persisted_sessions.remove(&id);
+            storage.written_messages.remove(&id);
         }
 
         transaction.commit().map_err(to_io_error)?;
+        // Now that the rows are durable, and not before.
+        for (session_id, fingerprints) in written_messages {
+            storage.written_messages.insert(session_id, fingerprints);
+        }
         state.dirty_sessions.clear();
         Ok(())
     }
@@ -917,13 +952,32 @@ const UPSERT_MESSAGE: &str = "INSERT INTO messages(
 ///
 /// Appending during a turn touches only the new rows; the delete clears any
 /// tail left behind when a conversation is forked or truncated.
+/// Writes the messages whose stored row would actually differ.
+///
+/// A streaming turn saves once a second, and every one of those saves used to
+/// re-upsert the whole transcript: a `to_string` of the id, a clone of the
+/// body, a `serde_json` round-trip for the role, and a statement, per message.
+/// At two thousand messages that is upwards of 15ms — several frames — spent
+/// rewriting rows that are byte-for-byte what SQLite already holds.
+///
+/// `written` is what the connection was last told, keyed by message id, so the
+/// comparison costs one hash of each body instead of a write of it. Returns the
+/// map to remember for next time; the caller installs it only once the
+/// transaction commits, so a rolled-back write is not recorded as done.
 fn write_messages(
     transaction: &Connection,
     session: &AgentSession,
-) -> io::Result<()> {
+    written: &HashMap<Uuid, u64>,
+) -> io::Result<HashMap<Uuid, u64>> {
     use rusqlite::types::Value;
     let session_id = session.id.to_string();
+    let mut current = HashMap::with_capacity(session.messages.len());
     for (position, message) in session.messages.iter().enumerate() {
+        let fingerprint = message_fingerprint(message, position);
+        current.insert(message.id, fingerprint);
+        if written.get(&message.id) == Some(&fingerprint) {
+            continue;
+        }
         transaction
             .execute(
                 UPSERT_MESSAGE,
@@ -948,7 +1002,57 @@ fn write_messages(
             params![session_id, session.messages.len() as i64],
         )
         .map_err(to_io_error)?;
-    Ok(())
+    Ok(current)
+}
+
+/// Fingerprint of every column [`write_messages`] stores for a message.
+///
+/// Covers the body as well as the metadata: an edit that preserves length —
+/// a typo fix — has to be caught, so length and position alone will not do.
+/// Folded a word at a time because this runs over the whole transcript on
+/// every save, which is what [`fingerprint`]'s byte-at-a-time loop is too slow
+/// for.
+/// Stand-in for "this connection has written nothing for that session yet".
+static EMPTY: std::sync::LazyLock<HashMap<Uuid, u64>> = std::sync::LazyLock::new(HashMap::new);
+
+fn message_fingerprint(message: &Message, position: usize) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut fold = |value: u64| {
+        hash ^= value;
+        hash = hash.wrapping_mul(PRIME).rotate_left(23);
+    };
+
+    fold(position as u64);
+    fold(message.created_at);
+    fold(u64::from(message.streaming));
+    fold(fingerprint(&tag_of(message.role)));
+    let (high, low) = message.id.as_u64_pair();
+    fold(high);
+    fold(low);
+    match message.turn_id {
+        Some(turn_id) => {
+            let (high, low) = turn_id.as_u64_pair();
+            fold(high);
+            fold(low);
+        }
+        // Distinct from a turn id that happens to be zero.
+        None => fold(u64::MAX),
+    }
+
+    let bytes = message.content.as_bytes();
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        fold(u64::from_le_bytes(
+            chunk.try_into().expect("chunks_exact yields 8 bytes"),
+        ));
+    }
+    let mut tail = [0u8; 8];
+    let remainder = chunks.remainder();
+    tail[..remainder.len()].copy_from_slice(remainder);
+    fold(u64::from_le_bytes(tail));
+    fold(bytes.len() as u64);
+    hash
 }
 
 /// Columns the sidebar sorts and filters on are stored alongside the JSON so
@@ -1112,6 +1216,83 @@ mod tests {
         fs::remove_dir_all(directory).ok();
     }
 
+    /// Rows this store's connection has inserted, updated or deleted.
+    fn rows_written(store: &StateStore) -> u64 {
+        store
+            .storage
+            .lock()
+            .as_ref()
+            .expect("the store has saved at least once")
+            .connection
+            .total_changes()
+    }
+
+    /// A streaming turn saves once a second, and every one of those saves used
+    /// to rewrite the entire transcript — measurably several frames of work at
+    /// a couple of thousand messages. Counted in rows, because rows written is
+    /// exactly what used to grow with history.
+    #[test]
+    fn a_save_only_writes_the_messages_that_changed() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        for turn in 0..20 {
+            state.sessions[0].begin_turn(format!("prompt {turn}"));
+            state.sessions[0].push_message(MessageRole::Assistant, format!("reply {turn}"));
+            state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        }
+        store.save(&mut state).unwrap();
+        assert!(state.sessions[0].messages.len() >= 40);
+
+        // A dirty session always rewrites its own two rows; that is the floor
+        // the message count is measured against.
+        let before = rows_written(&store);
+        state.mark_session_dirty(id);
+        store.save(&mut state).unwrap();
+        let floor = rows_written(&store) - before;
+
+        let before = rows_written(&store);
+        state
+            .session_mut(id)
+            .unwrap()
+            .push_message(MessageRole::Assistant, "one more");
+        store.save(&mut state).unwrap();
+        assert_eq!(
+            rows_written(&store) - before,
+            floor + 1,
+            "a new message costs one row, not the whole transcript"
+        );
+
+        // Length is not enough to tell rows apart: a typo fix keeps it.
+        let before = rows_written(&store);
+        let session = state.session_mut(id).unwrap();
+        let original = session.messages[3].content.clone();
+        let edited = original.chars().rev().collect::<String>();
+        assert_eq!(edited.len(), original.len());
+        assert_ne!(edited, original);
+        session.messages[3].content = edited.clone();
+        store.save(&mut state).unwrap();
+        assert_eq!(
+            rows_written(&store) - before,
+            floor + 1,
+            "an edit that preserves length is still written"
+        );
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        reopened.hydrate(&mut restored.sessions[0]).unwrap();
+        let messages = &restored.sessions[0].messages;
+        assert_eq!(messages[3].content, edited, "the edit reached disk");
+        assert_eq!(
+            messages.last().unwrap().content,
+            "one more",
+            "and so did the append"
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
     #[test]
     fn a_skeleton_is_never_written_back_over_stored_history() {
         // The failure this guards against is silent and total: saving a session
@@ -1186,7 +1367,10 @@ mod tests {
         else {
             panic!("expected activities");
         };
-        let path = store.blobs().path_for(&activities[0].image_urls[0]).unwrap();
+        let path = store
+            .blobs()
+            .path_for(&activities[0].image_urls[0])
+            .unwrap();
         assert_eq!(fs::read(path).unwrap(), payload, "the image survived");
 
         fs::remove_dir_all(directory).ok();
@@ -1406,7 +1590,10 @@ mod tests {
 
         let settings = directory.join("settings.json");
         let text = fs::read_to_string(&settings).unwrap();
-        assert!(text.contains('\n'), "settings are pretty-printed for editing");
+        assert!(
+            text.contains('\n'),
+            "settings are pretty-printed for editing"
+        );
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["sidebar_width"], 301.0);
         // Session history stays in the database, not in the settings file.
@@ -1440,7 +1627,10 @@ mod tests {
             .collect();
         assert_eq!(
             recorded,
-            MIGRATIONS.iter().map(|(tag, _)| tag.to_string()).collect::<Vec<_>>()
+            MIGRATIONS
+                .iter()
+                .map(|(tag, _)| tag.to_string())
+                .collect::<Vec<_>>()
         );
 
         // Re-running is a no-op; a second CREATE TABLE would otherwise error.
@@ -1507,7 +1697,9 @@ mod tests {
         // The JSON column must not carry a second copy that could drift.
         let connection = Connection::open(directory.join("app.db")).unwrap();
         let data: String = connection
-            .query_row("SELECT data FROM session_details LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT data FROM session_details LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert!(
             !serde_json::from_str::<serde_json::Value>(&data)
@@ -1557,7 +1749,12 @@ mod tests {
         assert_eq!(count, 1, "the tail row was deleted, not left behind");
         drop(connection);
 
-        assert_eq!(load_hydrated(&store_in(&directory)).sessions[0].messages.len(), 1);
+        assert_eq!(
+            load_hydrated(&store_in(&directory)).sessions[0]
+                .messages
+                .len(),
+            1
+        );
         fs::remove_dir_all(directory).ok();
     }
 
@@ -1763,7 +1960,10 @@ mod tests {
         let title: String = connection
             .query_row("SELECT title FROM sessions LIMIT 1", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(title, "untouched", "no row was rewritten after a plain load");
+        assert_eq!(
+            title, "untouched",
+            "no row was rewritten after a plain load"
+        );
         drop(connection);
 
         fs::remove_dir_all(directory).ok();

@@ -327,6 +327,13 @@ impl ComposerInput {
         self
     }
 
+    /// Flip read-only after construction. A file editor starts locked because
+    /// its contents are still being read off the UI thread, and unlocks once
+    /// the read lands and says the file is writable.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
     /// Re-tokenize after a content change. Cheap for a composer (no language),
     /// one linear pass for a code editor.
     fn refresh_highlight(&mut self) {
