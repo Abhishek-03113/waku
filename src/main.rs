@@ -136,6 +136,19 @@ fn main() {
                     ],
                 },
                 Menu {
+                    name: "Edit".into(),
+                    disabled: false,
+                    items: vec![
+                        MenuItem::action("Undo", input::Undo),
+                        MenuItem::action("Redo", input::Redo),
+                        MenuItem::separator(),
+                        MenuItem::action("Cut", input::Cut),
+                        MenuItem::action("Copy", input::Copy),
+                        MenuItem::action("Paste", input::Paste),
+                        MenuItem::action("Select All", input::SelectAll),
+                    ],
+                },
+                Menu {
                     name: "View".into(),
                     disabled: false,
                     items: vec![

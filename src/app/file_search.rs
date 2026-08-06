@@ -621,7 +621,13 @@ impl Waku {
             }
             replace_all_content(content, &regex, &matches, &template, use_regex)
         };
-        editor.update(cx, |editor, cx| editor.set_content(replaced, cx));
+        // Through `replace_range`, not `set_content`: a whole-content splice
+        // is a recorded edit, so Replace All is one cmd-z step, while
+        // `set_content` would reset the editor's undo history as a reload.
+        editor.update(cx, |editor, cx| {
+            let len = editor.content().len();
+            editor.replace_range(0..len, &replaced, cx);
+        });
         self.refresh_file_search(SearchRefresh::Content, cx);
     }
 

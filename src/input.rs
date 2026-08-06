@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::md::highlight::{self, Lang, TokenClass};
 use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
@@ -40,6 +40,8 @@ actions!(
         Paste,
         Cut,
         Copy,
+        Undo,
+        Redo,
         Enter,
     ]
 );
@@ -93,6 +95,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
         KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
         KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
+        KeyBinding::new("cmd-z", Undo, Some("ComposerInput")),
+        KeyBinding::new("cmd-shift-z", Redo, Some("ComposerInput")),
         KeyBinding::new("enter", Enter, Some("ComposerInput")),
     ]);
 }
@@ -168,6 +172,256 @@ impl BlinkCursor {
     }
 }
 
+/// How long after the previous edit a new one may still coalesce into the
+/// same undo step — Zed's transaction group interval.
+const UNDO_GROUP_INTERVAL: Duration = Duration::from_millis(300);
+
+/// Undo steps kept before the oldest fall off. Steps are whole coalesced
+/// gestures, so this is far more editing than anyone steps back through.
+const UNDO_HISTORY_CAP: usize = 1000;
+
+/// One undo step: the text at `start` was `old` and is now `new`. Undoing
+/// splices `old` back over `new`; redoing reverses that. A step grows in
+/// place while a run of typing or deleting coalesces into it, so the stack
+/// stays proportional to gestures, not keystrokes.
+struct EditRecord {
+    start: usize,
+    old: String,
+    new: String,
+    /// Selection to restore when the step is undone.
+    selection_before: Range<usize>,
+    selection_reversed_before: bool,
+    /// When the newest coalesced edit landed, bounding the group interval.
+    edited_at: Instant,
+    /// A sealed step never coalesces with later edits. Set at gesture
+    /// boundaries: cut, paste, a completion insert, a finished composition.
+    sealed: bool,
+    /// An IME composition still underway, amended in place as the marked
+    /// text changes so the whole entry undoes as one step.
+    composing: bool,
+}
+
+#[derive(Default)]
+struct EditHistory {
+    undo: Vec<EditRecord>,
+    redo: Vec<EditRecord>,
+}
+
+impl EditHistory {
+    /// Record a splice of `new_text` over `range`, called with the content
+    /// the splice has not yet been applied to. Coalesces with the newest
+    /// step where the pair reads as one gesture: an insertion continuing at
+    /// the end of an insertion, or a deletion extending a deletion run in
+    /// either direction.
+    fn record(
+        &mut self,
+        content: &str,
+        range: &Range<usize>,
+        new_text: &str,
+        selection: Range<usize>,
+        selection_reversed: bool,
+        now: Instant,
+    ) {
+        // A whole-content replace (Replace All) arrives as one huge splice;
+        // trimming the shared affixes stores only the span that changed.
+        let (start, old, new) = trimmed_splice(content, range, new_text);
+        if old.is_empty() && new.is_empty() {
+            return;
+        }
+        self.redo.clear();
+        if let Some(last) = self.undo.last_mut()
+            && !last.sealed
+            && !last.composing
+            && now.duration_since(last.edited_at) < UNDO_GROUP_INTERVAL
+        {
+            // Typing run: this insertion continues where the last edit's text
+            // ended, which also lets typing extend a replaced selection.
+            if old.is_empty() && !last.new.is_empty() && start == last.start + last.new.len() {
+                last.new.push_str(&new);
+                last.edited_at = now;
+                return;
+            }
+            if new.is_empty() && last.new.is_empty() && !last.old.is_empty() {
+                // Backspace run: this deletion ends where the last one started.
+                if start + old.len() == last.start {
+                    last.start = start;
+                    last.old.insert_str(0, &old);
+                    last.edited_at = now;
+                    return;
+                }
+                // Forward-delete run: this deletion starts where the last did.
+                if start == last.start {
+                    last.old.push_str(&old);
+                    last.edited_at = now;
+                    return;
+                }
+            }
+        }
+        self.push(EditRecord {
+            start,
+            old,
+            new,
+            selection_before: selection,
+            selection_reversed_before: selection_reversed,
+            edited_at: now,
+            sealed: false,
+            composing: false,
+        });
+    }
+
+    /// Record an IME splice. The whole composition — every marked-text
+    /// revision and the final commit — stays one step, amended in place.
+    fn record_composition(
+        &mut self,
+        content: &str,
+        range: &Range<usize>,
+        new_text: &str,
+        selection: Range<usize>,
+        selection_reversed: bool,
+        now: Instant,
+    ) {
+        self.redo.clear();
+        if let Some(last) = self.undo.last_mut()
+            && last.composing
+        {
+            let span = last.start..last.start + last.new.len();
+            if range.start >= span.start && range.end <= span.end {
+                last.new
+                    .replace_range(range.start - last.start..range.end - last.start, new_text);
+                last.edited_at = now;
+                return;
+            }
+            // A splice outside the open composition should not happen; close
+            // the step rather than corrupt it.
+            last.composing = false;
+            last.sealed = true;
+        }
+        self.push(EditRecord {
+            start: range.start,
+            old: content[range.clone()].to_owned(),
+            new: new_text.to_owned(),
+            selection_before: selection,
+            selection_reversed_before: selection_reversed,
+            edited_at: now,
+            sealed: false,
+            composing: true,
+        });
+    }
+
+    /// Close the open composition step, if any. A canceled composition that
+    /// nets no change records nothing.
+    fn finalize_composition(&mut self) {
+        if let Some(last) = self.undo.last_mut()
+            && last.composing
+        {
+            last.composing = false;
+            last.sealed = true;
+            if last.old == last.new {
+                self.undo.pop();
+            }
+        }
+    }
+
+    /// Stop later edits from coalescing into the newest step — a gesture
+    /// boundary such as cut, paste, or a completion insert.
+    fn seal(&mut self) {
+        if let Some(last) = self.undo.last_mut() {
+            last.sealed = true;
+        }
+    }
+
+    fn push(&mut self, record: EditRecord) {
+        self.undo.push(record);
+        if self.undo.len() > UNDO_HISTORY_CAP {
+            let excess = self.undo.len() - UNDO_HISTORY_CAP;
+            self.undo.drain(..excess);
+        }
+    }
+
+    /// Apply the newest undo step to `content`, returning the restored
+    /// content and the selection to show. The step must still verifiably
+    /// describe `content`; on any mismatch the history is corrupt and is
+    /// dropped whole rather than applied wrong.
+    fn undo(&mut self, content: &str) -> Option<(String, Range<usize>, bool)> {
+        let record = self.undo.pop()?;
+        let span = record.start..record.start + record.new.len();
+        if content.get(span.clone()) != Some(record.new.as_str()) {
+            self.undo.clear();
+            self.redo.clear();
+            return None;
+        }
+        let restored = [&content[..span.start], &record.old, &content[span.end..]].concat();
+        let selection = record.selection_before.start.min(restored.len())
+            ..record.selection_before.end.min(restored.len());
+        let selection_reversed = record.selection_reversed_before;
+        self.redo.push(record);
+        Some((restored, selection, selection_reversed))
+    }
+
+    /// Reapply the newest undone step, with the caret after the re-applied
+    /// text — where the original edit left it.
+    fn redo(&mut self, content: &str) -> Option<(String, Range<usize>, bool)> {
+        let record = self.redo.pop()?;
+        let span = record.start..record.start + record.old.len();
+        if content.get(span.clone()) != Some(record.old.as_str()) {
+            self.undo.clear();
+            self.redo.clear();
+            return None;
+        }
+        let applied = [&content[..span.start], &record.new, &content[span.end..]].concat();
+        let caret = record.start + record.new.len();
+        self.undo.push(record);
+        Some((applied, caret..caret, false))
+    }
+}
+
+/// The splice with its common affixes removed: where `range` in `content` is
+/// replaced by `new_text`, the returned offset and (old, new) pair cover only
+/// the bytes that actually differ. Keeps a whole-content replace from storing
+/// two copies of the file when only a few spans changed.
+fn trimmed_splice(content: &str, range: &Range<usize>, new_text: &str) -> (usize, String, String) {
+    let old = &content[range.clone()];
+    let prefix = common_prefix_len(old, new_text);
+    let (old, new_text) = (&old[prefix..], &new_text[prefix..]);
+    let suffix = common_suffix_len(old, new_text);
+    (
+        range.start + prefix,
+        old[..old.len() - suffix].to_owned(),
+        new_text[..new_text.len() - suffix].to_owned(),
+    )
+}
+
+/// Bytes shared at the start of both strings, backed off to a character
+/// boundary so a partially shared code point is not split.
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    let mut len = a
+        .as_bytes()
+        .iter()
+        .zip(b.as_bytes())
+        .take_while(|(x, y)| x == y)
+        .count();
+    while !a.is_char_boundary(len) {
+        len -= 1;
+    }
+    len
+}
+
+/// Bytes shared at the end of both strings. The shared bytes are identical,
+/// so a boundary found in one is a boundary in the other.
+fn common_suffix_len(a: &str, b: &str) -> usize {
+    let mut len = a
+        .as_bytes()
+        .iter()
+        .rev()
+        .zip(b.as_bytes().iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    while !a.is_char_boundary(a.len() - len) {
+        len -= 1;
+    }
+    len
+}
+
 #[derive(Clone)]
 pub enum ComposerEvent {
     Submit(String),
@@ -218,6 +472,7 @@ pub struct ComposerInput {
     last_layout: Option<TextLayout>,
     is_selecting: bool,
     selected_word_range: Option<Range<usize>>,
+    history: EditHistory,
     external_context_menu_focus_holds: usize,
     context_menu: ContextMenuHandle,
     blink_cursor: Entity<BlinkCursor>,
@@ -259,6 +514,7 @@ impl ComposerInput {
             last_layout: None,
             is_selecting: false,
             selected_word_range: None,
+            history: EditHistory::default(),
             external_context_menu_focus_holds: 0,
             context_menu: {
                 // The menu takes real focus while open, so the composer holds
@@ -398,12 +654,17 @@ impl ComposerInput {
         {
             return;
         }
+        // A discrete undo step: picking a completion or replacing a match
+        // must not coalesce with the typing around it.
+        self.history.seal();
+        self.record_edit_history(&range, text, false);
         self.content =
             (self.content[..range.start].to_owned() + text + &self.content[range.end..]).into();
         let offset = range.start + text.len();
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.history.seal();
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
         cx.emit(ComposerEvent::Edited);
@@ -490,6 +751,11 @@ impl ComposerInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.highlight.clear();
+        // A programmatic clear is a new baseline, not an edit to step back
+        // over — a submitted prompt should not resurface via cmd-z.
+        if changed {
+            self.history = EditHistory::default();
+        }
         self.pause_blink_cursor(cx);
         if changed {
             cx.emit(ComposerEvent::Edited);
@@ -505,6 +771,12 @@ impl ComposerInput {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.marked_range = None;
+        // A load or reload from disk is a new baseline: undoing into text
+        // from before an external change would silently revert that change.
+        // An unchanged reload keeps the history alive.
+        if changed {
+            self.history = EditHistory::default();
+        }
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
         if changed {
@@ -514,6 +786,10 @@ impl ComposerInput {
     }
 
     fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        // Regaining focus is a gesture boundary — Zed finalizes its last
+        // transaction here too — so edits from separate visits never merge
+        // into one undo step.
+        self.history.seal();
         self.blink_cursor.update(cx, |cursor, cx| cursor.start(cx));
         cx.emit(ComposerEvent::Focus);
     }
@@ -705,7 +981,11 @@ impl ComposerInput {
             FieldMode::Composer | FieldMode::Search => text.replace(['\n', '\r'], " "),
             FieldMode::Code => text.replace('\r', ""),
         };
+        // A paste is its own undo step, never part of the typing around it —
+        // the native NSTextView boundary, stricter than Zed's time grouping.
+        self.history.seal();
         self.replace_text_in_range(None, &text, window, cx);
+        self.history.seal();
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -726,8 +1006,77 @@ impl ComposerInput {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
+            // Like paste, a cut never coalesces with surrounding deletions.
+            self.history.seal();
             self.replace_text_in_range(None, "", window, cx);
+            self.history.seal();
         }
+    }
+
+    /// Route a splice into the history before it is applied: composition
+    /// splices amend the open composition step, everything else records —
+    /// and possibly coalesces — normally.
+    fn record_edit_history(&mut self, range: &Range<usize>, new_text: &str, composing: bool) {
+        if composing {
+            self.history.record_composition(
+                &self.content,
+                range,
+                new_text,
+                self.selected_range.clone(),
+                self.selection_reversed,
+                Instant::now(),
+            );
+        } else {
+            self.history.record(
+                &self.content,
+                range,
+                new_text,
+                self.selected_range.clone(),
+                self.selection_reversed,
+                Instant::now(),
+            );
+        }
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        // While text is marked the IME owns the field; undoing under an
+        // active composition would desync it.
+        if self.read_only || self.marked_range.is_some() {
+            return;
+        }
+        let Some((content, selection, selection_reversed)) = self.history.undo(&self.content)
+        else {
+            return;
+        };
+        self.apply_history_step(content, selection, selection_reversed, cx);
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only || self.marked_range.is_some() {
+            return;
+        }
+        let Some((content, selection, selection_reversed)) = self.history.redo(&self.content)
+        else {
+            return;
+        };
+        self.apply_history_step(content, selection, selection_reversed, cx);
+    }
+
+    fn apply_history_step(
+        &mut self,
+        content: String,
+        selection: Range<usize>,
+        selection_reversed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.content = content.into();
+        self.selected_range = selection;
+        self.selection_reversed = selection_reversed;
+        self.marked_range = None;
+        self.refresh_highlight();
+        self.pause_blink_cursor(cx);
+        cx.emit(ComposerEvent::Edited);
+        cx.notify();
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -939,6 +1288,7 @@ impl EntityInputHandler for ComposerInput {
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
         self.marked_range = None;
+        self.history.finalize_composition();
     }
 
     fn replace_text_in_range(
@@ -951,17 +1301,27 @@ impl EntityInputHandler for ComposerInput {
         if self.read_only {
             return;
         }
-        let range = range_utf16
-            .as_ref()
-            .map(|range| self.range_from_utf16(range))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+        // While text is marked, macOS reports replacement ranges relative to
+        // the marked text, so the marked span itself is the commit target —
+        // Zed's reading of the protocol. Absolute ranges only arrive outside
+        // composition (e.g. the Accessibility Keyboard's completions).
+        let composing = self.marked_range.is_some();
+        let range = self.marked_range.clone().unwrap_or_else(|| {
+            range_utf16
+                .as_ref()
+                .map(|range| self.range_from_utf16(range))
+                .unwrap_or(self.selected_range.clone())
+        });
+        self.record_edit_history(&range, new_text, composing);
         let previous = self.content.clone();
         self.content =
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         let offset = range.start + new_text.len();
         self.selected_range = offset..offset;
         self.marked_range = None;
+        if composing {
+            self.history.finalize_composition();
+        }
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
         if previous != self.content {
@@ -978,16 +1338,35 @@ impl EntityInputHandler for ComposerInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range| self.range_from_utf16(range))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+        if self.read_only {
+            return;
+        }
+        // A range arriving while text is marked is relative to the marked
+        // text, and clipped to it the way Zed clips; only without marked
+        // text is it absolute.
+        let range = match (range_utf16.as_ref(), self.marked_range.as_ref()) {
+            (Some(range_utf16), Some(marked)) => {
+                let base = self.offset_to_utf16(marked.start);
+                let absolute = self
+                    .range_from_utf16(&(base + range_utf16.start..base + range_utf16.end));
+                absolute.start.clamp(marked.start, marked.end)
+                    ..absolute.end.clamp(marked.start, marked.end)
+            }
+            (Some(range_utf16), None) => self.range_from_utf16(range_utf16),
+            (None, Some(marked)) => marked.clone(),
+            (None, None) => self.selected_range.clone(),
+        };
+        self.record_edit_history(&range, new_text, true);
         let previous = self.content.clone();
         self.content =
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.marked_range =
             (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
+        // Empty composition text is a cancel; close its undo step so a
+        // netted-out composition leaves no trace.
+        if self.marked_range.is_none() {
+            self.history.finalize_composition();
+        }
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -1360,6 +1739,8 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::enter))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_mouse_down))
@@ -1458,13 +1839,314 @@ impl Focusable for ComposerInput {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use gpui::{TextRun, font, hsla};
 
     use super::TokenClass;
     use super::{
-        SearchPaint, cursor_should_be_visible, input_text_runs, next_word_boundary,
-        previous_word_boundary, word_range_at,
+        EditHistory, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP, cursor_should_be_visible,
+        input_text_runs, next_word_boundary, previous_word_boundary, trimmed_splice,
+        word_range_at,
     };
+
+    /// Type each string in sequence at `at`, advancing the caret, the way
+    /// keystrokes arrive: record first, then apply the splice.
+    fn type_at(
+        history: &mut EditHistory,
+        content: &mut String,
+        mut at: usize,
+        keys: &[&str],
+        start: Instant,
+        gap: Duration,
+    ) -> usize {
+        for (index, key) in keys.iter().enumerate() {
+            history.record(
+                content,
+                &(at..at),
+                key,
+                at..at,
+                false,
+                start + gap * index as u32,
+            );
+            content.insert_str(at, key);
+            at += key.len();
+        }
+        at
+    }
+
+    #[test]
+    fn a_typing_run_coalesces_into_one_undo_step() {
+        let mut history = EditHistory::default();
+        let mut content = String::from("fn main() {}");
+        let start = Instant::now();
+        type_at(
+            &mut history,
+            &mut content,
+            3,
+            &["a", "b", "c"],
+            start,
+            Duration::from_millis(50),
+        );
+        assert_eq!(content, "fn abcmain() {}");
+
+        let (restored, selection, _) = history.undo(&content).unwrap();
+        assert_eq!(restored, "fn main() {}");
+        assert_eq!(selection, 3..3, "caret returns to where typing began");
+        assert!(
+            history.undo(&restored).is_none(),
+            "the whole run is one step"
+        );
+
+        let (redone, selection, _) = history.redo(&restored).unwrap();
+        assert_eq!(redone, "fn abcmain() {}");
+        assert_eq!(selection, 6..6, "caret lands after the reapplied text");
+    }
+
+    #[test]
+    fn a_pause_starts_a_new_undo_step() {
+        let mut history = EditHistory::default();
+        let mut content = String::new();
+        let start = Instant::now();
+        type_at(
+            &mut history,
+            &mut content,
+            0,
+            &["a"],
+            start,
+            Duration::ZERO,
+        );
+        type_at(
+            &mut history,
+            &mut content,
+            1,
+            &["b"],
+            start + UNDO_GROUP_INTERVAL,
+            Duration::ZERO,
+        );
+        assert_eq!(history.undo.len(), 2, "the group interval is exclusive");
+    }
+
+    #[test]
+    fn a_backspace_run_undoes_as_one_step() {
+        let mut history = EditHistory::default();
+        let mut content = String::from("hello");
+        let start = Instant::now();
+        // Backspace twice: each records the extended selection it deletes.
+        history.record(&content, &(4..5), "", 4..5, false, start);
+        content.replace_range(4..5, "");
+        history.record(
+            &content,
+            &(3..4),
+            "",
+            3..4,
+            false,
+            start + Duration::from_millis(50),
+        );
+        content.replace_range(3..4, "");
+        assert_eq!(content, "hel");
+
+        let (restored, selection, _) = history.undo(&content).unwrap();
+        assert_eq!(restored, "hello");
+        assert_eq!(selection, 4..5, "the first deletion's selection returns");
+        assert!(history.undo(&restored).is_none());
+    }
+
+    #[test]
+    fn typing_extends_a_replaced_selection_into_one_step() {
+        let mut history = EditHistory::default();
+        let mut content = String::from("abcdef");
+        let start = Instant::now();
+        // Type "x" over the selected "cde", then keep typing.
+        history.record(&content, &(2..5), "x", 2..5, false, start);
+        content.replace_range(2..5, "x");
+        type_at(
+            &mut history,
+            &mut content,
+            3,
+            &["y"],
+            start + Duration::from_millis(50),
+            Duration::ZERO,
+        );
+        assert_eq!(content, "abxyf");
+
+        let (restored, selection, _) = history.undo(&content).unwrap();
+        assert_eq!(restored, "abcdef");
+        assert_eq!(selection, 2..5, "the replaced selection comes back");
+        assert!(history.undo(&restored).is_none());
+    }
+
+    #[test]
+    fn sealed_steps_do_not_coalesce() {
+        let mut history = EditHistory::default();
+        let mut content = String::new();
+        let start = Instant::now();
+        type_at(
+            &mut history,
+            &mut content,
+            0,
+            &["a"],
+            start,
+            Duration::ZERO,
+        );
+        history.seal();
+        type_at(
+            &mut history,
+            &mut content,
+            1,
+            &["b"],
+            start + Duration::from_millis(10),
+            Duration::ZERO,
+        );
+        assert_eq!(history.undo.len(), 2);
+    }
+
+    #[test]
+    fn an_edit_after_undo_drops_the_redo_branch() {
+        let mut history = EditHistory::default();
+        let mut content = String::new();
+        let start = Instant::now();
+        type_at(
+            &mut history,
+            &mut content,
+            0,
+            &["a"],
+            start,
+            Duration::ZERO,
+        );
+        let (restored, ..) = history.undo(&content).unwrap();
+        let mut content = restored;
+        assert_eq!(history.redo.len(), 1);
+        type_at(
+            &mut history,
+            &mut content,
+            0,
+            &["b"],
+            start + UNDO_GROUP_INTERVAL * 2,
+            Duration::ZERO,
+        );
+        assert!(history.redo.is_empty());
+        assert!(history.redo(&content).is_none());
+    }
+
+    /// Replace All arrives as one whole-content splice; the record must keep
+    /// only the span that changed, not two copies of the file.
+    #[test]
+    fn a_whole_content_replace_records_only_the_changed_span() {
+        let mut history = EditHistory::default();
+        let content = "xx aaa yy";
+        let replaced = "xx bbb yy";
+        history.record(
+            content,
+            &(0..content.len()),
+            replaced,
+            0..content.len(),
+            false,
+            Instant::now(),
+        );
+        let record = history.undo.last().unwrap();
+        assert_eq!((record.start, record.old.as_str()), (3, "aaa"));
+        assert_eq!(record.new, "bbb");
+
+        let (restored, ..) = history.undo(replaced).unwrap();
+        assert_eq!(restored, content);
+    }
+
+    #[test]
+    fn trimmed_splices_respect_character_boundaries() {
+        // "é" and "è" share their first UTF-8 byte; the shared byte must not
+        // be trimmed off mid-character.
+        assert_eq!(
+            trimmed_splice("é", &(0..2), "è"),
+            (0, "é".to_owned(), "è".to_owned())
+        );
+        assert_eq!(
+            trimmed_splice("aé", &(0..3), "bé"),
+            (0, "a".to_owned(), "b".to_owned())
+        );
+        assert_eq!(
+            trimmed_splice("abc", &(0..3), "abcd"),
+            (3, String::new(), "d".to_owned())
+        );
+    }
+
+    /// Every marked-text revision and the final commit collapse into a
+    /// single undo step, the way Zed groups everything since the first IME
+    /// edit into one transaction.
+    #[test]
+    fn a_composition_undoes_as_one_step() {
+        let mut history = EditHistory::default();
+        let start = Instant::now();
+        let mut content = String::from("ab");
+        history.record_composition(&content, &(1..1), "k", 1..1, false, start);
+        content.replace_range(1..1, "k");
+        history.record_composition(&content, &(1..2), "か", 1..2, false, start);
+        content.replace_range(1..2, "か");
+        history.record_composition(&content, &(1..4), "漢字", 1..4, false, start);
+        content.replace_range(1..4, "漢字");
+        history.finalize_composition();
+        assert_eq!(content, "a漢字b");
+        assert_eq!(history.undo.len(), 1);
+
+        let (restored, selection, _) = history.undo(&content).unwrap();
+        assert_eq!(restored, "ab");
+        assert_eq!(selection, 1..1);
+
+        let (redone, ..) = history.redo(&restored).unwrap();
+        assert_eq!(redone, "a漢字b");
+    }
+
+    #[test]
+    fn a_canceled_composition_records_nothing() {
+        let mut history = EditHistory::default();
+        let start = Instant::now();
+        let mut content = String::from("ab");
+        history.record_composition(&content, &(1..1), "k", 1..1, false, start);
+        content.replace_range(1..1, "k");
+        history.record_composition(&content, &(1..2), "", 1..2, false, start);
+        content.replace_range(1..2, "");
+        history.finalize_composition();
+        assert_eq!(content, "ab");
+        assert!(history.undo.is_empty());
+    }
+
+    /// A step that no longer describes the content — the invariant only a
+    /// bug could break — must drop the history rather than corrupt the text.
+    #[test]
+    fn a_stale_step_is_dropped_rather_than_applied() {
+        let mut history = EditHistory::default();
+        let mut content = String::new();
+        type_at(
+            &mut history,
+            &mut content,
+            0,
+            &["abc"],
+            Instant::now(),
+            Duration::ZERO,
+        );
+        assert!(history.undo("unrelated content").is_none());
+        assert!(history.undo.is_empty() && history.redo.is_empty());
+    }
+
+    #[test]
+    fn history_is_capped() {
+        let mut history = EditHistory::default();
+        let mut content = String::new();
+        let start = Instant::now();
+        for step in 0..UNDO_HISTORY_CAP + 5 {
+            let end = content.len();
+            let at = type_at(
+                &mut history,
+                &mut content,
+                end,
+                &["x"],
+                start + UNDO_GROUP_INTERVAL * step as u32,
+                Duration::ZERO,
+            );
+            assert_eq!(at, content.len());
+        }
+        assert_eq!(history.undo.len(), UNDO_HISTORY_CAP);
+    }
 
     #[test]
     fn word_navigation_matches_native_text_inputs() {
