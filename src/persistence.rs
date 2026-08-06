@@ -1,6 +1,6 @@
 //! Local state storage.
 //!
-//! Sessions and projects live in SQLite (`state.db`), settings in a readable
+//! Sessions and projects live in SQLite (`app.db`), settings in a readable
 //! `settings.json` beside it, and binary payloads in [`crate::blob_store`].
 //!
 //! A save writes only the rows whose contents changed, so a streaming turn
@@ -402,11 +402,23 @@ pub struct StateStore {
 }
 
 impl StateStore {
+    /// Where the database lives.
+    ///
+    /// Debug builds keep it in the checkout's gitignored `temp/`, so
+    /// development never touches the installed app's data and a bad state is
+    /// thrown away by deleting one directory. Release builds use the usual
+    /// per-user application support directory.
     pub fn default_path() -> PathBuf {
-        dirs::data_local_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(DATA_DIRECTORY_NAME)
-            .join("state.db")
+        if cfg!(debug_assertions) {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("temp")
+                .join("app.db")
+        } else {
+            dirs::data_local_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(DATA_DIRECTORY_NAME)
+                .join("app.db")
+        }
     }
 
     pub fn new(path: PathBuf) -> Self {
@@ -875,18 +887,24 @@ mod tests {
     }
 
     fn store_in(directory: &Path) -> StateStore {
-        StateStore::new(directory.join("state.db"))
+        StateStore::new(directory.join("app.db"))
     }
 
     #[test]
-    fn default_path_uses_build_specific_data_directory() {
+    fn default_path_is_build_specific() {
         let path = StateStore::default_path();
-        let data_directory = path.parent().and_then(Path::file_name);
+        assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("app.db")));
+        let directory = path.parent().and_then(Path::file_name);
 
+        // Debug builds stay inside the checkout so development never writes to
+        // the installed app's data.
         #[cfg(debug_assertions)]
-        assert_eq!(data_directory, Some(std::ffi::OsStr::new("Waku Debug")));
+        {
+            assert_eq!(directory, Some(std::ffi::OsStr::new("temp")));
+            assert!(path.starts_with(env!("CARGO_MANIFEST_DIR")));
+        }
         #[cfg(not(debug_assertions))]
-        assert_eq!(data_directory, Some(std::ffi::OsStr::new("Waku")));
+        assert_eq!(directory, Some(std::ffi::OsStr::new("Waku")));
     }
 
     #[test]
@@ -1122,7 +1140,7 @@ mod tests {
         store.save(&mut state).unwrap();
 
         // The JSON column must not carry a second copy that could drift.
-        let connection = Connection::open(directory.join("state.db")).unwrap();
+        let connection = Connection::open(directory.join("app.db")).unwrap();
         let data: String = connection
             .query_row("SELECT data FROM sessions LIMIT 1", [], |row| row.get(0))
             .unwrap();
@@ -1166,7 +1184,7 @@ mod tests {
         state.sessions[0].messages.truncate(1);
         store.save(&mut state).unwrap();
 
-        let connection = Connection::open(directory.join("state.db")).unwrap();
+        let connection = Connection::open(directory.join("app.db")).unwrap();
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
@@ -1196,7 +1214,7 @@ mod tests {
         state.sessions.retain(|session| session.id != removed_id);
         store.save(&mut state).unwrap();
 
-        let connection = Connection::open(directory.join("state.db")).unwrap();
+        let connection = Connection::open(directory.join("app.db")).unwrap();
         let orphans: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
@@ -1243,7 +1261,7 @@ mod tests {
         let session = state.sessions[0].clone();
         store.save(&mut state).unwrap();
 
-        let connection = Connection::open(directory.join("state.db")).unwrap();
+        let connection = Connection::open(directory.join("app.db")).unwrap();
         let (title, provider, model, status, created, updated, last_reply): (
             String,
             String,
@@ -1337,7 +1355,7 @@ mod tests {
         state.sessions.push(second);
         store.save(&mut state).unwrap();
 
-        let connection = Connection::open(directory.join("state.db")).unwrap();
+        let connection = Connection::open(directory.join("app.db")).unwrap();
         let mut statement = connection
             .prepare("SELECT title FROM sessions ORDER BY updated_at DESC")
             .unwrap();
