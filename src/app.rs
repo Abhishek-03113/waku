@@ -19,6 +19,7 @@ use gpui::{
 use uuid::Uuid;
 
 use crate::checkpoint;
+use crate::composer_complete::{FileEntry, SlashCommand};
 use crate::computer_use::{
     ComputerPermissions, ComputerUsePhase, ComputerUseState, PendingComputerApproval,
 };
@@ -38,8 +39,8 @@ use crate::md::render::{
     TranscriptSelection,
 };
 use crate::ui::menu::{
-    ConfirmEntry, ContextMenuHandle, MenuAlign, MenuItem, SelectNextEntry, SelectPreviousEntry,
-    context_menu, dropdown_menu, popover,
+    ConfirmEntry, ContextMenuHandle, DismissMenu, MenuAlign, MenuItem, SelectNextEntry,
+    SelectPreviousEntry, context_menu, dropdown_menu, popover,
 };
 use crate::ui::scrollbar::{self, ScrollbarState};
 use crate::ui::tooltip::Tooltip;
@@ -475,6 +476,22 @@ pub struct Waku {
     /// keyboard has not moved yet, so `enter` takes the first row.
     model_picker_highlight: Option<usize>,
     model_picker_scroll: ScrollHandle,
+    /// Slash commands discovered per (provider, project root). Filesystem
+    /// walks live on the background executor; frames read the index below.
+    slash_commands: QueryCache<(ProviderKind, PathBuf), Vec<SlashCommand>>,
+    /// The merged command list the autocomplete popup draws, and the key it
+    /// was built for — a stale key means "no commands", never another
+    /// provider's list.
+    slash_command_index: Rc<Vec<SlashCommand>>,
+    slash_command_index_key: Option<(ProviderKind, PathBuf)>,
+    /// Workspace file index per project root, for `@` mentions.
+    mention_files: QueryCache<PathBuf, Vec<FileEntry>>,
+    mention_file_index: Rc<Vec<FileEntry>>,
+    mention_file_index_path: Option<PathBuf>,
+    /// Set when a driver reports its command registry mid-drain; the drain
+    /// has no `Context` to rebuild the drawn index itself.
+    composer_sources_stale: bool,
+    composer_autocomplete: autocomplete::AutocompleteUi,
     runtimes: HashMap<Uuid, SessionRuntime>,
     stream_state_dirty: bool,
     last_stream_save: Instant,
@@ -603,6 +620,7 @@ pub struct Waku {
     fps_value: u32,
 }
 
+mod autocomplete;
 mod components;
 mod composer;
 mod render;
@@ -615,6 +633,7 @@ mod streaming;
 mod transcript;
 mod transcript_view;
 
+pub use autocomplete::init as init_composer_autocomplete;
 use components::*;
 use sidebar::SidebarRow;
 use streaming::*;
@@ -844,6 +863,9 @@ impl Waku {
                             if std::mem::take(&mut this.workspace_queries_stale) {
                                 this.invalidate_workspace_queries(cx);
                             }
+                            if std::mem::take(&mut this.composer_sources_stale) {
+                                this.refresh_composer_sources(cx);
+                            }
                             this.reap_idle_sessions();
                             // A finished turn asks for a checkpoint from a
                             // handler with no `Context`; this is where that
@@ -879,6 +901,16 @@ impl Waku {
                 model_picker_tab,
                 model_picker_highlight: None,
                 model_picker_scroll: ScrollHandle::new(),
+                // Providers × workspaces; both scans are small, the cache
+                // only exists to keep them off the frame path.
+                slash_commands: QueryCache::new(2 * MAX_CACHED_WORKSPACES),
+                slash_command_index: Rc::new(Vec::new()),
+                slash_command_index_key: None,
+                mention_files: QueryCache::new(MAX_CACHED_WORKSPACES),
+                mention_file_index: Rc::new(Vec::new()),
+                mention_file_index_path: None,
+                composer_sources_stale: false,
+                composer_autocomplete: autocomplete::AutocompleteUi::new(),
                 runtimes: HashMap::new(),
                 stream_state_dirty: false,
                 last_stream_save: Instant::now(),
@@ -968,6 +1000,9 @@ impl Waku {
         entity.update(cx, |this, cx| {
             this.start_pending_checkpoint_captures(cx);
             this.refresh_branch(cx);
+            // The autocomplete indexes prefetch alongside, so typing `/` or
+            // `@` into the very first prompt already has data to draw.
+            this.refresh_composer_sources(cx);
             // Model discovery for every installed provider also starts here,
             // ahead of the model picker's first render, so opening it never
             // waits on a per-provider lazy load.

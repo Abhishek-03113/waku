@@ -77,6 +77,7 @@ impl Waku {
         }
         self.reset_visible_state();
         self.refresh_branch(cx);
+        self.refresh_composer_sources(cx);
         self.reset_transcript_rows(self.transcript_row_count());
         self.save();
         cx.notify();
@@ -95,6 +96,7 @@ impl Waku {
         self.branches.invalidate(&path);
         self.refresh_branch(cx);
         self.refresh_workspace_surfaces(cx);
+        self.invalidate_composer_sources(cx);
     }
 
     /// Resolves the checked-out branch for the selected project.
@@ -562,6 +564,8 @@ impl Waku {
             // model change within one provider can be applied in session.
             if provider_changed {
                 self.reset_session_runtime(session_id);
+                // A different provider is also a different command registry.
+                self.refresh_composer_sources(cx);
             } else {
                 self.apply_session_options(session_id);
             }

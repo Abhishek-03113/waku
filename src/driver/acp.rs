@@ -670,9 +670,32 @@ fn handle_message(
                 complete: false,
             });
         }
+        Some("available_commands_update") => {
+            let commands = update
+                .get("availableCommands")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|command| {
+                            let name = command.get("name").and_then(Value::as_str)?;
+                            Some(crate::model::ReportedCommand {
+                                name: name.to_owned(),
+                                description: command
+                                    .get("description")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !commands.is_empty() {
+                let _ = events.send(DriverEvent::AvailableCommands(commands));
+            }
+        }
         // `user_message_chunk` is Waku's own prompt echoed back, and
-        // `usage_update` / `available_commands_update` / `session_info_update`
-        // are not transcript content.
+        // `usage_update` / `session_info_update` are not transcript content.
         _ => {}
     }
 }

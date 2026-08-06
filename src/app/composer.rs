@@ -1207,7 +1207,7 @@ impl Waku {
             .into_any_element()
     }
 
-    pub(super) fn render_composer(&self, _window: &Window, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let session = self.selected_session();
         let working = session
@@ -1219,6 +1219,8 @@ impl Waku {
             })
             .unwrap_or(false);
         let has_draft = !self.composer.read(cx).content().trim().is_empty();
+        let autocomplete = self.render_composer_autocomplete(window, cx);
+        let autocomplete_open = autocomplete.is_some();
         div().flex_none().px(px(20.0)).child(
             div()
                 .w_full()
@@ -1229,6 +1231,31 @@ impl Waku {
                 .border_color(theme.border)
                 .bg(theme.composer)
                 .p(px(10.0))
+                // Anchor for the bounds probe the autocomplete popup aligns to.
+                .relative()
+                .child(super::autocomplete::composer_card_bounds_probe(
+                    self.composer_autocomplete.card_bounds_cell(),
+                ))
+                // Only while the popup is open: the key context routes the
+                // arrows, `enter`, `tab` and `escape` here as actions, out
+                // from under the focused field. When it closes, the context
+                // disappears with it and `enter` submits again.
+                .when(autocomplete_open, |card| {
+                    card.key_context("ComposerAutocomplete")
+                        .on_action(cx.listener(|this, _: &SelectNextEntry, window, cx| {
+                            this.move_autocomplete_highlight("down", window, cx);
+                        }))
+                        .on_action(cx.listener(|this, _: &SelectPreviousEntry, window, cx| {
+                            this.move_autocomplete_highlight("up", window, cx);
+                        }))
+                        .on_action(cx.listener(|this, _: &ConfirmEntry, window, cx| {
+                            this.accept_autocomplete(None, window, cx);
+                        }))
+                        .on_action(cx.listener(|this, _: &DismissMenu, _, cx| {
+                            this.dismiss_autocomplete(cx);
+                        }))
+                })
+                .children(autocomplete)
                 .child(div().px(px(4.0)).pt(px(2.0)).child(self.composer.clone()))
                 .child(
                     div()

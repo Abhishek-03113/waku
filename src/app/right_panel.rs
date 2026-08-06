@@ -19,7 +19,7 @@ pub(super) struct WorkingTreeEntry {
 /// Select from a compact, embedded subset of Material Icon Theme rather than
 /// shipping its entire icon catalog. The SVG path is resolved once per entry
 /// during the directory scan, not on every row paint.
-fn file_icon_for_path(path: &str) -> &'static str {
+pub(super) fn file_icon_for_path(path: &str) -> &'static str {
     let name = Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())

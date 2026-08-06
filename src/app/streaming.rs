@@ -202,6 +202,18 @@ impl Waku {
                     }
                 }
             }
+            DriverEvent::AvailableCommands(names) => {
+                if let Some(session) = self
+                    .state
+                    .session_mut(session_id)
+                    .filter(|session| session.available_commands != names)
+                {
+                    session.available_commands = names;
+                    // The drain has no `Context`; the frame loop rebuilds the
+                    // drawn index when it sees this.
+                    self.composer_sources_stale = true;
+                }
+            }
             DriverEvent::TurnStarted => {
                 runtime.last_driver_error = None;
                 if let Some(session) = self.state.session_mut(session_id)

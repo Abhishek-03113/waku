@@ -1170,9 +1170,17 @@ impl Waku {
         self.transcript_anchor_following.set(true);
         self.splice_transcript_rows_after_visibility_change(&previous_kinds);
         self.scroll_transcript_to_anchor();
+        // Template commands expand here, at the seam between the transcript
+        // and the transport: the user message keeps the typed `/name …` —
+        // the same echo the CLIs show — while the provider receives the
+        // rendered prompt. Claude's commands pass through untouched; its CLI
+        // owns their expansion.
+        let driver_prompt =
+            crate::composer_complete::expanded_submission(&prompt, &self.slash_command_index)
+                .unwrap_or(prompt);
         let mut failed_to_start = false;
         match self.ensure_driver() {
-            Ok(driver) => driver.prompt(prompt),
+            Ok(driver) => driver.prompt(driver_prompt),
             Err(error) => {
                 failed_to_start = true;
                 let message = format!("Could not start the agent: {error}");

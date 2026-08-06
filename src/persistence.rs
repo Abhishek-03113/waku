@@ -902,6 +902,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         updated_at: updated_at as u64,
         last_reply_at: last_reply_at.map(|at| at as u64),
         provider_cursor: None,
+        available_commands: Vec::new(),
         provider_session_id: None,
         messages: Vec::new(),
         transcript_blocks: Vec::new(),

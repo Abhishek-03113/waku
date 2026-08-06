@@ -515,6 +515,11 @@ pub struct AgentSession {
     pub last_reply_at: Option<u64>,
     #[serde(default)]
     pub provider_cursor: Option<ProviderResumeCursor>,
+    /// Slash commands the provider reported for this session's live process,
+    /// kept so a resumed session still completes them before its next
+    /// handshake.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_commands: Vec<ReportedCommand>,
     /// Read-only compatibility field for v1 state files. New saves omit it.
     #[serde(default, skip_serializing)]
     pub provider_session_id: Option<String>,
@@ -561,6 +566,7 @@ impl AgentSession {
             last_reply_at: None,
             detail_loaded: true,
             provider_cursor: None,
+            available_commands: Vec::new(),
             provider_session_id: None,
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
@@ -923,6 +929,11 @@ pub enum DriverEvent {
     Connected {
         provider_cursor: Option<ProviderResumeCursor>,
     },
+    /// The slash commands the live process itself reports — Claude's
+    /// stream-json init handshake and ACP's `available_commands_update`.
+    /// Authoritative over filesystem discovery, which cannot see plugin or
+    /// dynamically registered commands.
+    AvailableCommands(Vec<ReportedCommand>),
     TurnStarted,
     TextDelta(String),
     ReasoningDelta(String),
@@ -947,6 +958,42 @@ pub enum DriverEvent {
     },
     Error(String),
     ProcessExited,
+}
+
+/// A slash command a live provider process advertised for its session.
+///
+/// Claude's init handshake reports bare names; ACP agents report names with
+/// descriptions. Sessions persisted by earlier builds stored plain strings,
+/// which the untagged repr still accepts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(from = "ReportedCommandRepr")]
+pub struct ReportedCommand {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ReportedCommandRepr {
+    Name(String),
+    Full {
+        name: String,
+        #[serde(default)]
+        description: String,
+    },
+}
+
+impl From<ReportedCommandRepr> for ReportedCommand {
+    fn from(repr: ReportedCommandRepr) -> Self {
+        match repr {
+            ReportedCommandRepr::Name(name) => Self {
+                name,
+                description: String::new(),
+            },
+            ReportedCommandRepr::Full { name, description } => Self { name, description },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

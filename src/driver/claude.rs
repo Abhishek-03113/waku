@@ -389,6 +389,25 @@ fn handle_message(
     state: &mut ClaudeStreamState,
 ) {
     match value.get("type").and_then(Value::as_str) {
+        Some("system") => {
+            // The init handshake carries the CLI's own command registry —
+            // built-ins, custom commands, plugins and skills alike.
+            if value.get("subtype").and_then(Value::as_str) == Some("init")
+                && let Some(commands) = value.get("slash_commands").and_then(Value::as_array)
+            {
+                let commands = commands
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|name| crate::model::ReportedCommand {
+                        name: name.to_owned(),
+                        description: String::new(),
+                    })
+                    .collect::<Vec<_>>();
+                if !commands.is_empty() {
+                    let _ = events.send(DriverEvent::AvailableCommands(commands));
+                }
+            }
+        }
         Some("control_request") => {
             if value.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool") {
                 request_permission(value, events, commands, auto_approve);

@@ -361,6 +361,37 @@ impl ComposerInput {
         &self.content
     }
 
+    /// The caret's byte offset into `content`.
+    pub fn cursor(&self) -> usize {
+        self.cursor_offset()
+    }
+
+    /// Splice `text` over `range` and put the caret after it. This is the
+    /// autocompletion insert: unlike [`EntityInputHandler::replace_text_in_range`]
+    /// it takes byte offsets and no window, so an action handler can call it.
+    pub fn replace_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let range = range.start.min(self.content.len())..range.end.min(self.content.len());
+        if !self.content.is_char_boundary(range.start)
+            || !self.content.is_char_boundary(range.end)
+            || range.start > range.end
+        {
+            return;
+        }
+        self.content =
+            (self.content[..range.start].to_owned() + text + &self.content[range.end..]).into();
+        let offset = range.start + text.len();
+        self.selected_range = offset..offset;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.refresh_highlight();
+        self.pause_blink_cursor(cx);
+        cx.emit(ComposerEvent::Edited);
+        cx.notify();
+    }
+
     /// Height of each logical line as laid out, so a gutter can put one number
     /// per line even when soft wrap gives a line several visual rows.
     ///
