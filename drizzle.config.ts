@@ -7,4 +7,7 @@ export default defineConfig({
   // The Rust runner applies these files in order; it never reads drizzle's
   // journal, so keep names stable and prefix-ordered.
   migrations: { prefix: "index" },
+  dbCredentials: {
+    url: './temp/app.db'
+  }
 });
