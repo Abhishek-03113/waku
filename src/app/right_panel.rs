@@ -6,7 +6,7 @@ use super::*;
 const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct WorkingTreeEntry {
+pub(super) struct WorkingTreeEntry {
     relative_path: String,
     absolute_path: PathBuf,
     name: String,
@@ -564,6 +564,36 @@ fn tab_scroll_fade(
 mod tests {
     use super::*;
 
+    /// The render path must never reach the filesystem. This reads the source
+    /// rather than the behaviour, because the cost of a regression here is a
+    /// syscall per directory entry on every frame — invisible until a project
+    /// is large or its volume is slow.
+    #[test]
+    fn the_working_tree_render_path_does_no_filesystem_work() {
+        let source = include_str!("right_panel.rs");
+        // Anchored on the definition's indentation so this test does not match
+        // its own string literals.
+        let start = source
+            .find("\n    fn render_right_panel_working_tree(")
+            .expect("render fn");
+        let body = &source[start + 1..];
+        let end = body.find("\n    fn ").unwrap_or(body.len());
+        let body = &body[..end];
+
+        for forbidden in [
+            "visible_working_tree_entries",
+            "read_dir",
+            "std::fs::",
+            "metadata(",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "render_right_panel_working_tree must not call `{forbidden}`; \
+                 walk the tree in refresh_right_panel_working_tree instead"
+            );
+        }
+    }
+
     #[test]
     fn working_tree_only_descends_into_expanded_directories() {
         let root = std::env::temp_dir().join(format!("waku-working-tree-{}", Uuid::new_v4()));
@@ -857,6 +887,12 @@ impl Waku {
         if self.active_right_panel_surface() == Some(&RightPanelSurface::Diff) {
             self.refresh_right_panel_diff(cx);
         }
+        if matches!(
+            self.active_right_panel_surface(),
+            Some(RightPanelSurface::Files | RightPanelSurface::File(_))
+        ) {
+            self.refresh_right_panel_working_tree(cx);
+        }
         self.ensure_right_panel_terminals(cx);
         if self.right_panel_visible {
             self.request_active_terminal_focus();
@@ -961,6 +997,9 @@ impl Waku {
         }
         if surface == RightPanelSurface::Diff {
             self.refresh_right_panel_diff(cx);
+        }
+        if matches!(surface, RightPanelSurface::Files | RightPanelSurface::File(_)) {
+            self.refresh_right_panel_working_tree(cx);
         }
         if let Some(terminal_id) = surface.terminal_id() {
             self.ensure_right_panel_terminal(terminal_id, cx);
@@ -1592,9 +1631,10 @@ impl Waku {
                 cx,
             );
         };
-        let project_path = project.path.clone();
         let project_name = project.name.clone();
-        let entries = visible_working_tree_entries(&project_path, &self.right_panel_expanded_paths);
+        // Read only. The walk is filesystem I/O, so it happens in
+        // `refresh_right_panel_working_tree`, never in a frame.
+        let entries = self.right_panel_working_tree.clone();
 
         let mut list = div().flex().flex_col().py(px(6.0));
         for entry in entries {
@@ -1649,6 +1689,7 @@ impl Waku {
                         this.right_panel_expanded_paths
                             .insert(absolute_path.clone());
                     }
+                    this.refresh_right_panel_working_tree(cx);
                     cx.notify();
                 })))
             } else {
@@ -2211,6 +2252,61 @@ impl Waku {
                     .text_color(theme.text_tertiary)
                     .child(description),
             )
+    }
+
+    /// Re-reads whichever workspace surface is on screen.
+    pub(super) fn refresh_workspace_surfaces(&mut self, cx: &mut Context<Self>) {
+        match self.active_right_panel_surface() {
+            Some(RightPanelSurface::Diff) => self.refresh_right_panel_diff(cx),
+            Some(RightPanelSurface::Files | RightPanelSurface::File(_)) => {
+                self.refresh_right_panel_working_tree(cx)
+            }
+            _ => {}
+        }
+    }
+
+    /// Re-walks the project's working tree.
+    ///
+    /// `read_dir` plus a `stat` per entry, recursively over expanded
+    /// directories — filesystem I/O, so it runs on the background executor and
+    /// the panel keeps drawing the previous listing until the result lands.
+    /// Called when the tree's inputs change, never from a frame.
+    fn refresh_right_panel_working_tree(&mut self, cx: &mut Context<Self>) {
+        let Some(project_path) = self.selected_project().map(|project| project.path.clone()) else {
+            self.right_panel_working_tree.clear();
+            return;
+        };
+        // The tree on disk moves under us, and the expanded set may just have
+        // changed, so a cached listing is only good until something asks again.
+        self.working_trees.invalidate(&project_path);
+        match self.working_trees.read(&project_path) {
+            Query::Ready(entries) => self.right_panel_working_tree = (*entries).clone(),
+            Query::Pending => {}
+            Query::Missing(token) => {
+                let expanded = self.right_panel_expanded_paths.clone();
+                cx.spawn(async move |waku, cx| {
+                    let entries = cx
+                        .background_executor()
+                        .spawn({
+                            let path = project_path.clone();
+                            async move { visible_working_tree_entries(&path, &expanded) }
+                        })
+                        .await;
+                    waku.update(cx, |waku, cx| {
+                        if waku.working_trees.fulfill(token, entries.clone())
+                            && waku
+                                .selected_project()
+                                .is_some_and(|project| project.path == project_path)
+                        {
+                            waku.right_panel_working_tree = entries;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
     }
 
     /// Refreshes the diff surface's file list.

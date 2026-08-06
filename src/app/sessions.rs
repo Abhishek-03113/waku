@@ -79,6 +79,21 @@ impl Waku {
         cx.notify();
     }
 
+    /// Drops cached answers about the workspace on disk.
+    ///
+    /// These queries cache to keep `git` and directory walks out of frames, but
+    /// nothing tells us when the working tree changes underneath. Rather than
+    /// expire on a timer, they are dropped at the moments the answer plausibly
+    /// moved — coming back to the window, or a turn finishing.
+    pub(super) fn invalidate_workspace_queries(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_project().map(|project| project.path.clone()) else {
+            return;
+        };
+        self.branches.invalidate(&path);
+        self.refresh_branch(cx);
+        self.refresh_workspace_surfaces(cx);
+    }
+
     /// Resolves the checked-out branch for the selected project.
     ///
     /// `git` costs upwards of 10ms, more than a frame at 120Hz, so it is a

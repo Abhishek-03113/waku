@@ -91,8 +91,12 @@ const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// count — one long message costs far more than several short ones. 512 KB
 /// holds several sessions' transcripts for a few MB of structures.
 const MAX_CACHED_MESSAGE_SOURCE_BYTES: usize = 512 * 1024;
-/// Projects whose branch is remembered. Small: a window rarely has many.
-const MAX_CACHED_PROJECT_BRANCHES: usize = 32;
+/// Projects whose workspace lookups are remembered — branch, diff listing,
+/// working tree. A window rarely has more than a handful open, and the diff
+/// and tree caches are invalidated on every refresh, so they hold one entry in
+/// practice. 8 is generous and caps the tree cache, the only large one, at a
+/// few hundred KB.
+const MAX_CACHED_WORKSPACES: usize = 8;
 const STREAM_CATCH_UP_FRAMES: usize = 18;
 const STREAM_MIN_GRAPHEMES_PER_FRAME: usize = 12;
 const STREAM_MAX_GRAPHEMES_PER_FRAME: usize = 256;
@@ -469,6 +473,15 @@ pub struct Waku {
     right_panel_file_tree_width: f32,
     right_panel_file_editors: HashMap<String, RightPanelFileEditor>,
     right_panel_diff_files: Vec<RightPanelDiffFile>,
+    /// The working tree as currently drawn. Held so a refresh can redraw the
+    /// previous listing instead of blanking the panel.
+    right_panel_working_tree: Vec<right_panel::WorkingTreeEntry>,
+    /// Working tree per project path. Walking it is filesystem I/O and must
+    /// never happen in a frame.
+    working_trees: QueryCache<PathBuf, Vec<right_panel::WorkingTreeEntry>>,
+    /// Set when a turn finishes; the drain loop drops the workspace queries,
+    /// since the event handler has no `Context` to refresh them itself.
+    workspace_queries_stale: bool,
     /// Diff listing per project path, so a slow refresh cannot land on top of a
     /// newer one.
     right_panel_diffs: QueryCache<PathBuf, Vec<RightPanelDiffFile>>,
@@ -668,7 +681,7 @@ impl Waku {
             .map(|project| project.path.clone());
         let branch = branch_path.as_deref().and_then(git_branch);
         // Seed the cache so returning to this project never re-runs `git`.
-        let mut branches = QueryCache::new(MAX_CACHED_PROJECT_BRANCHES);
+        let mut branches = QueryCache::new(MAX_CACHED_WORKSPACES);
         if let Some(path) = branch_path
             && let Query::Missing(token) = branches.read(&path)
         {
@@ -724,6 +737,10 @@ impl Waku {
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
                 if window.is_window_active() {
                     this.reload_clean_right_panel_file_editors(window, cx);
+                    // The working tree and branch may have moved while another
+                    // app had focus — a checkout in a terminal, an edit in an
+                    // editor. Coming back is the moment to re-check.
+                    this.invalidate_workspace_queries(cx);
                     if this.settings_page == Some(SettingsPage::ComputerUse) {
                         this.request_computer_permissions(false, cx);
                     }
@@ -777,6 +794,9 @@ impl Waku {
                                 || this.drain_computer_permission_events()
                             {
                                 cx.notify();
+                            }
+                            if std::mem::take(&mut this.workspace_queries_stale) {
+                                this.invalidate_workspace_queries(cx);
                             }
                         })
                         .is_err()
@@ -839,7 +859,10 @@ impl Waku {
                 right_panel_file_tree_width: DEFAULT_FILE_TREE_WIDTH,
                 right_panel_file_editors: HashMap::new(),
                 right_panel_diff_files: Vec::new(),
-                right_panel_diffs: QueryCache::new(MAX_CACHED_PROJECT_BRANCHES),
+                right_panel_working_tree: Vec::new(),
+                working_trees: QueryCache::new(MAX_CACHED_WORKSPACES),
+                workspace_queries_stale: false,
+                right_panel_diffs: QueryCache::new(MAX_CACHED_WORKSPACES),
                 right_panel_terminals: HashMap::new(),
                 settings_page: None,
                 header_drag_armed: false,

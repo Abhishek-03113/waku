@@ -308,6 +308,12 @@ impl Waku {
                 runtime.pending_permission = None;
                 runtime.pending_computer_approval = None;
                 runtime.driver.cancel_computer_use();
+                // The agent may have edited files or switched branches, so the
+                // cached view of the workspace is no longer trustworthy. This
+                // handler has no `Context`, so the drain loop acts on the flag.
+                if self.state.selected_session == Some(session_id) {
+                    self.workspace_queries_stale = true;
+                }
                 runtime.computer_use_previews.clear();
                 self.capture_latest_turn_checkpoint_for(session_id);
             }
