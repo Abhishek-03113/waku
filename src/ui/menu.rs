@@ -13,6 +13,9 @@
 //! - **Click outside** uses `on_mouse_down_out`, which tests the card's own
 //!   hitbox during the capture phase. An occluding full-window backdrop would
 //!   also work but has to guess the window size and swallows hover elsewhere.
+//!   A left click on the trigger is exempt — capture runs before the trigger's
+//!   bubble-phase toggle, so closing here would make the toggle see a closed
+//!   menu and reopen it.
 //! - **Escape** is an action bound in the menu's own key context, so it beats
 //!   the transcript's `escape` binding instead of also cancelling the turn.
 //! - **Focus** is taken two frames after opening. Deferred elements are not
@@ -228,6 +231,24 @@ impl ContextMenuHandle {
         }
     }
 
+    /// Dismiss for a mouse down outside the card, except a left click on the
+    /// trigger: the trigger's own bubble-phase handler is the toggle, and it
+    /// runs after this capture-phase listener — closing here first would make
+    /// it see a closed menu and reopen it. Context menus attach no trigger
+    /// probe, so their bounds stay `None` and every outside click dismisses.
+    fn dismiss_on_down_out(&self, event: &MouseDownEvent, window: &mut Window, cx: &mut App) {
+        let on_trigger = event.button == MouseButton::Left
+            && self
+                .trigger_bounds
+                .get()
+                .is_some_and(|bounds| bounds.contains(&event.position));
+        if on_trigger {
+            return;
+        }
+        self.close(window, cx);
+        window.refresh();
+    }
+
     fn open_at(&self, position: Point<Pixels>, window: &mut Window, cx: &mut App) {
         let was_open = {
             let mut state = self.state.borrow_mut();
@@ -428,6 +449,7 @@ where
             if toggle_handle.is_open() {
                 toggle_handle.close(window, cx);
                 window.refresh();
+                cx.stop_propagation();
                 return;
             }
             let anchor = toggle_handle
@@ -480,10 +502,7 @@ impl RenderOnce for PopoverCard {
             })
             .on_mouse_down_out({
                 let handle = self.handle.clone();
-                move |_, window, cx| {
-                    handle.close(window, cx);
-                    window.refresh();
-                }
+                move |event, window, cx| handle.dismiss_on_down_out(event, window, cx)
             })
             .child(body)
     }
@@ -573,10 +592,7 @@ impl RenderOnce for MenuCard {
             })
             .on_mouse_down_out({
                 let handle = self.handle.clone();
-                move |_, window, cx| {
-                    handle.close(window, cx);
-                    window.refresh();
-                }
+                move |event, window, cx| handle.dismiss_on_down_out(event, window, cx)
             })
             .min_w(px(176.0))
             .max_w(px(320.0))
@@ -780,7 +796,81 @@ fn on_menu_key(
 
 #[cfg(test)]
 mod tests {
+    use gpui::{Context, Modifiers, Render, TestAppContext, point};
+
     use super::*;
+
+    /// Which anchored surface the harness mounts; both share
+    /// `anchored_surface` but dismiss through different cards.
+    #[derive(Clone, Copy)]
+    enum Surface {
+        Popover,
+        Dropdown,
+    }
+
+    struct Harness {
+        handle: ContextMenuHandle,
+        surface: Surface,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let trigger = div().w(px(120.0)).h(px(32.0));
+            div().size_full().child(match self.surface {
+                Surface::Popover => popover(
+                    trigger,
+                    &self.handle,
+                    MenuAlign::BelowLeft,
+                    |_, _, _| div().w(px(200.0)).h(px(100.0)).into_any_element(),
+                ),
+                Surface::Dropdown => dropdown_menu(
+                    trigger,
+                    "dropdown",
+                    &self.handle,
+                    MenuAlign::BelowLeft,
+                    |_| vec![MenuItem::new("Entry", |_, _| {})],
+                ),
+            })
+        }
+    }
+
+    /// The trigger sits at the window origin, 120×32; the card hangs below it,
+    /// so a point inside the trigger is outside the card and vice versa.
+    fn assert_trigger_toggles(surface: Surface, cx: &mut TestAppContext) {
+        let handle = cx.update(ContextMenuHandle::new);
+        let harness = Harness {
+            handle: handle.clone(),
+            surface,
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| harness);
+        let on_trigger = point(px(10.0), px(10.0));
+        let outside = point(px(500.0), px(400.0));
+
+        cx.simulate_mouse_down(on_trigger, MouseButton::Left, Modifiers::none());
+        assert!(handle.is_open(), "first trigger click should open");
+
+        // The card's capture-phase `on_mouse_down_out` sees this click first;
+        // without the trigger exemption it closes the menu and the trigger's
+        // own handler reopens it.
+        cx.simulate_mouse_down(on_trigger, MouseButton::Left, Modifiers::none());
+        assert!(!handle.is_open(), "second trigger click should close");
+
+        cx.simulate_mouse_down(on_trigger, MouseButton::Left, Modifiers::none());
+        assert!(handle.is_open(), "trigger click after close should reopen");
+
+        cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::none());
+        assert!(!handle.is_open(), "click outside should dismiss");
+    }
+
+    #[gpui::test]
+    fn popover_trigger_toggles(cx: &mut TestAppContext) {
+        assert_trigger_toggles(Surface::Popover, cx);
+    }
+
+    #[gpui::test]
+    fn dropdown_trigger_toggles(cx: &mut TestAppContext) {
+        assert_trigger_toggles(Surface::Dropdown, cx);
+    }
 
     fn items() -> Vec<MenuItem> {
         vec![
