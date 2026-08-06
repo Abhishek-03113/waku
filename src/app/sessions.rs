@@ -110,6 +110,11 @@ impl Waku {
         }
         self.invalidate_checkpoint_refs();
 
+        // Screenshots the deleted session owned are now unreferenced. Sweeping
+        // walks the blob directory, so it stays off the UI thread.
+        let sweep = self.store.blob_sweep(&self.state);
+        cx.background_executor().spawn(async move { sweep() }).detach();
+
         if !was_selected {
             self.save();
             cx.notify();

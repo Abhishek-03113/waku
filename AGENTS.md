@@ -59,7 +59,7 @@
 
 ## Product reference
 
-- Use [T3 Code](https://github.com/pingdotgg/t3code) as a reference when a task
+- Use [T3 Code](https://github.com/pingdotgg/t3code) source code on github as a reference when a task
   concerns coding-agent workflow, information hierarchy, controls, tool
   activity, or transcript presentation and the comparison would materially
   clarify an ambiguous product decision, or when the user explicitly asks for

@@ -96,7 +96,7 @@ impl Waku {
 
     pub(super) fn save(&mut self) {
         self.last_stream_save = Instant::now();
-        if let Err(error) = self.store.save(&self.state) {
+        if let Err(error) = self.store.save(&mut self.state) {
             self.toast = Some(format!("Could not save local state: {error}"));
         } else {
             self.stream_state_dirty = false;

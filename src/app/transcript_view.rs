@@ -1383,9 +1383,15 @@ impl Waku {
 }
 
 fn render_activity_image(image_url: &str, activity_id: Uuid, image_index: usize) -> AnyElement {
-    let element = match decode_activity_image(image_url) {
-        Some(image) => img(image),
-        None => img(image_url.to_owned()),
+    // Stored blobs go through GPUI's asset cache, which reads and decodes the
+    // file once off the UI thread. Only legacy inline data URLs still pay a
+    // per-render base64 decode.
+    let element = match crate::blob_store::shared_path_for(image_url) {
+        Some(path) => img(path),
+        None => match decode_activity_image(image_url) {
+            Some(image) => img(image),
+            None => img(image_url.to_owned()),
+        },
     };
     element
         .id(SharedString::from(format!(

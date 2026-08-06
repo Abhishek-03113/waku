@@ -503,12 +503,20 @@ pub struct AgentSession {
     pub service_tier: Option<String>,
     pub status: SessionStatus,
     pub created_at: u64,
+    /// Any mutation, including title edits and truncation. Use
+    /// [`Self::last_reply_at`] for "when did the agent last respond".
     pub updated_at: u64,
+    /// Completion of the most recent assistant turn, whatever its outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reply_at: Option<u64>,
     #[serde(default)]
     pub provider_cursor: Option<ProviderResumeCursor>,
     /// Read-only compatibility field for v1 state files. New saves omit it.
     #[serde(default, skip_serializing)]
     pub provider_session_id: Option<String>,
+    /// Not stored in the session JSON — these are rows in the `messages`
+    /// table, reattached on load.
+    #[serde(default)]
     pub messages: Vec<Message>,
     #[serde(default)]
     pub transcript_blocks: Vec<TranscriptBlock>,
@@ -532,12 +540,28 @@ impl AgentSession {
             status: SessionStatus::Idle,
             created_at: now,
             updated_at: now,
+            last_reply_at: None,
             provider_cursor: None,
             provider_session_id: None,
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
             turns: Vec::new(),
         }
+    }
+
+    /// Derives [`Self::last_reply_at`] from the turn history when it is not
+    /// already known, so a session stored before the field existed still sorts
+    /// and displays correctly.
+    pub fn backfill_last_reply_at(&mut self) {
+        if self.last_reply_at.is_some() {
+            return;
+        }
+        self.last_reply_at = self
+            .turns
+            .iter()
+            .rev()
+            .find_map(|turn| turn.completed_at)
+            .filter(|_| self.has_started());
     }
 
     pub fn has_started(&self) -> bool {
@@ -716,9 +740,12 @@ impl AgentSession {
             .turns
             .last_mut()
             .filter(|turn| turn.status == TurnStatus::Running)?;
+        let completed_at = unix_time();
         turn.status = status;
-        turn.completed_at = Some(unix_time());
-        Some((turn.id, turn.turn_count))
+        turn.completed_at = Some(completed_at);
+        let result = (turn.id, turn.turn_count);
+        self.last_reply_at = Some(completed_at);
+        Some(result)
     }
 
     pub fn push_message(&mut self, role: MessageRole, content: impl Into<String>) -> Uuid {

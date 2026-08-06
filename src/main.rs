@@ -3,6 +3,7 @@
 mod amp_session;
 mod app;
 mod assets;
+mod blob_store;
 mod checkpoint;
 mod claude_session;
 mod command_env;
