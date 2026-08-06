@@ -138,9 +138,7 @@ impl AcpDriver {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| {
-                format!("failed to start {} in ACP mode", provider.display_name())
-            })?;
+            .with_context(|| format!("failed to start {} in ACP mode", provider.display_name()))?;
         let stdin = child
             .stdin
             .take()
@@ -743,7 +741,10 @@ fn request_permission(
                 .iter()
                 .filter_map(|option| {
                     let id = option.get("optionId").and_then(Value::as_str)?;
-                    let kind = option.get("kind").and_then(Value::as_str).unwrap_or_default();
+                    let kind = option
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     Some(PermissionOption {
                         id: id.to_owned(),
                         label: option
@@ -873,9 +874,8 @@ fn tool_activity(update: &Value, events: &Sender<DriverEvent>, state: &mut AcpSt
         .get("content")
         .filter(|value| !value.is_null())
         .or_else(|| update.get("rawOutput").filter(|value| !value.is_null()));
-    let item = activity::tool_activity(
-        id, kind, title, arguments, output, output, failed, complete,
-    );
+    let item =
+        activity::tool_activity(id, kind, title, arguments, output, output, failed, complete);
     let _ = events.send(DriverEvent::RichActivity(item));
 }
 
@@ -998,16 +998,12 @@ mod tests {
             seen.push(event);
         }
         assert!(matches!(&seen[0], DriverEvent::ReasoningDelta(text) if text == "thinking"));
-        assert!(
-            matches!(&seen[1], DriverEvent::RichActivity(item)
-                if item.kind == ActivityKind::Search && !item.complete)
-        );
-        assert!(
-            matches!(&seen[2], DriverEvent::RichActivity(item)
+        assert!(matches!(&seen[1], DriverEvent::RichActivity(item)
+                if item.kind == ActivityKind::Search && !item.complete));
+        assert!(matches!(&seen[2], DriverEvent::RichActivity(item)
                 if item.complete
                     && item.title == "fixture.txt"
-                    && item.output.as_deref().is_some_and(|output| output.contains("waku probe fixture")))
-        );
+                    && item.output.as_deref().is_some_and(|output| output.contains("waku probe fixture"))));
         assert!(matches!(&seen[3], DriverEvent::TextDelta(text) if text == "OK"));
         assert_eq!(seen.len(), 4, "control traffic leaked into the transcript");
     }

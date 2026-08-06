@@ -184,12 +184,14 @@ pub enum ComposerEvent {
 }
 
 /// What the field is for. The difference is small but load-bearing: Enter
-/// submits a prompt and inserts a newline in code.
+/// submits a prompt, inserts a newline in code, and in a search field submits
+/// while keeping the query.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FieldMode {
     #[default]
     Composer,
     Code,
+    Search,
 }
 
 pub struct ComposerInput {
@@ -201,6 +203,13 @@ pub struct ComposerInput {
     /// Cached token spans over `content`, as absolute byte ranges. Recomputed
     /// only when the content changes, so painting a large file is free.
     highlight: Vec<(Range<usize>, TokenClass)>,
+    /// Find-in-file match ranges painted as washes under the text, sorted and
+    /// non-overlapping. Owned by the find bar, which recomputes them whenever
+    /// the content or the query changes; the field only paints them.
+    search_matches: Vec<Range<usize>>,
+    /// Index into `search_matches` of the match navigation is on, painted
+    /// stronger than its siblings.
+    active_search_match: Option<usize>,
     content: SharedString,
     placeholder: SharedString,
     selected_range: Range<usize>,
@@ -240,6 +249,8 @@ impl ComposerInput {
             read_only: false,
             language: None,
             highlight: Vec::new(),
+            search_matches: Vec::new(),
+            active_search_match: None,
             content: "".into(),
             placeholder: "Do anything…".into(),
             selected_range: 0..0,
@@ -321,6 +332,13 @@ impl ComposerInput {
         self
     }
 
+    /// Turn the field into a search box: Enter submits without clearing, so
+    /// "find next" keeps the query, and pasted line breaks become spaces.
+    pub fn search_field(mut self) -> Self {
+        self.mode = FieldMode::Search;
+        self
+    }
+
     /// Reject edits while still allowing selection and copy.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
@@ -390,6 +408,62 @@ impl ComposerInput {
         self.pause_blink_cursor(cx);
         cx.emit(ComposerEvent::Edited);
         cx.notify();
+    }
+
+    /// Replace the painted find-match washes. Ranges must be sorted and
+    /// non-overlapping; `active` indexes into `matches`. Purely visual — the
+    /// content is untouched, so no [`ComposerEvent::Edited`] is emitted.
+    pub fn set_search_matches(
+        &mut self,
+        matches: Vec<Range<usize>>,
+        active: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_matches == matches && self.active_search_match == active {
+            return;
+        }
+        self.search_matches = matches;
+        self.active_search_match = active;
+        cx.notify();
+    }
+
+    pub fn selected_range(&self) -> Range<usize> {
+        self.selected_range.clone()
+    }
+
+    /// Move the selection to `range`, as find-next does when it lands on a
+    /// match. Ignored unless the range sits on character boundaries, so a
+    /// selection computed against stale content cannot split a code point.
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        if range.start > range.end
+            || range.end > self.content.len()
+            || !self.content.is_char_boundary(range.start)
+            || !self.content.is_char_boundary(range.end)
+        {
+            return;
+        }
+        self.selected_range = range;
+        self.selection_reversed = false;
+        self.pause_blink_cursor(cx);
+        cx.notify();
+    }
+
+    /// Select the whole content, the way reopening a find bar re-arms its
+    /// query for retyping. Unlike the `SelectAll` action this needs no window.
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        self.pause_blink_cursor(cx);
+        cx.notify();
+    }
+
+    /// Where `offset` sits in the window as of the last paint, with the line
+    /// height, so a find bar can scroll a match into view. `None` until the
+    /// field has painted once.
+    pub fn position_for_offset(&self, offset: usize) -> Option<(Point<Pixels>, Pixels)> {
+        let layout = self.last_layout.as_ref()?;
+        let position = layout.position_for_index(offset.min(self.content.len()))?;
+        Some((position, layout.line_height()))
     }
 
     /// Height of each logical line as laid out, so a gutter can put one number
@@ -601,14 +675,23 @@ impl ComposerInput {
     }
 
     fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == FieldMode::Code {
-            self.replace_text_in_range(None, "\n", window, cx);
-            return;
-        }
-        let value = self.content.trim().to_owned();
-        if !value.is_empty() {
-            cx.emit(ComposerEvent::Submit(value));
-            self.clear(cx);
+        match self.mode {
+            FieldMode::Code => {
+                self.replace_text_in_range(None, "\n", window, cx);
+            }
+            // A search query survives its own submission — Enter means "find
+            // next", not "send" — and stays untrimmed because leading or
+            // trailing spaces are part of what is searched for.
+            FieldMode::Search => {
+                cx.emit(ComposerEvent::Submit(self.content.to_string()));
+            }
+            FieldMode::Composer => {
+                let value = self.content.trim().to_owned();
+                if !value.is_empty() {
+                    cx.emit(ComposerEvent::Submit(value));
+                    self.clear(cx);
+                }
+            }
         }
     }
 
@@ -617,8 +700,9 @@ impl ComposerInput {
             return;
         };
         let text = match self.mode {
-            // A composer is one prompt, so pasted line breaks become spaces.
-            FieldMode::Composer => text.replace(['\n', '\r'], " "),
+            // A composer is one prompt — and a search box one query — so
+            // pasted line breaks become spaces.
+            FieldMode::Composer | FieldMode::Search => text.replace(['\n', '\r'], " "),
             FieldMode::Code => text.replace('\r', ""),
         };
         self.replace_text_in_range(None, &text, window, cx);
@@ -981,6 +1065,28 @@ struct PrepaintState {
     cursor: Option<PaintQuad>,
 }
 
+/// Find-match washes layered into [`input_text_runs`]: every match gets
+/// `match_color`, and the one navigation is on gets `active_color`, which also
+/// wins over the selection wash so the current match keeps its identity while
+/// selected — the way a find widget conventionally paints it.
+struct SearchPaint<'a> {
+    matches: &'a [Range<usize>],
+    active: Option<&'a Range<usize>>,
+    match_color: Hsla,
+    active_color: Hsla,
+}
+
+impl SearchPaint<'static> {
+    fn none() -> Self {
+        Self {
+            matches: &[],
+            active: None,
+            match_color: gpui::transparent_black(),
+            active_color: gpui::transparent_black(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn input_text_runs(
     display_len: usize,
@@ -990,6 +1096,7 @@ fn input_text_runs(
     selection_color: Hsla,
     highlight: &[(Range<usize>, TokenClass)],
     token_color: impl Fn(TokenClass) -> Hsla,
+    search: SearchPaint,
 ) -> Vec<TextRun> {
     let mut boundaries = vec![0, display_len];
     for range in [selected_range, marked_range].into_iter().flatten() {
@@ -1000,24 +1107,51 @@ fn input_text_runs(
         boundaries.push(range.start.min(display_len));
         boundaries.push(range.end.min(display_len));
     }
+    for range in search.matches {
+        boundaries.push(range.start.min(display_len));
+        boundaries.push(range.end.min(display_len));
+    }
     boundaries.sort_unstable();
     boundaries.dedup();
+
+    // Token and match lists are sorted and non-overlapping, and every one of
+    // their edges is a boundary, so each window has exactly one candidate —
+    // found by binary search, keeping this linear-ish in the token count
+    // rather than quadratic.
+    let covering_match = |start: usize, end: usize| -> bool {
+        let index = search.matches.partition_point(|range| range.end <= start);
+        search
+            .matches
+            .get(index)
+            .is_some_and(|range| range.start <= start && range.end >= end)
+    };
 
     boundaries
         .windows(2)
         .filter_map(|boundary| {
             let start = boundary[0];
             let end = boundary[1];
+            let token_index = highlight.partition_point(|(range, _)| range.end <= start);
             let color = highlight
-                .iter()
-                .find(|(range, _)| range.start <= start && range.end >= end)
+                .get(token_index)
+                .filter(|(range, _)| range.start <= start && range.end >= end)
                 .map_or(base_run.color, |(_, class)| token_color(*class));
+            let background_color = if search
+                .active
+                .is_some_and(|range| range.start <= start && range.end >= end)
+            {
+                Some(search.active_color)
+            } else if selected_range.is_some_and(|range| range.start < end && range.end > start) {
+                Some(selection_color)
+            } else if covering_match(start, end) {
+                Some(search.match_color)
+            } else {
+                None
+            };
             (start < end).then(|| TextRun {
                 len: end - start,
                 color,
-                background_color: selected_range
-                    .filter(|range| range.start < end && range.end > start)
-                    .map(|_| selection_color),
+                background_color,
                 underline: marked_range
                     .filter(|range| range.start < end && range.end > start)
                     .map(|_| UnderlineStyle {
@@ -1082,6 +1216,18 @@ impl Element for InputElement {
             strikethrough: None,
         };
         let palette = crate::md::render::Palette::from_theme(&theme);
+        let search = if content_is_empty {
+            SearchPaint::none()
+        } else {
+            SearchPaint {
+                matches: &input.search_matches,
+                active: input
+                    .active_search_match
+                    .and_then(|index| input.search_matches.get(index)),
+                match_color: theme.warning.opacity(0.22),
+                active_color: theme.warning.opacity(0.5),
+            }
+        };
         let runs = input_text_runs(
             display_text.len(),
             base_run,
@@ -1094,6 +1240,7 @@ impl Element for InputElement {
                 &input.highlight
             },
             |class| palette.token(class),
+            search,
         );
         let mut text = StyledText::new(display_text).with_runs(runs);
         let (layout_id, text_layout_state) = text.request_layout(id, inspector_id, window, cx);
@@ -1315,8 +1462,8 @@ mod tests {
 
     use super::TokenClass;
     use super::{
-        cursor_should_be_visible, input_text_runs, next_word_boundary, previous_word_boundary,
-        word_range_at,
+        SearchPaint, cursor_should_be_visible, input_text_runs, next_word_boundary,
+        previous_word_boundary, word_range_at,
     };
 
     #[test]
@@ -1381,6 +1528,7 @@ mod tests {
                 TokenClass::Keyword => keyword,
                 _ => plain,
             },
+            SearchPaint::none(),
         );
 
         assert_eq!(
@@ -1420,6 +1568,7 @@ mod tests {
             hsla(0.0, 0.0, 1.0, 0.18),
             &[],
             |_| hsla(0.0, 0.0, 1.0, 1.0),
+            SearchPaint::none(),
         );
 
         assert_eq!(
@@ -1438,5 +1587,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             [false, false, true, false, false]
         );
+    }
+
+    /// Find washes tile with everything else, and the active match keeps its
+    /// own colour even while it is also the selection — otherwise navigating
+    /// (which selects the match) would make the current match look like any
+    /// drag-selection.
+    #[test]
+    fn search_match_washes_layer_under_selection_except_the_active_one() {
+        let plain = hsla(0.0, 0.0, 1.0, 1.0);
+        let selection_color = hsla(0.6, 1.0, 0.5, 0.4);
+        let match_color = hsla(0.1, 1.0, 0.5, 0.2);
+        let active_color = hsla(0.1, 1.0, 0.5, 0.5);
+        let matches = vec![2..4, 8..10, 14..16];
+        let active = 8..10;
+        // Selection covers the active match exactly, as after find-next.
+        let selection = 8..10;
+        let runs = input_text_runs(
+            20,
+            TextRun {
+                len: 20,
+                font: font(".SystemUIFont"),
+                color: plain,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            },
+            Some(&selection),
+            None,
+            selection_color,
+            &[],
+            |_| plain,
+            SearchPaint {
+                matches: &matches,
+                active: Some(&active),
+                match_color,
+                active_color,
+            },
+        );
+
+        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), 20);
+        let background_at = |offset: usize| {
+            let mut cursor = 0;
+            runs.iter()
+                .find_map(|run| {
+                    let range = cursor..cursor + run.len;
+                    cursor += run.len;
+                    range.contains(&offset).then_some(run.background_color)
+                })
+                .unwrap()
+        };
+        assert_eq!(background_at(2), Some(match_color));
+        assert_eq!(background_at(8), Some(active_color));
+        assert_eq!(background_at(14), Some(match_color));
+        assert_eq!(background_at(6), None);
     }
 }

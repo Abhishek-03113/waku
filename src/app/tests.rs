@@ -1,3 +1,4 @@
+use super::composer::next_picker_highlight;
 use super::{
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
     TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
@@ -7,12 +8,10 @@ use super::{
     maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
     navigation_rail_height, navigation_rail_scale, navigation_rail_tick_count,
     navigation_rail_tick_turn, navigation_rail_turn_tick, pop_stream_chunk, session_is_reapable,
-    should_show_navigation_rail,
-    take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
-    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
-    widened_panel_width_for_file_editor,
+    should_show_navigation_rail, take_stream_prefix, transcript_anchor_end_space,
+    transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
+    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
 };
-use super::composer::next_picker_highlight;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
     ReasoningBlock, SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus,

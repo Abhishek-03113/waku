@@ -285,9 +285,8 @@ impl Render for ConversationNavigationRail {
         }
         let transition_from = self.transition_from;
         let tick_for_message = |message_id: Option<Uuid>| {
-            message_id.and_then(|message_id| {
-                tick_message_ids.iter().position(|&id| id == message_id)
-            })
+            message_id
+                .and_then(|message_id| tick_message_ids.iter().position(|&id| id == message_id))
         };
         let from_active_tick_index = tick_for_message(transition_from.active_turn);
         let from_emphasized_tick_index = tick_for_message(transition_from.emphasized_turn);

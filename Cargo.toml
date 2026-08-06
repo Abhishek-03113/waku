@@ -23,6 +23,7 @@ toml = "0.8"
 unicode-segmentation = "1.12"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 pulldown-cmark = "0.13"
+regex = "1"
 smol = "2"
 ropey = "=2.0.0-beta.1"
 futures-lite = "2"

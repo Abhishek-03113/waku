@@ -45,10 +45,10 @@ use crate::ui::menu::{
 use crate::ui::scrollbar::{self, ScrollbarState};
 use crate::ui::tooltip::Tooltip;
 
-use crate::query::{Query, QueryCache};
 use crate::persistence::{
     DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH, PersistedState, StateStore,
 };
+use crate::query::{Query, QueryCache};
 use crate::terminal::TerminalView;
 use crate::theme::{Theme, ThemePreference};
 use crate::ui::{
@@ -56,9 +56,10 @@ use crate::ui::{
     provider_icon, status_color, status_label,
 };
 use crate::{
-    CancelTurn, CloseWindow, CopySelection, FocusComposer, NavigateBack, NavigateForward,
-    NewSession, OpenSettings, SaveFile, ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel,
-    ToggleSidebar,
+    CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
+    NavigateBack, NavigateForward, NewSession, OpenFind, OpenFindReplace, OpenSettings,
+    ReplaceAllMatches, SaveFile, ToggleFindCaseSensitive, ToggleFindRegex, ToggleFindWholeWord,
+    ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel, ToggleSidebar,
 };
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
@@ -529,6 +530,10 @@ pub struct Waku {
     right_panel_files_selected_path: Option<String>,
     right_panel_file_tree_width: f32,
     right_panel_file_editors: HashMap<String, RightPanelFileEditor>,
+    /// Find-and-replace over the visible file editor. Created on first
+    /// `cmd-f` and kept for the window's lifetime so the query and toggles
+    /// survive closing the bar; `open` inside says whether it is showing.
+    file_search: Option<file_search::FileSearch>,
     right_panel_diff_files: Vec<RightPanelDiffFile>,
     /// The working tree as currently drawn. Held so a refresh can redraw the
     /// previous listing instead of blanking the panel.
@@ -627,6 +632,7 @@ pub struct Waku {
 mod autocomplete;
 mod components;
 mod composer;
+mod file_search;
 mod render;
 mod right_panel;
 mod runtime;
@@ -954,6 +960,7 @@ impl Waku {
                 right_panel_files_selected_path: None,
                 right_panel_file_tree_width: DEFAULT_FILE_TREE_WIDTH,
                 right_panel_file_editors: HashMap::new(),
+                file_search: None,
                 right_panel_diff_files: Vec::new(),
                 right_panel_working_tree: Vec::new(),
                 working_trees: QueryCache::new(MAX_CACHED_WORKSPACES),

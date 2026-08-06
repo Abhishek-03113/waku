@@ -2,8 +2,7 @@ use super::*;
 
 impl Waku {
     pub(super) fn finish_streaming_assistant(&mut self, session_id: Uuid) {
-        if let Some(session) = self.state.session_mut(session_id)
-        {
+        if let Some(session) = self.state.session_mut(session_id) {
             for message in &mut session.messages {
                 if message.role == MessageRole::Assistant && message.streaming {
                     message.streaming = false;
@@ -38,8 +37,7 @@ impl Waku {
         if !continuing {
             self.finish_streaming_assistant(session_id);
         }
-        if let Some(session) = self.state.session_mut(session_id)
-        {
+        if let Some(session) = self.state.session_mut(session_id) {
             if continuing
                 && let Some(TranscriptBlock {
                     content: TranscriptBlockContent::Reasoning(reasoning),
@@ -75,8 +73,7 @@ impl Waku {
         }
 
         let continuing = runtime.stream_phase == Some(StreamPhase::Activity);
-        if let Some(session) = self.state.session_mut(session_id)
-        {
+        if let Some(session) = self.state.session_mut(session_id) {
             for block in session.transcript_blocks.iter_mut().rev() {
                 let TranscriptBlockContent::Activities(activities) = &mut block.content else {
                     continue;
@@ -135,8 +132,7 @@ impl Waku {
     }
 
     pub(super) fn complete_turn_blocks(&mut self, session_id: Uuid) {
-        if let Some(session) = self.state.session_mut(session_id)
-        {
+        if let Some(session) = self.state.session_mut(session_id) {
             for block in &mut session.transcript_blocks {
                 if let TranscriptBlockContent::Activities(activities) = &mut block.content {
                     for activity in activities {
@@ -187,8 +183,7 @@ impl Waku {
         match event {
             DriverEvent::Connected { provider_cursor } => {
                 runtime.last_driver_error = None;
-                if let Some(session) = self.state.session_mut(session_id)
-                {
+                if let Some(session) = self.state.session_mut(session_id) {
                     if let Some(ProviderResumeCursor::Claude {
                         resume_at: Some(message_id),
                         ..
@@ -266,8 +261,7 @@ impl Waku {
                         detail,
                         options,
                     });
-                    if let Some(session) = self.state.session_mut(session_id)
-                    {
+                    if let Some(session) = self.state.session_mut(session_id) {
                         session.status = SessionStatus::Waiting;
                     }
                 }
@@ -293,8 +287,7 @@ impl Waku {
                 self.complete_turn_blocks(session_id);
                 runtime.stream_phase = None;
                 let needs_fallback = !self.turn_has_assistant_message(session_id);
-                if let Some(session) = self.state.session_mut(session_id)
-                {
+                if let Some(session) = self.state.session_mut(session_id) {
                     session.status = if success {
                         SessionStatus::Idle
                     } else {

@@ -6071,6 +6071,7 @@ dependencies = [
  "parking_lot",
  "pulldown-cmark",
  "raw-window-handle",
+ "regex",
  "ropey",
  "rquickjs",
  "rusqlite",

@@ -212,7 +212,9 @@ impl Waku {
         // genuinely unreferenced. It reads the database and walks the blob
         // directory, so it stays off the UI thread.
         let sweep = self.store.blob_sweep();
-        cx.background_executor().spawn(async move { sweep() }).detach();
+        cx.background_executor()
+            .spawn(async move { sweep() })
+            .detach();
     }
 
     pub(super) fn new_session_action(
@@ -744,8 +746,7 @@ impl Waku {
         }
         if has_active_turn {
             let needs_fallback = !self.turn_has_assistant_message(session_id);
-            if let Some(session) = self.state.session_mut(session_id)
-            {
+            if let Some(session) = self.state.session_mut(session_id) {
                 session.status = SessionStatus::Idle;
                 if needs_fallback {
                     session.push_message(MessageRole::Assistant, "Stopped.");
@@ -832,8 +833,7 @@ impl Waku {
             }
             runtime.driver.run_computer_tool(pending.request);
         }
-        if let Some(session) = self.state.session_mut(session_id)
-        {
+        if let Some(session) = self.state.session_mut(session_id) {
             session.status = SessionStatus::Working;
         }
         self.runtimes.insert(session_id, runtime);

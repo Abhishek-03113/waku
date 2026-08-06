@@ -140,42 +140,43 @@ impl PiDriver {
         let reader_pending = pending.clone();
         let reader_commands = commands.clone();
         let reader_events = events.clone();
-        let reader_thread = thread::Builder::new()
-            .name("waku-pi-reader".into())
-            .spawn(move || {
-                let mut stream_state = PiStreamState::default();
-                for line in BufReader::new(stdout).lines() {
-                    match line {
-                        Ok(line) if !line.trim().is_empty() => {
-                            match serde_json::from_str::<Value>(&line) {
-                                Ok(value) => handle_pi_message(
-                                    value,
-                                    &reader_pending,
-                                    &reader_commands,
-                                    &reader_events,
-                                    &mut stream_state,
-                                ),
-                                Err(error) => {
-                                    let _ = reader_events.send(DriverEvent::Error(format!(
-                                        "Pi sent invalid JSON: {error}"
-                                    )));
+        let reader_thread =
+            thread::Builder::new()
+                .name("waku-pi-reader".into())
+                .spawn(move || {
+                    let mut stream_state = PiStreamState::default();
+                    for line in BufReader::new(stdout).lines() {
+                        match line {
+                            Ok(line) if !line.trim().is_empty() => {
+                                match serde_json::from_str::<Value>(&line) {
+                                    Ok(value) => handle_pi_message(
+                                        value,
+                                        &reader_pending,
+                                        &reader_commands,
+                                        &reader_events,
+                                        &mut stream_state,
+                                    ),
+                                    Err(error) => {
+                                        let _ = reader_events.send(DriverEvent::Error(format!(
+                                            "Pi sent invalid JSON: {error}"
+                                        )));
+                                    }
                                 }
                             }
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            let _ = reader_events.send(DriverEvent::Error(format!(
-                                "Pi transport read failed: {error}"
-                            )));
-                            break;
+                            Ok(_) => {}
+                            Err(error) => {
+                                let _ = reader_events.send(DriverEvent::Error(format!(
+                                    "Pi transport read failed: {error}"
+                                )));
+                                break;
+                            }
                         }
                     }
-                }
-                // Unblock anything waiting on an RPC reply immediately; the
-                // process thread owns the `ProcessExited` announcement so a
-                // non-zero exit can be reported before the runtime is torn down.
-                fail_pending(&reader_pending, "Pi RPC process exited");
-            })?;
+                    // Unblock anything waiting on an RPC reply immediately; the
+                    // process thread owns the `ProcessExited` announcement so a
+                    // non-zero exit can be reported before the runtime is torn down.
+                    fail_pending(&reader_pending, "Pi RPC process exited");
+                })?;
 
         let writer_pending = pending;
         let writer_events = events.clone();
@@ -312,9 +313,9 @@ impl PiDriver {
                                                 "modelId": model_id
                                             }),
                                         ) {
-                                            let _ = writer_events.send(DriverEvent::Error(format!(
-                                                "Could not switch the Pi model: {error}"
-                                            )));
+                                            let _ = writer_events.send(DriverEvent::Error(
+                                                format!("Could not switch the Pi model: {error}"),
+                                            ));
                                         }
                                     }
                                     Ok(None) => {}
@@ -391,17 +392,18 @@ impl PiDriver {
         let last_visible_stderr = Arc::new(Mutex::new(None::<String>));
         let stderr_last_error = last_visible_stderr.clone();
         let stderr_events = events.clone();
-        let stderr_thread = thread::Builder::new()
-            .name("waku-pi-stderr".into())
-            .spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    if line.to_ascii_lowercase().contains("error") {
-                        let error = format!("Pi: {}", line.trim());
-                        *stderr_last_error.lock() = Some(error.clone());
-                        let _ = stderr_events.send(DriverEvent::Error(error));
+        let stderr_thread =
+            thread::Builder::new()
+                .name("waku-pi-stderr".into())
+                .spawn(move || {
+                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        if line.to_ascii_lowercase().contains("error") {
+                            let error = format!("Pi: {}", line.trim());
+                            *stderr_last_error.lock() = Some(error.clone());
+                            let _ = stderr_events.send(DriverEvent::Error(error));
+                        }
                     }
-                }
-            })?;
+                })?;
 
         // Nothing signals or kills the Pi process: it exits when the writer
         // thread drops its stdin. Something still has to reap it, or every
@@ -414,8 +416,8 @@ impl PiDriver {
                 let _ = stderr_thread.join();
                 match status {
                     Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
-                        let _ = events
-                            .send(DriverEvent::Error(format!("Pi RPC exited with {status}")));
+                        let _ =
+                            events.send(DriverEvent::Error(format!("Pi RPC exited with {status}")));
                     }
                     Err(error) => {
                         let _ = events.send(DriverEvent::Error(format!(

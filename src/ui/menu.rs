@@ -35,7 +35,12 @@ use gpui::{
 
 actions!(
     waku_menu,
-    [DismissMenu, SelectNextEntry, SelectPreviousEntry, ConfirmEntry]
+    [
+        DismissMenu,
+        SelectNextEntry,
+        SelectPreviousEntry,
+        ConfirmEntry
+    ]
 );
 
 /// Key context the open menu declares, and the scope its bindings live in.
@@ -419,13 +424,19 @@ where
     E: ParentElement + Styled + InteractiveElement + IntoElement + 'static,
 {
     let content = Rc::new(content);
-    anchored_surface(trigger, handle, align, SurfaceFocus::Content, move |handle| {
-        PopoverCard {
-            handle: handle.clone(),
-            content: content.clone(),
-        }
-        .into_any_element()
-    })
+    anchored_surface(
+        trigger,
+        handle,
+        align,
+        SurfaceFocus::Content,
+        move |handle| {
+            PopoverCard {
+                handle: handle.clone(),
+                content: content.clone(),
+            }
+            .into_any_element()
+        },
+    )
 }
 
 /// Toggle a [`popover`] as if its trigger were clicked, for keyboard shortcuts.
@@ -844,12 +855,11 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             let trigger = div().w(px(120.0)).h(px(32.0));
             div().size_full().child(match self.surface {
-                Surface::Popover => popover(
-                    trigger,
-                    &self.handle,
-                    MenuAlign::BelowLeft,
-                    |_, _, _| div().w(px(200.0)).h(px(100.0)).into_any_element(),
-                ),
+                Surface::Popover => {
+                    popover(trigger, &self.handle, MenuAlign::BelowLeft, |_, _, _| {
+                        div().w(px(200.0)).h(px(100.0)).into_any_element()
+                    })
+                }
                 Surface::Dropdown => dropdown_menu(
                     trigger,
                     "dropdown",

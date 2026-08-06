@@ -54,7 +54,8 @@ impl Waku {
                 })
                 .unwrap_or_default();
             *self.transcript_navigation_turns.borrow_mut() = Rc::new(turns);
-            self.transcript_navigation_turns_fingerprint.set(fingerprint);
+            self.transcript_navigation_turns_fingerprint
+                .set(fingerprint);
         }
         self.transcript_navigation_turns.borrow().clone()
     }

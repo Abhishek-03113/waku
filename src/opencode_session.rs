@@ -118,7 +118,12 @@ impl OpenCodeServer {
         }
     }
 
-    pub(crate) fn request(&self, method: &str, path: &str, body: Option<&Value>) -> anyhow::Result<Value> {
+    pub(crate) fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> anyhow::Result<Value> {
         let body = body.map(serde_json::to_vec).transpose()?;
         let response = http_request(self.port, method, path, body.as_deref())?;
         serde_json::from_slice(&response)

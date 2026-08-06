@@ -24,9 +24,7 @@ use serde_json::{Value, json};
 
 use super::activity;
 use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
-use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode,
-};
+use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
 
 enum CommandMessage {
     Prompt(String),
@@ -73,10 +71,7 @@ pub(super) fn amp_args(
 }
 
 impl AmpDriver {
-    pub fn start(
-        options: DriverStartOptions,
-        events: Sender<DriverEvent>,
-    ) -> anyhow::Result<Self> {
+    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
             cwd,
@@ -345,8 +340,7 @@ fn handle_message(
                             }
                         }
                         Some("tool_use") => {
-                            let id =
-                                block.get("id").and_then(Value::as_str).map(str::to_owned);
+                            let id = block.get("id").and_then(Value::as_str).map(str::to_owned);
                             let wire_title = block
                                 .get("name")
                                 .and_then(Value::as_str)
@@ -377,7 +371,10 @@ fn handle_message(
             }
             // Amp emits no `result`: the turn is over when the assistant stops
             // for its own reasons rather than to call a tool.
-            if value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
+            if value
+                .pointer("/message/stop_reason")
+                .and_then(Value::as_str)
+                == Some("end_turn")
                 && std::mem::take(&mut *turn_active.lock())
             {
                 let _ = events.send(DriverEvent::TurnFinished {
@@ -541,14 +538,10 @@ mod tests {
             } if thread_id == "T-abc"
         ));
         assert!(matches!(&seen[1], DriverEvent::ReasoningDelta(t) if t == "pondering"));
-        assert!(
-            matches!(&seen[2], DriverEvent::RichActivity(item)
-                if item.kind == ActivityKind::Command && !item.complete)
-        );
-        assert!(
-            matches!(&seen[3], DriverEvent::RichActivity(item)
-                if item.complete && item.output.as_deref() == Some("a.txt"))
-        );
+        assert!(matches!(&seen[2], DriverEvent::RichActivity(item)
+                if item.kind == ActivityKind::Command && !item.complete));
+        assert!(matches!(&seen[3], DriverEvent::RichActivity(item)
+                if item.complete && item.output.as_deref() == Some("a.txt")));
         assert!(matches!(&seen[4], DriverEvent::TextDelta(t) if t == "BANANA."));
         assert!(matches!(
             &seen[5],
