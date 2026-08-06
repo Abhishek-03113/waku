@@ -314,6 +314,12 @@ impl ComposerInput {
         cx.notify();
     }
 
+    /// Whether this field's right-click menu is open. The browser surface
+    /// treats that as an overlay above its native webview.
+    pub fn context_menu_open(&self) -> bool {
+        self.context_menu.is_open()
+    }
+
     fn context_menu_preserves_visual_focus(&self) -> bool {
         self.external_context_menu_focus_holds > 0
     }

@@ -386,6 +386,13 @@ impl RightPanelSurface {
         }
     }
 
+    fn browser_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Browser(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     fn label(&self) -> &str {
         match self {
             Self::Browser(_) => "Browser",
@@ -934,8 +941,10 @@ impl Waku {
             self.refresh_right_panel_working_tree(cx);
         }
         self.ensure_right_panel_terminals(cx);
+        self.retain_right_panel_browsers();
         if self.right_panel_visible {
             self.request_active_terminal_focus();
+            self.request_active_browser_focus();
         }
     }
 
@@ -948,12 +957,13 @@ impl Waku {
             self.right_panel_session_states.remove(&session_id)
         };
         if let Some(state) = state {
-            for terminal_id in state
-                .surfaces
-                .iter()
-                .filter_map(RightPanelSurface::terminal_id)
-            {
-                self.right_panel_terminals.remove(&terminal_id);
+            for surface in &state.surfaces {
+                if let Some(terminal_id) = surface.terminal_id() {
+                    self.right_panel_terminals.remove(&terminal_id);
+                }
+                if let Some(browser_id) = surface.browser_id() {
+                    self.right_panel_browsers.remove(&browser_id);
+                }
             }
         }
     }
@@ -1003,6 +1013,12 @@ impl Waku {
         self.right_panel_pending_terminal_focus = self
             .active_right_panel_surface()
             .and_then(RightPanelSurface::terminal_id);
+    }
+
+    pub(super) fn request_active_browser_focus(&mut self) {
+        self.right_panel_pending_browser_focus = self
+            .active_right_panel_surface()
+            .and_then(RightPanelSurface::browser_id);
     }
 
     /// The file the active editor surface is showing, whether via a File tab
@@ -1059,6 +1075,8 @@ impl Waku {
         if let Some(terminal_id) = surface.terminal_id() {
             self.ensure_right_panel_terminal(terminal_id, cx);
         }
+        // Browser views are created on the surface's first render, which has
+        // the `Window` their webview must attach to.
         let index =
             reusable_surface_index(&self.right_panel_surfaces, &surface).unwrap_or_else(|| {
                 self.right_panel_surfaces.push(surface);
@@ -1067,6 +1085,7 @@ impl Waku {
         self.right_panel_active_surface = Some(index);
         self.reveal_right_panel_tab(index);
         self.request_active_terminal_focus();
+        self.request_active_browser_focus();
         self.set_right_panel_visible(true, cx);
         cx.notify();
     }
@@ -1134,6 +1153,9 @@ impl Waku {
         if let Some(terminal_id) = self.right_panel_surfaces[index].terminal_id() {
             self.right_panel_terminals.remove(&terminal_id);
         }
+        if let Some(browser_id) = self.right_panel_surfaces[index].browser_id() {
+            self.right_panel_browsers.remove(&browser_id);
+        }
         self.right_panel_surfaces.remove(index);
         self.right_panel_active_surface = if self.right_panel_surfaces.is_empty() {
             None
@@ -1148,9 +1170,11 @@ impl Waku {
         if let Some(active) = self.right_panel_active_surface {
             self.reveal_right_panel_tab(active);
             self.request_active_terminal_focus();
+            self.request_active_browser_focus();
         } else {
             self.right_panel_pending_tab_reveal = None;
             self.right_panel_pending_terminal_focus = None;
+            self.right_panel_pending_browser_focus = None;
         }
         cx.notify();
     }
@@ -1240,9 +1264,17 @@ impl Waku {
             Some(RightPanelSurface::File(path)) => self
                 .render_right_panel_file(path, width, window, cx)
                 .into_any_element(),
-            Some(surface) => self
-                .render_right_panel_placeholder(surface, cx)
-                .into_any_element(),
+            Some(RightPanelSurface::Browser(browser_id)) => {
+                let browser = self.ensure_right_panel_browser(browser_id, window, cx);
+                if self
+                    .right_panel_pending_browser_focus
+                    .take_if(|pending| *pending == browser_id)
+                    .is_some()
+                {
+                    browser.update(cx, |view, cx| view.focus_default(window, cx));
+                }
+                browser.into_any_element()
+            }
         };
 
         div()
@@ -1264,6 +1296,79 @@ impl Waku {
                 PanelResizeTarget::RightPanel,
                 cx,
             ))
+    }
+
+    fn ensure_right_panel_browser(
+        &mut self,
+        browser_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::browser::BrowserView> {
+        if let Some(browser) = self.right_panel_browsers.get(&browser_id) {
+            return browser.clone();
+        }
+        let browser = cx.new(|cx| crate::browser::BrowserView::new(window, cx));
+        // Tab titles and toolbar state live on the browser entity; the panel
+        // chrome re-renders when they move.
+        cx.observe(&browser, |_, _, cx| cx.notify()).detach();
+        self.right_panel_browsers.insert(browser_id, browser.clone());
+        browser
+    }
+
+    /// Drop browser views whose tab no longer exists in any session.
+    pub(super) fn retain_right_panel_browsers(&mut self) {
+        let retained_browser_ids = self
+            .right_panel_surfaces
+            .iter()
+            .filter_map(RightPanelSurface::browser_id)
+            .chain(self.right_panel_session_states.values().flat_map(|state| {
+                state
+                    .surfaces
+                    .iter()
+                    .filter_map(RightPanelSurface::browser_id)
+            }))
+            .collect::<HashSet<_>>();
+        self.right_panel_browsers
+            .retain(|browser_id, _| retained_browser_ids.contains(browser_id));
+    }
+
+    /// Whether any GPUI overlay that could float above the right panel is
+    /// open. The native webview always draws over GPUI, so while this holds
+    /// the live page swaps for a frozen snapshot.
+    fn any_overlay_open(&self, cx: &App) -> bool {
+        self.menus.borrow().values().any(ContextMenuHandle::is_open)
+            || self.composer.read(cx).context_menu_open()
+            || self
+                .right_panel_browsers
+                .values()
+                .any(|browser| browser.read(cx).overlay_open(cx))
+    }
+
+    /// Once per frame, from the very top of the app's render: push down to
+    /// every browser whether its native view belongs on screen. This is the
+    /// single authority — tab switches, panel toggles, session switches, the
+    /// settings page and overlay menus all funnel through here, so a webview
+    /// can never linger over unrelated UI.
+    pub(super) fn sync_browser_webviews(&mut self, cx: &mut Context<Self>) {
+        if self.right_panel_browsers.is_empty() {
+            return;
+        }
+        // With the scene overlay compositing GPUI's deferred draws above
+        // native views, open menus never occlude the webview — the snapshot
+        // swap is purely the fallback for a window where enabling it failed.
+        let overlay_open = !self.scene_overlay_enabled && self.any_overlay_open(cx);
+        let active_browser = if self.settings_page.is_none() && self.right_panel_visible {
+            self.active_right_panel_surface()
+                .and_then(RightPanelSurface::browser_id)
+        } else {
+            None
+        };
+        for (browser_id, browser) in &self.right_panel_browsers {
+            let surface_visible = active_browser == Some(*browser_id);
+            browser.update(cx, |view, cx| {
+                view.sync_native_state(surface_visible, overlay_open, cx);
+            });
+        }
     }
 
     fn ensure_right_panel_terminal(&mut self, terminal_id: Uuid, cx: &mut Context<Self>) {
@@ -1323,10 +1428,17 @@ impl Waku {
         for (index, surface) in self.right_panel_surfaces.iter().cloned().enumerate() {
             let active = active_surface == Some(index);
             let dirty = self.right_panel_surface_is_dirty(&surface);
-            let label = SharedString::from(
-                right_panel_tab_label(&surface, self.right_panel_files_selected_path.as_deref())
+            let label = SharedString::from(match &surface {
+                // Browser tabs read like browser tabs: the page title once
+                // known, the address until then.
+                RightPanelSurface::Browser(browser_id) => self
+                    .right_panel_browsers
+                    .get(browser_id)
+                    .and_then(|browser| browser.read(cx).tab_label())
+                    .unwrap_or_else(|| surface.label().to_owned()),
+                _ => right_panel_tab_label(&surface, self.right_panel_files_selected_path.as_deref())
                     .to_owned(),
-            );
+            });
             let icon_path =
                 right_panel_tab_icon(&surface, self.right_panel_files_selected_path.as_deref());
             let activate_weak = cx.entity().downgrade();
@@ -1612,52 +1724,6 @@ impl Waku {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_right_panel_surface(surface.clone(), cx);
             }))
-    }
-
-    fn render_right_panel_placeholder(
-        &self,
-        surface: RightPanelSurface,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let theme = Theme::current(cx);
-        let description = match surface {
-            RightPanelSurface::Browser(_) => {
-                "Browser previews will appear here once the native preview backend is connected."
-            }
-            RightPanelSurface::Terminal(_) => {
-                "A workspace terminal will appear here once the native terminal backend is connected."
-            }
-            _ => "This surface is not available yet.",
-        };
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .px(px(48.0))
-            .pb(px(32.0))
-            .child(icon(surface.icon_path(), 24.0, theme.text_tertiary))
-            .child(
-                div()
-                    .mt(px(14.0))
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(surface.label().to_owned()),
-            )
-            .child(
-                div()
-                    .mt(px(6.0))
-                    .max_w(px(310.0))
-                    .text_center()
-                    .text_size(px(11.0))
-                    .line_height(px(17.0))
-                    .text_color(theme.text_tertiary)
-                    .whitespace_normal()
-                    .child(description),
-            )
     }
 
     fn render_right_panel_files(

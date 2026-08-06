@@ -12,8 +12,12 @@ base64 = "0.22"
 chrono = "0.4"
 crossbeam-channel = "0.5"
 dirs = "6.0"
-gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+# The egoist/zed fork is upstream main plus PR #61945 (layered scene
+# rendering), which lets GPUI composite menus and tooltips above native child
+# views — the browser surface's WKWebView. Drop back to upstream once the PR
+# merges.
+gpui = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = ["test-support"] }
+gpui_platform = { git = "https://github.com/egoist/zed", branch = "waku-webview", features = ["font-kit"] }
 parking_lot = "0.12"
 rquickjs = "0.12.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -32,16 +36,36 @@ nucleo-matcher = "0.3.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+wry = { version = "0.56", features = ["devtools"] }
+block2 = "0.6"
+# Matches the version GPUI itself renders with, so RenderImage frames are the
+# same `image` types.
+image = "0.25"
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGImage",
+] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-app-kit",
+    "WKWebView",
+    "WKSnapshotConfiguration",
+] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSAccessibility",
     "NSAppearance",
     "NSBitmapImageRep",
+    "NSCell",
     "NSColor",
     "NSGraphics",
+    "NSGraphicsContext",
     "NSImage",
     "NSImageRep",
+    "NSMenu",
+    "NSMenuItem",
     "NSResponder",
     "NSView",
     "NSVisualEffectView",
