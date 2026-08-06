@@ -723,10 +723,8 @@ mod tests {
 
     #[test]
     fn model_cache_round_trips_and_rejects_empty_or_invalid_files() {
-        let directory = std::env::temp_dir().join(format!(
-            "waku-model-cache-test-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("waku-model-cache-test-{}", std::process::id()));
         let path = directory.join("codex.json");
         let models = vec![
             ProviderModel::new("gpt-5.6-sol", "GPT-5.6-Sol")

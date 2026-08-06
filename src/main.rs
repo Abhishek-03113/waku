@@ -48,7 +48,16 @@ actions!(
         ToggleModelPicker,
         SaveFile,
         CancelTurn,
-        CopySelection
+        CopySelection,
+        OpenFind,
+        OpenFindReplace,
+        CloseFind,
+        FindNext,
+        FindPrevious,
+        ToggleFindCaseSensitive,
+        ToggleFindWholeWord,
+        ToggleFindRegex,
+        ReplaceAllMatches
     ]
 );
 
@@ -89,7 +98,7 @@ fn main() {
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-shift-b", ToggleRightPanel, None),
-                KeyBinding::new("cmd-alt-f", ToggleFpsCounter, None),
+                KeyBinding::new("cmd-alt-shift-f", ToggleFpsCounter, None),
                 KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
                 KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
                 KeyBinding::new("cmd-l", FocusComposer, None),
@@ -97,6 +106,21 @@ fn main() {
                 KeyBinding::new("cmd-s", SaveFile, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
                 KeyBinding::new("cmd-c", CopySelection, Some("Waku")),
+                // Find and replace in the right panel's file editor, on the
+                // conventional VS Code bindings. `cmd-g` cycles matches from
+                // the editor without moving focus to the bar.
+                KeyBinding::new("cmd-f", OpenFind, Some("Waku")),
+                KeyBinding::new("cmd-alt-f", OpenFindReplace, Some("Waku")),
+                KeyBinding::new("cmd-g", FindNext, Some("Waku")),
+                KeyBinding::new("cmd-shift-g", FindPrevious, Some("Waku")),
+                // Scoped to the editor pane: escape closes the bar there and
+                // falls through to CancelTurn anywhere else.
+                KeyBinding::new("escape", CloseFind, Some("FileEditorPane")),
+                KeyBinding::new("cmd-alt-c", ToggleFindCaseSensitive, Some("FileEditorPane")),
+                KeyBinding::new("cmd-alt-w", ToggleFindWholeWord, Some("FileEditorPane")),
+                KeyBinding::new("cmd-alt-r", ToggleFindRegex, Some("FileEditorPane")),
+                KeyBinding::new("shift-enter", FindPrevious, Some("FindBar")),
+                KeyBinding::new("cmd-alt-enter", ReplaceAllMatches, Some("FindBar")),
             ]);
 
             cx.set_menus(vec![

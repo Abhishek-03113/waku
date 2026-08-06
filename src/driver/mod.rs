@@ -5,8 +5,8 @@ mod claude;
 mod codex;
 mod computer_use;
 mod opencode;
-mod support;
 mod pi;
+mod support;
 
 use std::path::PathBuf;
 use std::sync::Arc;

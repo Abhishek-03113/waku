@@ -60,10 +60,7 @@ fn permission_mode(mode: RuntimeMode, interaction_mode: InteractionMode) -> &'st
 }
 
 impl ClaudeDriver {
-    pub fn start(
-        options: DriverStartOptions,
-        events: Sender<DriverEvent>,
-    ) -> anyhow::Result<Self> {
+    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
             cwd,
@@ -477,8 +474,7 @@ fn handle_message(
                             .unwrap_or("Tool")
                             .to_owned();
                         let kind = super::support::classify_tool(&wire_title);
-                        let title =
-                            activity::input_title(block.get("input")).unwrap_or(wire_title);
+                        let title = activity::input_title(block.get("input")).unwrap_or(wire_title);
                         if let Some(id) = &id {
                             state.tools.insert(id.clone(), (kind, title.clone()));
                         }
@@ -746,9 +742,7 @@ mod tests {
             json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}),
         ];
         for message in wire {
-            handle_message(
-                &message, "s", &events, &commands, &turn, true, &mut state,
-            );
+            handle_message(&message, "s", &events, &commands, &turn, true, &mut state);
         }
 
         let mut seen = Vec::new();
@@ -758,14 +752,10 @@ mod tests {
         assert!(matches!(&seen[0], DriverEvent::ReasoningDelta(t) if t == "pondering"));
         assert!(matches!(&seen[1], DriverEvent::TextDelta(t) if t == "I'll run that."));
         // The completed assistant block must not repeat the streamed text.
-        assert!(
-            matches!(&seen[2], DriverEvent::RichActivity(item)
-                if item.kind == ActivityKind::Command && !item.complete)
-        );
-        assert!(
-            matches!(&seen[3], DriverEvent::RichActivity(item)
-                if item.complete && item.output.as_deref() == Some("hi"))
-        );
+        assert!(matches!(&seen[2], DriverEvent::RichActivity(item)
+                if item.kind == ActivityKind::Command && !item.complete));
+        assert!(matches!(&seen[3], DriverEvent::RichActivity(item)
+                if item.complete && item.output.as_deref() == Some("hi")));
         assert_eq!(seen.len(), 4, "replayed prompt or control noise leaked");
     }
 
@@ -787,9 +777,7 @@ mod tests {
             }
         });
 
-        handle_message(
-            &request, "s", &events, &commands, &turn, false, &mut state,
-        );
+        handle_message(&request, "s", &events, &commands, &turn, false, &mut state);
         let DriverEvent::Permission {
             request_id,
             detail,

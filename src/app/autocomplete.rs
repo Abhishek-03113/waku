@@ -16,7 +16,9 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gpui::{Anchor, App, Bounds, Font, KeyBinding, Pixels, StyledText, TextRun, anchored, deferred};
+use gpui::{
+    Anchor, App, Bounds, Font, KeyBinding, Pixels, StyledText, TextRun, anchored, deferred,
+};
 use nucleo_matcher::Matcher;
 
 use crate::composer_complete::{
@@ -104,8 +106,7 @@ impl Waku {
     /// starts discovery on the background executor and re-runs this when it
     /// arrives. Nothing here may touch the filesystem directly.
     pub(super) fn refresh_composer_sources(&mut self, cx: &mut Context<Self>) {
-        let Some(project_path) = self.selected_project().map(|project| project.path.clone())
-        else {
+        let Some(project_path) = self.selected_project().map(|project| project.path.clone()) else {
             self.slash_command_index = Rc::new(Vec::new());
             self.slash_command_index_key = None;
             self.mention_file_index = Rc::new(Vec::new());
@@ -246,14 +247,9 @@ impl Waku {
         };
         {
             let memo = self.composer_autocomplete.results.borrow();
-            if let Some(memo) = memo
-                .as_ref()
-                .filter(|memo| {
-                    memo.kind == trigger.kind
-                        && memo.query == trigger.query
-                        && memo.source == source
-                })
-            {
+            if let Some(memo) = memo.as_ref().filter(|memo| {
+                memo.kind == trigger.kind && memo.query == trigger.query && memo.source == source
+            }) {
                 return memo.rows.clone();
             }
         }
@@ -374,17 +370,14 @@ impl Waku {
             .track_scroll(&self.composer_autocomplete.scroll)
             .p(px(4.0));
         for (index, row) in rows.iter().enumerate() {
-            list = list
-                .child(self.render_autocomplete_row(index, row, highlight, &theme, window, cx));
+            list =
+                list.child(self.render_autocomplete_row(index, row, highlight, &theme, window, cx));
         }
 
         Some(
             deferred(
                 anchored()
-                    .position(point(
-                        card_bounds.origin.x,
-                        card_bounds.origin.y - px(6.0),
-                    ))
+                    .position(point(card_bounds.origin.x, card_bounds.origin.y - px(6.0)))
                     .anchor(Anchor::BottomLeft)
                     .snap_to_window_with_margin(px(8.0))
                     .child(

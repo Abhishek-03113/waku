@@ -918,6 +918,10 @@ impl Waku {
         for editor in self.right_panel_file_editors.values_mut() {
             editor.reading = false;
         }
+        // The find bar pointed into the editors that were just swapped out;
+        // its match list means nothing here, and restored editors may carry
+        // washes stored mid-search.
+        self.reset_file_search_for_session(cx);
         self.reload_clean_right_panel_file_editors(cx);
         self.state.right_panel_visible = self.right_panel_visible;
         if self.active_right_panel_surface() == Some(&RightPanelSurface::Diff) {
@@ -999,6 +1003,18 @@ impl Waku {
         self.right_panel_pending_terminal_focus = self
             .active_right_panel_surface()
             .and_then(RightPanelSurface::terminal_id);
+    }
+
+    /// The file the active editor surface is showing, whether via a File tab
+    /// or the Files browser's selection — regardless of whether the panel is
+    /// currently visible, which is a per-caller decision: save works on a
+    /// hidden panel, find does not.
+    pub(super) fn visible_right_panel_file_path(&self) -> Option<String> {
+        match self.active_right_panel_surface() {
+            Some(RightPanelSurface::Files) => self.right_panel_files_selected_path.clone(),
+            Some(RightPanelSurface::File(path)) => Some(path.clone()),
+            _ => None,
+        }
     }
 
     fn right_panel_file_is_dirty(&self, relative_path: &str) -> bool {
@@ -1794,7 +1810,7 @@ impl Waku {
     ) -> Div {
         let theme = Theme::current(cx);
         let file_tree_width = fitted_file_tree_width(panel_width, self.right_panel_file_tree_width);
-        let (editor_state, _writable, _) =
+        let (editor_state, writable, _) =
             self.ensure_right_panel_file_editor(&relative_path, window, cx);
 
         let editor = div()
@@ -1828,7 +1844,14 @@ impl Waku {
                             .child(relative_path.clone()),
                     ),
             )
-            .child(self.render_file_editor_body(&relative_path, &editor_state, cx));
+            .child(self.render_file_editor_body(
+                &relative_path,
+                &editor_state,
+                panel_width - file_tree_width,
+                writable,
+                window,
+                cx,
+            ));
 
         div()
             .flex_1()
@@ -1909,6 +1932,9 @@ impl Waku {
                         cx.notify();
                     }
                 }
+                // Any content change — typing, a replace, a reload from disk —
+                // moves the text out from under an open find's match list.
+                this.refresh_file_search_for_edit(subscribed_path.as_str(), cx);
             },
         )
         .detach();
@@ -2031,15 +2057,24 @@ impl Waku {
     /// line height, so a soft-wrapped line still gets exactly one number and the
     /// two columns cannot drift apart down a long file.
     fn render_file_editor_body(
-        &self,
+        &mut self,
         relative_path: &str,
         editor_state: &Entity<ComposerInput>,
+        pane_width: f32,
+        writable: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         const LINE_HEIGHT: f32 = 16.0;
         const TEXT_SIZE: f32 = 10.5;
         const GUTTER_PAD_RIGHT: f32 = 8.0;
         const CONTENT_PAD_TOP: f32 = 6.0;
+
+        // An open find bar follows whichever file this body is showing; a
+        // cheap comparison every frame, one recompute on the frame after the
+        // visible file actually changes.
+        self.sync_file_search_target(relative_path, cx);
+        let find_bar = self.render_file_search_bar(pane_width, writable, window, cx);
 
         let theme = Theme::current(cx);
         let field = editor_state.read(cx);
@@ -2098,42 +2133,54 @@ impl Waku {
         .w(px(gutter_width - GUTTER_PAD_RIGHT))
         .h(content_height);
 
+        // The find bar sits in normal flow above the scroll region — Zed's
+        // buffer-search arrangement — so an open bar pushes the content and
+        // its line-number gutter down instead of covering the first lines.
         div()
+            .key_context("FileEditorPane")
             .flex_1()
             .min_h_0()
-            .relative()
+            .flex()
+            .flex_col()
             .bg(theme.surface)
             .font_family(md::render::MONO_FAMILY)
             .text_size(px(TEXT_SIZE))
             .line_height(px(LINE_HEIGHT))
+            .children(find_bar)
             .child(
                 div()
-                    .id(SharedString::from(format!("file-editor-{relative_path}")))
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.right_panel_editor_scroll_handle)
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
                     .child(
                         div()
-                            .w_full()
-                            .pt(px(CONTENT_PAD_TOP))
-                            .pb(px(CONTENT_PAD_TOP))
-                            .flex()
-                            .items_start()
-                            .child(gutter)
-                            .child(div().w(px(GUTTER_PAD_RIGHT)).flex_none())
+                            .id(SharedString::from(format!("file-editor-{relative_path}")))
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.right_panel_editor_scroll_handle)
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .pr(px(10.0))
-                                    .child(editor_state.clone()),
+                                    .w_full()
+                                    .pt(px(CONTENT_PAD_TOP))
+                                    .pb(px(CONTENT_PAD_TOP))
+                                    .flex()
+                                    .items_start()
+                                    .child(gutter)
+                                    .child(div().w(px(GUTTER_PAD_RIGHT)).flex_none())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .pr(px(10.0))
+                                            .child(editor_state.clone()),
+                                    ),
                             ),
-                    ),
+                    )
+                    .child(scrollbar::vertical(
+                        &self.right_panel_editor_scroll_handle,
+                        &self.right_panel_editor_scrollbar,
+                    )),
             )
-            .child(scrollbar::vertical(
-                &self.right_panel_editor_scroll_handle,
-                &self.right_panel_editor_scrollbar,
-            ))
     }
 
     /// Picks up an external edit to a file the user has not modified here.
@@ -2169,12 +2216,7 @@ impl Waku {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let relative_path = match self.active_right_panel_surface() {
-            Some(RightPanelSurface::Files) => self.right_panel_files_selected_path.clone(),
-            Some(RightPanelSurface::File(path)) => Some(path.clone()),
-            _ => None,
-        };
-        let Some(relative_path) = relative_path else {
+        let Some(relative_path) = self.visible_right_panel_file_path() else {
             return;
         };
         let Some(project_path) = self.selected_project().map(|project| project.path.clone()) else {

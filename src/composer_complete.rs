@@ -70,7 +70,9 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
 
     let token_start = text[..cursor]
         .rfind(char::is_whitespace)
-        .map_or(0, |index| index + text[index..].chars().next().unwrap().len_utf8());
+        .map_or(0, |index| {
+            index + text[index..].chars().next().unwrap().len_utf8()
+        });
     let token = &text[token_start..cursor];
     let query = token.strip_prefix('@')?;
     Some(Trigger {
@@ -671,7 +673,13 @@ fn git_listed_files(root: &Path, cap: usize) -> Option<Vec<String>> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -909,7 +917,10 @@ mod tests {
         let plain = parse_frontmatter("Just a prompt body.");
         assert!(plain.description.is_none());
         assert_eq!(plain.body, "Just a prompt body.");
-        assert_eq!(first_line_summary("# Title\n\nThe real summary."), "The real summary.");
+        assert_eq!(
+            first_line_summary("# Title\n\nThe real summary."),
+            "The real summary."
+        );
     }
 
     #[test]
@@ -923,7 +934,10 @@ mod tests {
             "Fix: the login bug"
         );
         // Pi templates spell the same thing `$@`.
-        assert_eq!(expand_command_template("Fix: $@", "the bug"), "Fix: the bug");
+        assert_eq!(
+            expand_command_template("Fix: $@", "the bug"),
+            "Fix: the bug"
+        );
         // No placeholders: the arguments still arrive, appended.
         assert_eq!(
             expand_command_template("Run the linter.", "src only"),
@@ -931,8 +945,14 @@ mod tests {
         );
         // Every `$1`–`$9` is a placeholder — unfilled ones vanish, matching
         // the CLIs' own dialect — while non-positional dollar text survives.
-        assert_eq!(expand_command_template("cost is $5 and $1", ""), "cost is  and ");
-        assert_eq!(expand_command_template("literal $x or $0", ""), "literal $x or $0");
+        assert_eq!(
+            expand_command_template("cost is $5 and $1", ""),
+            "cost is  and "
+        );
+        assert_eq!(
+            expand_command_template("literal $x or $0", ""),
+            "literal $x or $0"
+        );
     }
 
     #[test]
@@ -1030,10 +1050,22 @@ mod tests {
     #[test]
     fn file_filter_ranks_and_caps_matches() {
         let files = vec![
-            FileEntry { path: "src/".into(), is_dir: true },
-            FileEntry { path: "src/app.rs".into(), is_dir: false },
-            FileEntry { path: "docs/appendix.md".into(), is_dir: false },
-            FileEntry { path: "README.md".into(), is_dir: false },
+            FileEntry {
+                path: "src/".into(),
+                is_dir: true,
+            },
+            FileEntry {
+                path: "src/app.rs".into(),
+                is_dir: false,
+            },
+            FileEntry {
+                path: "docs/appendix.md".into(),
+                is_dir: false,
+            },
+            FileEntry {
+                path: "README.md".into(),
+                is_dir: false,
+            },
         ];
         let mut matcher = matcher();
         let matched = filter_files(&files, "app", &mut matcher);
@@ -1060,7 +1092,10 @@ mod tests {
         let matched = filter_commands(&commands, "sec", &mut matcher);
         assert_eq!(matched[0].item.name, "security-review");
         assert_eq!(matched[0].positions, vec![0, 1, 2]);
-        assert_eq!(filter_commands(&commands, "", &mut matcher).len(), commands.len());
+        assert_eq!(
+            filter_commands(&commands, "", &mut matcher).len(),
+            commands.len()
+        );
     }
 
     #[test]
@@ -1073,7 +1108,10 @@ mod tests {
             vec![0..3, 4..5]
         );
         // The directory segment sees none of them.
-        assert_eq!(highlight_byte_ranges("src", &positions, 0), Vec::<Range<usize>>::new());
+        assert_eq!(
+            highlight_byte_ranges("src", &positions, 0),
+            Vec::<Range<usize>>::new()
+        );
         // Multi-byte characters produce byte-wide ranges.
         assert_eq!(highlight_byte_ranges("é.rs", &[0, 1], 0), vec![0..3]);
     }
@@ -1106,12 +1144,17 @@ mod tests {
         // The instructions file matches each ecosystem's convention.
         let claude = discover_slash_commands(ProviderKind::Claude, &root);
         let amp = discover_slash_commands(ProviderKind::Amp, &root);
-        assert!(claude.iter().any(|c| c.name == "commit" && c.template.is_some()));
         assert!(
-            amp.iter()
-                .find(|c| c.name == "init")
-                .is_some_and(|c| c.template.as_deref().unwrap_or_default().contains("AGENTS.md"))
+            claude
+                .iter()
+                .any(|c| c.name == "commit" && c.template.is_some())
         );
+        assert!(amp.iter().find(|c| c.name == "init").is_some_and(|c| {
+            c.template
+                .as_deref()
+                .unwrap_or_default()
+                .contains("AGENTS.md")
+        }));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1130,9 +1173,7 @@ mod tests {
             let skill = commands
                 .iter()
                 .find(|command| command.name == "deploy-runbook")
-                .unwrap_or_else(|| {
-                    panic!("{} misses the shared skill", provider.display_name())
-                });
+                .unwrap_or_else(|| panic!("{} misses the shared skill", provider.display_name()));
             assert_eq!(skill.scope, CommandScope::Skill);
             assert!(
                 skill.template.is_none(),
@@ -1141,7 +1182,10 @@ mod tests {
         }
         // Raw passthrough end to end: no expansion applies at submit.
         let commands = discover_slash_commands(ProviderKind::Amp, &root);
-        assert_eq!(expanded_submission("/deploy-runbook staging", &commands), None);
+        assert_eq!(
+            expanded_submission("/deploy-runbook staging", &commands),
+            None
+        );
 
         // Each ecosystem's own project-level skill tree is read too.
         for (provider, dir) in [
@@ -1152,7 +1196,11 @@ mod tests {
         ] {
             let skill_dir = root.join(dir).join("native-skill");
             std::fs::create_dir_all(&skill_dir).unwrap();
-            std::fs::write(skill_dir.join("SKILL.md"), "---\nname: native-skill\n---\nX").unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: native-skill\n---\nX",
+            )
+            .unwrap();
             assert!(
                 discover_slash_commands(provider, &root)
                     .iter()
@@ -1190,7 +1238,12 @@ mod tests {
             commands.iter().any(|c| c.name == "my-skill"),
             "symlinked skill missing: {commands:?}"
         );
-        scan_command_files(&root.join("commands"), CommandScope::User, true, &mut commands);
+        scan_command_files(
+            &root.join("commands"),
+            CommandScope::User,
+            true,
+            &mut commands,
+        );
         assert!(
             commands.iter().any(|c| c.name == "deploy"),
             "commands under a symlinked root missing: {commands:?}"
@@ -1206,13 +1259,18 @@ mod tests {
         std::fs::write(root.join("src/deep/lib.rs"), "x").unwrap();
         std::fs::write(root.join("main.rs"), "x").unwrap();
         let entries = list_project_files(&root, 100);
-        let paths = entries.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>();
+        let paths = entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
         assert!(paths.contains(&"src/"), "derived dir missing: {paths:?}");
         assert!(paths.contains(&"src/deep/lib.rs"));
         // Shallow entries lead.
         assert_eq!(paths[0], "main.rs");
-        assert!(paths.iter().position(|p| *p == "main.rs").unwrap()
-            < paths.iter().position(|p| *p == "src/deep/lib.rs").unwrap());
+        assert!(
+            paths.iter().position(|p| *p == "main.rs").unwrap()
+                < paths.iter().position(|p| *p == "src/deep/lib.rs").unwrap()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -967,9 +967,7 @@ impl Waku {
             "",
         )
         .iter()
-        .position(|(kind, model)| {
-            *kind == provider && selected_model == Some(model.id.as_str())
-        })
+        .position(|(kind, model)| *kind == provider && selected_model == Some(model.id.as_str()))
         .unwrap_or(0);
         self.model_picker_scroll.scroll_to_item(index);
     }

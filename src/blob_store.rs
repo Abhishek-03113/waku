@@ -231,7 +231,10 @@ mod tests {
         let store = BlobStore::new(temporary_root());
         let small = data_url("image/png", b"hello");
         assert_eq!(store.store_data_url(&small), small);
-        assert_eq!(store.store_data_url("https://example.com/a.png"), "https://example.com/a.png");
+        assert_eq!(
+            store.store_data_url("https://example.com/a.png"),
+            "https://example.com/a.png"
+        );
     }
 
     #[test]

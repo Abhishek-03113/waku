@@ -46,10 +46,7 @@ pub struct OpenCodeDriver {
 }
 
 impl OpenCodeDriver {
-    pub fn start(
-        options: DriverStartOptions,
-        events: Sender<DriverEvent>,
-    ) -> anyhow::Result<Self> {
+    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
             cwd,
@@ -211,9 +208,7 @@ impl OpenCodeDriver {
                                         "/session/{}/message",
                                         encode_path_segment(&session)
                                     );
-                                    if let Err(error) =
-                                        server.request("POST", &path, Some(&body))
-                                    {
+                                    if let Err(error) = server.request("POST", &path, Some(&body)) {
                                         let _ = events.send(DriverEvent::Error(format!(
                                             "OpenCode rejected the prompt: {error}"
                                         )));
@@ -232,10 +227,8 @@ impl OpenCodeDriver {
                                 });
                         }
                         CommandMessage::Cancel => {
-                            let path = format!(
-                                "/session/{}/abort",
-                                encode_path_segment(&worker_session)
-                            );
+                            let path =
+                                format!("/session/{}/abort", encode_path_segment(&worker_session));
                             if let Err(error) = worker_server.request("POST", &path, None) {
                                 let _ = worker_events.send(DriverEvent::Error(format!(
                                     "Could not stop OpenCode: {error}"
@@ -363,7 +356,10 @@ fn handle_event(
     auto_approve: bool,
     state: &mut OpenCodeStreamState,
 ) {
-    let kind = value.get("type").and_then(Value::as_str).unwrap_or_default();
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let properties = value.get("properties").unwrap_or(&Value::Null);
 
     match kind {
@@ -646,14 +642,10 @@ mod tests {
         }
         assert!(matches!(&seen[0], DriverEvent::TextDelta(text) if text == "OK"));
         assert!(matches!(&seen[1], DriverEvent::ReasoningDelta(text) if text == "thinking"));
-        assert!(
-            matches!(&seen[2], DriverEvent::RichActivity(item)
-                if item.kind == ActivityKind::Search && !item.complete)
-        );
-        assert!(
-            matches!(&seen[3], DriverEvent::RichActivity(item)
-                if item.complete && item.title == "read")
-        );
+        assert!(matches!(&seen[2], DriverEvent::RichActivity(item)
+                if item.kind == ActivityKind::Search && !item.complete));
+        assert!(matches!(&seen[3], DriverEvent::RichActivity(item)
+                if item.complete && item.title == "read"));
         assert!(matches!(
             &seen[4],
             DriverEvent::TurnFinished { success: true, .. }

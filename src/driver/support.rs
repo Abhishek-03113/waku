@@ -35,7 +35,10 @@ pub(super) struct HeadlessComputerUseRuntime {
 }
 
 impl HeadlessComputerUseRuntime {
-    pub(super) fn start(provider: ProviderKind, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+    pub(super) fn start(
+        provider: ProviderKind,
+        events: Sender<DriverEvent>,
+    ) -> anyhow::Result<Self> {
         let runtime = computer_use_runtime::ComputerUseRuntime::start(events)?;
         let config = match provider {
             ProviderKind::OpenCode => {
@@ -326,7 +329,6 @@ fn truncate_error(message: &str, max_chars: usize) -> String {
     truncated
 }
 
-
 pub(super) fn classify_tool(name: &str) -> ActivityKind {
     let normalized = name.to_ascii_lowercase();
     if normalized.contains("bash")
@@ -432,7 +434,6 @@ mod tests {
         assert!(value.pointer("/mcp/waku_computer_use").is_none());
     }
 
-
     #[test]
     fn grok_computer_use_config_preserves_existing_config_and_replaces_waku_server() {
         let content = build_grok_computer_use_toml(
@@ -537,17 +538,4 @@ mod tests {
             None
         );
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
