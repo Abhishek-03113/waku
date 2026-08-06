@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::{activity, computer_use as computer_use_runtime};
-use crate::driver::{DriverControl, DriverStartOptions};
+use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
 use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,6 +21,7 @@ enum CommandMessage {
     Prompt(String),
     Cancel,
     CancelExtensionRequest(String),
+    Options(SessionOptions),
     Rollback {
         turns: usize,
         response: Sender<Result<ProviderResumeCursor, String>>,
@@ -139,7 +140,7 @@ impl PiDriver {
         let reader_pending = pending.clone();
         let reader_commands = commands.clone();
         let reader_events = events.clone();
-        thread::Builder::new()
+        let reader_thread = thread::Builder::new()
             .name("waku-pi-reader".into())
             .spawn(move || {
                 let mut stream_state = PiStreamState::default();
@@ -170,8 +171,10 @@ impl PiDriver {
                         }
                     }
                 }
+                // Unblock anything waiting on an RPC reply immediately; the
+                // process thread owns the `ProcessExited` announcement so a
+                // non-zero exit can be reported before the runtime is torn down.
                 fail_pending(&reader_pending, "Pi RPC process exited");
-                let _ = reader_events.send(DriverEvent::ProcessExited);
             })?;
 
         let writer_pending = pending;
@@ -260,6 +263,10 @@ impl PiDriver {
                     provider_cursor: Some(cursor.clone()),
                 });
 
+                // Pi exposes setters for both, so changing either is an RPC on
+                // the live session rather than a restart.
+                let mut current_model = model;
+                let mut current_effort = reasoning_effort;
                 while let Ok(message) = command_rx.recv() {
                     match message {
                         CommandMessage::Prompt(prompt) => {
@@ -289,6 +296,49 @@ impl PiDriver {
                                 let _ = writer_events.send(DriverEvent::Error(format!(
                                     "Could not stop Pi: {error}"
                                 )));
+                            }
+                        }
+                        CommandMessage::Options(options) => {
+                            if options.model != current_model {
+                                match options.model.as_deref().map(parse_model_slug).transpose() {
+                                    Ok(Some((provider, model_id))) => {
+                                        if let Err(error) = send_request(
+                                            &mut stdin,
+                                            &writer_pending,
+                                            &mut next_request_id,
+                                            json!({
+                                                "type": "set_model",
+                                                "provider": provider,
+                                                "modelId": model_id
+                                            }),
+                                        ) {
+                                            let _ = writer_events.send(DriverEvent::Error(format!(
+                                                "Could not switch the Pi model: {error}"
+                                            )));
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        let _ = writer_events
+                                            .send(DriverEvent::Error(error.to_string()));
+                                    }
+                                }
+                                current_model = options.model;
+                            }
+                            if options.reasoning_effort != current_effort {
+                                if let Some(level) = options.reasoning_effort.as_deref()
+                                    && let Err(error) = send_request(
+                                        &mut stdin,
+                                        &writer_pending,
+                                        &mut next_request_id,
+                                        json!({"type": "set_thinking_level", "level": level}),
+                                    )
+                                {
+                                    let _ = writer_events.send(DriverEvent::Error(format!(
+                                        "Could not change Pi's thinking level: {error}"
+                                    )));
+                                }
+                                current_effort = options.reasoning_effort;
                             }
                         }
                         CommandMessage::CancelExtensionRequest(id) => {
@@ -338,14 +388,43 @@ impl PiDriver {
                 }
             })?;
 
-        thread::Builder::new()
+        let last_visible_stderr = Arc::new(Mutex::new(None::<String>));
+        let stderr_last_error = last_visible_stderr.clone();
+        let stderr_events = events.clone();
+        let stderr_thread = thread::Builder::new()
             .name("waku-pi-stderr".into())
             .spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                     if line.to_ascii_lowercase().contains("error") {
-                        let _ = events.send(DriverEvent::Error(format!("Pi: {}", line.trim())));
+                        let error = format!("Pi: {}", line.trim());
+                        *stderr_last_error.lock() = Some(error.clone());
+                        let _ = stderr_events.send(DriverEvent::Error(error));
                     }
                 }
+            })?;
+
+        // Nothing signals or kills the Pi process: it exits when the writer
+        // thread drops its stdin. Something still has to reap it, or every
+        // session that ever ran leaves a zombie behind for the life of the app.
+        thread::Builder::new()
+            .name("waku-pi-process".into())
+            .spawn(move || {
+                let status = child.wait();
+                let _ = reader_thread.join();
+                let _ = stderr_thread.join();
+                match status {
+                    Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
+                        let _ = events
+                            .send(DriverEvent::Error(format!("Pi RPC exited with {status}")));
+                    }
+                    Err(error) => {
+                        let _ = events.send(DriverEvent::Error(format!(
+                            "Could not read the Pi RPC exit status: {error}"
+                        )));
+                    }
+                    _ => {}
+                }
+                let _ = events.send(DriverEvent::ProcessExited);
             })?;
 
         Ok(Self {
@@ -371,6 +450,19 @@ impl DriverControl for PiDriver {
     }
 
     fn respond(&self, _request_id: String, _option_id: String) {}
+
+    fn apply_options(&self, options: SessionOptions) -> bool {
+        // Pi has setters for the model and thinking level, so those apply to the
+        // live session. It has none for permissions — and only runs Build with
+        // Full access anyway — so a mode change asks for a fresh start, which is
+        // where that constraint is reported.
+        if options.mode != RuntimeMode::FullAccess
+            || options.interaction_mode != InteractionMode::Build
+        {
+            return false;
+        }
+        self.commands.send(CommandMessage::Options(options)).is_ok()
+    }
 
     fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
         if turns == 0 {
@@ -831,6 +923,33 @@ mod tests {
             receiver,
             PiStreamState::default(),
         )
+    }
+
+    #[test]
+    fn model_and_thinking_changes_reach_the_running_session_but_mode_changes_do_not() {
+        let (commands, command_rx) = unbounded();
+        let driver = PiDriver {
+            commands,
+            computer_use: None,
+        };
+        let options = |mode, interaction_mode| SessionOptions {
+            mode,
+            interaction_mode,
+            model: Some("anthropic/claude-opus-5".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
+            service_tier: None,
+        };
+
+        assert!(driver.apply_options(options(RuntimeMode::FullAccess, InteractionMode::Build)));
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(CommandMessage::Options(_))
+        ));
+
+        // Pi has no permission setter, and only runs Build with Full access.
+        assert!(!driver.apply_options(options(RuntimeMode::Ask, InteractionMode::Build)));
+        assert!(!driver.apply_options(options(RuntimeMode::FullAccess, InteractionMode::Plan)));
+        assert!(command_rx.try_recv().is_err());
     }
 
     #[test]

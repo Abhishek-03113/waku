@@ -58,19 +58,34 @@ fn fork_message_id(message_ids: &[String], retained_turns: usize) -> anyhow::Res
     Ok(message_ids.get(retained_turns).map(String::as_str))
 }
 
-struct OpenCodeServer {
+pub(crate) struct OpenCodeServer {
     child: Child,
-    port: u16,
+    pub(crate) port: u16,
+    pid: u32,
 }
 
 impl OpenCodeServer {
-    fn start(binary: &Path, cwd: &Path) -> anyhow::Result<Self> {
+    pub(crate) fn start(binary: &Path, cwd: &Path) -> anyhow::Result<Self> {
+        Self::start_with_env(binary, cwd, &[])
+    }
+
+    /// Starts the server with extra environment, so a caller can hand it the
+    /// Computer Use configuration the same way a one-shot invocation got it.
+    pub(crate) fn start_with_env(
+        binary: &Path,
+        cwd: &Path,
+        environment: &[(String, String)],
+    ) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .context("could not reserve a local port for OpenCode")?;
         let port = listener.local_addr()?.port();
         drop(listener);
 
-        let child = crate::command_env::command(binary)
+        let mut command = crate::command_env::command(binary);
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        let child = command
             .args([
                 "serve",
                 "--hostname",
@@ -86,7 +101,8 @@ impl OpenCodeServer {
             .stderr(Stdio::null())
             .spawn()
             .context("failed to start `opencode serve`")?;
-        let mut server = Self { child, port };
+        let pid = child.id();
+        let mut server = Self { child, port, pid };
         let started_at = Instant::now();
         loop {
             if server.request("GET", "/global/health", None).is_ok() {
@@ -102,7 +118,7 @@ impl OpenCodeServer {
         }
     }
 
-    fn request(&self, method: &str, path: &str, body: Option<&Value>) -> anyhow::Result<Value> {
+    pub(crate) fn request(&self, method: &str, path: &str, body: Option<&Value>) -> anyhow::Result<Value> {
         let body = body.map(serde_json::to_vec).transpose()?;
         let response = http_request(self.port, method, path, body.as_deref())?;
         serde_json::from_slice(&response)
@@ -121,6 +137,26 @@ fn is_native_user_turn(message: &Value) -> bool {
                         && part.get("synthetic").and_then(Value::as_bool) != Some(true)
                 })
             })
+}
+
+impl OpenCodeServer {
+    /// Ends the server without owning it mutably.
+    ///
+    /// A long-lived reader blocked on the event stream keeps a handle alive, and
+    /// that stream only closes when the server exits — so waiting for the last
+    /// handle to drop deadlocks and leaks the process. The owner kills it
+    /// directly instead, which closes the stream and releases the readers.
+    pub(crate) fn shutdown(&self) {
+        if self.pid == 0 {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-TERM", &self.pid.to_string()])
+                .status();
+        }
+    }
 }
 
 impl Drop for OpenCodeServer {
@@ -208,7 +244,7 @@ fn decode_chunked(mut input: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(output)
 }
 
-fn encode_path_segment(value: &str) -> String {
+pub(crate) fn encode_path_segment(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {

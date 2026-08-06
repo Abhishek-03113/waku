@@ -924,6 +924,95 @@ impl Waku {
         true
     }
 
+    /// Resolves the turn options a driver should run with, dropping a reasoning
+    /// effort or service tier the resolved model does not offer. Driver start
+    /// and in-session option changes both go through this so they cannot
+    /// disagree about what the session is currently set to.
+    pub(super) fn session_options(&self, session: &AgentSession) -> SessionOptions {
+        let model = session.model.clone().or_else(|| {
+            self.provider_probe(session.provider)
+                .and_then(ProviderProbe::preferred_model)
+                .map(|model| model.id.clone())
+        });
+        let model_metadata = self.model_metadata_for_session(session);
+        let reasoning_effort = session.reasoning_effort.clone().filter(|effort| {
+            model_metadata.is_some_and(|model| {
+                model
+                    .reasoning_efforts
+                    .iter()
+                    .any(|option| option.id == *effort)
+            })
+        });
+        let service_tier = session.service_tier.clone().filter(|tier| {
+            tier == "default"
+                || model_metadata.is_some_and(|model| {
+                    model.service_tiers.iter().any(|option| option.id == *tier)
+                })
+        });
+        SessionOptions {
+            mode: session.runtime_mode,
+            interaction_mode: session.interaction_mode,
+            model,
+            reasoning_effort,
+            service_tier,
+        }
+    }
+
+    /// Releases provider processes for sessions nobody has touched in a while.
+    ///
+    /// Codex and Pi keep a process resident between turns, so an abandoned task
+    /// otherwise holds an agent — and, with Computer Use on, a whole process
+    /// tree — for as long as the app runs. Recreating a runtime is exactly the
+    /// work the next prompt already does after Stop, and the resume cursor is
+    /// persisted, so the conversation survives.
+    pub(super) fn reap_idle_sessions(&mut self) {
+        if self.last_idle_session_sweep.elapsed() < IDLE_SESSION_SWEEP_INTERVAL {
+            return;
+        }
+        self.last_idle_session_sweep = Instant::now();
+        let idle = self
+            .runtimes
+            .iter()
+            .filter(|(session_id, runtime)| {
+                let session = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == **session_id);
+                session_is_reapable(session, runtime.last_active_at.elapsed())
+            })
+            .map(|(session_id, _)| *session_id)
+            .collect::<Vec<_>>();
+        for session_id in idle {
+            // Dropping the runtime is the release: it closes the transport, and
+            // the driver's own `Drop` takes the process tree with it. No cancel,
+            // because there is no turn to cancel.
+            self.runtimes.remove(&session_id);
+        }
+    }
+
+    /// Applies a changed model, effort, tier, or mode to a session. Transports
+    /// that carry these per turn absorb the change and keep running; the rest
+    /// are torn down so the next prompt starts with the new options.
+    pub(super) fn apply_session_options(&mut self, session_id: Uuid) {
+        let Some(options) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| self.session_options(session))
+        else {
+            return;
+        };
+        let applied = self
+            .runtimes
+            .get(&session_id)
+            .is_none_or(|runtime| runtime.driver.apply_options(options));
+        if !applied {
+            self.reset_session_runtime(session_id);
+        }
+    }
+
     pub(super) fn ensure_driver(&mut self) -> anyhow::Result<DriverHandle> {
         let session = self
             .selected_session()
@@ -949,36 +1038,21 @@ impl Waku {
                     session.provider.display_name()
                 )
             })?;
-        let model = session.model.clone().or_else(|| {
-            self.probes
-                .iter()
-                .find(|probe| probe.provider == session.provider)
-                .and_then(ProviderProbe::preferred_model)
-                .map(|model| model.id.clone())
-        });
-        let model_metadata = self.model_metadata_for_session(&session);
-        let reasoning_effort = session.reasoning_effort.clone().filter(|effort| {
-            model_metadata.is_some_and(|model| {
-                model
-                    .reasoning_efforts
-                    .iter()
-                    .any(|option| option.id == *effort)
-            })
-        });
-        let service_tier = session.service_tier.clone().filter(|tier| {
-            tier == "default"
-                || model_metadata.is_some_and(|model| {
-                    model.service_tiers.iter().any(|option| option.id == *tier)
-                })
-        });
+        let SessionOptions {
+            mode,
+            interaction_mode,
+            model,
+            reasoning_effort,
+            service_tier,
+        } = self.session_options(&session);
         let (event_tx, event_rx) = unbounded();
         let handle = driver::start(
             session.provider,
             DriverStartOptions {
                 binary,
                 cwd: project.path.clone(),
-                mode: session.runtime_mode,
-                interaction_mode: session.interaction_mode,
+                mode,
+                interaction_mode,
                 model,
                 reasoning_effort,
                 service_tier,
@@ -1000,6 +1074,7 @@ impl Waku {
                 computer_use_previews: Vec::new(),
                 computer_session_grants: HashSet::new(),
                 last_driver_error: None,
+                last_active_at: Instant::now(),
             },
         );
         Ok(handle)
@@ -1073,6 +1148,7 @@ impl Waku {
             runtime.stream_phase = None;
             runtime.pending_permission = None;
             runtime.pending_computer_approval = None;
+            runtime.last_active_at = Instant::now();
         }
         self.reasoning_expanded.clear();
         self.activities_expanded.clear();

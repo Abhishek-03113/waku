@@ -22,7 +22,7 @@ use crate::checkpoint;
 use crate::computer_use::{
     ComputerPermissions, ComputerUsePhase, ComputerUseState, PendingComputerApproval,
 };
-use crate::driver::{self, DriverHandle, DriverStartOptions};
+use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::input::{ComposerEvent, ComposerInput};
 use crate::md;
 use crate::model::{
@@ -83,6 +83,11 @@ const NAVIGATION_RAIL_INACTIVE_OPACITY: f32 = 0.45;
 const NAVIGATION_RAIL_TURN_HEIGHT: f32 = NAVIGATION_RAIL_TICK_HEIGHT + NAVIGATION_RAIL_TICK_GAP;
 const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
+/// How long a session may sit untouched before its provider process is released.
+/// Codex and Pi stay resident between turns, so without this an afternoon of
+/// abandoned tasks is an afternoon of idle agent processes.
+const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const IDLE_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Source bytes of parsed messages kept across session switches.
 ///
@@ -140,6 +145,19 @@ struct PanelResizeDrag {
     target: PanelResizeTarget,
     start_mouse_x: f32,
     start_width: f32,
+}
+
+/// Whether an untouched session's provider process may be released.
+///
+/// A session mid-turn is not idle however long it has been quiet: a slow tool
+/// call, or an approval waiting on the user, must not have its agent pulled out
+/// from under it.
+fn session_is_reapable(session: Option<&AgentSession>, idle_for: Duration) -> bool {
+    idle_for >= IDLE_SESSION_TIMEOUT
+        && session.is_none_or(|session| {
+            session.active_turn_id().is_none()
+                && matches!(session.status, SessionStatus::Idle | SessionStatus::Failed)
+        })
 }
 
 fn sanitize_panel_width(width: f32, default: f32, min: f32, max: f32) -> f32 {
@@ -398,6 +416,8 @@ struct SessionRuntime {
     computer_use_previews: Vec<ComputerUseState>,
     computer_session_grants: HashSet<String>,
     last_driver_error: Option<String>,
+    /// When this session last sent or received anything, for idle reaping.
+    last_active_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -549,6 +569,9 @@ pub struct Waku {
     /// a turn that finishes while its own capture is still going — does not
     /// fork a second `git add -A` over the same worktree.
     checkpoint_captures_in_flight: HashSet<(Uuid, usize)>,
+    /// Clock for the idle-session sweep, so the check costs one comparison per
+    /// frame instead of a scan.
+    last_idle_session_sweep: Instant,
     transcript_anchor: Cell<Option<TranscriptAnchor>>,
     transcript_anchor_end_space: Rc<Cell<Pixels>>,
     transcript_anchor_following: Rc<Cell<bool>>,
@@ -815,6 +838,7 @@ impl Waku {
                             if std::mem::take(&mut this.workspace_queries_stale) {
                                 this.invalidate_workspace_queries(cx);
                             }
+                            this.reap_idle_sessions();
                             // A finished turn asks for a checkpoint from a
                             // handler with no `Context`; this is where that
                             // `git` work actually leaves the UI thread.
@@ -907,6 +931,7 @@ impl Waku {
                 checkpoint_ref_prefetch: Cell::new(None),
                 pending_checkpoint_captures: interrupted_turn_checkpoints,
                 checkpoint_captures_in_flight: HashSet::new(),
+                last_idle_session_sweep: Instant::now(),
                 transcript_anchor: Cell::new(None),
                 transcript_anchor_end_space: Rc::new(Cell::new(Pixels::ZERO)),
                 transcript_anchor_following,

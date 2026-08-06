@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::computer_use as computer_use_runtime;
 use crate::computer_use;
-use crate::driver::{DriverControl, DriverStartOptions};
+use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
 use crate::model::{
     ActivityItem, ActivityKind, DriverEvent, InteractionMode, PermissionOption,
     ProviderResumeCursor, RuntimeMode,
@@ -48,11 +48,14 @@ enum CommandMessage {
         turns_to_remove: usize,
         response: Sender<Result<String, String>>,
     },
+    Options(SessionOptions),
     Shutdown,
 }
 
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
+    mode: RuntimeMode,
+    interaction_mode: InteractionMode,
     computer_use_process_directory: Option<PathBuf>,
     computer_use_server_path: Option<PathBuf>,
     computer_use_preview_monitor: Option<computer_use_runtime::ComputerUsePreviewMonitor>,
@@ -268,8 +271,15 @@ impl CodexDriver {
                     }
                 }
 
+                // Every turn carries its own model, effort and tier, so changing
+                // one of those is a new value here rather than a new process.
+                // The permission policy is deliberately not in that set — see
+                // `apply_options`.
                 let (approval_policy, sandbox, approvals_reviewer) =
                     codex_permissions(mode, interaction_mode);
+                let mut model = model;
+                let mut reasoning_effort = reasoning_effort;
+                let mut service_tier = service_tier;
                 let open_thread = if let Some(thread_id) = provider_session_id {
                     let mut params = json!({
                         "threadId": thread_id,
@@ -435,6 +445,12 @@ impl CodexDriver {
                             }
                             continue;
                         }
+                        CommandMessage::Options(options) => {
+                            model = options.model;
+                            reasoning_effort = options.reasoning_effort;
+                            service_tier = options.service_tier;
+                            continue;
+                        }
                         CommandMessage::Shutdown => break,
                     };
                     if let Err(error) = write_json_line(&mut stdin, &message) {
@@ -527,6 +543,8 @@ impl CodexDriver {
 
         Ok(Self {
             commands,
+            mode,
+            interaction_mode,
             computer_use_process_directory,
             computer_use_server_path,
             computer_use_preview_monitor,
@@ -585,6 +603,18 @@ impl DriverControl for CodexDriver {
             request_id,
             option_id,
         });
+    }
+
+    fn apply_options(&self, options: SessionOptions) -> bool {
+        // Model, effort and tier ride on every `turn/start`, so the next turn
+        // picks them up. The approval policy and sandbox are not treated the
+        // same way even though they are also per-turn fields: loosening or
+        // tightening what an already-running agent may touch deserves a fresh
+        // thread, so a mode change asks to be restarted instead.
+        if options.mode != self.mode || options.interaction_mode != self.interaction_mode {
+            return false;
+        }
+        self.commands.send(CommandMessage::Options(options)).is_ok()
     }
 
     fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
@@ -1324,6 +1354,56 @@ mod tests {
             codex_permissions(RuntimeMode::FullAccess, InteractionMode::Plan),
             ("never", "read-only", "user")
         );
+    }
+
+    fn session_options(
+        mode: RuntimeMode,
+        interaction_mode: InteractionMode,
+        model: &str,
+    ) -> SessionOptions {
+        SessionOptions {
+            mode,
+            interaction_mode,
+            model: Some(model.to_owned()),
+            reasoning_effort: None,
+            service_tier: None,
+        }
+    }
+
+    #[test]
+    fn model_changes_reach_the_running_thread_but_mode_changes_ask_for_a_restart() {
+        let (commands, command_rx) = unbounded();
+        let driver = CodexDriver {
+            commands,
+            mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Build,
+            computer_use_process_directory: None,
+            computer_use_server_path: None,
+            computer_use_preview_monitor: None,
+        };
+
+        assert!(driver.apply_options(session_options(
+            RuntimeMode::FullAccess,
+            InteractionMode::Build,
+            "gpt-5-codex"
+        )));
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(CommandMessage::Options(_))
+        ));
+
+        // Both of these change the sandbox the running thread was opened with.
+        assert!(!driver.apply_options(session_options(
+            RuntimeMode::FullAccess,
+            InteractionMode::Plan,
+            "gpt-5-codex"
+        )));
+        assert!(!driver.apply_options(session_options(
+            RuntimeMode::Ask,
+            InteractionMode::Build,
+            "gpt-5-codex"
+        )));
+        assert!(command_rx.try_recv().is_err());
     }
 
     #[test]

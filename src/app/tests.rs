@@ -5,7 +5,8 @@ use super::{
     compact_driver_error, disclosure_leading_space, fenced_code, fitted_file_tree_width,
     fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
     maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
-    navigation_rail_height, navigation_rail_scale, pop_stream_chunk, should_show_navigation_rail,
+    navigation_rail_height, navigation_rail_scale, pop_stream_chunk, session_is_reapable,
+    should_show_navigation_rail,
     take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
     transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
     widened_panel_width_for_file_editor,
@@ -20,6 +21,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashSet, VecDeque},
     rc::Rc,
+    time::Duration,
 };
 use uuid::Uuid;
 
@@ -325,6 +327,38 @@ fn stream_parts_keep_targeting_the_running_session_after_selection_changes() {
     assert_eq!(sessions[0].messages[1].content, "first second");
     assert!(sessions[0].messages[1].streaming);
     assert!(sessions[1].messages.is_empty());
+}
+
+#[test]
+fn idle_reaping_releases_finished_sessions_but_never_a_running_turn() {
+    let project_id = uuid::Uuid::new_v4();
+    let fresh = Duration::from_secs(60);
+    let stale = Duration::from_secs(60 * 60);
+
+    let idle = AgentSession::new(project_id, ProviderKind::Codex);
+    assert!(session_is_reapable(Some(&idle), stale));
+    assert!(!session_is_reapable(Some(&idle), fresh));
+
+    let mut working = AgentSession::new(project_id, ProviderKind::Codex);
+    working.begin_turn("a long tool call");
+    working.status = SessionStatus::Working;
+    assert!(!session_is_reapable(Some(&working), stale));
+
+    // An approval can sit unanswered far longer than the idle window; its agent
+    // is blocked on the user, not abandoned.
+    let mut waiting = AgentSession::new(project_id, ProviderKind::Codex);
+    waiting.begin_turn("needs approval");
+    waiting.status = SessionStatus::Waiting;
+    assert!(!session_is_reapable(Some(&waiting), stale));
+
+    let mut failed = AgentSession::new(project_id, ProviderKind::Codex);
+    failed.begin_turn("failed turn");
+    failed.finish_active_turn(TurnStatus::Failed);
+    failed.status = SessionStatus::Failed;
+    assert!(session_is_reapable(Some(&failed), stale));
+
+    // A runtime whose session is already gone is pure leak.
+    assert!(session_is_reapable(None, stale));
 }
 
 #[test]

@@ -1,7 +1,10 @@
 use super::*;
 
 fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
-    provider != ProviderKind::Codex
+    // Codex's app-server owns the Computer Use process tree, and Amp offers no
+    // interrupt on its stream — stopping it means ending the process. Both
+    // resume their native thread on the next prompt.
+    !matches!(provider, ProviderKind::Codex | ProviderKind::Amp)
 }
 
 impl Waku {
@@ -545,6 +548,7 @@ impl Waku {
             && (session.provider != provider || session.model.as_deref() != Some(model.as_str()))
         {
             let session_id = session.id;
+            let provider_changed = session.provider != provider;
             session.provider = provider;
             session.model = Some(model.clone());
             session.reasoning_effort = None;
@@ -554,7 +558,13 @@ impl Waku {
             self.state.last_reasoning_effort = None;
             self.state.last_service_tier = None;
             self.model_picker_tab = ModelPickerTab::Provider(provider);
-            self.reset_session_runtime(session_id);
+            // A different provider is a different binary and protocol; only a
+            // model change within one provider can be applied in session.
+            if provider_changed {
+                self.reset_session_runtime(session_id);
+            } else {
+                self.apply_session_options(session_id);
+            }
             self.save();
             cx.notify();
         }
@@ -616,7 +626,7 @@ impl Waku {
         {
             let session_id = session.id;
             session.runtime_mode = mode;
-            self.reset_session_runtime(session_id);
+            self.apply_session_options(session_id);
             self.save();
             cx.notify();
         }
@@ -628,7 +638,7 @@ impl Waku {
         {
             let session_id = session.id;
             session.interaction_mode = mode;
-            self.reset_session_runtime(session_id);
+            self.apply_session_options(session_id);
             self.save();
             cx.notify();
         }
@@ -641,7 +651,7 @@ impl Waku {
             let session_id = session.id;
             session.reasoning_effort = Some(effort.clone());
             self.state.last_reasoning_effort = Some(effort);
-            self.reset_session_runtime(session_id);
+            self.apply_session_options(session_id);
             self.save();
             cx.notify();
         }
@@ -654,7 +664,7 @@ impl Waku {
             let session_id = session.id;
             session.service_tier = Some(tier.clone());
             self.state.last_service_tier = Some(tier);
-            self.reset_session_runtime(session_id);
+            self.apply_session_options(session_id);
             self.save();
             cx.notify();
         }
@@ -866,10 +876,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stopping_codex_releases_its_computer_use_process_tree() {
+    fn stopping_releases_the_runtimes_that_cannot_be_interrupted_in_place() {
+        // Codex owns a Computer Use process tree; Amp has no stream interrupt.
         assert!(!retain_runtime_after_cancel(ProviderKind::Codex));
+        assert!(!retain_runtime_after_cancel(ProviderKind::Amp));
         for provider in ProviderKind::ALL {
-            if provider != ProviderKind::Codex {
+            if !matches!(provider, ProviderKind::Codex | ProviderKind::Amp) {
                 assert!(retain_runtime_after_cancel(provider));
             }
         }

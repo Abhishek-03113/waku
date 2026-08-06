@@ -183,6 +183,7 @@ impl Waku {
         runtime: &mut SessionRuntime,
         event: DriverEvent,
     ) -> bool {
+        runtime.last_active_at = Instant::now();
         match event {
             DriverEvent::Connected { provider_cursor } => {
                 runtime.last_driver_error = None;
