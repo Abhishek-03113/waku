@@ -217,7 +217,7 @@ mod host {
             window.firstResponder().is_some_and(|responder| {
                 responder
                     .downcast_ref::<NSView>()
-                    .is_some_and(|responder| unsafe { responder.isDescendantOf(view) })
+                    .is_some_and(|responder| responder.isDescendantOf(view))
             })
         }
     }
