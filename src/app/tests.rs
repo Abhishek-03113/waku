@@ -448,7 +448,7 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
 
-    let kinds = folded_transcript_row_kinds(&session, &HashSet::new());
+    let kinds = folded_transcript_row_kinds(&session, &HashSet::from([turn_id]));
     // The work the agent did must be reachable by index, not just counted.
     assert!(
         kinds.iter().any(|kind| matches!(kind, TurnBlock(_))),
@@ -466,6 +466,11 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
     for index in 0..kinds.len() {
         assert!(kinds.get(index).is_some());
     }
+    // Collapsed, that same work is one fold row — reachable, not lost.
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), TurnFold(turn_id), Message(1)]
+    );
 }
 
 /// `refresh_transcript_row_kinds` skips the fold while this fingerprint holds
@@ -486,11 +491,30 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
         }),
     });
     base.push_message(MessageRole::Assistant, "I found the relevant code.");
+    base.transcript_blocks.push(TranscriptBlock {
+        after_message: 2,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )]),
+    });
     base.push_message(MessageRole::Assistant, "Done. The change is ready.");
     base.finish_active_turn(TurnStatus::Completed);
 
     let settled = HashSet::new();
-    let baseline_rows = folded_transcript_row_kinds(&base, &settled);
+    // Both states, because a mutation inside the fold only moves rows once the
+    // reader opens it — and those rows have to be right when they do.
+    let rows = |session: &AgentSession| {
+        (
+            folded_transcript_row_kinds(session, &settled),
+            folded_transcript_row_kinds(session, &HashSet::from([turn_id])),
+        )
+    };
+    let baseline_rows = rows(&base);
     let baseline_fingerprint = transcript_rows_fingerprint(&base, &settled);
 
     // Expansion lives outside the session, so check it against the same base.
@@ -528,13 +552,18 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
         ("a message reassigned to no turn", |session| {
             session.messages[1].turn_id = None;
         }),
+        // A blank part is work, not answer, so where the answer starts — and
+        // with it everything the fold swallows — turns on the content itself.
+        ("the final text part left blank", |session| {
+            session.messages[2].content.clear();
+        }),
     ];
 
     for (description, mutate) in mutations {
         let mut session = base.clone();
         mutate(&mut session);
         assert_ne!(
-            folded_transcript_row_kinds(&session, &settled),
+            rows(&session),
             baseline_rows,
             "{description} should change the rows — the case no longer proves anything"
         );
@@ -558,7 +587,7 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
 }
 
 #[test]
-fn a_settled_turn_keeps_its_work_visible_and_folds_only_interim_commentary() {
+fn a_settled_turn_folds_all_of_its_work_above_the_answer() {
     let project_id = Uuid::new_v4();
     let mut session = AgentSession::new(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
@@ -586,30 +615,81 @@ fn a_settled_turn_keeps_its_work_visible_and_folds_only_interim_commentary() {
     session.push_message(MessageRole::Assistant, "Done. The change is ready.");
     session.finish_active_turn(TurnStatus::Completed);
 
-    // Reasoning and tool activity stay in the transcript — each is already a
-    // one-line summary the reader can expand. Only the interim assistant
-    // commentary (message 1) folds away behind the work summary.
+    // The summary opens the turn and everything the agent did before its
+    // answer sits behind it — reasoning, tool activity and interim commentary
+    // alike. A divider between two pieces of work would read as a cut-off
+    // response.
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
-        vec![
-            Message(0),
-            TurnBlock(0),
-            TurnFold(turn_id),
-            TurnBlock(1),
-            Message(2)
-        ]
+        vec![Message(0), TurnFold(turn_id), Message(2)]
     );
-    // Expanding the fold brings the interim commentary back.
+    // Expanding restores the turn's real order in place.
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
         vec![
             Message(0),
-            TurnBlock(0),
             TurnFold(turn_id),
+            TurnBlock(0),
             Message(1),
             TurnBlock(1),
             Message(2)
         ]
+    );
+}
+
+/// Providers split one answer across several text parts. They arrive with no
+/// work between them, so they are all answer and none of them folds.
+#[test]
+fn consecutive_trailing_text_parts_all_stay_out_of_the_fold() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
+            content: "Looking around".into(),
+            started_at_ms: 1_000,
+            finished_at_ms: 2_000,
+        }),
+    });
+    session.push_message(MessageRole::Assistant, "First half of the answer.");
+    session.push_message(MessageRole::Assistant, "Second half of the answer.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), TurnFold(turn_id), Message(1), Message(2)]
+    );
+}
+
+/// An interrupted turn that never produced text has nothing to stay visible,
+/// so the whole turn folds behind its summary rather than spilling raw work.
+#[test]
+fn a_turn_without_an_answer_folds_completely() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )]),
+    });
+    // The streaming placeholder never received any text.
+    session.push_message(MessageRole::Assistant, "");
+    session.finish_active_turn(TurnStatus::Interrupted);
+
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), TurnFold(turn_id)]
+    );
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
+        vec![Message(0), TurnFold(turn_id), TurnBlock(0), Message(1)]
     );
 }
 

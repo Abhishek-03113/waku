@@ -614,6 +614,10 @@ pub(super) fn transcript_rows_fingerprint(
     for message in &session.messages {
         hash = mix(hash, message.role as u64);
         hash = mix_turn_id(hash, message.turn_id);
+        // The fold counts a blank text part as work, so a part crossing that
+        // line moves rows. `trim` stops at the first non-space character, so
+        // this stays a per-message constant on the frame path.
+        hash = mix(hash, message.content.trim().is_empty() as u64);
     }
 
     hash = mix(hash, session.transcript_blocks.len() as u64);
@@ -660,16 +664,15 @@ fn mix_turn_id(hash: u64, turn_id: Option<Uuid>) -> u64 {
     }
 }
 
-/// A settled turn presents its terminal assistant message plus the one-line
-/// summaries of what it did — "Thought for 12s", "Ran 3 tool calls" — each
-/// expandable in place.
+/// A settled turn presents its answer — the trailing run of assistant text —
+/// under a single work summary row standing in for everything that came
+/// before it: reasoning, tool activity and interim commentary alike.
 ///
-/// Only the turn's *interim assistant commentary* folds away, behind one work
-/// summary row. Reasoning and tool activity stay visible: they are already
-/// collapsed to a single line each, and hiding them behind a second fold left
-/// a settled turn saying nothing about what the agent actually did. This
-/// mirrors T3 Code, which keeps work entries inline in the timeline and
-/// collapses only overflow.
+/// That summary belongs at the *top* of the turn, where the work began. It
+/// used to be anchored at the first row it hid, which left it stranded mid-turn
+/// whenever the agent thought before it spoke — a divider reading "Worked for
+/// 19 seconds" with more work listed below it, as if the response had been cut
+/// in half. Expanding it restores the turn's full order in place.
 ///
 /// Every field this reads is fingerprinted by [`transcript_rows_fingerprint`]
 /// so frames can skip the fold; consult a new one and that must learn it too.
@@ -690,29 +693,17 @@ pub(super) fn folded_transcript_row_kinds(
         if turn.status == TurnStatus::Running {
             continue;
         }
-        let terminal_message = session.messages.iter().rposition(|message| {
-            message.role == MessageRole::Assistant && message.turn_id == Some(turn.id)
-        });
-        let hidden = raw_rows
+        let turn_rows = raw_rows
             .iter()
             .copied()
-            .filter(|row| match *row {
-                TranscriptRowKind::Message(message_index) => {
-                    Some(message_index) != terminal_message
-                        && session.messages.get(message_index).is_some_and(|message| {
-                            message.role == MessageRole::Assistant
-                                && message.turn_id == Some(turn.id)
-                        })
-                }
-                // Reasoning and activity summarise themselves; they stay.
-                TranscriptRowKind::TurnBlock(_) | TranscriptRowKind::TurnFold(_) => false,
-            })
+            .filter(|row| turn_produced_row(session, *row, turn.id))
             .collect::<Vec<_>>();
+        let hidden = &turn_rows[..turn_answer_start(session, &turn_rows)];
         let Some(anchor) = hidden.first().copied() else {
             continue;
         };
         fold_anchors.insert(anchor, turn.id);
-        hidden_rows.extend(hidden);
+        hidden_rows.extend(hidden.iter().copied());
     }
 
     let mut rows = Vec::with_capacity(raw_rows.len() + fold_anchors.len());
@@ -727,6 +718,49 @@ pub(super) fn folded_transcript_row_kinds(
         }
     }
     rows
+}
+
+/// Whether the row is something the turn *produced*. The user's prompt opens a
+/// turn and carries its id, but it is the heading the fold sits under, never
+/// part of what folds away.
+fn turn_produced_row(session: &AgentSession, row: TranscriptRowKind, turn_id: Uuid) -> bool {
+    match row {
+        TranscriptRowKind::Message(message_index) => {
+            session.messages.get(message_index).is_some_and(|message| {
+                message.role == MessageRole::Assistant && message.turn_id == Some(turn_id)
+            })
+        }
+        TranscriptRowKind::TurnBlock(block_index) => session
+            .transcript_blocks
+            .get(block_index)
+            .is_some_and(|block| block.turn_id == Some(turn_id)),
+        // Folds are inserted after this pass, so none exist yet.
+        TranscriptRowKind::TurnFold(_) => false,
+    }
+}
+
+/// Where the turn's answer begins within its own rows: the trailing run of
+/// assistant text parts. Everything before that is work and folds.
+///
+/// A blank part renders nothing, so it counts as work rather than extending the
+/// run backwards over the reasoning and tool calls between it and the answer.
+/// A turn that produced no text at all — interrupted, or pure tool output — has
+/// no answer, and all of it folds.
+fn turn_answer_start(session: &AgentSession, turn_rows: &[TranscriptRowKind]) -> usize {
+    let is_answer_text = |row: &TranscriptRowKind| match *row {
+        TranscriptRowKind::Message(message_index) => session
+            .messages
+            .get(message_index)
+            .is_some_and(|message| !message.content.trim().is_empty()),
+        TranscriptRowKind::TurnBlock(_) | TranscriptRowKind::TurnFold(_) => false,
+    };
+    let Some(last_text) = turn_rows.iter().rposition(is_answer_text) else {
+        return turn_rows.len();
+    };
+    turn_rows[..last_text]
+        .iter()
+        .rposition(|row| !is_answer_text(row))
+        .map_or(0, |index| index + 1)
 }
 
 fn row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
