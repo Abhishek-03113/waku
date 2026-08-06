@@ -108,6 +108,7 @@ impl Waku {
         if let Some(project_path) = project_path {
             let _ = checkpoint::delete_session_refs(&project_path, session_id, last_turn_count);
         }
+        self.invalidate_checkpoint_refs();
 
         if !was_selected {
             self.save();

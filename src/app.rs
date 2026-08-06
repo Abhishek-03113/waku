@@ -475,6 +475,16 @@ pub struct Waku {
     /// Snapshot of the sidebar rows the list state currently corresponds to.
     sidebar_row_cache: RefCell<Vec<SidebarRow>>,
     transcript_row_kinds: RefCell<Vec<TranscriptRowKind>>,
+    /// Checkpoint-ref existence per (session, retained turn count), filled by
+    /// `prefetch_checkpoint_refs` on the background executor. Rows read only
+    /// this cache: resolving a ref forks a `git` subprocess, which must stay
+    /// off the frame path.
+    checkpoint_ref_cache: RefCell<HashMap<(Uuid, usize), bool>>,
+    /// Bumped whenever checkpoint refs may have changed. A prefetch launched
+    /// under an older generation is stale and discarded on arrival.
+    checkpoint_ref_generation: Cell<u64>,
+    /// The (session, generation) the latest scheduled prefetch covers.
+    checkpoint_ref_prefetch: Cell<Option<(Uuid, u64)>>,
     transcript_anchor: Cell<Option<TranscriptAnchor>>,
     transcript_anchor_end_space: Rc<Cell<Pixels>>,
     transcript_anchor_following: Rc<Cell<bool>>,
@@ -795,6 +805,9 @@ impl Waku {
                 sidebar_scrollbar: ScrollbarState::new(),
                 sidebar_row_cache: RefCell::new(Vec::new()),
                 transcript_row_kinds: RefCell::new(Vec::new()),
+                checkpoint_ref_cache: RefCell::new(HashMap::new()),
+                checkpoint_ref_generation: Cell::new(0),
+                checkpoint_ref_prefetch: Cell::new(None),
                 transcript_anchor: Cell::new(None),
                 transcript_anchor_end_space: Rc::new(Cell::new(Pixels::ZERO)),
                 transcript_anchor_following,

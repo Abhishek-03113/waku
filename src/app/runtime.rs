@@ -148,6 +148,7 @@ impl Waku {
                 }
             }
         };
+        self.invalidate_checkpoint_refs();
         if let Some(session) = self
             .state
             .sessions
@@ -405,6 +406,7 @@ impl Waku {
             .and_then(|project| {
                 checkpoint::copy_session_refs(&project.path, source.id, fork_id, turn_count).err()
             });
+        self.invalidate_checkpoint_refs();
 
         self.state.sessions.push(forked);
         self.select_session(fork_id, cx);
@@ -803,6 +805,7 @@ impl Waku {
             retained_turn_count,
             previous_turn_count,
         );
+        self.invalidate_checkpoint_refs();
         self.sync_transcript_rows();
         let previous_kinds = self.transcript_row_kinds.borrow().clone();
         if let Some(session) = self
@@ -995,6 +998,7 @@ impl Waku {
                 .flatten()
                 .map(|error| format!("Could not capture the pre-turn checkpoint: {error}"))
         });
+        self.invalidate_checkpoint_refs();
         let transcript_anchor = if let Some(session) = self.selected_session_mut() {
             session.set_title_from_prompt(&prompt);
             let turn_id = session.begin_turn(&prompt);

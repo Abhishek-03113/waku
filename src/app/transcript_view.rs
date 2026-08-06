@@ -89,6 +89,7 @@ impl Waku {
         chat_viewport_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.prefetch_checkpoint_refs(cx);
         self.sync_transcript_rows();
         self.sync_transcript_layout_width(window);
         let transcript_rows = self.active_transcript_rows().clone();
@@ -107,52 +108,55 @@ impl Waku {
         }
         let entity = cx.entity().downgrade();
         let scrollbar_handle = transcript_rows.clone();
-        let viewport_size = transcript_rows.viewport_bounds().size;
-        let transcript_scrollable = viewport_size.height > Pixels::ZERO
-            && transcript_rows.max_offset_for_scrollbar().y > px(0.5);
-        let navigation_turns = self
-            .selected_session()
-            .map(|session| {
-                transcript_navigation_turns(session, &self.transcript_row_kinds.borrow())
-            })
-            .unwrap_or_default();
-        let navigation_rail_visible = should_show_navigation_rail(
-            transcript_scrollable,
-            navigation_turns.len(),
-            chat_viewport_width,
-        );
-        let scroll_top_row = transcript_rows.logical_scroll_top().item_ix;
-        let turn_rows = navigation_turns
-            .iter()
-            .map(|turn| turn.row_index)
-            .collect::<Vec<_>>();
-        let active_turn = active_navigation_turn_index(
-            &turn_rows,
-            scroll_top_row,
-            !self.transcript_is_scrolled.get(),
-        )
-        .map(|index| navigation_turns[index].message_id);
-        let navigation_rail_snapshot = ConversationNavigationRailSnapshot {
-            visible: navigation_rail_visible,
-            turns: navigation_turns,
-            viewport_height: f32::from(viewport_size.height),
-            active_turn,
-            active_scale_enabled: self.navigation_rail_active_scale_enabled.get(),
-            reset_generation: self.navigation_rail_reset_generation.get(),
-            theme_is_dark: Theme::current(cx).is_dark,
-        };
-        if self.navigation_rail.read(cx).snapshot != navigation_rail_snapshot {
-            self.navigation_rail.update(cx, |rail, cx| {
-                rail.set_snapshot(navigation_rail_snapshot, cx)
-            });
-        }
-        let navigation_rail = self.navigation_rail.clone().cached(
-            StyleRefinement::default()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
-        );
+        const NAVIGATION_RAIL_ENABLED: bool = true;
+        let navigation_rail = NAVIGATION_RAIL_ENABLED.then(|| {
+            let viewport_size = transcript_rows.viewport_bounds().size;
+            let transcript_scrollable = viewport_size.height > Pixels::ZERO
+                && transcript_rows.max_offset_for_scrollbar().y > px(0.5);
+            let navigation_turns = self
+                .selected_session()
+                .map(|session| {
+                    transcript_navigation_turns(session, &self.transcript_row_kinds.borrow())
+                })
+                .unwrap_or_default();
+            let navigation_rail_visible = should_show_navigation_rail(
+                transcript_scrollable,
+                navigation_turns.len(),
+                chat_viewport_width,
+            );
+            let scroll_top_row = transcript_rows.logical_scroll_top().item_ix;
+            let turn_rows = navigation_turns
+                .iter()
+                .map(|turn| turn.row_index)
+                .collect::<Vec<_>>();
+            let active_turn = active_navigation_turn_index(
+                &turn_rows,
+                scroll_top_row,
+                !self.transcript_is_scrolled.get(),
+            )
+            .map(|index| navigation_turns[index].message_id);
+            let navigation_rail_snapshot = ConversationNavigationRailSnapshot {
+                visible: navigation_rail_visible,
+                turns: navigation_turns,
+                viewport_height: f32::from(viewport_size.height),
+                active_turn,
+                active_scale_enabled: self.navigation_rail_active_scale_enabled.get(),
+                reset_generation: self.navigation_rail_reset_generation.get(),
+                theme_is_dark: Theme::current(cx).is_dark,
+            };
+            if self.navigation_rail.read(cx).snapshot != navigation_rail_snapshot {
+                self.navigation_rail.update(cx, |rail, cx| {
+                    rail.set_snapshot(navigation_rail_snapshot, cx)
+                });
+            }
+            self.navigation_rail.clone().cached(
+                StyleRefinement::default()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+        });
         div()
             .flex_1()
             .min_h_0()
@@ -171,7 +175,7 @@ impl Waku {
                 .size_full()
                 .pb(anchor_end_space),
             )
-            .child(navigation_rail)
+            .children(navigation_rail)
             .child(scrollbar::vertical(
                 &scrollbar_handle,
                 &self.transcript_scrollbar,
@@ -654,16 +658,16 @@ impl Waku {
             return None;
         }
         let retained_turn_count = turn.turn_count.saturating_sub(1);
-        let project_path = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .map(|project| project.path.as_path())?;
-        if !checkpoint::has_ref(
-            project_path,
-            &checkpoint::checkpoint_ref(session.id, retained_turn_count),
-        ) {
+        // Cache only — the ref lives in git, and this runs for every visible
+        // user message on every frame. `prefetch_checkpoint_refs` fills the
+        // cache off-thread and notifies.
+        if !self
+            .checkpoint_ref_cache
+            .borrow()
+            .get(&(session.id, retained_turn_count))
+            .copied()
+            .unwrap_or(false)
+        {
             return None;
         }
         let rollback_turns = session.provider_turns_after(retained_turn_count);
@@ -674,6 +678,63 @@ impl Waku {
             session_id: session.id,
             turn_count: turn.turn_count,
         })
+    }
+
+    /// Forget cached checkpoint-ref existence after refs changed. The next
+    /// transcript frame schedules a fresh background prefetch.
+    pub(super) fn invalidate_checkpoint_refs(&self) {
+        self.checkpoint_ref_cache.borrow_mut().clear();
+        self.checkpoint_ref_generation
+            .set(self.checkpoint_ref_generation.get().wrapping_add(1));
+    }
+
+    /// Resolve the selected session's checkpoint refs on the background
+    /// executor — one `git for-each-ref` per session per invalidation — and
+    /// cache which retained turn counts have one. The rewind affordance
+    /// appears once the result lands and notifies.
+    fn prefetch_checkpoint_refs(&self, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let generation = self.checkpoint_ref_generation.get();
+        if self.checkpoint_ref_prefetch.get() == Some((session.id, generation)) {
+            return;
+        }
+        let Some(project_path) = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .map(|project| project.path.clone())
+        else {
+            return;
+        };
+        let session_id = session.id;
+        let retained_turn_counts = session
+            .turns
+            .iter()
+            .map(|turn| turn.turn_count.saturating_sub(1))
+            .collect::<Vec<_>>();
+        self.checkpoint_ref_prefetch
+            .set(Some((session_id, generation)));
+        cx.spawn(async move |this, cx| {
+            let existing = cx
+                .background_executor()
+                .spawn(async move { checkpoint::session_turn_refs(&project_path, session_id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.checkpoint_ref_generation.get() != generation {
+                    return;
+                }
+                let mut cache = this.checkpoint_ref_cache.borrow_mut();
+                for turn_count in retained_turn_counts {
+                    cache.insert((session_id, turn_count), existing.contains(&turn_count));
+                }
+                drop(cache);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn assistant_message_action_for_message(

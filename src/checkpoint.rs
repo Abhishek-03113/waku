@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -118,6 +119,24 @@ pub fn restore_ref(cwd: &Path, git_ref: &str) -> anyhow::Result<()> {
 
 pub fn has_ref(cwd: &Path, git_ref: &str) -> bool {
     resolve_ref(cwd, git_ref).is_some()
+}
+
+/// Every turn count that has a checkpoint ref for `session_id`, resolved with
+/// a single `git for-each-ref` instead of one `git rev-parse` per turn.
+pub fn session_turn_refs(cwd: &Path, session_id: Uuid) -> HashSet<usize> {
+    let prefix = format!("refs/waku/session-{session_id}-turn-");
+    git_output(
+        cwd,
+        ["for-each-ref", "--format=%(refname)", &format!("{prefix}*")],
+    )
+    .map(|output| {
+        output
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(prefix.as_str()))
+            .filter_map(|turn_count| turn_count.parse().ok())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn delete_ref(cwd: &Path, git_ref: &str) -> anyhow::Result<()> {
@@ -324,6 +343,42 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "git {args:?} failed");
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[test]
+    fn session_turn_refs_lists_the_sessions_checkpoints_in_one_call() {
+        let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        git_ok(&directory, &["init", "--quiet"]);
+        fs::write(directory.join("tracked.txt"), "baseline\n").unwrap();
+        git_ok(&directory, &["add", "tracked.txt"]);
+        git_ok(
+            &directory,
+            &[
+                "-c",
+                "user.name=Waku Test",
+                "-c",
+                "user.email=waku@example.com",
+                "commit",
+                "--quiet",
+                "-m",
+                "baseline",
+            ],
+        );
+
+        let session = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        capture_turn(&directory, session, 0).unwrap();
+        capture_turn(&directory, session, 2).unwrap();
+        capture_turn(&directory, other, 5).unwrap();
+
+        assert_eq!(
+            session_turn_refs(&directory, session),
+            HashSet::from([0, 2])
+        );
+        assert_eq!(session_turn_refs(&directory, other), HashSet::from([5]));
+        assert!(session_turn_refs(&directory, Uuid::new_v4()).is_empty());
+        fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
