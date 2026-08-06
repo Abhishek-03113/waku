@@ -174,6 +174,13 @@ pub enum ComposerEvent {
     /// The field took focus. A code editor uses this to re-read its file, so
     /// clicking back into it picks up changes made on disk meanwhile.
     Focus,
+    /// The text content actually changed. Parents that derive UI from the
+    /// content — filter lists, draft state, dirty markers — react to this,
+    /// never to raw notifies: the field also notifies for caret blinks and
+    /// selection changes, and re-rendering an owner twice a second for a
+    /// blinking caret is exactly the per-frame waste the field exists to
+    /// contain.
+    Edited,
 }
 
 /// What the field is for. The difference is small but load-bearing: Enter
@@ -365,23 +372,32 @@ impl ComposerInput {
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
+        let changed = !self.content.is_empty();
         self.content = "".into();
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
         self.highlight.clear();
         self.pause_blink_cursor(cx);
+        if changed {
+            cx.emit(ComposerEvent::Edited);
+        }
         cx.notify();
     }
 
     pub fn set_content(&mut self, content: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.content = content.into();
+        let content = content.into();
+        let changed = self.content != content;
+        self.content = content;
         let offset = self.content.len();
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.marked_range = None;
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
+        if changed {
+            cx.emit(ComposerEvent::Edited);
+        }
         cx.notify();
     }
 
@@ -818,6 +834,7 @@ impl EntityInputHandler for ComposerInput {
             .map(|range| self.range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let previous = self.content.clone();
         self.content =
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         let offset = range.start + new_text.len();
@@ -825,6 +842,9 @@ impl EntityInputHandler for ComposerInput {
         self.marked_range = None;
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
+        if previous != self.content {
+            cx.emit(ComposerEvent::Edited);
+        }
         cx.notify();
     }
 
@@ -841,6 +861,7 @@ impl EntityInputHandler for ComposerInput {
             .map(|range| self.range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let previous = self.content.clone();
         self.content =
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.marked_range =
@@ -854,6 +875,9 @@ impl EntityInputHandler for ComposerInput {
                 offset..offset
             });
         self.pause_blink_cursor(cx);
+        if previous != self.content {
+            cx.emit(ComposerEvent::Edited);
+        }
         cx.notify();
     }
 

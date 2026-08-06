@@ -530,7 +530,6 @@ impl Waku {
                             .unwrap_or_default();
                         this.model_picker_tab = ModelPickerTab::Provider(provider);
                         this.model_picker_highlight = None;
-                        this.model_picker_query.clear();
                         this.request_provider_model_discovery(provider);
                         reset_search.update(cx, |search, cx| search.clear(cx));
                     } else {

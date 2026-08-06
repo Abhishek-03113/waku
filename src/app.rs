@@ -424,11 +424,6 @@ pub struct Waku {
     /// Keyboard cursor over the model picker's filtered rows. `None` means the
     /// keyboard has not moved yet, so `enter` takes the first row.
     model_picker_highlight: Option<usize>,
-    /// The filter text the cursor above was positioned against. A field
-    /// notifies on every caret blink, so only a real change to this may reset
-    /// the cursor — comparing against it is what keeps the selection alive
-    /// between keystrokes.
-    model_picker_query: String,
     model_picker_scroll: ScrollHandle,
     runtimes: HashMap<Uuid, SessionRuntime>,
     stream_state_dirty: bool,
@@ -713,33 +708,41 @@ impl Waku {
             })
             .detach();
 
+            // Edits, not raw notifies: a field also notifies for caret blinks
+            // and selection changes, and none of the app chrome depends on
+            // those — re-rendering the window twice a second for a blinking
+            // caret is exactly what the Performance guidance forbids.
             cx.subscribe(
                 &composer,
                 |this: &mut Self, _, event: &ComposerEvent, cx| match event {
                     ComposerEvent::Submit(prompt) => this.submit_prompt(prompt.clone(), cx),
+                    ComposerEvent::Edited => cx.notify(),
                     ComposerEvent::Focus => {}
                 },
             )
             .detach();
 
-            cx.observe(&composer, |_, _, cx| cx.notify()).detach();
-
-            // A field notifies its observers on every edit, which is all the
-            // searches need to re-filter. A changed query renumbers the rows,
-            // so the keyboard cursor cannot carry over — but the field also
-            // notifies on every caret blink, and resetting on those would wipe
-            // the selection half a second after each arrow key.
-            cx.observe(&model_search, |this: &mut Self, search, cx| {
-                let query = search.read(cx).content().to_owned();
-                if this.model_picker_query != query {
-                    this.model_picker_query = query;
-                    this.model_picker_highlight = None;
-                }
-                cx.notify();
-            })
+            // A changed query re-filters the picker rows and renumbers them,
+            // so the drawn selection cannot carry over.
+            cx.subscribe(
+                &model_search,
+                |this: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        this.model_picker_highlight = None;
+                        cx.notify();
+                    }
+                },
+            )
             .detach();
-            cx.observe(&settings_search, |_, _, cx| cx.notify())
-                .detach();
+            cx.subscribe(
+                &settings_search,
+                |_: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
 
             cx.spawn(async move |this, cx| {
                 loop {
@@ -781,7 +784,6 @@ impl Waku {
                 computer_use_app_icon_loads: RefCell::new(HashSet::new()),
                 model_picker_tab,
                 model_picker_highlight: None,
-                model_picker_query: String::new(),
                 model_picker_scroll: ScrollHandle::new(),
                 runtimes: HashMap::new(),
                 stream_state_dirty: false,

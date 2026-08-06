@@ -1808,21 +1808,29 @@ impl Waku {
             },
         );
 
-        // The field notifies on every edit, which is all dirty tracking needs.
+        // Dirty tracking follows content edits. Observing raw notifies would
+        // also fire for caret blinks and selection drags, cloning the whole
+        // file's text for each one.
         let subscribed_path = relative_path.to_owned();
-        cx.observe(&state, move |this: &mut Self, state, cx| {
-            let value = state.read(cx).content().to_owned();
-            if let Some(editor) = this
-                .right_panel_file_editors
-                .get_mut(subscribed_path.as_str())
-            {
-                let dirty = editor.writable && value != editor.disk_content;
-                if editor.dirty != dirty {
-                    editor.dirty = dirty;
-                    cx.notify();
+        cx.subscribe(
+            &state,
+            move |this: &mut Self, state, event: &ComposerEvent, cx| {
+                if !matches!(event, ComposerEvent::Edited) {
+                    return;
                 }
-            }
-        })
+                let value = state.read(cx).content().to_owned();
+                if let Some(editor) = this
+                    .right_panel_file_editors
+                    .get_mut(subscribed_path.as_str())
+                {
+                    let dirty = editor.writable && value != editor.disk_content;
+                    if editor.dirty != dirty {
+                        editor.dirty = dirty;
+                        cx.notify();
+                    }
+                }
+            },
+        )
         .detach();
 
         let focused_path = relative_path.to_owned();

@@ -458,11 +458,11 @@ impl Waku {
 
         let input = cx.new(|cx| ComposerInput::new(window, cx));
         input.update(cx, |input, cx| input.set_content(initial_message, cx));
-        cx.observe(&input, |_, _, cx| cx.notify()).detach();
         cx.subscribe(
             &input,
             |this: &mut Self, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::Submit(_) => this.submit_message_edit(cx),
+                ComposerEvent::Edited => cx.notify(),
                 ComposerEvent::Focus => {}
             },
         )
