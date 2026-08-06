@@ -570,23 +570,9 @@ impl Waku {
         }
     }
 
+    /// Discovery is not requested here: launch already requested it for every
+    /// installed provider, so tabs only ever switch between loaded lists.
     pub(super) fn select_model_picker_tab(&mut self, tab: ModelPickerTab, cx: &mut Context<Self>) {
-        match tab {
-            ModelPickerTab::Provider(provider) => {
-                self.request_provider_model_discovery(provider);
-            }
-            ModelPickerTab::Favorites => {
-                let providers = self
-                    .state
-                    .favorite_models
-                    .iter()
-                    .map(|favorite| favorite.provider)
-                    .collect::<HashSet<_>>();
-                for provider in providers {
-                    self.request_provider_model_discovery(provider);
-                }
-            }
-        }
         if self.model_picker_tab != tab {
             self.model_picker_tab = tab;
             // A different tab renumbers the rows under the keyboard cursor.

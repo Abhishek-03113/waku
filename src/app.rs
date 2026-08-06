@@ -960,6 +960,10 @@ impl Waku {
         entity.update(cx, |this, cx| {
             this.start_pending_checkpoint_captures(cx);
             this.refresh_branch(cx);
+            // Model discovery for every installed provider also starts here,
+            // ahead of the model picker's first render, so opening it never
+            // waits on a per-provider lazy load.
+            this.request_all_model_discoveries();
         });
         entity
     }

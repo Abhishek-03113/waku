@@ -29,6 +29,15 @@ impl Waku {
         self.probes.iter().find(|probe| probe.provider == provider)
     }
 
+    /// Kick off discovery for every installed provider, so the model picker
+    /// never opens onto a lazy load. Runs once at launch; each provider's
+    /// fallback catalog stands in until its discovery lands.
+    pub(super) fn request_all_model_discoveries(&mut self) {
+        for provider in ProviderKind::ALL {
+            self.request_provider_model_discovery(provider);
+        }
+    }
+
     pub(super) fn request_provider_model_discovery(&mut self, provider: ProviderKind) {
         if !provider.supports_model_discovery()
             || self.provider_model_discoveries.contains(&provider)
