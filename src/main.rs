@@ -4,6 +4,7 @@ mod amp_session;
 mod app;
 mod assets;
 mod blob_store;
+mod browser;
 mod checkpoint;
 mod claude_session;
 mod command_env;
@@ -57,7 +58,19 @@ actions!(
         ToggleFindCaseSensitive,
         ToggleFindWholeWord,
         ToggleFindRegex,
-        ReplaceAllMatches
+        ReplaceAllMatches,
+        BrowserBack,
+        BrowserForward,
+        BrowserReload,
+        BrowserHardReload,
+        BrowserStop,
+        BrowserDevtools,
+        FocusBrowserAddress,
+        BrowserAddressCancel,
+        WebviewCopy,
+        WebviewCut,
+        WebviewPaste,
+        WebviewSelectAll
     ]
 );
 
@@ -121,6 +134,24 @@ fn main() {
                 KeyBinding::new("cmd-alt-r", ToggleFindRegex, Some("FileEditorPane")),
                 KeyBinding::new("shift-enter", FindPrevious, Some("FindBar")),
                 KeyBinding::new("cmd-alt-enter", ReplaceAllMatches, Some("FindBar")),
+                // Browser surface. Deeper than "Waku", so while focus is on the
+                // page or its address bar the browser reads ⌘L/⌘R/⌘[/⌘]/Esc
+                // the way every macOS browser does; the same keys elsewhere
+                // keep their app meanings. The clipboard trio is rebound
+                // because GPUI's window view claims key equivalents before
+                // AppKit can walk the responder chain into the webview.
+                KeyBinding::new("cmd-l", FocusBrowserAddress, Some("Browser")),
+                KeyBinding::new("cmd-r", BrowserReload, Some("Browser")),
+                KeyBinding::new("cmd-shift-r", BrowserHardReload, Some("Browser")),
+                KeyBinding::new("cmd-[", BrowserBack, Some("Browser")),
+                KeyBinding::new("cmd-]", BrowserForward, Some("Browser")),
+                KeyBinding::new("escape", BrowserStop, Some("Browser")),
+                KeyBinding::new("cmd-alt-i", BrowserDevtools, Some("Browser")),
+                KeyBinding::new("cmd-c", WebviewCopy, Some("Browser")),
+                KeyBinding::new("cmd-x", WebviewCut, Some("Browser")),
+                KeyBinding::new("cmd-v", WebviewPaste, Some("Browser")),
+                KeyBinding::new("cmd-a", WebviewSelectAll, Some("Browser")),
+                KeyBinding::new("escape", BrowserAddressCancel, Some("BrowserAddress")),
             ]);
 
             cx.set_menus(vec![
