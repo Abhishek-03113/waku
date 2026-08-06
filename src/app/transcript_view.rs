@@ -231,9 +231,17 @@ impl Render for ConversationNavigationRail {
             .iter()
             .map(|turn| self.navigation_rail_focus_handle(turn.message_id, window, cx))
             .collect::<Vec<_>>();
-        let focused_turn_index = focus_handles
-            .iter()
-            .position(|focus_handle| focus_handle.is_focused(window));
+        // Focus emphasizes a tick only while focus is keyboard-driven, matching
+        // the `focus_visible` ring: a click also focuses the tick it hit, and
+        // ungated focus would pin the preview card open after the cursor left.
+        let focused_turn_index = window
+            .last_input_was_keyboard()
+            .then(|| {
+                focus_handles
+                    .iter()
+                    .position(|focus_handle| focus_handle.is_focused(window))
+            })
+            .flatten();
         let hovered_turn_index = self
             .hovered_turn
             .and_then(|message_id| turns.iter().position(|turn| turn.message_id == message_id));
