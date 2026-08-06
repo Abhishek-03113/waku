@@ -28,11 +28,13 @@ case "$profile" in
     app_name="Waku Debug"
     helper_name="Waku Debug Computer Use"
     bundle_identifier="sh.waku.dev"
+    icon_file="AppIconDev.icns"
     ;;
   release)
     app_name="Waku"
     helper_name="Waku Computer Use"
     bundle_identifier="sh.waku"
+    icon_file="AppIcon.icns"
     ;;
   *)
     echo "usage: scripts/bundle.sh [debug|release]" >&2
@@ -112,7 +114,7 @@ cp "$cargo_target_dir/$profile/waku" "$contents/MacOS/$app_name"
 cp "$cargo_target_dir/$profile/waku_js_repl" "$repl_executable"
 chmod 755 "$repl_executable"
 cp resources/Info.plist "$contents/Info.plist"
-cp resources/AppIcon.icns "$contents/Resources/AppIcon.icns"
+cp "resources/$icon_file" "$contents/Resources/AppIcon.icns"
 cp resources/computer-use/pi-extension.ts "$contents/Resources/computer-use/pi-extension.ts"
 cp resources/computer-use/SKILL.md "$contents/Resources/skills/waku-computer-use/SKILL.md"
 plutil -replace CFBundleDisplayName -string "$app_name" "$contents/Info.plist"
