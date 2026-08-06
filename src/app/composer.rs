@@ -521,7 +521,7 @@ impl Waku {
             let reset_weak = weak.clone();
             let reset_search = search.clone();
             let picker_focus = search_focus.clone();
-            self.menu_handle_with("provider-model-picker", cx, move |open, window, cx| {
+            self.menu_handle_with(MODEL_PICKER_MENU_ID, cx, move |open, window, cx| {
                 let _ = reset_weak.update(cx, |this, cx| {
                     if open {
                         let provider = this

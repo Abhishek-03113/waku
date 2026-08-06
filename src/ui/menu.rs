@@ -41,6 +41,9 @@ actions!(
 /// Key context the open menu declares, and the scope its bindings live in.
 const MENU_CONTEXT: &str = "WakuMenu";
 
+/// Vertical gap between a trigger and its anchored card.
+const TRIGGER_GAP: f32 = 4.0;
+
 /// A text field inside an open panel, such as a picker's filter box.
 ///
 /// The field holds real focus the whole time — the list's selection is drawn,
@@ -425,6 +428,32 @@ where
     })
 }
 
+/// Toggle a [`popover`] as if its trigger were clicked, for keyboard shortcuts.
+///
+/// Anchors to the trigger's last recorded bounds, so it no-ops until the
+/// trigger has drawn at least once. The handle's toggle observers may update
+/// the owning entity, so a caller holding that entity's lease must defer this.
+pub fn toggle_popover(
+    handle: &ContextMenuHandle,
+    align: MenuAlign,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if handle.is_open() {
+        handle.close(window, cx);
+        window.refresh();
+        return;
+    }
+    let Some(anchor) = handle
+        .trigger_bounds
+        .get()
+        .map(|bounds| align.anchor_point(bounds, px(TRIGGER_GAP)))
+    else {
+        return;
+    };
+    open_menu(handle, anchor, SurfaceFocus::Content, window, cx);
+}
+
 /// The shared half of both dropdown surfaces: a trigger that records its bounds
 /// and toggles the handle, plus the open card deferred and anchored to it.
 fn anchored_surface<E>(
@@ -437,8 +466,6 @@ fn anchored_surface<E>(
 where
     E: ParentElement + Styled + InteractiveElement + IntoElement + 'static,
 {
-    const GAP: f32 = 4.0;
-
     let open_at = handle.state.borrow().open;
     let toggle_handle = handle.clone();
 
@@ -455,7 +482,7 @@ where
             let anchor = toggle_handle
                 .trigger_bounds
                 .get()
-                .map(|bounds| align.anchor_point(bounds, px(GAP)))
+                .map(|bounds| align.anchor_point(bounds, px(TRIGGER_GAP)))
                 .unwrap_or_else(|| window.mouse_position());
             open_menu(&toggle_handle, anchor, focus_target, window, cx);
             cx.stop_propagation();

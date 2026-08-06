@@ -57,11 +57,15 @@ use crate::ui::{
 };
 use crate::{
     CancelTurn, CloseWindow, CopySelection, FocusComposer, NavigateBack, NavigateForward,
-    NewSession, OpenSettings, SaveFile, ToggleFpsCounter, ToggleRightPanel, ToggleSidebar,
+    NewSession, OpenSettings, SaveFile, ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel,
+    ToggleSidebar,
 };
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
+/// Menu-registry id of the composer's model picker, shared by its render site
+/// and the `cmd-/` toggle action.
+const MODEL_PICKER_MENU_ID: &str = "provider-model-picker";
 const SIDEBAR_MIN_WIDTH: f32 = 180.0;
 const SIDEBAR_MAX_WIDTH: f32 = 420.0;
 const RIGHT_PANEL_MIN_WIDTH: f32 = 280.0;

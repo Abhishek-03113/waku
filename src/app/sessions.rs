@@ -574,6 +574,44 @@ impl Waku {
         }
     }
 
+    /// `cmd-/`: toggle the composer's model picker as if its chip were clicked.
+    pub(super) fn toggle_model_picker_action(
+        &mut self,
+        _: &ToggleModelPicker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_page.is_some() {
+            return;
+        }
+        if !self
+            .selected_session()
+            .is_some_and(|session| session.can_choose_model(session.provider))
+        {
+            return;
+        }
+        let menus = self.menus.borrow();
+        let Some(handle) = menus.get(MODEL_PICKER_MENU_ID).cloned() else {
+            return;
+        };
+        // A keyboard toggle produces no mouse-down for another open menu's
+        // dismiss-on-down-out to see, so close the rest here.
+        let other_open: Vec<_> = menus
+            .iter()
+            .filter(|(id, other)| id.as_ref() != MODEL_PICKER_MENU_ID && other.is_open())
+            .map(|(_, other)| other.clone())
+            .collect();
+        drop(menus);
+        // The picker's toggle observers update this entity, so the toggle has
+        // to run after this listener releases it.
+        window.defer(cx, move |window, cx| {
+            for menu in other_open {
+                menu.close(window, cx);
+            }
+            crate::ui::menu::toggle_popover(&handle, MenuAlign::AboveLeft, window, cx);
+        });
+    }
+
     /// Discovery is not requested here: launch already requested it for every
     /// installed provider, so tabs only ever switch between loaded lists.
     pub(super) fn select_model_picker_tab(&mut self, tab: ModelPickerTab, cx: &mut Context<Self>) {

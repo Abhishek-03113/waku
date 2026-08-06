@@ -45,6 +45,7 @@ actions!(
         NavigateBack,
         NavigateForward,
         FocusComposer,
+        ToggleModelPicker,
         SaveFile,
         CancelTurn,
         CopySelection
@@ -92,6 +93,7 @@ fn main() {
                 KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
                 KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
                 KeyBinding::new("cmd-l", FocusComposer, None),
+                KeyBinding::new("cmd-/", ToggleModelPicker, None),
                 KeyBinding::new("cmd-s", SaveFile, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
                 KeyBinding::new("cmd-c", CopySelection, Some("Waku")),
@@ -116,6 +118,7 @@ fn main() {
                         MenuItem::action("Toggle Sidebar", ToggleSidebar),
                         MenuItem::action("Toggle Right Panel", ToggleRightPanel),
                         MenuItem::action("Focus Composer", FocusComposer),
+                        MenuItem::action("Toggle Model Picker", ToggleModelPicker),
                     ],
                 },
                 Menu {
