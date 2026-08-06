@@ -5,7 +5,8 @@ use super::{
     compact_driver_error, disclosure_leading_space, fenced_code, fitted_file_tree_width,
     fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
     maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
-    navigation_rail_height, navigation_rail_scale, pop_stream_chunk, session_is_reapable,
+    navigation_rail_height, navigation_rail_scale, navigation_rail_tick_count,
+    navigation_rail_tick_turn, navigation_rail_turn_tick, pop_stream_chunk, session_is_reapable,
     should_show_navigation_rail,
     take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
     transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
@@ -87,13 +88,53 @@ fn conversation_navigation_rail_visibility_uses_all_three_gates() {
 }
 
 #[test]
-fn conversation_navigation_rail_height_caps_at_sixty_five_percent() {
+fn conversation_navigation_rail_height_caps_at_eighty_percent() {
     assert_eq!(navigation_rail_height(10, 600.0), 120.0);
-    assert_eq!(navigation_rail_height(100, 600.0), 390.0);
+    // 80% of 600px holds 40 whole ticks; the rail quantizes to them instead
+    // of squeezing one hundred sub-pixel rows into the 480px budget.
+    assert_eq!(navigation_rail_height(100, 600.0), 480.0);
+    assert!(navigation_rail_height(100, 600.0) <= 600.0 * 0.80);
     assert_eq!(
         NAVIGATION_RAIL_TURN_HEIGHT - NAVIGATION_RAIL_TICK_HEIGHT,
         10.0
     );
+}
+
+#[test]
+fn conversation_navigation_rail_samples_ticks_when_turns_cannot_fit() {
+    // While every turn fits, each keeps its own tick and the maps are the
+    // identity.
+    assert_eq!(navigation_rail_tick_count(10, 600.0), 10);
+    assert_eq!(navigation_rail_tick_turn(3, 10, 10), 3);
+    assert_eq!(navigation_rail_turn_tick(3, 10, 10), 3);
+
+    // A thousand turns sample down to the 40 full-pitch ticks a 600px
+    // viewport can hold, spanning the whole conversation.
+    let tick_count = navigation_rail_tick_count(1000, 600.0);
+    assert_eq!(tick_count, 40);
+    assert_eq!(navigation_rail_tick_turn(0, tick_count, 1000), 0);
+    assert_eq!(
+        navigation_rail_tick_turn(tick_count - 1, tick_count, 1000),
+        975
+    );
+
+    // Every turn resolves to exactly the tick whose bucket holds it, and each
+    // tick's representative turn maps back to that tick.
+    for turn_index in 0..1000 {
+        let tick = navigation_rail_turn_tick(turn_index, tick_count, 1000);
+        assert!(tick < tick_count);
+        assert!(navigation_rail_tick_turn(tick, tick_count, 1000) <= turn_index);
+        if tick + 1 < tick_count {
+            assert!(turn_index < navigation_rail_tick_turn(tick + 1, tick_count, 1000));
+        }
+    }
+    for tick_index in 0..tick_count {
+        let representative = navigation_rail_tick_turn(tick_index, tick_count, 1000);
+        assert_eq!(
+            navigation_rail_turn_tick(representative, tick_count, 1000),
+            tick_index
+        );
+    }
 }
 
 #[test]

@@ -75,7 +75,7 @@ const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
 const NAVIGATION_RAIL_WIDTH: f32 = 44.0;
 const NAVIGATION_RAIL_LEFT: f32 = 16.0;
 const NAVIGATION_RAIL_CONTENT_GAP: f32 = 16.0;
-const NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO: f32 = 0.65;
+const NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO: f32 = 0.80;
 const NAVIGATION_RAIL_TICK_WIDTH: f32 = 32.0;
 const NAVIGATION_RAIL_TICK_HEIGHT: f32 = 2.0;
 const NAVIGATION_RAIL_TICK_GAP: f32 = 10.0;
@@ -548,6 +548,12 @@ pub struct Waku {
     /// from, so an unchanged transcript costs nothing on a frame. `None` until
     /// the first fold. See `transcript_rows_fingerprint`.
     transcript_row_kinds_fingerprint: Cell<Option<u64>>,
+    /// The navigation rail's turn list, shared by `Rc` so a frame hands the
+    /// rail a pointer instead of re-extracting every turn's snippets. Rebuilt
+    /// by `navigation_turns` when the row-kinds fingerprint moves.
+    transcript_navigation_turns: RefCell<Rc<Vec<TranscriptNavigationTurn>>>,
+    /// The row-kinds fingerprint `transcript_navigation_turns` was built from.
+    transcript_navigation_turns_fingerprint: Cell<Option<u64>>,
     /// Checkpoint-ref existence per (session, retained turn count), filled by
     /// `prefetch_checkpoint_refs` on the background executor. Rows read only
     /// this cache: resolving a ref forks a `git` subprocess, which must stay
@@ -926,6 +932,8 @@ impl Waku {
                 sidebar_row_cache: RefCell::new(Vec::new()),
                 transcript_row_kinds: RefCell::new(Vec::new()),
                 transcript_row_kinds_fingerprint: Cell::new(None),
+                transcript_navigation_turns: RefCell::new(Rc::new(Vec::new())),
+                transcript_navigation_turns_fingerprint: Cell::new(None),
                 checkpoint_ref_cache: RefCell::new(HashMap::new()),
                 checkpoint_ref_generation: Cell::new(0),
                 checkpoint_ref_prefetch: Cell::new(None),

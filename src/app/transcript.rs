@@ -34,6 +34,31 @@ impl Waku {
         })
     }
 
+    /// The navigation rail's turn list, rebuilt only when the row-kinds
+    /// fingerprint moves.
+    ///
+    /// `render_transcript` needs this every frame, and extracting prompt and
+    /// response snippets for every turn of a long session is far too much to
+    /// redo per frame. Every input the extraction reads is settled under an
+    /// unchanged [`transcript_rows_fingerprint`]: prompts are immutable once
+    /// sent, a response snippet is read only after its turn stopped running,
+    /// and completions, rewinds, and refolds all move the fingerprint.
+    pub(super) fn navigation_turns(&self) -> Rc<Vec<TranscriptNavigationTurn>> {
+        self.refresh_transcript_row_kinds();
+        let fingerprint = self.transcript_row_kinds_fingerprint.get();
+        if self.transcript_navigation_turns_fingerprint.get() != fingerprint {
+            let turns = self
+                .selected_session()
+                .map(|session| {
+                    transcript_navigation_turns(session, &self.transcript_row_kinds.borrow())
+                })
+                .unwrap_or_default();
+            *self.transcript_navigation_turns.borrow_mut() = Rc::new(turns);
+            self.transcript_navigation_turns_fingerprint.set(fingerprint);
+        }
+        self.transcript_navigation_turns.borrow().clone()
+    }
+
     pub(super) fn active_transcript_rows(&self) -> &ListState {
         if self.transcript_anchor.get().is_some() {
             &self.anchored_transcript_rows
@@ -319,47 +344,59 @@ pub(super) fn transcript_navigation_turns(
         .filter_map(|(index, message)| (message.role == MessageRole::User).then_some(index))
         .collect::<Vec<_>>();
 
-    user_message_indexes
-        .iter()
-        .copied()
-        .enumerate()
-        .filter_map(|(turn_index, message_index)| {
-            let message = session.messages.get(message_index)?;
-            let row_index = row_kinds
+    // Message rows keep ascending message order through folding, so one cursor
+    // walk resolves every prompt's row. A `position` scan from the top per
+    // turn made this quadratic over a long session.
+    let mut row_cursor = 0;
+    let mut turns = Vec::with_capacity(user_message_indexes.len());
+    for (turn_index, message_index) in user_message_indexes.iter().copied().enumerate() {
+        let Some(message) = session.messages.get(message_index) else {
+            continue;
+        };
+        let row_index = loop {
+            match row_kinds.get(row_cursor) {
+                None => break None,
+                Some(TranscriptRowKind::Message(row_message)) if *row_message >= message_index => {
+                    break (*row_message == message_index).then_some(row_cursor);
+                }
+                Some(_) => row_cursor += 1,
+            }
+        };
+        let Some(row_index) = row_index else {
+            continue;
+        };
+        let next_user_index = user_message_indexes
+            .get(turn_index + 1)
+            .copied()
+            .unwrap_or(session.messages.len());
+        let turn_running = message.turn_id.is_some_and(|turn_id| {
+            session
+                .turns
                 .iter()
-                .position(|kind| *kind == TranscriptRowKind::Message(message_index))?;
-            let next_user_index = user_message_indexes
-                .get(turn_index + 1)
-                .copied()
-                .unwrap_or(session.messages.len());
-            let turn_running = message.turn_id.is_some_and(|turn_id| {
-                session
-                    .turns
+                .any(|turn| turn.id == turn_id && turn.status == TurnStatus::Running)
+        });
+        let response = (!turn_running)
+            .then(|| {
+                session.messages[message_index + 1..next_user_index]
                     .iter()
-                    .any(|turn| turn.id == turn_id && turn.status == TurnStatus::Running)
-            });
-            let response = (!turn_running)
-                .then(|| {
-                    session.messages[message_index + 1..next_user_index]
-                        .iter()
-                        .rev()
-                        .find(|candidate| {
-                            candidate.role == MessageRole::Assistant
-                                && !candidate.content.trim().is_empty()
-                        })
-                        .map(|candidate| navigation_preview_snippet(&candidate.content, 240))
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
-            Some(TranscriptNavigationTurn {
-                message_id: message.id,
-                message_index,
-                row_index,
-                prompt: navigation_preview_snippet(&message.content, 100),
-                response,
+                    .rev()
+                    .find(|candidate| {
+                        candidate.role == MessageRole::Assistant
+                            && !candidate.content.trim().is_empty()
+                    })
+                    .map(|candidate| navigation_preview_snippet(&candidate.content, 240))
+                    .unwrap_or_default()
             })
-        })
-        .collect()
+            .unwrap_or_default();
+        turns.push(TranscriptNavigationTurn {
+            message_id: message.id,
+            message_index,
+            row_index,
+            prompt: navigation_preview_snippet(&message.content, 100),
+            response,
+        });
+    }
+    turns
 }
 
 pub(super) fn navigation_preview_snippet(content: &str, max_graphemes: usize) -> String {
@@ -411,9 +448,47 @@ pub(super) fn navigation_rail_scale(
     active_scale.max(emphasis_scale)
 }
 
+/// How many ticks the rail draws: one per turn while they fit, otherwise as
+/// many whole ticks as the rail's height budget holds. Ticks never squeeze
+/// below their full pitch — a hundreds-of-turns session would compress the
+/// gaps to nothing and turn the rail into a solid bar, and the element count
+/// per hover re-render would grow with the session instead of the viewport.
+pub(super) fn navigation_rail_tick_count(turn_count: usize, viewport_height: f32) -> usize {
+    let budget = viewport_height * NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO;
+    let max_ticks = ((budget / NAVIGATION_RAIL_TURN_HEIGHT) as usize).max(1);
+    turn_count.min(max_ticks)
+}
+
+/// The first turn of the bucket tick `tick_index` stands for — its
+/// representative for previews, clicks, and focus. The identity map while
+/// every turn has its own tick.
+pub(super) fn navigation_rail_tick_turn(
+    tick_index: usize,
+    tick_count: usize,
+    turn_count: usize,
+) -> usize {
+    if tick_count == 0 {
+        return 0;
+    }
+    (tick_index * turn_count).div_ceil(tick_count)
+}
+
+/// The tick whose bucket holds `turn_index` — the inverse of
+/// [`navigation_rail_tick_turn`], so an active turn always lights up exactly
+/// one tick.
+pub(super) fn navigation_rail_turn_tick(
+    turn_index: usize,
+    tick_count: usize,
+    turn_count: usize,
+) -> usize {
+    if turn_count == 0 {
+        return 0;
+    }
+    turn_index * tick_count / turn_count
+}
+
 pub(super) fn navigation_rail_height(turn_count: usize, viewport_height: f32) -> f32 {
-    (turn_count as f32 * NAVIGATION_RAIL_TURN_HEIGHT)
-        .min(viewport_height * NAVIGATION_RAIL_VIEWPORT_HEIGHT_RATIO)
+    navigation_rail_tick_count(turn_count, viewport_height) as f32 * NAVIGATION_RAIL_TURN_HEIGHT
 }
 
 pub(super) fn should_show_navigation_rail(
