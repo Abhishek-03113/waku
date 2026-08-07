@@ -34,8 +34,16 @@ impl Waku {
     /// Runs every pump tick; the guards keep it to one in-flight fetch per
     /// provider and clock comparisons otherwise.
     pub(super) fn maybe_refresh_plan_usage(&mut self, cx: &mut Context<Self>) {
+        // Disabling a provider only stops it backing new sessions; a session
+        // already locked to it keeps running, and while one is selected its
+        // usage panel still owes the account meters. Without this the panel
+        // would show its loading skeleton forever: fetchable provider, no
+        // snapshot, and no fetch ever allowed to start.
+        let selected_provider = self.selected_session().map(|session| session.provider);
         for provider in PLAN_USAGE_PROVIDERS {
-            if self.plan_usage_pending.contains(&provider) || !self.provider_enabled(provider) {
+            if self.plan_usage_pending.contains(&provider)
+                || (!self.provider_enabled(provider) && selected_provider != Some(provider))
+            {
                 continue;
             }
             let interval = if self.plan_usage_error.contains_key(&provider) {
@@ -75,7 +83,10 @@ impl Waku {
                             Some(binary) => crate::usage::fetch_grok_plan_usage(&binary),
                             None => Err(anyhow::anyhow!("grok is not installed")),
                         },
-                        _ => return,
+                        // A result must always come back: an early return here
+                        // would leave the provider pending forever and freeze
+                        // its panel section on the loading skeleton.
+                        _ => Err(anyhow::anyhow!("no plan usage fetcher")),
                     };
                     let _ = tx.send((provider, result.map_err(|error| format!("{error:#}"))));
                 })
@@ -411,11 +422,13 @@ fn usage_panel(
             .gap(px(6.0))
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
                     .text_size(px(11.0))
                     .text_color(theme.text_tertiary)
                     .child(SharedString::from(header)),
-            )
-            .child(div().flex_1());
+            );
         panel = panel.child(match usage_url {
             Some(url) => header_row
                 .id("plan-usage-link")
@@ -439,19 +452,26 @@ fn usage_panel(
                             .items_center()
                             .gap(px(8.0))
                             .child(
+                                // A long lane label gives way — truncated
+                                // with an ellipsis — rather than pushing the
+                                // reset time and percent past the card edge.
                                 div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
                                     .text_color(theme.text)
                                     .child(SharedString::from(window.label.clone())),
                             )
-                            .child(div().flex_1())
                             .children(window.resets_at.map(|resets_at| {
                                 div()
+                                    .flex_none()
                                     .text_size(px(11.0))
                                     .text_color(theme.text_tertiary)
                                     .child(SharedString::from(reset_label(resets_at, now)))
                             }))
                             .child(
                                 div()
+                                    .flex_none()
                                     .text_size(px(11.5))
                                     .text_color(theme.text_secondary)
                                     .child(SharedString::from(format!("{:.0}%", window.percent))),

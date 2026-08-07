@@ -340,6 +340,11 @@ fn parse_codex_plan_usage(body: &Value) -> Option<PlanUsage> {
             .get("limit_name")
             .and_then(Value::as_str)
             .unwrap_or("Model");
+        // The Spark bonus lane is promotional quota, not a limit the account
+        // plans around; its row is noise next to the real lanes.
+        if name.to_ascii_lowercase().contains("spark") {
+            continue;
+        }
         push_codex_windows(&mut windows, rate_limit, Some(name));
     }
     if windows.is_empty() {
@@ -847,9 +852,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_model_scoped_limits_become_named_rows() {
+    fn codex_model_scoped_limits_become_named_rows_except_spark() {
         // Shape captured live on 2026-08-07: a Pro account with a weekly
-        // account lane plus a model-scoped weekly lane.
+        // account lane plus model-scoped weekly lanes. The Spark bonus lane
+        // is dropped; other scoped lanes keep their named rows.
         let body: Value = serde_json::from_str(
             r#"{
                 "plan_type": "pro",
@@ -863,6 +869,12 @@ mod tests {
                     "rate_limit": {
                         "primary_window":
                             {"used_percent": 0, "limit_window_seconds": 604800, "reset_at": 1786720969}
+                    }
+                }, {
+                    "limit_name": "GPT-5.3-Codex",
+                    "rate_limit": {
+                        "primary_window":
+                            {"used_percent": 12, "limit_window_seconds": 604800, "reset_at": 1786720969}
                     }
                 }]
             }"#,
@@ -878,7 +890,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ("Weekly limit", 99.0),
-                ("Weekly · GPT-5.3-Codex-Spark", 0.0),
+                ("Weekly · GPT-5.3-Codex", 12.0),
             ]
         );
     }

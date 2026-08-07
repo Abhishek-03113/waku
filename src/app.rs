@@ -1008,12 +1008,16 @@ impl Waku {
                     cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
                     if this
                         .update(cx, |this, cx| {
+                            // `|` on purpose: every drain runs every tick. A
+                            // short-circuit would let a busy stream (whose
+                            // drain reports a change each tick) starve the
+                            // later queues for as long as it runs.
                             if this.drain_driver_events(cx)
-                                || this.drain_provider_probe_events()
-                                || this.drain_provider_version_events()
-                                || this.drain_provider_detection_events()
-                                || this.drain_computer_permission_events()
-                                || this.drain_plan_usage_events()
+                                | this.drain_provider_probe_events()
+                                | this.drain_provider_version_events()
+                                | this.drain_provider_detection_events()
+                                | this.drain_computer_permission_events()
+                                | this.drain_plan_usage_events()
                             {
                                 cx.notify();
                             }
