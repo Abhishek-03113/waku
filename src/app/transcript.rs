@@ -531,6 +531,12 @@ pub(super) fn assistant_response_footer_index(
     })
 }
 
+/// The copy content for the response footer: the turn's *visible* answer.
+///
+/// Everything before the trailing run of text parts hides behind the turn's
+/// "Worked for X" fold, and copying must match what the transcript presents
+/// as the message — interim commentary the fold hides stays out, even while
+/// the fold is expanded for inspection.
 pub(super) fn assistant_response_footer(
     session: &AgentSession,
     message_index: usize,
@@ -542,16 +548,16 @@ pub(super) fn assistant_response_footer(
     let Some(turn_id) = message.turn_id else {
         return Some(message.content.clone());
     };
+    let rows = turn_rows(session, turn_id);
     Some(
-        session
-            .messages
+        rows[turn_answer_start(session, &rows)..]
             .iter()
-            .filter(|candidate| {
-                candidate.role == MessageRole::Assistant
-                    && candidate.turn_id == Some(turn_id)
-                    && !candidate.content.trim().is_empty()
+            .filter_map(|row| match *row {
+                TranscriptRowKind::Message(index) => session.messages.get(index),
+                TranscriptRowKind::TurnBlock(_) | TranscriptRowKind::TurnFold(_) => None,
             })
-            .map(|candidate| candidate.content.as_str())
+            .filter(|part| !part.content.trim().is_empty())
+            .map(|part| part.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n"),
     )
@@ -769,11 +775,7 @@ pub(super) fn folded_transcript_row_kinds(
         if turn.status == TurnStatus::Running {
             continue;
         }
-        let turn_rows = raw_rows
-            .iter()
-            .copied()
-            .filter(|row| turn_produced_row(session, *row, turn.id))
-            .collect::<Vec<_>>();
+        let turn_rows = turn_rows(session, turn.id);
         let hidden = &turn_rows[..turn_answer_start(session, &turn_rows)];
         let Some(anchor) = hidden.first().copied() else {
             continue;
@@ -796,23 +798,40 @@ pub(super) fn folded_transcript_row_kinds(
     rows
 }
 
-/// Whether the row is something the turn *produced*. The user's prompt opens a
-/// turn and carries its id, but it is the heading the fold sits under, never
-/// part of what folds away.
-fn turn_produced_row(session: &AgentSession, row: TranscriptRowKind, turn_id: Uuid) -> bool {
-    match row {
-        TranscriptRowKind::Message(message_index) => {
-            session.messages.get(message_index).is_some_and(|message| {
-                message.role == MessageRole::Assistant && message.turn_id == Some(turn_id)
-            })
+/// The rows the turn *produced*, in transcript order: its assistant text parts
+/// merged with its blocks at their anchors, exactly the turn's subsequence of
+/// [`transcript_row_kinds`]. The user's prompt opens a turn and carries its id,
+/// but it is the heading the fold sits under, never part of what folds away —
+/// so it is not one of the turn's rows.
+///
+/// Both the fold and the response footer's copy content derive from this, so
+/// what gets copied is by construction what the fold leaves visible.
+fn turn_rows(session: &AgentSession, turn_id: Uuid) -> Vec<TranscriptRowKind> {
+    let message_count = session.messages.len();
+    // A block with (clamped) anchor `n` renders before message `n`, and blocks
+    // sharing an anchor keep their insertion order — the stable sort mirrors
+    // the bucket traversal in `transcript_row_kinds`.
+    let mut blocks = session
+        .transcript_blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.turn_id == Some(turn_id))
+        .map(|(block_index, block)| (block.after_message.min(message_count), block_index))
+        .collect::<Vec<_>>();
+    blocks.sort_by_key(|(anchor, _)| *anchor);
+    let mut blocks = blocks.into_iter().peekable();
+
+    let mut rows = Vec::new();
+    for (message_index, message) in session.messages.iter().enumerate() {
+        while let Some((_, block_index)) = blocks.next_if(|(anchor, _)| *anchor <= message_index) {
+            rows.push(TranscriptRowKind::TurnBlock(block_index));
         }
-        TranscriptRowKind::TurnBlock(block_index) => session
-            .transcript_blocks
-            .get(block_index)
-            .is_some_and(|block| block.turn_id == Some(turn_id)),
-        // Folds are inserted after this pass, so none exist yet.
-        TranscriptRowKind::TurnFold(_) => false,
+        if message.role == MessageRole::Assistant && message.turn_id == Some(turn_id) {
+            rows.push(TranscriptRowKind::Message(message_index));
+        }
     }
+    rows.extend(blocks.map(|(_, block_index)| TranscriptRowKind::TurnBlock(block_index)));
+    rows
 }
 
 /// Where the turn's answer begins within its own rows: the trailing run of

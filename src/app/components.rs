@@ -266,6 +266,13 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
     } = params;
 
     let content = message.content.clone();
+    // "Copy Message" must match what the row presents. The terminal part of a
+    // settled response stands in for the whole visible answer, so its menu
+    // shares the footer's copy content — parts hidden behind "Worked for X"
+    // stay out — rather than copying the final part alone.
+    let menu_copy_content = assistant_footer_copy_content
+        .clone()
+        .unwrap_or_else(|| content.clone());
     let message_id = message.id;
     let role = message.role;
     let element = match role {
@@ -465,7 +472,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         &menu,
         move |cx| {
             message_menu_items(
-                &content,
+                &menu_copy_content,
                 role,
                 user_message_action,
                 assistant_message_action,

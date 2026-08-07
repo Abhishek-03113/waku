@@ -816,13 +816,33 @@ fn a_turn_without_an_answer_folds_completely() {
 }
 
 #[test]
-fn assistant_response_footer_is_owned_by_the_terminal_part_and_combines_text() {
+fn assistant_response_footer_is_owned_by_the_terminal_part_and_copies_the_visible_answer() {
     let project_id = Uuid::new_v4();
     let mut session = AgentSession::new(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
-    session.push_message(MessageRole::Assistant, "First text part.");
-    session.push_message(MessageRole::Assistant, "  ");
-    session.push_message(MessageRole::Assistant, "Final text part.");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
+            content: "Looking around".into(),
+            started_at_ms: 1_000,
+            finished_at_ms: 2_000,
+        }),
+    });
+    session.push_message(MessageRole::Assistant, "Interim commentary.");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 2,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )]),
+    });
+    session.push_message(MessageRole::Assistant, "First half of the answer.");
+    session.push_message(MessageRole::Assistant, "Second half of the answer.");
     session.finish_active_turn(TurnStatus::Completed);
     session.messages[3].created_at = 100;
     session.turns.last_mut().unwrap().completed_at = Some(200);
@@ -830,9 +850,11 @@ fn assistant_response_footer_is_owned_by_the_terminal_part_and_combines_text() {
     assert_eq!(assistant_response_footer_index(&session, 1), Some(3));
     assert_eq!(assistant_response_footer_index(&session, 3), Some(3));
     assert_eq!(assistant_response_footer(&session, 1), None);
+    // The interim commentary hides behind the "Worked for X" fold, so copying
+    // the message must skip it and combine only the trailing answer parts.
     assert_eq!(
         assistant_response_footer(&session, 3).as_deref(),
-        Some("First text part.\n\nFinal text part.")
+        Some("First half of the answer.\n\nSecond half of the answer.")
     );
     assert_eq!(assistant_response_footer_time(&session, 1), None);
     assert_eq!(assistant_response_footer_time(&session, 3), Some(200));
@@ -840,6 +862,27 @@ fn assistant_response_footer_is_owned_by_the_terminal_part_and_combines_text() {
         session.messages[1..]
             .iter()
             .all(|message| message.turn_id == Some(turn_id))
+    );
+}
+
+/// A blank part breaks the answer run the same way work does — the fold hides
+/// the text before it, so the copied message must leave that text out too.
+#[test]
+fn assistant_response_footer_treats_a_blank_part_as_work() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "First text part.");
+    session.push_message(MessageRole::Assistant, "  ");
+    session.push_message(MessageRole::Assistant, "Final text part.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), TurnFold(turn_id), Message(3)]
+    );
+    assert_eq!(
+        assistant_response_footer(&session, 3).as_deref(),
+        Some("Final text part.")
     );
 }
 
