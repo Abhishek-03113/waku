@@ -535,16 +535,15 @@ impl Waku {
                         let locked = this
                             .selected_session()
                             .is_some_and(|session| !session.messages.is_empty());
-                        let provider = if !locked
-                            && this.state.disabled_providers.contains(&provider)
-                        {
-                            ProviderKind::ALL
-                                .into_iter()
-                                .find(|kind| this.provider_enabled(*kind))
-                                .unwrap_or(provider)
-                        } else {
-                            provider
-                        };
+                        let provider =
+                            if !locked && this.state.disabled_providers.contains(&provider) {
+                                ProviderKind::ALL
+                                    .into_iter()
+                                    .find(|kind| this.provider_enabled(*kind))
+                                    .unwrap_or(provider)
+                            } else {
+                                provider
+                            };
                         this.model_picker_tab = ModelPickerTab::Provider(provider);
                         this.model_picker_highlight = None;
                         reset_search.update(cx, |search, cx| search.clear(cx));
@@ -663,18 +662,11 @@ impl Waku {
                     )
                     .child(div().w(px(34.0)).h(px(1.0)).my(px(3.0)).bg(theme.border));
 
+                // One predicate with the `tab` cycle, so clicking and cycling
+                // agree on which tabs are usable.
+                let rail_tabs = visible_picker_tabs(&probes, &disabled_providers, locked_provider);
                 for kind in ProviderKind::ALL {
-                    let installed = probes
-                        .iter()
-                        .find(|probe| probe.provider == kind)
-                        .map(|probe| probe.installed)
-                        .unwrap_or(false);
-                    // A locked session keeps its own provider usable even if it
-                    // was switched off afterwards; disabling is for new work.
-                    let switched_off = disabled_providers.contains(&kind)
-                        && locked_provider != Some(kind);
-                    let allowed = (locked_provider.is_none() || locked_provider == Some(kind))
-                        && !switched_off;
+                    let usable = rail_tabs.contains(&ModelPickerTab::Provider(kind));
                     let selected = selected_tab == ModelPickerTab::Provider(kind) && !searching;
                     let tab_weak = weak.clone();
                     sidebar = sidebar.child(
@@ -688,8 +680,8 @@ impl Waku {
                             .justify_center()
                             .cursor_default()
                             .when(selected, |element| element.bg(theme.overlay_strong))
-                            .when(!installed || !allowed, |element| element.opacity(0.35))
-                            .when(installed && allowed, |element| {
+                            .when(!usable, |element| element.opacity(0.35))
+                            .when(usable, |element| {
                                 element.hover(|element| element.bg(theme.overlay)).on_click(
                                     move |_, _, cx| {
                                         let _ = tab_weak.update(cx, |this, cx| {
@@ -896,6 +888,8 @@ impl Waku {
                 let confirm_models = available_models.clone();
                 let next_weak = weak.clone();
                 let previous_weak = weak.clone();
+                let next_tab_weak = weak.clone();
+                let previous_tab_weak = weak.clone();
                 let confirm_weak = weak.clone();
                 let confirm_popover = popover.clone();
                 div()
@@ -921,6 +915,16 @@ impl Waku {
                     .on_action(move |_: &SelectPreviousEntry, _, cx| {
                         let _ = previous_weak.update(cx, |this, cx| {
                             this.move_model_picker_highlight("up", &previous_models, cx);
+                        });
+                    })
+                    .on_action(move |_: &SelectNextTab, _, cx| {
+                        let _ = next_tab_weak.update(cx, |this, cx| {
+                            this.cycle_model_picker_tab("down", cx);
+                        });
+                    })
+                    .on_action(move |_: &SelectPreviousTab, _, cx| {
+                        let _ = previous_tab_weak.update(cx, |this, cx| {
+                            this.cycle_model_picker_tab("up", cx);
                         });
                     })
                     .on_action(move |_: &ConfirmEntry, window, cx| {
@@ -965,6 +969,31 @@ impl Waku {
         self.model_picker_highlight = Some(next);
         self.model_picker_scroll.scroll_to_item(next);
         cx.notify();
+    }
+
+    /// Step the sidebar rail to the adjacent usable tab, wrapping at both
+    /// ends. `tab`/`shift-tab` land here from under the focused filter field,
+    /// the same route the arrows take. A live query hides which tab is
+    /// selected and searches across all of them, so cycling waits until the
+    /// field is cleared.
+    fn cycle_model_picker_tab(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.model_search.read(cx).content().trim().is_empty() {
+            return;
+        }
+        let locked_provider = self
+            .selected_session()
+            .filter(|session| !session.messages.is_empty())
+            .map(|session| session.provider);
+        let tabs = visible_picker_tabs(
+            &self.probes,
+            &self.state.disabled_providers,
+            locked_provider,
+        );
+        let current = tabs.iter().position(|tab| *tab == self.model_picker_tab);
+        let Some(next) = next_picker_highlight(current, tabs.len(), key) else {
+            return;
+        };
+        self.select_model_picker_tab(tabs[next], cx);
     }
 
     /// Bring the current model's row into view whenever the picker shows the
@@ -1302,7 +1331,14 @@ impl Waku {
                     .is_some_and(|extension| {
                         matches!(
                             extension.to_ascii_lowercase().as_str(),
-                            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff"
+                            "png"
+                                | "jpg"
+                                | "jpeg"
+                                | "gif"
+                                | "webp"
+                                | "bmp"
+                                | "tif"
+                                | "tiff"
                                 | "ico"
                         )
                     });
@@ -1717,8 +1753,7 @@ impl Waku {
                                 ))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let prompt = this.composer.read(cx).content().to_owned();
-                                    if let Some(prompt) =
-                                        this.submission_with_attachments(&prompt)
+                                    if let Some(prompt) = this.submission_with_attachments(&prompt)
                                     {
                                         this.composer.update(cx, |input, cx| input.clear(cx));
                                         this.submit_prompt(prompt, cx);
@@ -1845,6 +1880,30 @@ pub(super) fn next_picker_highlight(
         "up" => Some(current.map_or(len - 1, |index| (index + len - 1) % len)),
         _ => None,
     }
+}
+
+/// The sidebar tabs the picker can land on, in rail order: favorites first,
+/// then every installed provider a new session may use.
+///
+/// Shared by the rail's click gating and by `tab`'s cycle handler so the two
+/// agree on which tabs are usable. A locked session keeps its own provider
+/// usable even if it was switched off afterwards — disabling is for new work —
+/// while every other provider drops out for the lock's duration.
+pub(super) fn visible_picker_tabs(
+    probes: &[ProviderProbe],
+    disabled_providers: &[ProviderKind],
+    locked_provider: Option<ProviderKind>,
+) -> Vec<ModelPickerTab> {
+    let mut tabs = vec![ModelPickerTab::Favorites];
+    tabs.extend(ProviderKind::ALL.into_iter().filter_map(|kind| {
+        let installed = probes
+            .iter()
+            .any(|probe| probe.provider == kind && probe.installed);
+        let switched_off = disabled_providers.contains(&kind) && locked_provider != Some(kind);
+        let allowed = (locked_provider.is_none() || locked_provider == Some(kind)) && !switched_off;
+        (installed && allowed).then_some(ModelPickerTab::Provider(kind))
+    }));
+    tabs
 }
 
 /// The models the picker lists, in display order.

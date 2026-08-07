@@ -115,9 +115,7 @@ fn fetch_claude_profile_plan_label(access_token: &str, user_agent: &str) -> Opti
 /// ("default_claude_max_20x") carries the usage multiple.
 fn profile_plan_label(body: &Value) -> Option<String> {
     let organization = body.get("organization")?;
-    let tier = organization
-        .get("rate_limit_tier")
-        .and_then(Value::as_str);
+    let tier = organization.get("rate_limit_tier").and_then(Value::as_str);
     let subscription = organization
         .get("organization_type")
         .and_then(Value::as_str)
@@ -311,7 +309,9 @@ fn parse_grok_billing(billing: &Value) -> anyhow::Result<PlanUsage> {
         });
     }
     if plan_label.is_none() && windows.is_empty() {
-        return Err(anyhow!("Grok reported no billing data; run `grok` to sign in"));
+        return Err(anyhow!(
+            "Grok reported no billing data; run `grok` to sign in"
+        ));
     }
     Ok(PlanUsage {
         plan_label,
@@ -367,10 +367,7 @@ fn push_codex_windows(windows: &mut Vec<PlanWindow>, rate_limit: &Value, scope: 
             .map(|seconds| seconds / 60);
         let base = window_label_from_minutes(minutes);
         let label = match scope {
-            Some(name) => format!(
-                "{} · {name}",
-                base.strip_suffix(" limit").unwrap_or(&base)
-            ),
+            Some(name) => format!("{} · {name}", base.strip_suffix(" limit").unwrap_or(&base)),
             None => base,
         };
         windows.push(PlanWindow {
@@ -565,7 +562,10 @@ fn limit_entry_windows(body: &Value) -> Vec<PlanWindow> {
             };
             Some(PlanWindow {
                 label,
-                percent: entry.get("percent").and_then(Value::as_f64)?.clamp(0.0, 100.0),
+                percent: entry
+                    .get("percent")
+                    .and_then(Value::as_f64)?
+                    .clamp(0.0, 100.0),
                 resets_at: parse_reset(entry.get("resets_at")),
             })
         })
@@ -614,14 +614,12 @@ fn plan_label(subscription_type: Option<&str>, rate_limit_tier: Option<&str>) ->
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let base = subscription_type
-        .map(str::to_ascii_lowercase)
-        .or_else(|| {
-            ["max", "pro", "team", "enterprise"]
-                .into_iter()
-                .find(|plan| tier_words.iter().any(|word| word == plan))
-                .map(str::to_owned)
-        })?;
+    let base = subscription_type.map(str::to_ascii_lowercase).or_else(|| {
+        ["max", "pro", "team", "enterprise"]
+            .into_iter()
+            .find(|plan| tier_words.iter().any(|word| word == plan))
+            .map(str::to_owned)
+    })?;
     let mut label = match base.as_str() {
         "max" => "Max".to_owned(),
         "pro" => "Pro".to_owned(),
@@ -732,7 +730,12 @@ mod tests {
                 ("Weekly · Fable", 38.0),
             ]
         );
-        assert!(usage.windows.iter().all(|window| window.resets_at.is_some()));
+        assert!(
+            usage
+                .windows
+                .iter()
+                .all(|window| window.resets_at.is_some())
+        );
     }
 
     #[test]
@@ -950,7 +953,10 @@ mod tests {
     fn reset_labels_stay_relative_until_a_day_out() {
         let now = 1_700_000_000;
         assert_eq!(reset_label(now + 49 * 60, now), "Resets in 49 min");
-        assert_eq!(reset_label(now + 3 * 3600 + 120, now), "Resets in 3 hr 2 min");
+        assert_eq!(
+            reset_label(now + 3 * 3600 + 120, now),
+            "Resets in 3 hr 2 min"
+        );
         assert_eq!(reset_label(now - 5, now), "Resets soon");
         // Beyond a day the label goes absolute in local time; the exact text
         // depends on the machine's zone, so assert only the shape.

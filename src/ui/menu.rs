@@ -39,6 +39,8 @@ actions!(
         DismissMenu,
         SelectNextEntry,
         SelectPreviousEntry,
+        SelectNextTab,
+        SelectPreviousTab,
         ConfirmEntry
     ]
 );
@@ -54,8 +56,8 @@ const TRIGGER_GAP: f32 = 4.0;
 /// The field holds real focus the whole time — the list's selection is drawn,
 /// never focused, which is how Zed's picker works. So the list's keys have to
 /// be claimed from under the focused field, and only a binding can do that:
-/// `enter` and the arrows reach the field as *actions*, and an action consumes
-/// the keystroke before any `on_key_down` listener above it ever runs.
+/// `enter`, `tab`, and the arrows reach the field as *actions*, and an action
+/// consumes the keystroke before any `on_key_down` listener above it ever runs.
 const PANEL_FIELD_CONTEXT: &str = "WakuMenu > ComposerInput";
 
 /// Bind the menu's own keys. Called once at startup.
@@ -69,6 +71,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", DismissMenu, Some(MENU_CONTEXT)),
         KeyBinding::new("down", SelectNextEntry, Some(PANEL_FIELD_CONTEXT)),
         KeyBinding::new("up", SelectPreviousEntry, Some(PANEL_FIELD_CONTEXT)),
+        KeyBinding::new("tab", SelectNextTab, Some(PANEL_FIELD_CONTEXT)),
+        KeyBinding::new("shift-tab", SelectPreviousTab, Some(PANEL_FIELD_CONTEXT)),
         KeyBinding::new("enter", ConfirmEntry, Some(PANEL_FIELD_CONTEXT)),
     ]);
 }

@@ -1261,8 +1261,11 @@ fn resolve_color(
             colors[named as usize].or_else(|| Some(terminal_rgb(named as usize, theme.is_dark)))
         }
     };
-    rgb.map(rgb_to_hsla)
-        .unwrap_or(if foreground { theme.text } else { theme.terminal })
+    rgb.map(rgb_to_hsla).unwrap_or(if foreground {
+        theme.text
+    } else {
+        theme.terminal
+    })
 }
 
 fn rgb_to_hsla(color: Rgb) -> Hsla {
@@ -1402,7 +1405,10 @@ mod tests {
             terminal_cursor_style(true, false),
             TerminalCursorStyle::Hidden
         );
-        assert_eq!(terminal_cursor_style(true, true), TerminalCursorStyle::Solid);
+        assert_eq!(
+            terminal_cursor_style(true, true),
+            TerminalCursorStyle::Solid
+        );
     }
 
     #[test]
@@ -1436,5 +1442,4 @@ mod tests {
             Some((TerminalPoint::new(Line(-3), Column(0)), Side::Left))
         );
     }
-
 }

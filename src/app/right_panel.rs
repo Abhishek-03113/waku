@@ -1311,7 +1311,8 @@ impl Waku {
         // Tab titles and toolbar state live on the browser entity; the panel
         // chrome re-renders when they move.
         cx.observe(&browser, |_, _, cx| cx.notify()).detach();
-        self.right_panel_browsers.insert(browser_id, browser.clone());
+        self.right_panel_browsers
+            .insert(browser_id, browser.clone());
         browser
     }
 
@@ -1436,8 +1437,10 @@ impl Waku {
                     .get(browser_id)
                     .and_then(|browser| browser.read(cx).tab_label())
                     .unwrap_or_else(|| surface.label().to_owned()),
-                _ => right_panel_tab_label(&surface, self.right_panel_files_selected_path.as_deref())
-                    .to_owned(),
+                _ => {
+                    right_panel_tab_label(&surface, self.right_panel_files_selected_path.as_deref())
+                        .to_owned()
+                }
             });
             let icon_path =
                 right_panel_tab_icon(&surface, self.right_panel_files_selected_path.as_deref());

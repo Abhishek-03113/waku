@@ -1626,15 +1626,20 @@ fn probe_provider_version(binary: &std::path::Path) -> Option<String> {
 fn parse_cli_version(output: &str) -> Option<String> {
     let line = output.lines().find(|line| !line.trim().is_empty())?;
     line.split_whitespace()
-        .map(|token| token.trim_start_matches('v').trim_matches(|c: char| {
-            !(c.is_ascii_alphanumeric() || c == '.' || c == '-')
-        }))
+        .map(|token| {
+            token
+                .trim_start_matches('v')
+                .trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        })
         .find(|token| {
             let mut parts = token.split('.');
             let leading_number = parts
                 .next()
                 .is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
-            leading_number && parts.next().is_some_and(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            leading_number
+                && parts
+                    .next()
+                    .is_some_and(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
         })
         .map(str::to_owned)
 }
@@ -1653,7 +1658,10 @@ mod version_tests {
             parse_cli_version("2.1.24 (Claude Code)\n"),
             Some("2.1.24".to_owned())
         );
-        assert_eq!(parse_cli_version("v1.3.0-beta.2"), Some("1.3.0-beta.2".to_owned()));
+        assert_eq!(
+            parse_cli_version("v1.3.0-beta.2"),
+            Some("1.3.0-beta.2".to_owned())
+        );
         assert_eq!(
             parse_cli_version("\nAmp CLI version 0.9.12\n"),
             Some("0.9.12".to_owned())
@@ -1666,6 +1674,9 @@ mod version_tests {
     fn version_requires_a_dotted_number_not_a_bare_digit() {
         // "2024" alone or a hash must not read as a version.
         assert_eq!(parse_cli_version("build 2024 f3a9c1"), None);
-        assert_eq!(parse_cli_version("cursor-agent 2025.09.12-4f8d8e2"), Some("2025.09.12-4f8d8e2".to_owned()));
+        assert_eq!(
+            parse_cli_version("cursor-agent 2025.09.12-4f8d8e2"),
+            Some("2025.09.12-4f8d8e2".to_owned())
+        );
     }
 }

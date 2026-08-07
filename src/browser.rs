@@ -61,16 +61,17 @@ fn resolve_address(raw: &str) -> Option<AddressTarget> {
         return None;
     }
 
-    let has_scheme = trimmed
-        .split_once(':')
-        .is_some_and(|(scheme, rest)| {
-            !scheme.is_empty()
-                && scheme
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-                && scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                && (rest.starts_with("//") || matches!(scheme, "about" | "data" | "mailto" | "file"))
-        });
+    let has_scheme = trimmed.split_once(':').is_some_and(|(scheme, rest)| {
+        !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            && scheme
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            && (rest.starts_with("//") || matches!(scheme, "about" | "data" | "mailto" | "file"))
+    });
     if has_scheme {
         return Some(AddressTarget::Url(trimmed.to_owned()));
     }
@@ -88,9 +89,7 @@ fn resolve_address(raw: &str) -> Option<AddressTarget> {
         None => (authority, false),
     };
     let is_ip = !host.is_empty()
-        && host
-            .chars()
-            .all(|c| c.is_ascii_digit() || c == '.')
+        && host.chars().all(|c| c.is_ascii_digit() || c == '.')
         && host.split('.').count() == 4;
     let is_local = host.eq_ignore_ascii_case("localhost") || is_ip;
     let host_like = is_local
@@ -177,8 +176,7 @@ mod host {
                 | NSEventType::RightMouseDown
                 | NSEventType::OtherMouseDown
         );
-        pressed
-            && NSProcessInfo::processInfo().systemUptime() - event.timestamp() < 0.5
+        pressed && NSProcessInfo::processInfo().systemUptime() - event.timestamp() < 0.5
     }
 
     pub(super) struct ResponderObserverIvars {
@@ -204,8 +202,7 @@ mod host {
                 _change: Option<&NSDictionary<NSKeyValueChangeKey, AnyObject>>,
                 _context: *mut c_void,
             ) {
-                if key_path.is_some_and(|path| path.isEqualToString(ns_string!("firstResponder")))
-                {
+                if key_path.is_some_and(|path| path.isEqualToString(ns_string!("firstResponder"))) {
                     (self.ivars().handler)(recent_user_gesture());
                 }
             }
@@ -219,12 +216,15 @@ mod host {
             let observer = Self::alloc().set_ivars(ResponderObserverIvars { window, handler });
             let observer: Retained<Self> = unsafe { msg_send![super(observer), init] };
             unsafe {
-                observer.ivars().window.addObserver_forKeyPath_options_context(
-                    &observer,
-                    ns_string!("firstResponder"),
-                    NSKeyValueObservingOptions::New,
-                    null_mut(),
-                );
+                observer
+                    .ivars()
+                    .window
+                    .addObserver_forKeyPath_options_context(
+                        &observer,
+                        ns_string!("firstResponder"),
+                        NSKeyValueObservingOptions::New,
+                        null_mut(),
+                    );
             }
             observer
         }
@@ -1071,13 +1071,10 @@ impl BrowserView {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let has_page = self.navigation_requested;
-        let secure = self
-            .current_url
-            .as_deref()
-            .is_some_and(is_secure_url);
-        let progress = self.loading.then(|| {
-            (self.estimated_progress().clamp(0.04, 1.0) * 1000.0).round() / 1000.0
-        });
+        let secure = self.current_url.as_deref().is_some_and(is_secure_url);
+        let progress = self
+            .loading
+            .then(|| (self.estimated_progress().clamp(0.04, 1.0) * 1000.0).round() / 1000.0);
 
         div()
             .h(px(TOOLBAR_HEIGHT))
@@ -1307,8 +1304,7 @@ fn snapshot_render_image(
     if data.is_null() {
         return None;
     }
-    let bytes =
-        unsafe { std::slice::from_raw_parts(data, bytes_per_row.checked_mul(height)?) };
+    let bytes = unsafe { std::slice::from_raw_parts(data, bytes_per_row.checked_mul(height)?) };
     let bgra = bgra_from_bitmap(
         bytes,
         width,
@@ -1350,11 +1346,11 @@ fn bgra_from_bitmap(
 
     // Where each output channel (B, G, R) lives within one pixel's bytes.
     let [b, g, r] = match (samples, alpha_first, little_endian_words) {
-        (4, true, true) => [0, 1, 2],  // memory B,G,R,A — the CGImage native case
+        (4, true, true) => [0, 1, 2], // memory B,G,R,A — the CGImage native case
         (4, false, false) => [2, 1, 0], // memory R,G,B,A
         (4, true, false) => [3, 2, 1], // memory A,R,G,B
         (4, false, true) => [1, 2, 3], // memory A,B,G,R
-        _ => [2, 1, 0], // 3-sample R,G,B
+        _ => [2, 1, 0],               // 3-sample R,G,B
     };
     let alpha = match (samples, alpha_first, little_endian_words) {
         (4, true, true) => Some(3),
@@ -1439,7 +1435,8 @@ impl Render for BrowserView {
         }
 
         let body = if let Some(error) = self.host_error.clone() {
-            self.render_host_error(error.into(), theme).into_any_element()
+            self.render_host_error(error.into(), theme)
+                .into_any_element()
         } else if self.navigation_requested {
             self.render_page_area(theme).into_any_element()
         } else {
@@ -1536,7 +1533,10 @@ mod tests {
     #[test]
     fn the_address_bar_hides_only_the_https_scheme() {
         assert_eq!(display_url("https://example.com/x"), "example.com/x");
-        assert_eq!(display_url("http://localhost:3000"), "http://localhost:3000");
+        assert_eq!(
+            display_url("http://localhost:3000"),
+            "http://localhost:3000"
+        );
         assert!(is_secure_url("https://example.com"));
         assert!(!is_secure_url("http://localhost:3000"));
     }

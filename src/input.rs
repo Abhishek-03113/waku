@@ -1427,8 +1427,8 @@ impl EntityInputHandler for ComposerInput {
         let range = match (range_utf16.as_ref(), self.marked_range.as_ref()) {
             (Some(range_utf16), Some(marked)) => {
                 let base = self.offset_to_utf16(marked.start);
-                let absolute = self
-                    .range_from_utf16(&(base + range_utf16.start..base + range_utf16.end));
+                let absolute =
+                    self.range_from_utf16(&(base + range_utf16.start..base + range_utf16.end));
                 absolute.start.clamp(marked.start, marked.end)
                     ..absolute.end.clamp(marked.start, marked.end)
             }
@@ -1578,8 +1578,7 @@ impl InputElement {
                     input.cursor_offset(),
                     input.selected_range.end,
                 ),
-                !input.content.is_empty()
-                    && input.selected_range == (0..input.content.len()),
+                !input.content.is_empty() && input.selected_range == (0..input.content.len()),
                 input.scroll_offset,
             )
         };
@@ -2116,14 +2115,7 @@ mod tests {
         let mut history = EditHistory::default();
         let mut content = String::new();
         let start = Instant::now();
-        type_at(
-            &mut history,
-            &mut content,
-            0,
-            &["a"],
-            start,
-            Duration::ZERO,
-        );
+        type_at(&mut history, &mut content, 0, &["a"], start, Duration::ZERO);
         type_at(
             &mut history,
             &mut content,
@@ -2189,14 +2181,7 @@ mod tests {
         let mut history = EditHistory::default();
         let mut content = String::new();
         let start = Instant::now();
-        type_at(
-            &mut history,
-            &mut content,
-            0,
-            &["a"],
-            start,
-            Duration::ZERO,
-        );
+        type_at(&mut history, &mut content, 0, &["a"], start, Duration::ZERO);
         history.seal();
         type_at(
             &mut history,
@@ -2214,14 +2199,7 @@ mod tests {
         let mut history = EditHistory::default();
         let mut content = String::new();
         let start = Instant::now();
-        type_at(
-            &mut history,
-            &mut content,
-            0,
-            &["a"],
-            start,
-            Duration::ZERO,
-        );
+        type_at(&mut history, &mut content, 0, &["a"], start, Duration::ZERO);
         let (restored, ..) = history.undo(&content).unwrap();
         let mut content = restored;
         assert_eq!(history.redo.len(), 1);

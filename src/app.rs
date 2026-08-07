@@ -41,7 +41,7 @@ use crate::md::render::{
 };
 use crate::ui::menu::{
     ConfirmEntry, ContextMenuHandle, DismissMenu, MenuAlign, MenuItem, SelectNextEntry,
-    SelectPreviousEntry, context_menu, dropdown_menu, popover,
+    SelectNextTab, SelectPreviousEntry, SelectPreviousTab, context_menu, dropdown_menu, popover,
 };
 use crate::ui::scrollbar::{self, ScrollbarState};
 use crate::ui::tooltip::Tooltip;
@@ -822,10 +822,12 @@ impl Waku {
         }
         let probes = ProviderKind::ALL
             .into_iter()
-            .map(|provider| match state.provider_binary_overrides.get(&provider) {
-                Some(binary) => ProviderProbe::with_binary_override(provider, binary),
-                None => ProviderProbe::pending(provider),
-            })
+            .map(
+                |provider| match state.provider_binary_overrides.get(&provider) {
+                    Some(binary) => ProviderProbe::with_binary_override(provider, binary),
+                    None => ProviderProbe::pending(provider),
+                },
+            )
             .collect::<Vec<_>>();
         let (provider_probe_tx, provider_probe_events) = unbounded();
         let (provider_version_tx, provider_version_events) = unbounded();

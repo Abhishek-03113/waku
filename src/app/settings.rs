@@ -410,7 +410,10 @@ impl Waku {
 
             let toggle_on = !disabled;
             let toggle = div()
-                .id(SharedString::from(format!("provider-enabled-{}", kind.id())))
+                .id(SharedString::from(format!(
+                    "provider-enabled-{}",
+                    kind.id()
+                )))
                 .tab_index(0)
                 .focus_visible(|style| style.border_color(theme.accent))
                 .w(px(36.0))
@@ -419,7 +422,11 @@ impl Waku {
                 .flex_none()
                 .rounded_full()
                 .cursor_default()
-                .bg(if toggle_on { theme.inverse } else { theme.inset })
+                .bg(if toggle_on {
+                    theme.inverse
+                } else {
+                    theme.inset
+                })
                 .border_1()
                 .border_color(if toggle_on {
                     theme.inverse
@@ -429,11 +436,17 @@ impl Waku {
                 .flex()
                 .items_center()
                 .when(toggle_on, |element| element.justify_end())
-                .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if toggle_on {
-                    theme.on_inverse
-                } else {
-                    theme.text_tertiary
-                }))
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .rounded_full()
+                        .bg(if toggle_on {
+                            theme.on_inverse
+                        } else {
+                            theme.text_tertiary
+                        }),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.set_provider_enabled(kind, disabled, cx);
                 }));
@@ -646,7 +659,8 @@ impl Waku {
             .hover(|element| element.bg(theme.overlay))
             .child("Reset")
             .on_click(cx.listener(|this, _, _, cx| {
-                this.provider_path_input.update(cx, |input, cx| input.clear(cx));
+                this.provider_path_input
+                    .update(cx, |input, cx| input.clear(cx));
                 this.apply_provider_path_override(cx);
             }));
 
@@ -732,7 +746,12 @@ impl Waku {
         let Some(provider) = self.expanded_provider_settings else {
             return;
         };
-        let text = self.provider_path_input.read(cx).content().trim().to_owned();
+        let text = self
+            .provider_path_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
         let current = self
             .state
             .provider_binary_overrides
@@ -761,7 +780,9 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         if enabled {
-            self.state.disabled_providers.retain(|kind| *kind != provider);
+            self.state
+                .disabled_providers
+                .retain(|kind| *kind != provider);
         } else if !self.state.disabled_providers.contains(&provider) {
             self.state.disabled_providers.push(provider);
         }

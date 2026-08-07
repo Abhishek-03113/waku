@@ -1109,7 +1109,9 @@ fn codex_plan_usage(snapshot: Option<&Value>) -> Option<crate::usage::PlanUsage>
         return None;
     }
     Some(crate::usage::PlanUsage {
-        plan_label: crate::usage::openai_plan_label(snapshot.get("planType").and_then(Value::as_str)),
+        plan_label: crate::usage::openai_plan_label(
+            snapshot.get("planType").and_then(Value::as_str),
+        ),
         windows,
     })
 }

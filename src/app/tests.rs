@@ -29,7 +29,11 @@ use uuid::Uuid;
 fn dropped_files_mention_project_relative_paths() {
     let root = std::path::Path::new("/work/repo");
     assert_eq!(
-        dropped_file_mention(Some(root), std::path::Path::new("/work/repo/src/main.rs"), false),
+        dropped_file_mention(
+            Some(root),
+            std::path::Path::new("/work/repo/src/main.rs"),
+            false
+        ),
         "src/main.rs"
     );
     assert_eq!(
@@ -1023,4 +1027,52 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
         "",
     );
     assert_eq!(models.len(), 1);
+}
+
+#[test]
+fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
+    use super::ModelPickerTab;
+    use super::composer::visible_picker_tabs;
+    use crate::model::{ProviderModel, ProviderProbe};
+
+    let probe = |provider: ProviderKind, installed: bool| ProviderProbe {
+        provider,
+        installed,
+        path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
+        models: vec![ProviderModel::new("model", "model")],
+    };
+    let probes = [
+        probe(ProviderKind::Claude, true),
+        probe(ProviderKind::Codex, true),
+        probe(ProviderKind::Cursor, false),
+    ];
+
+    // Uninstalled providers never join the cycle; favorites leads.
+    assert_eq!(
+        visible_picker_tabs(&probes, &[], None),
+        vec![
+            ModelPickerTab::Favorites,
+            ModelPickerTab::Provider(ProviderKind::Claude),
+            ModelPickerTab::Provider(ProviderKind::Codex),
+        ]
+    );
+
+    // Switched-off providers leave the cycle like they leave the rail.
+    assert_eq!(
+        visible_picker_tabs(&probes, &[ProviderKind::Claude], None),
+        vec![
+            ModelPickerTab::Favorites,
+            ModelPickerTab::Provider(ProviderKind::Codex),
+        ]
+    );
+
+    // A locked session cycles between favorites and its own provider only,
+    // even when that provider was switched off after the session started.
+    assert_eq!(
+        visible_picker_tabs(&probes, &[ProviderKind::Claude], Some(ProviderKind::Claude)),
+        vec![
+            ModelPickerTab::Favorites,
+            ModelPickerTab::Provider(ProviderKind::Claude),
+        ]
+    );
 }
