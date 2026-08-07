@@ -721,6 +721,7 @@ mod usage_meter;
 
 pub use autocomplete::init as init_composer_autocomplete;
 use components::*;
+pub use settings::init as init_settings_keys;
 use sidebar::SidebarRow;
 use streaming::*;
 use transcript::*;

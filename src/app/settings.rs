@@ -1,6 +1,73 @@
+use gpui::actions;
+
+use super::composer::next_picker_highlight;
 use super::*;
 
+actions!(waku_settings, [ClearSearch]);
+
 const SETTINGS_CONTENT_MAX_WIDTH: f32 = 760.0;
+
+/// Key context the settings sidebar declares around its search field.
+const SETTINGS_SIDEBAR_CONTEXT: &str = "SettingsSidebar";
+
+/// The search field while focused inside the sidebar. The field holds real
+/// focus the whole time — the sidebar's selection is only drawn — so `up` and
+/// `down` have to be claimed from under it, and only a binding can do that:
+/// they arrive as actions, which consume the keystroke before the field sees
+/// it.
+const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > ComposerInput";
+
+/// The sidebar's rows in display order, each with the keyword haystack the
+/// search field filters against.
+const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 4] = [
+    (
+        SettingsPage::General,
+        "General",
+        "icons/settings.svg",
+        "general local projects conversations privacy",
+    ),
+    (
+        SettingsPage::Appearance,
+        "Appearance",
+        "icons/appearance.svg",
+        "appearance theme system light dark",
+    ),
+    (
+        SettingsPage::Providers,
+        "Providers",
+        "icons/bot.svg",
+        "providers agents models cli version install detect claude codex cursor opencode amp grok pi",
+    ),
+    (
+        SettingsPage::ComputerUse,
+        "Computer Use",
+        "icons/cursor-spark.svg",
+        "computer use screen recording accessibility apps control codex",
+    ),
+];
+
+/// Bind the search field's list-navigation keys. Called once at startup.
+pub fn init(cx: &mut App) {
+    use gpui::KeyBinding;
+    cx.bind_keys([
+        KeyBinding::new("down", SelectNextEntry, Some(SETTINGS_SEARCH_CONTEXT)),
+        KeyBinding::new("up", SelectPreviousEntry, Some(SETTINGS_SEARCH_CONTEXT)),
+        // Two-stage escape: the first press clears the query, and on an empty
+        // field the handler propagates, so the keystroke falls through to
+        // `CancelTurn`, which closes settings.
+        KeyBinding::new("escape", ClearSearch, Some(SETTINGS_SEARCH_CONTEXT)),
+    ]);
+}
+
+/// The sidebar rows the query leaves visible, in display order. `query` must
+/// already be trimmed and lowercased; when it is empty every page matches.
+pub(super) fn visible_settings_pages(
+    query: &str,
+) -> impl Iterator<Item = (SettingsPage, &'static str, &'static str, &'static str)> + '_ {
+    SETTINGS_PAGES
+        .into_iter()
+        .filter(move |(_, _, _, keywords)| query.is_empty() || keywords.contains(query))
+}
 
 impl Waku {
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -33,43 +100,10 @@ impl Waku {
     fn render_settings_sidebar(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let current_page = self.settings_page.unwrap_or(SettingsPage::Appearance);
-        let query = self
-            .settings_search
-            .read(cx)
-            .content()
-            .trim()
-            .to_ascii_lowercase();
+        let query = self.settings_search_query(cx);
         let mut navigation = div().flex().flex_col().gap(px(3.0));
 
-        for (page, label, icon_path, _keywords) in [
-            (
-                SettingsPage::General,
-                "General",
-                "icons/settings.svg",
-                "general local projects conversations privacy",
-            ),
-            (
-                SettingsPage::Appearance,
-                "Appearance",
-                "icons/appearance.svg",
-                "appearance theme system light dark",
-            ),
-            (
-                SettingsPage::Providers,
-                "Providers",
-                "icons/bot.svg",
-                "providers agents models cli version install detect claude codex cursor opencode amp grok pi",
-            ),
-            (
-                SettingsPage::ComputerUse,
-                "Computer Use",
-                "icons/cursor-spark.svg",
-                "computer use screen recording accessibility apps control codex",
-            ),
-        ]
-        .into_iter()
-        .filter(|(_, _, _, keywords)| query.is_empty() || keywords.contains(query.as_str()))
-        {
+        for (page, label, icon_path, _keywords) in visible_settings_pages(&query) {
             let selected = current_page == page;
             navigation = navigation.child(
                 div()
@@ -113,6 +147,22 @@ impl Waku {
         }
 
         div()
+            .key_context(SETTINGS_SIDEBAR_CONTEXT)
+            .on_action(cx.listener(|this, _: &SelectNextEntry, _, cx| {
+                this.cycle_settings_page("down", cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectPreviousEntry, _, cx| {
+                this.cycle_settings_page("up", cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClearSearch, _, cx| {
+                if this.settings_search.read(cx).content().is_empty() {
+                    cx.propagate();
+                    return;
+                }
+                // `clear` emits `Edited`, and the app's subscription turns
+                // that into the notify that re-expands the filtered list.
+                this.settings_search.update(cx, |input, cx| input.clear(cx));
+            }))
             .w(px(DEFAULT_SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
@@ -153,6 +203,34 @@ impl Waku {
             )
             .child(div().h(px(18.0)))
             .child(div().px(px(12.0)).child(navigation))
+    }
+
+    /// The search field's content, normalized the way the page filter expects.
+    fn settings_search_query(&self, cx: &App) -> String {
+        self.settings_search
+            .read(cx)
+            .content()
+            .trim()
+            .to_ascii_lowercase()
+    }
+
+    /// Step the selected page through the rows the search leaves visible,
+    /// wrapping at both ends. The field keeps focus so typing keeps narrowing
+    /// the list; the landing page renders immediately, so there is no separate
+    /// confirm step. A selection filtered out by the query re-enters the list
+    /// from whichever end matches the key.
+    fn cycle_settings_page(&mut self, key: &str, cx: &mut Context<Self>) {
+        let query = self.settings_search_query(cx);
+        let pages = visible_settings_pages(&query)
+            .map(|(page, ..)| page)
+            .collect::<Vec<_>>();
+        let current_page = self.settings_page.unwrap_or(SettingsPage::Appearance);
+        let current = pages.iter().position(|page| *page == current_page);
+        let Some(next) = next_picker_highlight(current, pages.len(), key) else {
+            return;
+        };
+        self.settings_page = Some(pages[next]);
+        cx.notify();
     }
 
     fn render_settings_sidebar_titlebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {

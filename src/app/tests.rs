@@ -1,4 +1,5 @@
 use super::composer::{dropped_file_mention, merged_submission, next_picker_highlight};
+use super::settings::visible_settings_pages;
 use super::{
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
     TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
@@ -953,6 +954,39 @@ fn model_picker_highlight_wraps_at_both_ends() {
 
     // An empty result list has nothing to land on.
     assert_eq!(next_picker_highlight(None, 0, "down"), None);
+}
+
+#[test]
+fn settings_search_filters_pages_for_arrow_cycling() {
+    use super::SettingsPage;
+
+    let pages = |query: &str| {
+        visible_settings_pages(query)
+            .map(|(page, ..)| page)
+            .collect::<Vec<_>>()
+    };
+
+    // An empty query keeps every page in sidebar order, so the arrows cycle
+    // the full navigation even before anything is typed.
+    assert_eq!(
+        pages(""),
+        vec![
+            SettingsPage::General,
+            SettingsPage::Appearance,
+            SettingsPage::Providers,
+            SettingsPage::ComputerUse,
+        ]
+    );
+
+    assert_eq!(pages("theme"), vec![SettingsPage::Appearance]);
+
+    // A keyword shared across pages keeps them all reachable.
+    assert_eq!(
+        pages("codex"),
+        vec![SettingsPage::Providers, SettingsPage::ComputerUse]
+    );
+
+    assert_eq!(pages("no such setting"), vec![]);
 }
 
 #[test]

@@ -103,6 +103,7 @@ fn main() {
             crate::input::init(cx);
             crate::ui::menu::init(cx);
             crate::app::init_composer_autocomplete(cx);
+            crate::app::init_settings_keys(cx);
             crate::theme::init(cx);
             cx.set_reduce_motion(crate::platform::reduce_motion_enabled());
 
