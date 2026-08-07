@@ -325,6 +325,37 @@ impl Waku {
             )
     }
 
+    fn render_sidebar_footer(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        div()
+            .flex_none()
+            .h(px(40.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .id("open-settings")
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .w(px(26.0))
+                    .h(px(26.0))
+                    .flex_none()
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_default()
+                    .hover(|element| element.bg(theme.overlay))
+                    .active(|element| element.bg(theme.overlay_strong))
+                    .tooltip(Tooltip::text("Settings"))
+                    .child(icon("icons/settings.svg", 14.0, theme.text_tertiary))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings_action(&OpenSettings, window, cx);
+                    })),
+            )
+    }
+
     pub(super) fn render_sidebar(&self, width: f32, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let is_resizing = self
@@ -378,6 +409,7 @@ impl Waku {
                         &self.sidebar_scrollbar,
                     )),
             )
+            .child(self.render_sidebar_footer(cx))
     }
 
     /// Snapshot the session history as a flat list of lightweight rows, newest
