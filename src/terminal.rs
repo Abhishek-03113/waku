@@ -262,7 +262,7 @@ impl TerminalSession {
         &self,
         theme: Theme,
         selection_color: Hsla,
-        render_cursor: bool,
+        cursor_style: TerminalCursorStyle,
     ) -> TerminalSnapshot {
         self.dark_theme.store(theme.is_dark, Ordering::Release);
         let term = self.term.lock();
@@ -272,11 +272,18 @@ impl TerminalSession {
         let selection = content.selection;
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_column = content.cursor.point.column.0;
-        let cursor_visible = render_cursor
-            && !matches!(
-                content.cursor.shape,
-                alacritty_terminal::vte::ansi::CursorShape::Hidden
-            );
+        let cursor_style = if matches!(
+            content.cursor.shape,
+            alacritty_terminal::vte::ansi::CursorShape::Hidden
+        ) {
+            TerminalCursorStyle::Hidden
+        } else {
+            cursor_style
+        };
+        let outline_cursor = (cursor_style == TerminalCursorStyle::Outline
+            && (0..rows as i32).contains(&cursor_row)
+            && cursor_column < columns)
+            .then_some((cursor_row as usize, cursor_column));
         let mut cells = vec![TerminalCell::blank(theme); columns * rows];
 
         for indexed in content.display_iter {
@@ -317,7 +324,10 @@ impl TerminalSession {
                 background = selection_color;
                 foreground = theme.text;
             }
-            if cursor_visible && row == cursor_row && column == cursor_column {
+            if cursor_style == TerminalCursorStyle::Solid
+                && row == cursor_row
+                && column == cursor_column
+            {
                 background = theme.text;
                 foreground = theme.terminal;
             }
@@ -359,6 +369,7 @@ impl TerminalSession {
 
         TerminalSnapshot {
             rows: rendered_rows,
+            outline_cursor,
         }
     }
 }
@@ -416,6 +427,14 @@ struct TerminalRow {
 
 struct TerminalSnapshot {
     rows: Vec<TerminalRow>,
+    outline_cursor: Option<(usize, usize)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TerminalCursorStyle {
+    Solid,
+    Outline,
+    Hidden,
 }
 
 struct TerminalCursorBlink {
@@ -838,13 +857,11 @@ impl Render for TerminalView {
             .max(TERMINAL_MIN_ROWS as f32) as usize;
 
         let terminal_focused = window.is_window_active() && self.focus_handle.is_focused(window);
-        let render_cursor = terminal_cursor_should_be_visible(
-            terminal_focused,
-            self.cursor_blink.read(cx).visible(),
-        );
+        let cursor_style =
+            terminal_cursor_style(terminal_focused, self.cursor_blink.read(cx).visible());
         let snapshot = self.session.as_mut().map(|session| {
             session.resize(columns, rows);
-            session.snapshot(theme, selection_color, render_cursor)
+            session.snapshot(theme, selection_color, cursor_style)
         });
         let title = if self.title.trim().is_empty() {
             "Terminal"
@@ -873,7 +890,11 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::on_mouse_move));
 
         if let Some(snapshot) = snapshot {
-            for row in snapshot.rows {
+            let TerminalSnapshot {
+                rows: snapshot_rows,
+                outline_cursor,
+            } = snapshot;
+            for row in snapshot_rows {
                 let runs = row
                     .runs
                     .into_iter()
@@ -912,6 +933,18 @@ impl Render for TerminalView {
                         .text_size(px(TERMINAL_FONT_SIZE))
                         .line_height(px(TERMINAL_CELL_HEIGHT))
                         .child(StyledText::new(row.text).with_runs(runs)),
+                );
+            }
+            if let Some((row, column)) = outline_cursor {
+                screen = screen.child(
+                    div()
+                        .absolute()
+                        .left(px(column as f32 * TERMINAL_CELL_WIDTH))
+                        .top(px(row as f32 * TERMINAL_CELL_HEIGHT))
+                        .w(px(TERMINAL_CELL_WIDTH))
+                        .h(px(TERMINAL_CELL_HEIGHT))
+                        .border_1()
+                        .border_color(theme.text),
                 );
             }
         } else {
@@ -1047,8 +1080,14 @@ impl Render for TerminalView {
     }
 }
 
-fn terminal_cursor_should_be_visible(focused: bool, blink_visible: bool) -> bool {
-    !focused || blink_visible
+fn terminal_cursor_style(focused: bool, blink_visible: bool) -> TerminalCursorStyle {
+    if !focused {
+        TerminalCursorStyle::Outline
+    } else if blink_visible {
+        TerminalCursorStyle::Solid
+    } else {
+        TerminalCursorStyle::Hidden
+    }
 }
 
 fn terminal_grid_point(
@@ -1350,11 +1389,20 @@ mod tests {
     }
 
     #[test]
-    fn cursor_blinks_only_while_terminal_is_focused() {
-        assert!(terminal_cursor_should_be_visible(false, false));
-        assert!(terminal_cursor_should_be_visible(false, true));
-        assert!(!terminal_cursor_should_be_visible(true, false));
-        assert!(terminal_cursor_should_be_visible(true, true));
+    fn cursor_blinks_while_focused_and_outlines_when_unfocused() {
+        assert_eq!(
+            terminal_cursor_style(false, false),
+            TerminalCursorStyle::Outline
+        );
+        assert_eq!(
+            terminal_cursor_style(false, true),
+            TerminalCursorStyle::Outline
+        );
+        assert_eq!(
+            terminal_cursor_style(true, false),
+            TerminalCursorStyle::Hidden
+        );
+        assert_eq!(terminal_cursor_style(true, true), TerminalCursorStyle::Solid);
     }
 
     #[test]
