@@ -125,12 +125,17 @@ impl AcpDriver {
         };
         let launch = launch_for(provider)?;
 
-        // Grok's Computer Use support is an isolated GROK_HOME plus a rules
-        // argument, and it is transport-independent — the ACP session needs the
-        // same setup the headless turns had.
+        // Grok's Computer Use support is an isolated GROK_HOME plus extra
+        // system-prompt rules. The GROK_HOME travels on the process
+        // environment, but `grok agent stdio` rejects the headless `--rules`
+        // flag, so the rules go in-band as `session/new` `_meta.rules`.
         let computer_use = (provider == ProviderKind::Grok && computer_use_enabled)
             .then(|| super::support::HeadlessComputerUseRuntime::start(provider, events.clone()))
             .transpose()?;
+        let session_meta = computer_use
+            .as_ref()
+            .and_then(|runtime| runtime.config.grok_rules())
+            .map(|rules| json!({"rules": rules}));
 
         let mut command = crate::command_env::command(&binary);
         command.args(&launch.args).current_dir(&cwd);
@@ -229,19 +234,30 @@ impl AcpDriver {
                         .pointer("/result/agentCapabilities/loadSession")
                         .and_then(Value::as_bool)
                         == Some(true);
-                    let new_session = json!({"cwd": cwd, "mcpServers": []});
+                    let mut new_session = json!({"cwd": cwd, "mcpServers": []});
+                    if let Some(meta) = &session_meta {
+                        new_session["_meta"] = meta.clone();
+                    }
                     let opened = match resume_session_id.as_deref() {
                         Some(session_id) if can_load => {
+                            // `_meta` rides along on the load too: rules are
+                            // per-request extension data, not persisted session
+                            // state, and an agent that does not read them there
+                            // ignores them.
+                            let mut load_session = json!({
+                                "sessionId": session_id,
+                                "cwd": cwd,
+                                "mcpServers": []
+                            });
+                            if let Some(meta) = &session_meta {
+                                load_session["_meta"] = meta.clone();
+                            }
                             let loaded = request(
                                 &mut stdin,
                                 &writer_pending,
                                 &mut next_id,
                                 "session/load",
-                                json!({
-                                    "sessionId": session_id,
-                                    "cwd": cwd,
-                                    "mcpServers": []
-                                }),
+                                load_session,
                             );
                             match loaded {
                                 // A resume that the agent no longer recognizes
