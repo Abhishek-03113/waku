@@ -52,6 +52,7 @@ use crate::persistence::{
 use crate::query::{Query, QueryCache};
 use crate::terminal::TerminalView;
 use crate::theme::{Theme, ThemePreference};
+use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, icon, icon_button, provider_color,
     provider_icon, status_color, status_label,
@@ -136,6 +137,7 @@ enum ModelPickerTab {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettingsPage {
     General,
+    Providers,
     ComputerUse,
     Appearance,
 }
@@ -471,6 +473,27 @@ pub struct Waku {
     provider_probe_events: Receiver<ProviderProbe>,
     provider_model_discoveries: HashSet<ProviderKind>,
     provider_model_discoveries_pending: HashSet<ProviderKind>,
+    /// CLI version per provider, probed off-thread. Missing key means the
+    /// probe has not answered yet; `None` means it ran and found nothing.
+    provider_versions: HashMap<ProviderKind, Option<String>>,
+    provider_version_tx: Sender<(ProviderKind, Option<String>)>,
+    provider_version_events: Receiver<(ProviderKind, Option<String>)>,
+    /// Providers with a version probe in flight, so a re-detect cannot stack
+    /// a second subprocess on one that has not answered.
+    provider_version_probes_pending: HashSet<ProviderKind>,
+    /// PATH re-detection results from the Providers page's refresh, merged
+    /// into `probes` without touching their model catalogs.
+    provider_detection_tx: Sender<(ProviderKind, bool, Option<PathBuf>)>,
+    provider_detection_events: Receiver<(ProviderKind, bool, Option<PathBuf>)>,
+    /// Providers the running re-detection has not answered for yet; empty
+    /// means no re-detection is in flight.
+    provider_detection_remaining: usize,
+    /// When provider detection last completed, for the page's "Checked" label.
+    provider_detection_checked_at: Option<Instant>,
+    /// The provider row expanded on the Providers page, if any. The binary
+    /// override input below edits this provider's entry.
+    expanded_provider_settings: Option<ProviderKind>,
+    provider_path_input: Entity<ComposerInput>,
     computer_permissions: ComputerPermissions,
     computer_permission_tx: Sender<Result<ComputerPermissions, String>>,
     computer_permission_events: Receiver<Result<ComputerPermissions, String>>,
@@ -663,10 +686,22 @@ use transcript_view::ConversationNavigationRail;
 impl Waku {
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
-        let model_search =
-            cx.new(|cx| ComposerInput::new(window, cx).placeholder("Search models..."));
-        let settings_search =
-            cx.new(|cx| ComposerInput::new(window, cx).placeholder("Search Settings"));
+        let model_search = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder("Search models...")
+        });
+        let settings_search = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder("Search Settings")
+        });
+        let provider_path_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .select_all_on_focus_click()
+                .placeholder("Detected automatically")
+        });
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
@@ -744,9 +779,14 @@ impl Waku {
         }
         let probes = ProviderKind::ALL
             .into_iter()
-            .map(ProviderProbe::pending)
+            .map(|provider| match state.provider_binary_overrides.get(&provider) {
+                Some(binary) => ProviderProbe::with_binary_override(provider, binary),
+                None => ProviderProbe::pending(provider),
+            })
             .collect::<Vec<_>>();
         let (provider_probe_tx, provider_probe_events) = unbounded();
+        let (provider_version_tx, provider_version_events) = unbounded();
+        let (provider_detection_tx, provider_detection_events) = unbounded();
         let (computer_permission_tx, computer_permission_events) = unbounded();
         {
             let computer_permission_tx = computer_permission_tx.clone();
@@ -893,6 +933,15 @@ impl Waku {
                 },
             )
             .detach();
+            cx.subscribe(
+                &provider_path_input,
+                |this: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Submit(_)) {
+                        this.apply_provider_path_override(cx);
+                    }
+                },
+            )
+            .detach();
 
             cx.spawn(async move |this, cx| {
                 loop {
@@ -901,6 +950,8 @@ impl Waku {
                         .update(cx, |this, cx| {
                             if this.drain_driver_events()
                                 || this.drain_provider_probe_events()
+                                || this.drain_provider_version_events()
+                                || this.drain_provider_detection_events()
                                 || this.drain_computer_permission_events()
                             {
                                 cx.notify();
@@ -937,6 +988,17 @@ impl Waku {
                 provider_probe_events,
                 provider_model_discoveries: HashSet::new(),
                 provider_model_discoveries_pending: HashSet::new(),
+                provider_versions: HashMap::new(),
+                provider_version_tx,
+                provider_version_events,
+                provider_version_probes_pending: HashSet::new(),
+                provider_detection_tx,
+                provider_detection_events,
+                provider_detection_remaining: 0,
+                // Startup ran the same PATH detection synchronously just above.
+                provider_detection_checked_at: Some(Instant::now()),
+                expanded_provider_settings: None,
+                provider_path_input,
                 computer_permissions: ComputerPermissions::default(),
                 computer_permission_tx,
                 computer_permission_events,
@@ -1056,6 +1118,10 @@ impl Waku {
             // ahead of the model picker's first render, so opening it never
             // waits on a per-provider lazy load.
             this.request_all_model_discoveries();
+            // CLI versions prefetch alongside for the same reason: the
+            // Providers settings page reads only this store and must never
+            // open onto a lazy load.
+            this.request_provider_version_probes();
         });
         entity
     }

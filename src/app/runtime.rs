@@ -75,6 +75,135 @@ impl Waku {
         }
     }
 
+    /// Ask every installed CLI for its version, one short-lived subprocess per
+    /// provider on its own thread. Answers land in `provider_versions` through
+    /// the drain loop; render reads only that map.
+    pub(super) fn request_provider_version_probes(&mut self) {
+        let targets = self
+            .probes
+            .iter()
+            .filter(|probe| probe.installed)
+            .filter_map(|probe| probe.path.clone().map(|path| (probe.provider, path)))
+            .collect::<Vec<_>>();
+        for (provider, path) in targets {
+            if !self.provider_version_probes_pending.insert(provider) {
+                continue;
+            }
+            let provider_version_tx = self.provider_version_tx.clone();
+            if std::thread::Builder::new()
+                .name(format!("waku-{}-version-probe", provider.id()))
+                .spawn(move || {
+                    let version = probe_provider_version(&path);
+                    let _ = provider_version_tx.send((provider, version));
+                })
+                .is_err()
+            {
+                self.provider_version_probes_pending.remove(&provider);
+            }
+        }
+    }
+
+    pub(super) fn drain_provider_version_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((provider, version)) = self.provider_version_events.try_recv() {
+            self.provider_version_probes_pending.remove(&provider);
+            self.provider_versions.insert(provider, version);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Re-detect provider CLIs off-thread — every provider for the Providers
+    /// page's refresh, or one whose binary override just changed. Also re-runs
+    /// model discovery and version probes for whatever the detection finds
+    /// installed.
+    pub(super) fn refresh_provider_detection(&mut self, scope: Option<ProviderKind>) {
+        if self.provider_detection_remaining > 0 {
+            return;
+        }
+        let providers = match scope {
+            Some(provider) => vec![provider],
+            None => ProviderKind::ALL.to_vec(),
+        };
+        self.provider_detection_remaining = providers.len();
+        let overrides = self.state.provider_binary_overrides.clone();
+        let provider_detection_tx = self.provider_detection_tx.clone();
+        let detect_providers = providers.clone();
+        if std::thread::Builder::new()
+            .name("waku-provider-detection".into())
+            .spawn(move || {
+                for provider in detect_providers {
+                    let path = match overrides.get(&provider) {
+                        Some(binary) => crate::command_env::resolve_binary_override(binary),
+                        None => crate::command_env::find_executable(provider.command()),
+                    };
+                    let _ = provider_detection_tx.send((provider, path.is_some(), path));
+                }
+            })
+            .is_err()
+        {
+            self.provider_detection_remaining = 0;
+            return;
+        }
+        // A refresh means "re-check everything about these providers":
+        // clearing the per-launch guard lets each one's catalog discovery run
+        // again as its detection lands below.
+        for provider in providers {
+            self.provider_model_discoveries.remove(&provider);
+        }
+    }
+
+    pub(super) fn drain_provider_detection_events(&mut self) -> bool {
+        let mut changed = false;
+        let mut installed_providers = Vec::new();
+        while let Ok((provider, installed, path)) = self.provider_detection_events.try_recv() {
+            self.provider_detection_remaining = self.provider_detection_remaining.saturating_sub(1);
+            if self.provider_detection_remaining == 0 {
+                self.provider_detection_checked_at = Some(Instant::now());
+            }
+            // Merge detection fields only: a probe's model catalog belongs to
+            // model discovery, and overwriting it here would race a discovery
+            // still in flight.
+            if let Some(existing) = self
+                .probes
+                .iter_mut()
+                .find(|existing| existing.provider == provider)
+            {
+                existing.installed = installed;
+                existing.path = path;
+            } else {
+                self.probes.push(ProviderProbe {
+                    provider,
+                    installed,
+                    path,
+                    models: crate::model_catalog::fallback_models(provider),
+                });
+            }
+            if installed {
+                installed_providers.push(provider);
+            } else {
+                self.provider_versions.remove(&provider);
+            }
+            changed = true;
+        }
+        for provider in installed_providers {
+            self.request_provider_model_discovery(provider);
+        }
+        if changed {
+            self.request_provider_version_probes();
+        }
+        changed
+    }
+
+    /// Whether the provider can back a new session: installed and not switched
+    /// off in the Providers settings.
+    pub(super) fn provider_enabled(&self, provider: ProviderKind) -> bool {
+        !self.state.disabled_providers.contains(&provider)
+            && self
+                .provider_probe(provider)
+                .is_some_and(|probe| probe.installed)
+    }
+
     pub(super) fn model_for_session<'a>(&'a self, session: &'a AgentSession) -> Option<&'a str> {
         session.model.as_deref().or_else(|| {
             self.provider_probe(session.provider)
@@ -1315,5 +1444,72 @@ impl Waku {
             self.save();
         }
         changed || selected_changed
+    }
+}
+
+/// Run `<cli> --version` and pull a version number out of whatever it prints.
+/// Blocking; runs on a version-probe thread, never on the UI thread.
+fn probe_provider_version(binary: &std::path::Path) -> Option<String> {
+    let output = crate::command_env::command(binary)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_cli_version(&combined)
+}
+
+/// The first token that reads as a version number — digits and dots, an
+/// optional leading `v`, optional pre-release tail — from the first non-empty
+/// line. CLIs decorate this differently ("codex-cli 0.45.0", "2.1.24 (Claude
+/// Code)", "v1.3.0-beta"); the number is the part worth showing.
+fn parse_cli_version(output: &str) -> Option<String> {
+    let line = output.lines().find(|line| !line.trim().is_empty())?;
+    line.split_whitespace()
+        .map(|token| token.trim_start_matches('v').trim_matches(|c: char| {
+            !(c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        }))
+        .find(|token| {
+            let mut parts = token.split('.');
+            let leading_number = parts
+                .next()
+                .is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+            leading_number && parts.next().is_some_and(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        })
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::parse_cli_version;
+
+    #[test]
+    fn parses_common_cli_version_banners() {
+        assert_eq!(
+            parse_cli_version("codex-cli 0.45.0\n"),
+            Some("0.45.0".to_owned())
+        );
+        assert_eq!(
+            parse_cli_version("2.1.24 (Claude Code)\n"),
+            Some("2.1.24".to_owned())
+        );
+        assert_eq!(parse_cli_version("v1.3.0-beta.2"), Some("1.3.0-beta.2".to_owned()));
+        assert_eq!(
+            parse_cli_version("\nAmp CLI version 0.9.12\n"),
+            Some("0.9.12".to_owned())
+        );
+        assert_eq!(parse_cli_version("not a version"), None);
+        assert_eq!(parse_cli_version(""), None);
+    }
+
+    #[test]
+    fn version_requires_a_dotted_number_not_a_bare_digit() {
+        // "2024" alone or a hash must not read as a version.
+        assert_eq!(parse_cli_version("build 2024 f3a9c1"), None);
+        assert_eq!(parse_cli_version("cursor-agent 2025.09.12-4f8d8e2"), Some("2025.09.12-4f8d8e2".to_owned()));
     }
 }

@@ -26,6 +26,21 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Resolve a user-supplied binary override: `~` expands to the home
+/// directory, a path must point at an existing file, and a bare name searches
+/// the same directories as [`find_executable`].
+pub fn resolve_binary_override(spec: &str) -> Option<PathBuf> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    if let Some(rest) = spec.strip_prefix("~/") {
+        let candidate = dirs::home_dir()?.join(rest);
+        return candidate.is_file().then_some(candidate);
+    }
+    find_executable(spec)
+}
+
 pub fn executable_search_path() -> Option<std::ffi::OsString> {
     std::env::join_paths(executable_search_paths()).ok()
 }

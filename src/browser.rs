@@ -34,6 +34,7 @@ use gpui::{
 use crate::input::{ComposerEvent, ComposerInput};
 use crate::theme::Theme;
 use crate::ui::icon;
+use crate::ui::text_field::TextField;
 use crate::ui::tooltip::Tooltip;
 use crate::{
     BrowserBack, BrowserDevtools, BrowserForward, BrowserHardReload, BrowserReload, BrowserStop,
@@ -1064,9 +1065,8 @@ impl BrowserView {
             }))
     }
 
-    fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let address_focused = self.address.read(cx).is_visually_focused(window);
         let has_page = self.navigation_requested;
         let secure = self
             .current_url
@@ -1125,41 +1125,23 @@ impl BrowserView {
                 )
             })
             .child(
-                div()
-                    .id("browser-address")
-                    .key_context("BrowserAddress")
-                    .on_action(cx.listener(|this, _: &crate::BrowserAddressCancel, _, cx| {
-                        this.restore_address(cx);
-                    }))
-                    .min_w_0()
-                    .flex_1()
-                    .h(px(28.0))
-                    .mx(px(4.0))
-                    .px(px(8.0))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(if address_focused {
-                        theme.accent
-                    } else {
-                        theme.border_strong
-                    })
-                    .bg(theme.inset)
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(px(11.5))
-                    .line_height(px(16.0))
-                    .child(icon(
+                TextField::new("browser-address", self.address.clone())
+                    .icon(
                         if secure {
                             "icons/lock.svg"
                         } else {
                             "icons/globe.svg"
                         },
                         11.0,
-                        theme.text_tertiary,
-                    ))
-                    .child(div().min_w_0().flex_1().child(self.address.clone()))
+                    )
+                    .key_context("BrowserAddress")
+                    .on_action(cx.listener(|this, _: &crate::BrowserAddressCancel, _, cx| {
+                        this.restore_address(cx);
+                    }))
+                    .min_w_0()
+                    .flex_1()
+                    .mx(px(4.0))
+                    .relative()
                     .when_some(progress, |element, progress| {
                         element.child(
                             div()
@@ -1482,7 +1464,7 @@ impl Render for BrowserView {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.render_toolbar(window, cx))
+            .child(self.render_toolbar(cx))
             .child(body)
     }
 }

@@ -3,7 +3,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
@@ -20,11 +20,11 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontStyle, FontWeight,
-    Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task,
-    TextRun, UnderlineStyle, Window, canvas, div, font, px, rgb,
+    App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontFallbacks,
+    FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    Render, ScrollDelta, ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText,
+    Subscription, Task, TextRun, UnderlineStyle, Window, canvas, div, font, px, rgb,
 };
 use parking_lot::Mutex;
 
@@ -43,6 +43,14 @@ const TERMINAL_SCROLLBACK_LINES: usize = 10_000;
 const TERMINAL_CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const TERMINAL_CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(300);
 
+/// Icon glyphs (nerd-font private-use codepoints) resolve through CoreText's
+/// cascade rather than run splitting: JetBrains Mono itself keeps the
+/// Powerline range it covers, everything else falls through to the bundled
+/// symbols face registered in [`crate::assets::register_fonts`].
+static TERMINAL_FONT_FALLBACKS: LazyLock<FontFallbacks> = LazyLock::new(|| {
+    FontFallbacks::from_fonts(vec![crate::assets::SYMBOLS_FONT_FAMILY.to_owned()])
+});
+
 enum TerminalUiEvent {
     Title(String),
     ResetTitle,
@@ -57,6 +65,9 @@ struct TerminalEventProxy {
     sender: Arc<OnceLock<EventLoopSender>>,
     ui_events: Sender<TerminalUiEvent>,
     window_size: Arc<Mutex<WindowSize>>,
+    /// Palette OSC replies run on the PTY thread; `snapshot` refreshes this
+    /// so they track the active theme.
+    dark_theme: Arc<AtomicBool>,
 }
 
 impl TerminalEventProxy {
@@ -89,7 +100,8 @@ impl EventListener for TerminalEventProxy {
             }
             Event::PtyWrite(text) => self.write_pty(text.into_bytes()),
             Event::ColorRequest(index, formatter) => {
-                self.write_pty(formatter(terminal_rgb(index)).into_bytes());
+                let is_dark = self.dark_theme.load(Ordering::Acquire);
+                self.write_pty(formatter(terminal_rgb(index, is_dark)).into_bytes());
             }
             Event::TextAreaSizeRequest(formatter) => {
                 self.write_pty(formatter(*self.window_size.lock()).into_bytes());
@@ -129,6 +141,7 @@ struct TerminalSession {
     ui_events: Receiver<TerminalUiEvent>,
     window_size: Arc<Mutex<WindowSize>>,
     grid_size: (usize, usize),
+    dark_theme: Arc<AtomicBool>,
 }
 
 impl TerminalSession {
@@ -144,12 +157,14 @@ impl TerminalSession {
         let shared_window_size = Arc::new(Mutex::new(window_size));
         let dirty = Arc::new(AtomicBool::new(true));
         let sender_slot = Arc::new(OnceLock::new());
+        let dark_theme = Arc::new(AtomicBool::new(true));
         let (ui_event_tx, ui_events) = unbounded();
         let proxy = TerminalEventProxy {
             dirty: dirty.clone(),
             sender: sender_slot.clone(),
             ui_events: ui_event_tx,
             window_size: shared_window_size.clone(),
+            dark_theme: dark_theme.clone(),
         };
 
         let config = Config {
@@ -195,6 +210,7 @@ impl TerminalSession {
             ui_events,
             window_size: shared_window_size,
             grid_size: (columns, rows),
+            dark_theme,
         })
     }
 
@@ -248,6 +264,7 @@ impl TerminalSession {
         selection_color: Hsla,
         render_cursor: bool,
     ) -> TerminalSnapshot {
+        self.dark_theme.store(theme.is_dark, Ordering::Release);
         let term = self.term.lock();
         let content = term.renderable_content();
         let columns = self.grid_size.0;
@@ -260,7 +277,7 @@ impl TerminalSession {
                 content.cursor.shape,
                 alacritty_terminal::vte::ansi::CursorShape::Hidden
             );
-        let mut cells = vec![TerminalCell::default(); columns * rows];
+        let mut cells = vec![TerminalCell::blank(theme); columns * rows];
 
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + content.display_offset as i32;
@@ -286,8 +303,15 @@ impl TerminalSession {
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut foreground, &mut background);
             }
-            if cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD) {
-                foreground.l *= 0.7;
+            // `Flags::DIM_BOLD` and `Flags::BOLD_ITALIC` are unions of the
+            // individual bits, so testing them with `intersects` would also
+            // match plain bold or italic cells.
+            if cell.flags.contains(Flags::DIM) {
+                if theme.is_dark {
+                    foreground.l *= 0.7;
+                } else {
+                    foreground.l = 1.0 - (1.0 - foreground.l) * 0.7;
+                }
             }
             if selection.is_some_and(|selection| selection.contains(indexed.point)) {
                 background = selection_color;
@@ -295,19 +319,17 @@ impl TerminalSession {
             }
             if cursor_visible && row == cursor_row && column == cursor_column {
                 background = theme.text;
-                foreground = theme.inset;
+                foreground = theme.terminal;
             }
-            let symbols_font = text.chars().any(uses_symbols_nerd_font);
 
             cells[row as usize * columns + column] = TerminalCell {
                 text,
                 foreground,
                 background,
-                bold: cell.flags.intersects(Flags::BOLD | Flags::BOLD_ITALIC),
-                italic: cell.flags.intersects(Flags::ITALIC | Flags::BOLD_ITALIC),
+                bold: cell.flags.contains(Flags::BOLD),
+                italic: cell.flags.contains(Flags::ITALIC),
                 underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
                 strikeout: cell.flags.contains(Flags::STRIKEOUT),
-                symbols_font,
             };
         }
 
@@ -325,7 +347,6 @@ impl TerminalSession {
                     italic: cell.italic,
                     underline: cell.underline,
                     strikeout: cell.strikeout,
-                    symbols_font: cell.symbols_font,
                 };
                 if let Some(run) = runs.last_mut().filter(|run| run.style == style) {
                     run.len += len;
@@ -357,20 +378,18 @@ struct TerminalCell {
     italic: bool,
     underline: bool,
     strikeout: bool,
-    symbols_font: bool,
 }
 
-impl Default for TerminalCell {
-    fn default() -> Self {
+impl TerminalCell {
+    fn blank(theme: Theme) -> Self {
         Self {
             text: " ".into(),
-            foreground: rgb(0xe5e5e5).into(),
-            background: rgb(0x151515).into(),
+            foreground: theme.text,
+            background: theme.terminal,
             bold: false,
             italic: false,
             underline: false,
             strikeout: false,
-            symbols_font: false,
         }
     }
 }
@@ -383,7 +402,6 @@ struct TerminalRunStyle {
     italic: bool,
     underline: bool,
     strikeout: bool,
-    symbols_font: bool,
 }
 
 struct TerminalRun {
@@ -860,11 +878,8 @@ impl Render for TerminalView {
                     .runs
                     .into_iter()
                     .map(|run| {
-                        let mut run_font = font(if run.style.symbols_font {
-                            "Symbols Nerd Font Mono"
-                        } else {
-                            "JetBrains Mono"
-                        });
+                        let mut run_font = font("JetBrains Mono");
+                        run_font.fallbacks = Some(TERMINAL_FONT_FALLBACKS.clone());
                         if run.style.bold {
                             run_font.weight = FontWeight::BOLD;
                         }
@@ -971,7 +986,7 @@ impl Render for TerminalView {
             .min_w_0()
             .px(px(TERMINAL_PADDING_X))
             .py(px(TERMINAL_PADDING_Y))
-            .bg(theme.inset)
+            .bg(theme.terminal)
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -986,7 +1001,7 @@ impl Render for TerminalView {
             .min_w_0()
             .flex()
             .flex_col()
-            .bg(theme.inset)
+            .bg(theme.terminal)
             .child(
                 div()
                     .h(px(TERMINAL_TOOLBAR_HEIGHT))
@@ -1189,19 +1204,6 @@ fn tilde_sequence(number: u8, modifier: u8) -> String {
     }
 }
 
-fn uses_symbols_nerd_font(character: char) -> bool {
-    let codepoint = character as u32;
-
-    // JetBrains Mono includes Powerline's branch and separator glyphs. Keep those
-    // in the primary face so they retain terminal-cell metrics; use the bundled
-    // Symbols Nerd Font for the remaining private-use icon ranges.
-    !matches!(codepoint, 0xe0a0..=0xe0d7)
-        && matches!(
-            codepoint,
-            0xe000..=0xf8ff | 0xf0000..=0xffffd | 0x100000..=0x10fffd
-        )
-}
-
 fn resolve_color(
     color: Color,
     colors: &alacritty_terminal::term::color::Colors,
@@ -1211,30 +1213,37 @@ fn resolve_color(
     let rgb = match color {
         Color::Spec(color) => Some(color),
         Color::Indexed(index) => {
-            colors[index as usize].or_else(|| Some(terminal_rgb(index as usize)))
+            colors[index as usize].or_else(|| Some(terminal_rgb(index as usize, theme.is_dark)))
         }
         Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => None,
-        Color::Named(NamedColor::Background) => return theme.inset,
+        Color::Named(NamedColor::Background) => return theme.terminal,
         Color::Named(NamedColor::Cursor) => return theme.text,
         Color::Named(named) => {
-            colors[named as usize].or_else(|| Some(terminal_rgb(named as usize)))
+            colors[named as usize].or_else(|| Some(terminal_rgb(named as usize, theme.is_dark)))
         }
     };
     rgb.map(rgb_to_hsla)
-        .unwrap_or(if foreground { theme.text } else { theme.inset })
+        .unwrap_or(if foreground { theme.text } else { theme.terminal })
 }
 
 fn rgb_to_hsla(color: Rgb) -> Hsla {
     rgb((u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)).into()
 }
 
-fn terminal_rgb(index: usize) -> Rgb {
-    const ANSI: [u32; 16] = [
+fn terminal_rgb(index: usize, is_dark: bool) -> Rgb {
+    // Tomorrow Night on dark surfaces, Tomorrow on light — same hues tuned
+    // for the opposite background so ANSI text stays legible on white.
+    const ANSI_DARK: [u32; 16] = [
         0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6, 0x666666,
         0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xeaeaea,
     ];
+    const ANSI_LIGHT: [u32; 16] = [
+        0x000000, 0xc82829, 0x718c00, 0xeab700, 0x4271ae, 0x8959a8, 0x3e999f, 0xc7c7c7, 0x8e908c,
+        0xc82829, 0x718c00, 0xeab700, 0x4271ae, 0x8959a8, 0x3e999f, 0xffffff,
+    ];
+    let ansi = if is_dark { &ANSI_DARK } else { &ANSI_LIGHT };
     let value = match index {
-        0..=15 => ANSI[index],
+        0..=15 => ansi[index],
         16..=231 => {
             let index = index - 16;
             let channel = |value: usize| {
@@ -1256,11 +1265,24 @@ fn terminal_rgb(index: usize) -> Rgb {
         value
             if value >= NamedColor::DimBlack as usize && value <= NamedColor::DimWhite as usize =>
         {
-            let base = ANSI[value - NamedColor::DimBlack as usize];
-            let dim = |channel: u32| channel * 2 / 3;
+            let base = ansi[value - NamedColor::DimBlack as usize];
+            // Faint fades toward the surface: black on dark, white on light.
+            let dim = |channel: u32| {
+                if is_dark {
+                    channel * 2 / 3
+                } else {
+                    channel + (255 - channel) / 3
+                }
+            };
             (dim((base >> 16) & 0xff) << 16) | (dim((base >> 8) & 0xff) << 8) | dim(base & 0xff)
         }
-        _ => 0xe5e5e5,
+        _ => {
+            if is_dark {
+                0xe5e5e5
+            } else {
+                0x242424
+            }
+        }
     };
     Rgb {
         r: (value >> 16) as u8,
@@ -1367,10 +1389,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn keeps_powerline_glyphs_in_jetbrains_mono() {
-        assert!(!uses_symbols_nerd_font('\u{e0a0}'));
-        assert!(!uses_symbols_nerd_font('\u{e0b0}'));
-        assert!(uses_symbols_nerd_font('\u{f121}'));
-    }
 }

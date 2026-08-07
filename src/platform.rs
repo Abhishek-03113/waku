@@ -1,5 +1,56 @@
 use gpui::Window;
 
+/// Register embedded font data with CoreText at process scope. GPUI's
+/// `add_fonts` only feeds its private font-kit source, which CoreText cascade
+/// matching cannot see — and it refuses symbols-only faces outright (fonts
+/// with no 'm' glyph). Fonts referenced through `FontFallbacks` therefore
+/// must be registered here instead.
+#[cfg(target_os = "macos")]
+pub fn register_fonts_with_coretext(fonts: &[&'static [u8]]) -> anyhow::Result<()> {
+    use std::ffi::c_void;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGDataProviderCreateWithData(
+            info: *mut c_void,
+            data: *const u8,
+            size: usize,
+            release_callback: *const c_void,
+        ) -> *mut c_void;
+        fn CGFontCreateWithDataProvider(provider: *mut c_void) -> *mut c_void;
+        fn CGDataProviderRelease(provider: *mut c_void);
+        fn CGFontRelease(font: *mut c_void);
+    }
+    #[link(name = "CoreText", kind = "framework")]
+    unsafe extern "C" {
+        fn CTFontManagerRegisterGraphicsFont(font: *mut c_void, error: *mut *mut c_void) -> bool;
+    }
+
+    for (index, data) in fonts.iter().enumerate() {
+        unsafe {
+            let provider = CGDataProviderCreateWithData(
+                std::ptr::null_mut(),
+                data.as_ptr(),
+                data.len(),
+                std::ptr::null(),
+            );
+            anyhow::ensure!(!provider.is_null(), "font {index}: not a readable buffer");
+            let font = CGFontCreateWithDataProvider(provider);
+            CGDataProviderRelease(provider);
+            anyhow::ensure!(!font.is_null(), "font {index}: not a valid font");
+            let registered = CTFontManagerRegisterGraphicsFont(font, std::ptr::null_mut());
+            CGFontRelease(font);
+            anyhow::ensure!(registered, "font {index}: CoreText registration failed");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn register_fonts_with_coretext(_: &[&'static [u8]]) -> anyhow::Result<()> {
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 pub fn reduce_motion_enabled() -> bool {
     use objc2_app_kit::NSWorkspace;

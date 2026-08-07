@@ -511,6 +511,7 @@ impl Waku {
         let selected_tab = self.model_picker_tab;
         let selected_model = selected_model.map(str::to_owned);
         let probes = self.probes.clone();
+        let disabled_providers = self.state.disabled_providers.clone();
         let pending_discoveries = self.provider_model_discoveries_pending.clone();
         let favorites = self.state.favorite_models.clone();
         let weak = cx.entity().downgrade();
@@ -528,6 +529,22 @@ impl Waku {
                             .selected_session()
                             .map(|session| session.provider)
                             .unwrap_or_default();
+                        // A draft can sit on a provider that was since switched
+                        // off; open onto the first usable provider instead of a
+                        // tab whose rows the filter would leave empty.
+                        let locked = this
+                            .selected_session()
+                            .is_some_and(|session| !session.messages.is_empty());
+                        let provider = if !locked
+                            && this.state.disabled_providers.contains(&provider)
+                        {
+                            ProviderKind::ALL
+                                .into_iter()
+                                .find(|kind| this.provider_enabled(*kind))
+                                .unwrap_or(provider)
+                        } else {
+                            provider
+                        };
                         this.model_picker_tab = ModelPickerTab::Provider(provider);
                         this.model_picker_highlight = None;
                         reset_search.update(cx, |search, cx| search.clear(cx));
@@ -570,6 +587,7 @@ impl Waku {
             visible_picker_models(
                 &probes,
                 &favorites,
+                &disabled_providers,
                 locked_provider,
                 selected_tab,
                 &normalized_query,
@@ -651,7 +669,12 @@ impl Waku {
                         .find(|probe| probe.provider == kind)
                         .map(|probe| probe.installed)
                         .unwrap_or(false);
-                    let allowed = locked_provider.is_none() || locked_provider == Some(kind);
+                    // A locked session keeps its own provider usable even if it
+                    // was switched off afterwards; disabling is for new work.
+                    let switched_off = disabled_providers.contains(&kind)
+                        && locked_provider != Some(kind);
+                    let allowed = (locked_provider.is_none() || locked_provider == Some(kind))
+                        && !switched_off;
                     let selected = selected_tab == ModelPickerTab::Provider(kind) && !searching;
                     let tab_weak = weak.clone();
                     sidebar = sidebar.child(
@@ -962,6 +985,7 @@ impl Waku {
         let index = visible_picker_models(
             &self.probes,
             &self.state.favorite_models,
+            &self.state.disabled_providers,
             locked_provider,
             self.model_picker_tab,
             "",
@@ -1445,9 +1469,10 @@ pub(super) fn next_picker_highlight(
 ///
 /// Shared by the panel body and by `enter`'s handler so a keyboard cursor index
 /// always means the same row in both.
-fn visible_picker_models(
+pub(super) fn visible_picker_models(
     probes: &[ProviderProbe],
     favorites: &[FavoriteModel],
+    disabled_providers: &[ProviderKind],
     locked_provider: Option<ProviderKind>,
     selected_tab: ModelPickerTab,
     normalized_query: &str,
@@ -1464,6 +1489,9 @@ fn visible_picker_models(
                 .map(move |model| (probe.provider, model))
         })
         .filter(|(kind, _)| locked_provider.is_none() || locked_provider == Some(*kind))
+        // Switched-off providers keep serving the session already locked to
+        // them, but offer nothing to new work — including favorites.
+        .filter(|(kind, _)| !disabled_providers.contains(kind) || locked_provider == Some(*kind))
         .filter(|(kind, model)| {
             if searching {
                 let searchable = format!(

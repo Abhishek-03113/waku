@@ -382,6 +382,19 @@ impl ProviderProbe {
         }
     }
 
+    /// A probe resolved through a user-configured binary override instead of
+    /// PATH detection. An override that resolves to nothing leaves the
+    /// provider uninstalled rather than silently falling back.
+    pub fn with_binary_override(provider: ProviderKind, binary: &str) -> Self {
+        let path = crate::command_env::resolve_binary_override(binary);
+        Self {
+            provider,
+            installed: path.is_some(),
+            path,
+            models: crate::model_catalog::fallback_models(provider),
+        }
+    }
+
     pub fn discover_models(mut self) -> Self {
         if self.provider.supports_model_discovery()
             && let Some(path) = self.path.as_deref()

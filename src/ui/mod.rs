@@ -6,6 +6,7 @@ use gpui::{
 
 pub mod menu;
 pub mod scrollbar;
+pub mod text_field;
 pub mod tooltip;
 
 use crate::model::{ActivityKind, ProviderKind, SessionStatus};
@@ -319,6 +320,8 @@ mod tests {
             "icons/zap.svg",
             "icons/panel-right.svg",
             "icons/x.svg",
+            "icons/bot.svg",
+            "icons/rotate-cw.svg",
         ];
         for provider in ProviderKind::ALL {
             paths.push(provider_icon(provider));

@@ -907,3 +907,77 @@ fn model_picker_highlight_wraps_at_both_ends() {
     // An empty result list has nothing to land on.
     assert_eq!(next_picker_highlight(None, 0, "down"), None);
 }
+
+#[test]
+fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
+    use super::ModelPickerTab;
+    use super::composer::visible_picker_models;
+    use crate::model::{FavoriteModel, ProviderModel, ProviderProbe};
+
+    let probe = |provider: ProviderKind, model: &str| ProviderProbe {
+        provider,
+        installed: true,
+        path: Some(std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
+        models: vec![ProviderModel::new(model, model)],
+    };
+    let probes = [
+        probe(ProviderKind::Claude, "claude-sonnet-5"),
+        probe(ProviderKind::Codex, "gpt-5.6-sol"),
+    ];
+    let favorites = [FavoriteModel {
+        provider: ProviderKind::Claude,
+        model: "claude-sonnet-5".into(),
+    }];
+    let disabled = [ProviderKind::Claude];
+
+    // Provider tab and favorites both stop offering the switched-off provider.
+    let models = visible_picker_models(
+        &probes,
+        &favorites,
+        &disabled,
+        None,
+        ModelPickerTab::Provider(ProviderKind::Claude),
+        "",
+    );
+    assert!(models.is_empty());
+    let models = visible_picker_models(
+        &probes,
+        &favorites,
+        &disabled,
+        None,
+        ModelPickerTab::Favorites,
+        "",
+    );
+    assert!(models.is_empty());
+    let models = visible_picker_models(
+        &probes,
+        &favorites,
+        &disabled,
+        None,
+        ModelPickerTab::Provider(ProviderKind::Codex),
+        "",
+    );
+    assert_eq!(models.len(), 1);
+
+    // Search cannot resurface it either.
+    let models = visible_picker_models(
+        &probes,
+        &favorites,
+        &disabled,
+        None,
+        ModelPickerTab::Provider(ProviderKind::Codex),
+        "claude",
+    );
+    assert!(models.is_empty());
+
+    // A session already locked to the provider keeps its models.
+    let models = visible_picker_models(
+        &probes,
+        &favorites,
+        &disabled,
+        Some(ProviderKind::Claude),
+        ModelPickerTab::Provider(ProviderKind::Claude),
+        "",
+    );
+    assert_eq!(models.len(), 1);
+}

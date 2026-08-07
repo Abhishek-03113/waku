@@ -81,6 +81,13 @@ pub struct AppSettings {
     pub computer_use_enabled: bool,
     #[serde(default)]
     pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
+    /// Providers switched off for new sessions in the Providers settings.
+    #[serde(default)]
+    pub disabled_providers: Vec<ProviderKind>,
+    /// Per-provider binary overrides from the Providers settings; empty means
+    /// detect from PATH.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub provider_binary_overrides: HashMap<ProviderKind, String>,
 }
 
 /// The legacy single-document format, still read once to migrate.
@@ -114,6 +121,13 @@ pub struct PersistedState {
     pub computer_use_enabled: bool,
     #[serde(default)]
     pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
+    /// Providers switched off for new sessions in the Providers settings.
+    #[serde(default)]
+    pub disabled_providers: Vec<ProviderKind>,
+    /// Per-provider binary overrides from the Providers settings; empty means
+    /// detect from PATH.
+    #[serde(default)]
+    pub provider_binary_overrides: HashMap<ProviderKind, String>,
     /// Sessions changed since the last save.
     ///
     /// The app knows what it touched, so it says so rather than making the
@@ -163,6 +177,8 @@ impl PersistedState {
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             computer_use_enabled: true,
             computer_use_allowed_apps: Vec::new(),
+            disabled_providers: Vec::new(),
+            provider_binary_overrides: HashMap::new(),
             dirty_sessions: HashSet::new(),
         }
     }
@@ -208,6 +224,8 @@ impl PersistedState {
             right_panel_width: self.right_panel_width,
             computer_use_enabled: self.computer_use_enabled,
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
+            disabled_providers: self.disabled_providers.clone(),
+            provider_binary_overrides: self.provider_binary_overrides.clone(),
         }
     }
 
@@ -227,6 +245,8 @@ impl PersistedState {
         self.right_panel_width = settings.right_panel_width;
         self.computer_use_enabled = settings.computer_use_enabled;
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
+        self.disabled_providers = settings.disabled_providers;
+        self.provider_binary_overrides = settings.provider_binary_overrides;
     }
 
     /// A session only earns a row once it has started; drafts stay in memory.
