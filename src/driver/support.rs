@@ -52,18 +52,6 @@ pub(super) struct HeadlessComputerUseRuntime {
     pub(super) config: HeadlessComputerUseConfig,
 }
 
-impl HeadlessComputerUseConfig {
-    /// Extra system-prompt rules the transport must deliver in-band. `grok
-    /// agent stdio` rejects the headless `--rules` flag, so the ACP session
-    /// carries these in `session/new` `_meta.rules`.
-    pub(super) fn grok_rules(&self) -> Option<&str> {
-        match self {
-            Self::Grok { rules, .. } => Some(rules),
-            Self::OpenCode { .. } => None,
-        }
-    }
-}
-
 impl HeadlessComputerUseRuntime {
     pub(super) fn start(
         provider: ProviderKind,
@@ -299,7 +287,7 @@ pub(super) fn configure_grok_computer_use_command(
         base,
         grok_home,
         auth_path,
-        rules: _,
+        rules,
     }) = config
     {
         command
@@ -308,7 +296,8 @@ pub(super) fn configure_grok_computer_use_command(
             .env(
                 "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
                 &base.process_directory,
-            );
+            )
+            .arg(format!("--rules={rules}"));
         if let Some(auth_path) = auth_path {
             command.env("GROK_AUTH_PATH", auth_path);
         }
@@ -512,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn grok_computer_use_command_is_process_scoped_and_keeps_rules_off_the_command_line() {
+    fn grok_computer_use_command_is_process_scoped_and_loads_rules() {
         let config = HeadlessComputerUseConfig::Grok {
             base: computer_use_config(),
             grok_home: PathBuf::from("/tmp/waku-computer-use/session/grok-home"),
@@ -523,19 +512,11 @@ mod tests {
 
         configure_grok_computer_use_command(&mut command, Some(&config));
 
-        // `grok agent stdio` rejects unknown arguments outright ("error:
-        // unexpected argument '--rules' found"), so the rules must reach the
-        // agent through `session/new` `_meta.rules`, never the command line.
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(arguments, Vec::<String>::new());
-        assert_eq!(
-            config.grok_rules(),
-            Some("Waku Computer Use rules"),
-            "the ACP transport reads the rules from the config"
-        );
+        assert_eq!(arguments, ["--rules=Waku Computer Use rules"]);
         let environment = command
             .get_envs()
             .map(|(name, value)| {
