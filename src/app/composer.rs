@@ -1269,6 +1269,162 @@ impl Waku {
             .into_any_element()
     }
 
+    /// Stage files dropped onto the composer as attachment chips. The mention
+    /// each chip will submit takes the autocomplete's form: relative to the
+    /// project root when the file is inside it, absolute otherwise,
+    /// directories with a trailing slash.
+    pub(super) fn stage_dropped_files(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.selected_project().map(|project| project.path.clone());
+        let mut staged = false;
+        for path in paths.paths() {
+            if self
+                .composer_attachments
+                .iter()
+                .any(|attachment| attachment.path == *path)
+            {
+                continue;
+            }
+            let is_dir = path.is_dir();
+            let mention = dropped_file_mention(root.as_deref(), path, is_dir);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| mention.clone());
+            let is_image = !is_dir
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(
+                            extension.to_ascii_lowercase().as_str(),
+                            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff"
+                                | "ico"
+                        )
+                    });
+            self.composer_attachments.push(ComposerAttachment {
+                path: path.clone(),
+                mention,
+                name: SharedString::from(name),
+                is_dir,
+                is_image,
+            });
+            staged = true;
+        }
+        if !staged {
+            return;
+        }
+        let focus = self.composer.read(cx).focus();
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// The text a submission sends, with staged chips drained into it —
+    /// submitting consumes them. `None` means there is nothing to send.
+    pub(super) fn submission_with_attachments(&mut self, prompt: &str) -> Option<String> {
+        let mentions = self
+            .composer_attachments
+            .drain(..)
+            .map(|attachment| attachment.mention)
+            .collect::<Vec<_>>();
+        merged_submission(prompt, &mentions)
+    }
+
+    /// The staged-attachment chips above the input: a thumbnail tile per
+    /// image, a file-type icon and basename for everything else, each with a
+    /// floating remove button — T3 Code's attachment row in graphite.
+    fn render_composer_attachments(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let mut row = div()
+            .px(px(4.0))
+            .pt(px(2.0))
+            .pb(px(8.0))
+            .flex()
+            .flex_wrap()
+            .gap(px(8.0));
+        for (index, attachment) in self.composer_attachments.iter().enumerate() {
+            let icon_path = if attachment.is_dir {
+                "icons/folder.svg"
+            } else {
+                super::right_panel::file_icon_for_path(&attachment.mention)
+            };
+            let mut tile = div()
+                .id(SharedString::from(format!("composer-attachment-{index}")))
+                .relative()
+                .w(px(64.0))
+                .h(px(64.0))
+                .rounded(px(8.0))
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.inset)
+                .tooltip(Tooltip::text(format!("@{}", attachment.mention)));
+            if attachment.is_image {
+                tile = tile.child(
+                    img(attachment.path.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                );
+            } else {
+                tile = tile.child(
+                    div()
+                        .size_full()
+                        .px(px(5.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(5.0))
+                        .child(icon(icon_path, 16.0, theme.text_tertiary))
+                        .child(
+                            div().w_full().flex().justify_center().child(
+                                div()
+                                    .max_w_full()
+                                    .truncate()
+                                    .text_size(px(8.5))
+                                    .text_color(theme.text_tertiary)
+                                    .child(attachment.name.clone()),
+                            ),
+                        ),
+                );
+            }
+            row = row.child(
+                tile.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "composer-attachment-remove-{index}"
+                        )))
+                        .absolute()
+                        .top(px(3.0))
+                        .right(px(3.0))
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .rounded(px(5.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_default()
+                        .bg(theme.canvas.opacity(0.8))
+                        .hover(|element| element.bg(theme.canvas.opacity(0.95)))
+                        .active(|element| element.opacity(0.8))
+                        .child(icon("icons/x.svg", 9.0, theme.text_secondary))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if index < this.composer_attachments.len() {
+                                this.composer_attachments.remove(index);
+                                cx.notify();
+                            }
+                        })),
+                ),
+            );
+        }
+        row
+    }
+
     pub(super) fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let session = self.selected_session();
@@ -1280,9 +1436,16 @@ impl Waku {
                 )
             })
             .unwrap_or(false);
-        let has_draft = !self.composer.read(cx).content().trim().is_empty();
+        let has_draft = !self.composer.read(cx).content().trim().is_empty()
+            || !self.composer_attachments.is_empty();
         let autocomplete = self.render_composer_autocomplete(window, cx);
         let autocomplete_open = autocomplete.is_some();
+        // Files dragged in from the OS light the card up as a drop target and
+        // stage as attachment chips. The wash arrives pre-blended because a
+        // drag-over refinement replaces the card's fill rather than
+        // compositing over it.
+        let drop_wash = theme.composer.blend(theme.overlay_strong);
+        let drop_ring = theme.accent.opacity(0.7);
         div().flex_none().px(px(20.0)).child(
             div()
                 .w_full()
@@ -1293,6 +1456,12 @@ impl Waku {
                 .border_color(theme.border)
                 .bg(theme.composer)
                 .p(px(10.0))
+                .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                    style.bg(drop_wash).border_color(drop_ring)
+                })
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                    this.stage_dropped_files(paths, window, cx);
+                }))
                 // Anchor for the bounds probe the autocomplete popup aligns to.
                 .relative()
                 .child(super::autocomplete::composer_card_bounds_probe(
@@ -1318,6 +1487,9 @@ impl Waku {
                         }))
                 })
                 .children(autocomplete)
+                .when(!self.composer_attachments.is_empty(), |card| {
+                    card.child(self.render_composer_attachments(cx))
+                })
                 .child(div().px(px(4.0)).pt(px(2.0)).child(self.composer.clone()))
                 .child(
                     div()
@@ -1379,8 +1551,10 @@ impl Waku {
                                     },
                                 ))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    let prompt = this.composer.read(cx).content().trim().to_owned();
-                                    if !prompt.is_empty() {
+                                    let prompt = this.composer.read(cx).content().to_owned();
+                                    if let Some(prompt) =
+                                        this.submission_with_attachments(&prompt)
+                                    {
                                         this.composer.update(cx, |input, cx| input.clear(cx));
                                         this.submit_prompt(prompt, cx);
                                     }
@@ -1442,6 +1616,46 @@ impl Waku {
                             .child(SharedString::from(path)),
                     ),
             )
+    }
+}
+
+/// The mention a dropped file submits: relative to the project root when the
+/// file is inside it, absolute otherwise, directories with a trailing slash —
+/// the same form the `@` autocomplete inserts. Dropping the root itself keeps
+/// the absolute path rather than producing an empty mention.
+pub(super) fn dropped_file_mention(
+    root: Option<&std::path::Path>,
+    path: &std::path::Path,
+    is_dir: bool,
+) -> String {
+    let mention = root
+        .and_then(|root| path.strip_prefix(root).ok())
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or(path)
+        .display()
+        .to_string();
+    if is_dir && !mention.ends_with('/') {
+        format!("{mention}/")
+    } else {
+        mention
+    }
+}
+
+/// The prompt a submission sends: the typed text plus one `@` mention per
+/// staged attachment, appended at the end the way T3 Code appends dropped
+/// files. `None` means there is nothing to send.
+pub(super) fn merged_submission(prompt: &str, mentions: &[String]) -> Option<String> {
+    let mentions = mentions
+        .iter()
+        .map(|mention| format!("@{mention}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let prompt = prompt.trim();
+    match (prompt.is_empty(), mentions.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(prompt.to_owned()),
+        (true, false) => Some(mentions),
+        (false, false) => Some(format!("{prompt} {mentions}")),
     }
 }
 

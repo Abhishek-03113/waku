@@ -435,6 +435,9 @@ pub enum ComposerEvent {
     /// blinking caret is exactly the per-frame waste the field exists to
     /// contain.
     Edited,
+    /// Backspace in an already-empty composer. The chat idiom for "remove
+    /// the last staged attachment"; owners without attachments ignore it.
+    BackspaceOnEmpty,
 }
 
 /// What the field is for. The difference is small but load-bearing: Enter
@@ -926,6 +929,10 @@ impl ComposerInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.mode, FieldMode::Composer) && self.content.is_empty() {
+            cx.emit(ComposerEvent::BackspaceOnEmpty);
+            return;
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
         }

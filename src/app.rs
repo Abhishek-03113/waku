@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local, Utc};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity, FocusHandle,
-    Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit,
-    PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful, StyleRefinement,
-    WeakEntity, Window, canvas, div, ease_out_quint, fill, img, linear_color_stop, linear_gradient,
-    list, point, prelude::*, pulsating_between, px, rgb,
+    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity, ExternalPaths,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
+    ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
+    StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, img, linear_color_stop,
+    linear_gradient, list, point, prelude::*, pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
@@ -154,6 +154,23 @@ struct PanelResizeDrag {
     target: PanelResizeTarget,
     start_mouse_x: f32,
     start_width: f32,
+}
+
+/// A file dropped onto the composer, staged as a chip until the next
+/// submission carries it as an `@` mention.
+#[derive(Clone, Debug)]
+struct ComposerAttachment {
+    /// Absolute path as dropped — the thumbnail reads this.
+    path: PathBuf,
+    /// What the submission sends: relative to the project root when the file
+    /// is inside it, absolute otherwise, directories with a trailing slash.
+    mention: String,
+    /// Basename drawn on the chip.
+    name: SharedString,
+    is_dir: bool,
+    /// Whether the chip shows a thumbnail. Decided by extension at drop time
+    /// so render never touches the filesystem.
+    is_image: bool,
 }
 
 /// Whether an untouched session's provider process may be released.
@@ -521,6 +538,9 @@ pub struct Waku {
     /// has no `Context` to rebuild the drawn index itself.
     composer_sources_stale: bool,
     composer_autocomplete: autocomplete::AutocompleteUi,
+    /// Files dropped onto the composer, drawn as chips above the input and
+    /// drained into the next submission.
+    composer_attachments: Vec<ComposerAttachment>,
     runtimes: HashMap<Uuid, SessionRuntime>,
     stream_state_dirty: bool,
     last_stream_save: Instant,
@@ -896,9 +916,18 @@ impl Waku {
             cx.subscribe(
                 &composer,
                 |this: &mut Self, _, event: &ComposerEvent, cx| match event {
-                    ComposerEvent::Submit(prompt) => this.submit_prompt(prompt.clone(), cx),
+                    ComposerEvent::Submit(prompt) => {
+                        if let Some(prompt) = this.submission_with_attachments(prompt) {
+                            this.submit_prompt(prompt, cx);
+                        }
+                    }
                     ComposerEvent::Edited => cx.notify(),
                     ComposerEvent::Focus => {}
+                    ComposerEvent::BackspaceOnEmpty => {
+                        if this.composer_attachments.pop().is_some() {
+                            cx.notify();
+                        }
+                    }
                 },
             )
             .detach();
@@ -1018,6 +1047,7 @@ impl Waku {
                 mention_file_index_path: None,
                 composer_sources_stale: false,
                 composer_autocomplete: autocomplete::AutocompleteUi::new(),
+                composer_attachments: Vec::new(),
                 runtimes: HashMap::new(),
                 stream_state_dirty: false,
                 last_stream_save: Instant::now(),

@@ -442,6 +442,7 @@ impl BrowserView {
                     this.address_dirty = address.read(cx).content() != shown;
                 }
                 ComposerEvent::Focus => {}
+                ComposerEvent::BackspaceOnEmpty => {}
             },
         );
 

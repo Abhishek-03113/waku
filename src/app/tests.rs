@@ -1,4 +1,4 @@
-use super::composer::next_picker_highlight;
+use super::composer::{dropped_file_mention, merged_submission, next_picker_highlight};
 use super::{
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
     TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
@@ -24,6 +24,49 @@ use std::{
     time::Duration,
 };
 use uuid::Uuid;
+
+#[test]
+fn dropped_files_mention_project_relative_paths() {
+    let root = std::path::Path::new("/work/repo");
+    assert_eq!(
+        dropped_file_mention(Some(root), std::path::Path::new("/work/repo/src/main.rs"), false),
+        "src/main.rs"
+    );
+    assert_eq!(
+        dropped_file_mention(Some(root), std::path::Path::new("/tmp/shot.png"), false),
+        "/tmp/shot.png"
+    );
+    assert_eq!(
+        dropped_file_mention(Some(root), std::path::Path::new("/work/repo/src"), true),
+        "src/"
+    );
+    // The project root itself relativizes to nothing; keep it absolute.
+    assert_eq!(
+        dropped_file_mention(Some(root), std::path::Path::new("/work/repo"), true),
+        "/work/repo/"
+    );
+    assert_eq!(
+        dropped_file_mention(None, std::path::Path::new("/tmp/no project.png"), false),
+        "/tmp/no project.png"
+    );
+}
+
+#[test]
+fn submissions_append_attachment_mentions_after_the_prompt() {
+    let mentions = vec!["src/a.rs".to_owned(), "shot.png".to_owned()];
+    assert_eq!(
+        merged_submission("fix this", &mentions).as_deref(),
+        Some("fix this @src/a.rs @shot.png")
+    );
+    // Attachments alone are a valid submission; blank text contributes
+    // nothing but whitespace-trimming.
+    assert_eq!(
+        merged_submission("  ", &mentions).as_deref(),
+        Some("@src/a.rs @shot.png")
+    );
+    assert_eq!(merged_submission(" plain ", &[]).as_deref(), Some("plain"));
+    assert_eq!(merged_submission("   ", &[]), None);
+}
 
 #[test]
 fn driver_errors_are_bounded_before_rendering() {

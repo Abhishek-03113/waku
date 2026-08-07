@@ -660,6 +660,7 @@ impl Waku {
                 ComposerEvent::Submit(_) => this.submit_message_edit(cx),
                 ComposerEvent::Edited => cx.notify(),
                 ComposerEvent::Focus => {}
+                ComposerEvent::BackspaceOnEmpty => {}
             },
         )
         .detach();

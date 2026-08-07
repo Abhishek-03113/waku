@@ -240,6 +240,7 @@ impl Waku {
                 ComposerEvent::Edited => this.refresh_file_search(SearchRefresh::Query, cx),
                 ComposerEvent::Submit(_) => this.file_search_navigate(false, cx),
                 ComposerEvent::Focus => {}
+                ComposerEvent::BackspaceOnEmpty => {}
             },
         )
         .detach();
