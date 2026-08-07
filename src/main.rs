@@ -25,6 +25,7 @@ mod query;
 mod terminal;
 mod theme;
 mod ui;
+mod updater;
 mod usage;
 
 use gpui::{
@@ -41,6 +42,7 @@ actions!(
         CloseWindow,
         NewSession,
         OpenSettings,
+        CheckForUpdates,
         ToggleSidebar,
         ToggleRightPanel,
         ToggleFpsCounter,
@@ -107,6 +109,18 @@ fn main() {
             crate::theme::init(cx);
             cx.set_reduce_motion(crate::platform::reduce_motion_enabled());
 
+            // Sparkle only runs from a bundled release build (or when forced
+            // via WAKU_FORCE_UPDATER=1); everywhere else the menu item is
+            // omitted along with the updater itself.
+            let updater = crate::updater::Updater::init();
+            let updater_available = updater.is_some();
+            cx.set_global(crate::updater::UpdaterState(updater));
+            cx.on_action(|_: &CheckForUpdates, cx| {
+                if let Some(updater) = &cx.global::<crate::updater::UpdaterState>().0 {
+                    updater.check_for_updates();
+                }
+            });
+
             cx.bind_keys([
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("cmd-w", CloseWindow, None),
@@ -162,13 +176,22 @@ fn main() {
                 Menu {
                     name: APP_NAME.into(),
                     disabled: false,
-                    items: vec![
-                        MenuItem::action("New Session", NewSession),
-                        MenuItem::separator(),
-                        MenuItem::action("Settings…", OpenSettings),
-                        MenuItem::separator(),
-                        MenuItem::action(format!("Quit {APP_NAME}"), Quit),
-                    ],
+                    items: {
+                        let mut items = vec![
+                            MenuItem::action("New Session", NewSession),
+                            MenuItem::separator(),
+                        ];
+                        if updater_available {
+                            items.push(MenuItem::action("Check for Updates…", CheckForUpdates));
+                            items.push(MenuItem::separator());
+                        }
+                        items.extend([
+                            MenuItem::action("Settings…", OpenSettings),
+                            MenuItem::separator(),
+                            MenuItem::action(format!("Quit {APP_NAME}"), Quit),
+                        ]);
+                        items
+                    },
                 },
                 Menu {
                     name: "Edit".into(),

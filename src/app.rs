@@ -486,6 +486,10 @@ pub struct Waku {
     model_search: Entity<ComposerInput>,
     settings_search: Entity<ComposerInput>,
     settings_focus: FocusHandle,
+    /// Mirror of Sparkle's persisted automatic-check setting. Refreshed when
+    /// settings opens and on toggle, so frames never read user defaults —
+    /// that lookup can reach cfprefsd.
+    automatic_updates_enabled: bool,
     probes: Vec<ProviderProbe>,
     provider_probe_tx: Sender<ProviderProbe>,
     provider_probe_events: Receiver<ProviderProbe>,
@@ -1050,6 +1054,10 @@ impl Waku {
                 model_search,
                 settings_search,
                 settings_focus,
+                automatic_updates_enabled: cx
+                    .try_global::<crate::updater::UpdaterState>()
+                    .and_then(|updater| updater.0.as_ref())
+                    .is_some_and(|updater| updater.automatically_checks_for_updates()),
                 probes,
                 provider_probe_tx,
                 provider_probe_events,

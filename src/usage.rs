@@ -888,10 +888,7 @@ mod tests {
                 .iter()
                 .map(|window| (window.label.as_str(), window.percent))
                 .collect::<Vec<_>>(),
-            [
-                ("Weekly limit", 99.0),
-                ("Weekly · GPT-5.3-Codex", 12.0),
-            ]
+            [("Weekly limit", 99.0), ("Weekly · GPT-5.3-Codex", 12.0),]
         );
     }
 

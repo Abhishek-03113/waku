@@ -238,6 +238,12 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         self.settings_page = Some(SettingsPage::Appearance);
+        // Sparkle owns this value and its consent prompt can flip it outside
+        // the settings UI, so re-mirror it each time settings opens.
+        self.automatic_updates_enabled = cx
+            .try_global::<crate::updater::UpdaterState>()
+            .and_then(|updater| updater.0.as_ref())
+            .is_some_and(|updater| updater.automatically_checks_for_updates());
         window.focus(&self.settings_focus, cx);
         cx.notify();
     }

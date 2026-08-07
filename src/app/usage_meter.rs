@@ -416,19 +416,15 @@ fn usage_panel(
             ProviderKind::Codex => Some("https://chatgpt.com/codex/settings/usage"),
             _ => None,
         };
-        let header_row = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_tertiary)
-                    .child(SharedString::from(header)),
-            );
+        let header_row = div().flex().items_center().gap(px(6.0)).child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(11.0))
+                .text_color(theme.text_tertiary)
+                .child(SharedString::from(header)),
+        );
         panel = panel.child(match usage_url {
             Some(url) => header_row
                 .id("plan-usage-link")

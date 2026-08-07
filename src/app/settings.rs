@@ -24,7 +24,7 @@ const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 4] = [
         SettingsPage::General,
         "General",
         "icons/settings.svg",
-        "general local projects conversations privacy",
+        "general local projects conversations privacy updates automatic sparkle version",
     ),
     (
         SettingsPage::Appearance,
@@ -307,29 +307,114 @@ impl Waku {
 
     fn render_general_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
+        let updater_available = cx
+            .try_global::<crate::updater::UpdaterState>()
+            .is_some_and(|updater| updater.0.is_some());
         div()
-            .mt(px(15.0))
-            .w_full()
-            .px(px(20.0))
-            .py(px(14.0))
-            .rounded(px(13.0))
-            .bg(theme.raised)
             .child(
                 div()
-                    .text_size(px(13.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("Local by default"),
+                    .mt(px(15.0))
+                    .w_full()
+                    .px(px(20.0))
+                    .py(px(14.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("Local by default"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(5.0))
+                            .text_size(px(12.5))
+                            .line_height(px(18.0))
+                            .text_color(theme.text_secondary)
+                            .child("Projects, conversations, and settings are stored on this Mac."),
+                    ),
             )
-            .child(
-                div()
-                    .mt(px(5.0))
-                    .text_size(px(12.5))
-                    .line_height(px(18.0))
-                    .text_color(theme.text_secondary)
-                    .child("Projects, conversations, and settings are stored on this Mac."),
-            )
+            .when(updater_available, |column| {
+                let enabled = self.automatic_updates_enabled;
+                let toggle = div()
+                    .id("automatic-updates-toggle")
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_color(theme.accent))
+                    .w(px(36.0))
+                    .h(px(20.0))
+                    .p(px(2.0))
+                    .flex_none()
+                    .rounded_full()
+                    .cursor_default()
+                    .bg(if enabled { theme.inverse } else { theme.inset })
+                    .border_1()
+                    .border_color(if enabled {
+                        theme.inverse
+                    } else {
+                        theme.border_strong
+                    })
+                    .flex()
+                    .items_center()
+                    .when(enabled, |element| element.justify_end())
+                    .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if enabled {
+                        theme.on_inverse
+                    } else {
+                        theme.text_tertiary
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_automatic_updates_enabled(!enabled, cx);
+                    }));
+                column.child(
+                    div()
+                        .mt(px(15.0))
+                        .w_full()
+                        .min_h(px(60.0))
+                        .px(px(20.0))
+                        .py(px(12.0))
+                        .rounded(px(13.0))
+                        .bg(theme.raised)
+                        .flex()
+                        .items_center()
+                        .gap(px(24.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_size(px(13.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.text)
+                                        .child("Automatic updates"),
+                                )
+                                .child(
+                                    div()
+                                        .mt(px(5.0))
+                                        .text_size(px(12.5))
+                                        .line_height(px(18.0))
+                                        .text_color(theme.text_secondary)
+                                        .child(
+                                            "Check for new versions in the background and \
+                                             offer to install them.",
+                                        ),
+                                ),
+                        )
+                        .child(toggle),
+                )
+            })
             .into_any_element()
+    }
+
+    fn set_automatic_updates_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.automatic_updates_enabled = enabled;
+        if let Some(updater) = cx
+            .try_global::<crate::updater::UpdaterState>()
+            .and_then(|updater| updater.0.as_ref())
+        {
+            updater.set_automatically_checks_for_updates(enabled);
+        }
+        cx.notify();
     }
 
     fn render_appearance_settings(&self, cx: &mut Context<Self>) -> AnyElement {
