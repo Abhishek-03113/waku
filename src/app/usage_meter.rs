@@ -162,8 +162,9 @@ impl Waku {
             plan.is_none() && error.is_none() && PLAN_USAGE_PROVIDERS.contains(&provider);
 
         let weak = cx.entity().downgrade();
-        let handle = self.menu_handle_with(USAGE_METER_MENU_ID, cx, move |open, _window, cx| {
+        let handle = self.menu_handle_with(USAGE_METER_MENU_ID, cx, move |open, window, cx| {
             if open {
+                let mut card_focus = None;
                 let _ = weak.update(cx, |this, cx| {
                     // An opening panel wants fresh numbers; the pump honors
                     // the stale flag on its next tick once the backoff allows.
@@ -174,8 +175,31 @@ impl Waku {
                     {
                         this.plan_usage_stale.insert(provider);
                     }
+                    card_focus = this
+                        .menus
+                        .borrow()
+                        .get(USAGE_METER_MENU_ID)
+                        .map(|handle| handle.focus_handle().clone());
                     cx.notify();
                 });
+                // The card is deferred, so its focus handle joins the
+                // dispatch tree only after the deferred draw — the same
+                // two-frame wait the menus use. Focused, the card's menu
+                // context is what lets `escape` dismiss it.
+                if let Some(focus) = card_focus {
+                    window.on_next_frame(move |window, _| {
+                        window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+                    });
+                }
+            } else {
+                let mut composer_focus = None;
+                let _ = weak.update(cx, |this, cx| {
+                    composer_focus = Some(this.composer.read(cx).focus());
+                    cx.notify();
+                });
+                if let Some(focus) = composer_focus {
+                    window.focus(&focus, cx);
+                }
             }
         });
 
@@ -211,8 +235,9 @@ impl Waku {
             trigger,
             &handle,
             MenuAlign::AboveRight,
-            move |_, _, cx| {
+            move |handle, _, cx| {
                 usage_panel(
+                    handle,
                     provider,
                     context,
                     plan.clone(),
@@ -307,6 +332,7 @@ fn context_gauge(percent: Option<f64>, track: Hsla, fill: Hsla) -> impl IntoElem
 }
 
 fn usage_panel(
+    handle: &ContextMenuHandle,
     provider: ProviderKind,
     context: Option<ContextUsage>,
     plan: Option<PlanUsage>,
@@ -317,6 +343,8 @@ fn usage_panel(
     let theme = Theme::current(cx);
     let now = unix_time() as i64;
     let mut panel = div()
+        // Focused on open so the surrounding menu context sees `escape`.
+        .track_focus(handle.focus_handle())
         .w(px(320.0))
         .p(px(14.0))
         .rounded(px(10.0))

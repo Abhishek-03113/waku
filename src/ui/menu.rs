@@ -226,6 +226,13 @@ impl ContextMenuHandle {
         self.state.borrow().open.is_some()
     }
 
+    /// The card's focus handle, for content-focusing surfaces whose panel has
+    /// no input of its own: focusing the card puts the menu key context on
+    /// the dispatch path, which is what lets `escape` dismiss it.
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
     pub fn close(&self, window: &mut Window, cx: &mut App) {
         let was_open = {
             let mut state = self.state.borrow_mut();
