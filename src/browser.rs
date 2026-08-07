@@ -170,14 +170,14 @@ mod host {
             return false;
         };
         let pressed = matches!(
-            unsafe { event.r#type() },
+            event.r#type(),
             NSEventType::LeftMouseDown
                 | NSEventType::LeftMouseUp
                 | NSEventType::RightMouseDown
                 | NSEventType::OtherMouseDown
         );
         pressed
-            && NSProcessInfo::processInfo().systemUptime() - unsafe { event.timestamp() } < 0.5
+            && NSProcessInfo::processInfo().systemUptime() - event.timestamp() < 0.5
     }
 
     pub(super) struct ResponderObserverIvars {
