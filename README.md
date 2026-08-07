@@ -129,6 +129,10 @@ notarization options.
 - Pi currently supports Build with Full access; unsupported Pi access modes
   fail explicitly instead of pretending to provide approval semantics.
 - Stop the active turn with `Escape`.
+- While the agent works, `Enter` queues the draft as a follow-up instead of
+  refusing it; queued messages appear above the composer, send one per settled
+  turn, and can be edited back into the composer or removed. `⌘↩` steers
+  instead, delivering the message into the running turn on every provider.
 - In a Git project, use **Rewind to here** beneath a provider prompt or **Edit**
   beneath a Codex prompt; both restore Waku's pre-turn checkpoint and align the
   provider conversation with the retained timeline.

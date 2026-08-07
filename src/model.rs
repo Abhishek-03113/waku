@@ -454,6 +454,31 @@ pub enum SessionStatus {
     Failed,
 }
 
+impl SessionStatus {
+    pub fn is_busy(self) -> bool {
+        matches!(self, Self::Connecting | Self::Working | Self::Waiting)
+    }
+}
+
+/// A follow-up message queued while the agent is busy. It becomes its own
+/// turn once the current turn settles successfully.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct QueuedMessage {
+    pub id: Uuid,
+    pub content: String,
+    pub created_at: u64,
+}
+
+impl QueuedMessage {
+    pub fn new(content: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            content: content.into(),
+            created_at: unix_time(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TurnStatus {
@@ -544,6 +569,8 @@ pub struct AgentSession {
     pub transcript_blocks: Vec<TranscriptBlock>,
     #[serde(default)]
     pub turns: Vec<AgentTurn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_messages: Vec<QueuedMessage>,
     /// Whether the transcript has been read from the database.
     ///
     /// Startup loads only the columns the session list needs, so a session
@@ -584,7 +611,12 @@ impl AgentSession {
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
             turns: Vec::new(),
+            queued_messages: Vec::new(),
         }
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.status.is_busy()
     }
 
     /// Derives [`Self::last_reply_at`] from the turn history when it is not
@@ -629,10 +661,7 @@ impl AgentSession {
     }
 
     pub fn can_choose_model(&self, provider: ProviderKind) -> bool {
-        !matches!(
-            self.status,
-            SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
-        ) && (self.messages.is_empty() || self.provider == provider)
+        !self.status.is_busy() && (self.messages.is_empty() || self.provider == provider)
     }
 
     pub fn migrate_legacy_state(&mut self) {
@@ -854,6 +883,9 @@ impl AgentSession {
         fork.updated_at = now;
         fork.provider_cursor = Some(provider_cursor);
         fork.provider_session_id = None;
+        // A fork snapshots the conversation, not the pending follow-ups its
+        // source session is still holding for the live agent.
+        fork.queued_messages.clear();
         Some(fork)
     }
 }
@@ -965,6 +997,16 @@ pub enum DriverEvent {
         options: Vec<PermissionOption>,
     },
     ComputerUseUpdated(crate::computer_use::ComputerUseState),
+    /// The provider accepted a steering message into the running turn.
+    SteerAccepted {
+        message: String,
+    },
+    /// The provider could not steer the running turn (for example it ended
+    /// before the request arrived). The app decides the fallback.
+    SteerRejected {
+        message: String,
+        reason: String,
+    },
     TurnFinished {
         success: bool,
         summary: Option<String>,
@@ -1310,6 +1352,78 @@ mod tests {
             fork.provider_cursor,
             Some(ProviderResumeCursor::Codex { ref thread_id }) if thread_id == "forked-thread"
         ));
+    }
+
+    #[test]
+    fn queued_follow_ups_stay_with_the_source_session_not_the_fork() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+
+        session.begin_turn("first");
+        session.push_message(MessageRole::Assistant, "first answer");
+        session.finish_active_turn(TurnStatus::Completed);
+        session
+            .queued_messages
+            .push(QueuedMessage::new("after you finish, also…"));
+
+        let fork = session
+            .fork_through_turn(
+                1,
+                ProviderResumeCursor::Codex {
+                    thread_id: "forked-thread".into(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(session.queued_messages.len(), 1);
+        assert!(fork.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn follow_up_queue_round_trips_through_serde() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session
+            .queued_messages
+            .push(QueuedMessage::new("first follow-up"));
+        session
+            .queued_messages
+            .push(QueuedMessage::new("second follow-up"));
+
+        let value = serde_json::to_value(&session).unwrap();
+        assert!(value["queued_messages"].is_array());
+        let restored: AgentSession = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.queued_messages.len(), 2);
+        assert_eq!(restored.queued_messages[0].content, "first follow-up");
+        assert_eq!(restored.queued_messages[1].content, "second follow-up");
+        assert_ne!(
+            restored.queued_messages[0].id,
+            restored.queued_messages[1].id
+        );
+
+        // Sessions without the field (older state files) deserialize as empty.
+        let mut legacy = serde_json::to_value(&session).unwrap();
+        legacy.as_object_mut().unwrap().remove("queued_messages");
+        let legacy_session: AgentSession = serde_json::from_value(legacy).unwrap();
+        assert!(legacy_session.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn busy_statuses_cover_connecting_working_and_waiting() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        for status in [
+            SessionStatus::Connecting,
+            SessionStatus::Working,
+            SessionStatus::Waiting,
+        ] {
+            session.status = status;
+            assert!(session.is_busy());
+        }
+        for status in [SessionStatus::Idle, SessionStatus::Failed] {
+            session.status = status;
+            assert!(!session.is_busy());
+        }
     }
 
     #[test]

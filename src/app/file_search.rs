@@ -239,6 +239,7 @@ impl Waku {
             |this: &mut Self, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::Edited => this.refresh_file_search(SearchRefresh::Query, cx),
                 ComposerEvent::Submit(_) => this.file_search_navigate(false, cx),
+                ComposerEvent::SubmitSteer(_) => {}
                 ComposerEvent::Focus => {}
                 ComposerEvent::BackspaceOnEmpty => {}
             },

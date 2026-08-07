@@ -719,16 +719,19 @@ impl Waku {
         // Do not leave already-received text in the smoothing queue: once the
         // message is marked complete, a later delta would otherwise create a
         // second assistant bubble. Show the received portion immediately.
+        // Buffered turn-completion events also must not start queued
+        // follow-ups: the user asked to stop, not to continue.
         let mut keep_runtime = true;
         if let Some(runtime) = runtime.as_mut() {
             Self::collect_runtime_events(runtime);
             while let Some(event) = runtime.pending_events.pop_front() {
-                keep_runtime &= self.handle_driver_event(session_id, runtime, event);
+                keep_runtime &= self.handle_driver_event(session_id, runtime, event, false, cx);
                 if !keep_runtime {
                     break;
                 }
             }
         }
+        self.pending_queue_drains.retain(|id| *id != session_id);
         let has_active_turn = self
             .state
             .sessions

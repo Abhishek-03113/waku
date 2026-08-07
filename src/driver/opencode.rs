@@ -5,6 +5,8 @@
 //! requests the user can actually be asked. Waku already started this server
 //! for a side-quest — forking a session — while running conversations through
 //! one-shot `opencode run` invocations; this drives everything through it.
+//! A prompt posted into a busy session is folded into the running turn rather
+//! than queued behind it, which is what makes steering a plain post.
 //!
 //! Routes and payload shapes here were read off a live server's OpenAPI
 //! document and event stream, not guessed.
@@ -29,12 +31,25 @@ use crate::opencode_session::{OpenCodeServer, encode_path_segment};
 
 enum CommandMessage {
     Prompt(String),
+    Steer(String),
     Cancel,
     Respond {
         request_id: String,
         option_id: String,
     },
     Shutdown,
+}
+
+/// The prompt body both turn starts and steers post; the model rides on every
+/// prompt because the server has no session-level model setting.
+fn prompt_body(text: &str, model: Option<&str>) -> Value {
+    let mut body = json!({
+        "parts": [{"type": "text", "text": text}]
+    });
+    if let Some((provider_id, model_id)) = model.and_then(|model| model.split_once('/')) {
+        body["model"] = json!({"providerID": provider_id, "modelID": model_id});
+    }
+    body
 }
 
 pub struct OpenCodeDriver {
@@ -185,46 +200,66 @@ impl OpenCodeDriver {
                         CommandMessage::Prompt(text) => {
                             *worker_turn.lock() = true;
                             let _ = worker_events.send(DriverEvent::TurnStarted);
-                            // The prompt request does not return until the turn
-                            // ends, so it runs off the command loop — otherwise
-                            // a Stop could not be sent while it is outstanding.
-                            let server = worker_server.clone();
-                            let session = worker_session.clone();
-                            let events = worker_events.clone();
-                            let turn = worker_turn.clone();
-                            let mut body = json!({
-                                "parts": [{"type": "text", "text": text}]
-                            });
-                            if let Some(model) = model.as_deref()
-                                && let Some((provider_id, model_id)) = model.split_once('/')
-                            {
-                                body["model"] =
-                                    json!({"providerID": provider_id, "modelID": model_id});
+                            // `prompt_async` acknowledges as soon as the prompt
+                            // is accepted; completion arrives as `session.idle`
+                            // on the event stream. The blocking message route
+                            // holds its response for the whole turn, which no
+                            // sane read timeout survives — a turn longer than
+                            // the HTTP timeout would be falsely failed.
+                            let path = format!(
+                                "/session/{}/prompt_async",
+                                encode_path_segment(&worker_session)
+                            );
+                            let body = prompt_body(&text, model.as_deref());
+                            if let Err(error) = worker_server.request("POST", &path, Some(&body)) {
+                                let _ = worker_events.send(DriverEvent::Error(format!(
+                                    "OpenCode rejected the prompt: {error}"
+                                )));
+                                // `session.idle` never arrives for a turn that
+                                // failed to start, so settle it here instead of
+                                // hanging.
+                                if std::mem::take(&mut *worker_turn.lock()) {
+                                    let _ = worker_events.send(DriverEvent::TurnFinished {
+                                        success: false,
+                                        summary: Some("OpenCode could not start the turn.".into()),
+                                    });
+                                }
                             }
-                            let _ = thread::Builder::new()
-                                .name("waku-opencode-turn".into())
-                                .spawn(move || {
-                                    let path = format!(
-                                        "/session/{}/message",
-                                        encode_path_segment(&session)
-                                    );
-                                    if let Err(error) = server.request("POST", &path, Some(&body)) {
-                                        let _ = events.send(DriverEvent::Error(format!(
-                                            "OpenCode rejected the prompt: {error}"
-                                        )));
-                                        // `session.idle` never arrives for a
-                                        // turn that failed to start, so settle
-                                        // it here instead of hanging.
-                                        if std::mem::take(&mut *turn.lock()) {
-                                            let _ = events.send(DriverEvent::TurnFinished {
-                                                success: false,
-                                                summary: Some(
-                                                    "OpenCode could not start the turn.".into(),
-                                                ),
-                                            });
-                                        }
-                                    }
+                        }
+                        CommandMessage::Steer(text) => {
+                            // A prompt posted into a busy session is a steer:
+                            // the server folds it into the running turn and one
+                            // `session.idle` still settles everything —
+                            // OpenCode's own UI calls this "queued", but it is
+                            // the live turn absorbing the message, not a
+                            // follow-up turn. `prompt_async` acknowledges as
+                            // soon as the prompt is accepted, unlike the
+                            // message route, which blocks until the merged turn
+                            // ends — which is what makes it the steer vehicle.
+                            if !*worker_turn.lock() {
+                                let _ = worker_events.send(DriverEvent::SteerRejected {
+                                    message: text,
+                                    reason: "OpenCode has no active turn to steer.".into(),
                                 });
+                                continue;
+                            }
+                            let path = format!(
+                                "/session/{}/prompt_async",
+                                encode_path_segment(&worker_session)
+                            );
+                            let body = prompt_body(&text, model.as_deref());
+                            match worker_server.request("POST", &path, Some(&body)) {
+                                Ok(_) => {
+                                    let _ = worker_events
+                                        .send(DriverEvent::SteerAccepted { message: text });
+                                }
+                                Err(error) => {
+                                    let _ = worker_events.send(DriverEvent::SteerRejected {
+                                        message: text,
+                                        reason: format!("OpenCode rejected the steer: {error}"),
+                                    });
+                                }
+                            }
                         }
                         CommandMessage::Cancel => {
                             let path =
@@ -272,6 +307,14 @@ impl OpenCodeDriver {
 impl DriverControl for OpenCodeDriver {
     fn prompt(&self, prompt: String) {
         let _ = self.commands.send(CommandMessage::Prompt(prompt));
+    }
+
+    fn supports_steer(&self) -> bool {
+        true
+    }
+
+    fn steer(&self, prompt: String) {
+        let _ = self.commands.send(CommandMessage::Steer(prompt));
     }
 
     fn cancel(&self) {
@@ -615,6 +658,90 @@ mod tests {
         assert!(
             text.contains("OK"),
             "expected the reply to stream through, got {text:?}"
+        );
+    }
+
+    /// Proves steering through the actual driver: the message injected while
+    /// the bash tool sleeps lands inside the same turn — one SteerAccepted,
+    /// one TurnFinished, and a reply that honors both instructions. Ignored by
+    /// default: needs the CLI installed, credentials, and the network.
+    #[test]
+    #[ignore = "requires an installed, authenticated opencode"]
+    fn opencode_steering_folds_a_mid_turn_message_into_the_running_turn() {
+        let binary =
+            crate::command_env::find_executable("opencode").expect("opencode is not installed");
+        let (events, event_rx) = unbounded();
+        let driver = OpenCodeDriver::start(
+            DriverStartOptions {
+                binary,
+                cwd: std::env::temp_dir(),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the server should start and open a session");
+
+        driver.prompt(
+            "Use the bash tool to run exactly `sleep 6` (nothing else). \
+             After the command completes, reply with exactly: FIRST DONE"
+                .into(),
+        );
+
+        let mut text = String::new();
+        let mut steered = false;
+        let mut steer_accepted = false;
+        let mut turns_finished = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while std::time::Instant::now() < deadline {
+            let Ok(event) = event_rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+                // Quiet after the turn settled means no second turn is coming.
+                if turns_finished == 1 {
+                    break;
+                }
+                continue;
+            };
+            match event {
+                DriverEvent::RichActivity(item) if !steered && !item.complete => {
+                    // The tool is running: the turn is unambiguously live.
+                    steered = true;
+                    driver.steer(
+                        "ADDITIONAL INSTRUCTION: end your very next reply \
+                         with the word BANANA."
+                            .into(),
+                    );
+                }
+                DriverEvent::SteerAccepted { message } => {
+                    assert!(message.contains("BANANA"));
+                    steer_accepted = true;
+                }
+                DriverEvent::SteerRejected { reason, .. } => {
+                    panic!("the steer should be accepted, got rejection: {reason}");
+                }
+                DriverEvent::TextDelta(delta) => text.push_str(&delta),
+                DriverEvent::TurnFinished { success, .. } => {
+                    assert!(success, "the turn should settle successfully");
+                    turns_finished += 1;
+                }
+                DriverEvent::Error(error) => panic!("the server reported: {error}"),
+                _ => {}
+            }
+        }
+
+        assert!(steered, "the probe never saw the tool start");
+        assert!(steer_accepted, "the driver should acknowledge the steer");
+        assert_eq!(
+            turns_finished, 1,
+            "a steered message must not settle a second turn"
+        );
+        assert!(
+            text.contains("BANANA"),
+            "the steered instruction should shape the same turn's reply, got {text:?}"
         );
     }
 

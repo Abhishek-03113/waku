@@ -29,7 +29,7 @@ use crate::md;
 use crate::model::{
     ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, FavoriteModel,
     InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind, ProviderModel,
-    ProviderProbe, ProviderResumeCursor, ReasoningBlock, RuntimeMode, SessionStatus,
+    ProviderProbe, ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
     TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -542,6 +542,11 @@ pub struct Waku {
     /// drained into the next submission.
     composer_attachments: Vec<ComposerAttachment>,
     runtimes: HashMap<Uuid, SessionRuntime>,
+    /// Sessions whose just-settled turn should start the next queued
+    /// follow-up. Processed at the end of the driver-event drain so the
+    /// session's runtime has already been re-inserted before a new prompt
+    /// reuses it.
+    pending_queue_drains: Vec<Uuid>,
     stream_state_dirty: bool,
     last_stream_save: Instant,
     /// User expansion overrides keyed by persisted transcript block index.
@@ -921,6 +926,11 @@ impl Waku {
                             this.submit_prompt(prompt, cx);
                         }
                     }
+                    ComposerEvent::SubmitSteer(prompt) => {
+                        if let Some(prompt) = this.submission_with_attachments(prompt) {
+                            this.steer_prompt(prompt, cx);
+                        }
+                    }
                     ComposerEvent::Edited => cx.notify(),
                     ComposerEvent::Focus => {}
                     ComposerEvent::BackspaceOnEmpty => {
@@ -977,7 +987,7 @@ impl Waku {
                     cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
                     if this
                         .update(cx, |this, cx| {
-                            if this.drain_driver_events()
+                            if this.drain_driver_events(cx)
                                 || this.drain_provider_probe_events()
                                 || this.drain_provider_version_events()
                                 || this.drain_provider_detection_events()
@@ -1049,6 +1059,7 @@ impl Waku {
                 composer_autocomplete: autocomplete::AutocompleteUi::new(),
                 composer_attachments: Vec::new(),
                 runtimes: HashMap::new(),
+                pending_queue_drains: Vec::new(),
                 stream_state_dirty: false,
                 last_stream_save: Instant::now(),
                 reasoning_expanded: HashMap::new(),

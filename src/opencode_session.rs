@@ -12,6 +12,11 @@ use crate::model::ProviderResumeCursor;
 
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// The server binds its port about a second before the app behind it starts
+/// answering, and a request accepted in that window is never answered at all.
+/// A startup probe caught there must give up quickly and retry — at the full
+/// `HTTP_TIMEOUT` one hung probe would eat the whole start budget.
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn fork_session_at_turn(
     binary: &Path,
@@ -105,7 +110,10 @@ impl OpenCodeServer {
         let mut server = Self { child, port, pid };
         let started_at = Instant::now();
         loop {
-            if server.request("GET", "/global/health", None).is_ok() {
+            if server
+                .request_with_timeout("GET", "/global/health", None, HEALTH_PROBE_TIMEOUT)
+                .is_ok()
+            {
                 return Ok(server);
             }
             if let Some(status) = server.child.try_wait()? {
@@ -124,8 +132,23 @@ impl OpenCodeServer {
         path: &str,
         body: Option<&Value>,
     ) -> anyhow::Result<Value> {
+        self.request_with_timeout(method, path, body, HTTP_TIMEOUT)
+    }
+
+    pub(crate) fn request_with_timeout(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
         let body = body.map(serde_json::to_vec).transpose()?;
-        let response = http_request(self.port, method, path, body.as_deref())?;
+        let response = http_request(self.port, method, path, body.as_deref(), timeout)?;
+        // Some routes answer 204 No Content — `prompt_async` among them — and
+        // the status was already checked, so an empty success body is Null.
+        if response.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Value::Null);
+        }
         serde_json::from_slice(&response)
             .with_context(|| format!("OpenCode returned invalid JSON for {method} {path}"))
     }
@@ -176,11 +199,12 @@ fn http_request(
     method: &str,
     path: &str,
     body: Option<&[u8]>,
+    timeout: Duration,
 ) -> anyhow::Result<Vec<u8>> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .with_context(|| format!("could not connect to OpenCode on local port {port}"))?;
-    stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
-    stream.set_write_timeout(Some(HTTP_TIMEOUT))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     let body = body.unwrap_or_default();
     write!(
         stream,

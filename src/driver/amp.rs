@@ -9,6 +9,14 @@
 //! decides the posture at launch. Turn completion is not a `result` message
 //! either: Amp signals it with `stop_reason: "end_turn"` on the assistant
 //! message. Both facts came from probing the real CLI.
+//!
+//! A plain user message written mid-turn is held by the CLI until the current
+//! turn's `end_turn`, then run as a turn of its own. Steering needs the
+//! documented top-level `"steer": true` attribute on the message, which marks
+//! it for handling at the next interruption point — the running turn absorbs
+//! it and one `end_turn` settles everything. Both behaviors were probed
+//! against the real CLI; the attribute is in the manual's Streaming JSON
+//! section.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -28,6 +36,7 @@ use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCur
 
 enum CommandMessage {
     Prompt(String),
+    Steer(String),
     Shutdown,
 }
 
@@ -201,6 +210,56 @@ impl AmpDriver {
                                 break;
                             }
                         }
+                        CommandMessage::Steer(text) => {
+                            // Without the marker Amp would hold the message
+                            // until `end_turn` and run it as a turn of its own;
+                            // `"steer": true` has the running turn absorb it at
+                            // the next interruption point instead. No
+                            // TurnStarted and no turn re-arm: the turn the
+                            // message joins is already running.
+                            if !*writer_turn.lock() {
+                                let _ = writer_events.send(DriverEvent::SteerRejected {
+                                    message: text,
+                                    reason: "Amp has no active turn to steer.".into(),
+                                });
+                                continue;
+                            }
+                            let written = write_line(
+                                &mut stdin,
+                                &json!({
+                                    "type": "user",
+                                    "steer": true,
+                                    "message": {
+                                        "role": "user",
+                                        "content": [{"type": "text", "text": text}]
+                                    }
+                                }),
+                            );
+                            match written {
+                                Ok(()) => {
+                                    let _ = writer_events
+                                        .send(DriverEvent::SteerAccepted { message: text });
+                                }
+                                Err(error) => {
+                                    let _ = writer_events.send(DriverEvent::SteerRejected {
+                                        message: text,
+                                        reason: format!("Amp transport write failed: {error}"),
+                                    });
+                                    // Stdin is gone, so the running turn cannot
+                                    // settle from the CLI side either.
+                                    let _ = writer_events.send(DriverEvent::Error(
+                                        "Amp transport write failed.".into(),
+                                    ));
+                                    if std::mem::take(&mut *writer_turn.lock()) {
+                                        let _ = writer_events.send(DriverEvent::TurnFinished {
+                                            success: false,
+                                            summary: Some("Amp stopped receiving messages.".into()),
+                                        });
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                         CommandMessage::Shutdown => break,
                     }
                 }
@@ -251,6 +310,14 @@ impl AmpDriver {
 impl DriverControl for AmpDriver {
     fn prompt(&self, prompt: String) {
         let _ = self.commands.send(CommandMessage::Prompt(prompt));
+    }
+
+    fn supports_steer(&self) -> bool {
+        true
+    }
+
+    fn steer(&self, prompt: String) {
+        let _ = self.commands.send(CommandMessage::Steer(prompt));
     }
 
     fn cancel(&self) {
@@ -484,6 +551,90 @@ mod tests {
         assert!(
             second.contains("BANANA"),
             "the session should retain context across turns, got {second:?}"
+        );
+    }
+
+    /// Proves steering through the actual driver: the `"steer": true` message
+    /// injected while the shell tool sleeps lands inside the same turn — one
+    /// SteerAccepted, one TurnFinished, and a reply that honors both
+    /// instructions. Ignored by default: needs the CLI installed, credentials,
+    /// and the network.
+    #[test]
+    #[ignore = "requires an installed, authenticated amp"]
+    fn amp_steering_folds_a_mid_turn_message_into_the_running_turn() {
+        let binary = crate::command_env::find_executable("amp").expect("amp is not installed");
+        let (events, event_rx) = unbounded();
+        let driver = AmpDriver::start(
+            DriverStartOptions {
+                binary,
+                cwd: std::env::temp_dir(),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: None,
+                reasoning_effort: None,
+                service_tier: Some("fast".into()),
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the streaming session should start");
+
+        driver.prompt(
+            "Use the Bash tool to run exactly `sleep 6` (nothing else). \
+             After the command completes, reply with exactly: FIRST DONE"
+                .into(),
+        );
+
+        let mut text = String::new();
+        let mut steered = false;
+        let mut steer_accepted = false;
+        let mut turns_finished = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while std::time::Instant::now() < deadline {
+            let Ok(event) = event_rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+                // Quiet after the turn settled means no second turn is coming.
+                if turns_finished == 1 {
+                    break;
+                }
+                continue;
+            };
+            match event {
+                DriverEvent::RichActivity(item) if !steered && !item.complete => {
+                    // The tool is running: the turn is unambiguously live.
+                    steered = true;
+                    driver.steer(
+                        "ADDITIONAL INSTRUCTION: end your very next reply \
+                         with the word BANANA."
+                            .into(),
+                    );
+                }
+                DriverEvent::SteerAccepted { message } => {
+                    assert!(message.contains("BANANA"));
+                    steer_accepted = true;
+                }
+                DriverEvent::SteerRejected { reason, .. } => {
+                    panic!("the steer should be accepted, got rejection: {reason}");
+                }
+                DriverEvent::TextDelta(delta) => text.push_str(&delta),
+                DriverEvent::TurnFinished { success, .. } => {
+                    assert!(success, "the turn should settle successfully");
+                    turns_finished += 1;
+                }
+                DriverEvent::Error(error) => panic!("the CLI reported: {error}"),
+                _ => {}
+            }
+        }
+
+        assert!(steered, "the probe never saw the tool start");
+        assert!(steer_accepted, "the driver should acknowledge the steer");
+        assert_eq!(
+            turns_finished, 1,
+            "a steered message must not settle a second turn"
+        );
+        assert!(
+            text.contains("BANANA"),
+            "the steered instruction should shape the same turn's reply, got {text:?}"
         );
     }
 

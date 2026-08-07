@@ -687,6 +687,7 @@ impl StateStore {
         let stored = serde_json::from_str::<AgentSession>(&data).map_err(to_io_error)?;
         session.transcript_blocks = stored.transcript_blocks;
         session.turns = stored.turns;
+        session.queued_messages = stored.queued_messages;
         session.provider_cursor = stored.provider_cursor;
         session.runtime_mode = stored.runtime_mode;
         session.interaction_mode = stored.interaction_mode;
@@ -919,6 +920,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         messages: Vec::new(),
         transcript_blocks: Vec::new(),
         turns: Vec::new(),
+        queued_messages: Vec::new(),
         detail_loaded: false,
     })
 }

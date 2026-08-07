@@ -35,9 +35,17 @@ pub struct DriverStartOptions {
 }
 ```
 
-Outputs ([src/model.rs:922](../src/model.rs#L922)): `Connected`, `TurnStarted`,
-`TextDelta`, `ReasoningDelta`, `Activity`, `RichActivity`, `Permission`,
-`ComputerUseUpdated`, `TurnFinished`, `Error`, `ProcessExited`.
+Outputs ([src/model.rs:973](../src/model.rs#L973)): `Connected`,
+`AvailableCommands`, `TurnStarted`, `TextDelta`, `ReasoningDelta`, `Activity`,
+`RichActivity`, `Permission`, `ComputerUseUpdated`, `SteerAccepted`,
+`SteerRejected`, `TurnFinished`, `Error`, `ProcessExited`.
+
+A transport that can inject a user message into the *running* turn advertises
+it through `DriverControl::supports_steer` and delivers it with `steer`; the
+outcome comes back asynchronously as `SteerAccepted` or `SteerRejected`. When
+steering is unsupported, refused, or the session is still connecting, the app
+falls back to its own follow-up queue — the message stays visible above the
+composer and starts a fresh turn once the current one settles.
 
 Every driver normalizes its tool events into one `ActivityItem`
 (`Reasoning | Command | FileChange | Search | Plan | Tool`) via
@@ -142,6 +150,7 @@ OpenCode server itself, whose driver kills it explicitly on drop.
 | Bidirectional | yes | yes | yes | yes | yes | yes | yes |
 | Reasoning stream | yes | yes | yes | yes | yes | yes | yes |
 | Interactive approvals | yes | no | yes | no | yes | yes | yes |
+| Mid-turn steering | yes | yes | yes | yes | yes | yes | yes |
 | Model discovery | yes | yes | no (fixed) | no (modes) | yes | yes | yes |
 | Computer Use | yes | yes | no | no | no | yes | yes |
 | Restricted to Build + Full access | no | yes | no | yes | no | no | no |
@@ -209,6 +218,11 @@ requests ([src/driver/codex.rs:779](../src/driver/codex.rs#L809)).
 
 **Cancel** — `turn/interrupt {threadId, turnId}`.
 
+**Steer** — `turn/steer {threadId, expectedTurnId, input}`. The RPC response
+resolves the pending steer to `SteerAccepted`, or to `SteerRejected` with the
+CLI's reason when the expected turn no longer matches — the server-side check
+that makes Codex the one provider whose steer cannot race a settling turn.
+
 **Rewind** — `thread/rollback {threadId, numTurns}`, in place; the cursor is
 unchanged. **Branch** — `thread/fork {threadId, lastTurnId}` returns a new
 thread id. Both are synchronous from the UI's perspective: the command carries a
@@ -269,6 +283,9 @@ both go into the cursor, and resume needs the **file path**, not just the id.
 
 **Cancel** — `{"type": "abort"}`.
 
+**Steer** — `{"type": "steer", "message": …}`; the request acknowledgment
+resolves to `SteerAccepted` or `SteerRejected`.
+
 **Rewind and branch** — both go through `get_fork_messages` → `fork {entryId}`
 (or `clone` when nothing is removed) → `get_state`
 ([src/driver/pi.rs:482](../src/driver/pi.rs#L574)). Rewind adopts the fork as the
@@ -328,6 +345,14 @@ name, input, `tool_use_id`, the `blocked_path` that tripped the check, and
 answers allow itself.
 
 **Cancel** — a `control_request` with `subtype: "interrupt"`.
+
+**Steer** — the same user-message write as a prompt, sent while a turn is
+running and without arming a new turn. The CLI holds the message and folds it
+into the running turn at its next model call — one `result` still settles the
+whole exchange, and the `isReplay` echo arrives at the moment of absorption
+rather than at write time. Verified against the real CLI by injecting an
+instruction while a Bash `sleep` ran: the same turn's reply honored it. Amp
+was probed the same way and behaves differently — see its section.
 
 **Model changes** — a `control_request` with `subtype: "set_model"`, so switching
 models keeps the session. The permission posture is a launch flag and still
@@ -390,6 +415,14 @@ still decides the posture at launch with `--dangerously-allow-all`.
 survives on Amp's side and the next prompt resumes it with `threads continue`,
 which is why Amp's runtime is not retained after a cancel.
 
+**Steer** — the user message with a documented top-level `"steer": true`
+attribute. A plain mid-turn message is held until the current turn's
+`end_turn` and then runs as a turn of its own; the attribute marks it for
+handling at the next interruption point instead, so the running turn absorbs
+it and one `end_turn` settles everything. Both behaviors probed against the
+real CLI — the plain-message probe is why an unmarked write must never be
+used as a steer.
+
 **Branch** — `amp threads export <id>` dumps the thread, Waku keeps the retained
 prefix, `amp threads new` creates an empty thread, and the retained history is
 replayed as a length-delimited envelope prepended to the first prompt
@@ -413,9 +446,22 @@ and payloads here were read off a live server's OpenAPI document, not guessed.
 **Handshake** — `POST /session` for a fresh session (or reuse the resume
 cursor's id), then `POST /session/{id}/agent` to pick `plan` or `build`.
 
-**Per turn** — `POST /session/{id}/message` with `{parts: [{type: "text", …}]}`.
-That request does not return until the turn ends, so it runs off the command
-loop — otherwise a Stop could not be sent while it is outstanding.
+**Per turn** — `POST /session/{id}/prompt_async` with
+`{parts: [{type: "text", …}]}`, which acknowledges with `204 No Content` as
+soon as the prompt is accepted; the turn's completion arrives as
+`session.idle` on the event stream. The blocking `message` route holds its
+response until the turn ends — longer than any sane read timeout — so it is
+not used for prompting. T3 Code's SDK calls the same route as
+`session.promptAsync`.
+
+**Steer** — the same `prompt_async` post while the session is busy: the
+server folds the message into the running turn and one `session.idle` still
+settles everything. OpenCode's own UI labels this "queued", but it is the
+live turn absorbing the message, not a follow-up turn. The `204`
+acknowledgment resolves to `SteerAccepted`; a failed post resolves to
+`SteerRejected` and leaves the running turn untouched. Verified against a
+real server by injecting an instruction while a bash `sleep` ran: one idle,
+one reply, honoring both messages.
 
 **Inbound stream** — `GET /event`, server-wide. The per-session route exists
 only under `/api`, and since this server is Waku's alone, filtering by
@@ -528,6 +574,14 @@ does.
 **Cancel** — `session/cancel`, a notification; the open `session/prompt` reports
 the cancellation.
 
+**Steer** — a second `session/prompt` while one is open. The agent continues
+the same conversation under the newer request; the superseded request
+resolves early — Cursor answers it `cancelled` the moment the steer lands and
+re-plans with the message in context, Grok finishes the current work first
+and answers the message before settling — and only the last open prompt's
+response settles the merged turn. Both policies probed against the real
+agents; T3 Code runs the same last-prompt-settles bookkeeping for both.
+
 **Rewind and branch** — unchanged and still out of band: Grok forks through its
 own ACP server plus on-disk truncation ([src/grok_session.rs](../src/grok_session.rs)),
 Cursor re-seeds a fresh session ([src/cursor_session.rs](../src/cursor_session.rs)).
@@ -616,7 +670,7 @@ What the long-lived session buys, and what Waku pays for not having it:
 | Interactive approvals | Every provider: Claude via the SDK's `canUseTool` (including `AskUserQuestion` and `ExitPlanMode`), Cursor/Grok via ACP `session/request_permission`, Codex via `*requestApproval*` | Every provider except Amp and Pi, neither of which exposes a request to answer |
 | Interrupt | `session/cancel`, `query.interrupt()` (plus `stopTask()` for runaway subagents) | Protocol interrupt everywhere except Amp, which has none and is stopped outright |
 | Change model mid-session | `capabilities.sessionModelSwitch: "in-session"` → `session/set_model`, `query.setModel()` | Every transport keeps the session except Amp, whose mode is a launch argument |
-| Mid-turn prompt | Queued into the live agent loop as a **steer**, same turn | Rejected: "The agent is already working" — the remaining behavioral gap, on every provider |
+| Mid-turn prompt | Queued into the live agent loop as a **steer**, same turn | Steered into the live turn on every provider (`⌘↩`); plain `Enter` queues a visible, editable follow-up instead |
 | Native rollback | `rollbackThread` on the adapter contract | Codex/Pi natively; the rest emulated out-of-band by the `*_session.rs` helpers |
 | Idle cleanup | `ProviderSessionReaper` stops sessions idle 30 min, swept every 5 min, skipping threads with an active turn | same, on the same thresholds |
 
@@ -652,7 +706,13 @@ transcript uuid as a rewind checkpoint.
    probe transcript or an OpenAPI document, and the two bugs that reached code
    anyway (a dead event subscription, a discarded permission reason) were both
    caught by running a real turn rather than by unit tests. Preserve ordering,
-   and never leak private control markers into the transcript.
+   and never leak private control markers into the transcript. If the transport
+   accepts user messages mid-turn, probe *which* behavior it has before wiring
+   `supports_steer`: inject an instruction while a slow tool runs and count the
+   turn completions. Claude and OpenCode fold a plain message into the running
+   turn; Amp queues it unless it carries the CLI's `"steer": true` attribute;
+   ACP agents take a second `session/prompt` whose superseded predecessor must
+   not settle the turn — and only a live probe tells these apart.
 5. Map the access and interaction modes. If the transport can ask the user, route
    Supervised to a real `Permission` event; if it cannot, pick the safe
    degradation and say so in a comment at the call site.

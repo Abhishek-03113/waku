@@ -182,6 +182,7 @@ impl Render for Waku {
                     })
                     .when(self.selected_project().is_some(), |element| {
                         element
+                            .children(self.render_queued_messages(cx))
                             .child(self.render_composer(window, cx))
                             .child(self.render_workspace_footer(cx))
                     })

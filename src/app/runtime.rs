@@ -248,12 +248,6 @@ impl Waku {
         }
     }
 
-    pub(super) fn capture_latest_turn_checkpoint(&mut self) {
-        if let Some(session_id) = self.state.selected_session {
-            self.capture_latest_turn_checkpoint_for(session_id);
-        }
-    }
-
     /// Queues the newest finished turn's checkpoint for capture.
     ///
     /// Bookkeeping only. The capture itself is upwards of ten `git`
@@ -658,6 +652,9 @@ impl Waku {
             &input,
             |this: &mut Self, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::Submit(_) => this.submit_message_edit(cx),
+                // An edited past message resubmits from that point; there is
+                // no running turn for it to steer.
+                ComposerEvent::SubmitSteer(_) => this.submit_message_edit(cx),
                 ComposerEvent::Edited => cx.notify(),
                 ComposerEvent::Focus => {}
                 ComposerEvent::BackspaceOnEmpty => {}
@@ -1162,10 +1159,24 @@ impl Waku {
     }
 
     pub(super) fn ensure_driver(&mut self) -> anyhow::Result<DriverHandle> {
-        let session = self
+        let session_id = self
             .selected_session()
-            .cloned()
+            .map(|session| session.id)
             .ok_or_else(|| anyhow::anyhow!("No session selected"))?;
+        self.ensure_driver_for_session(session_id)
+    }
+
+    pub(super) fn ensure_driver_for_session(
+        &mut self,
+        session_id: Uuid,
+    ) -> anyhow::Result<DriverHandle> {
+        let session = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
         if let Some(runtime) = self.runtimes.get(&session.id) {
             return Ok(runtime.driver.clone());
         }
@@ -1229,28 +1240,160 @@ impl Waku {
     }
 
     pub(super) fn submit_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
-        let Some((session_id, project_id, status, next_turn_count)) =
-            self.selected_session().map(|session| {
-                (
-                    session.id,
-                    session.project_id,
-                    session.status,
-                    session.turns.len() + 1,
-                )
-            })
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        if session.is_busy() {
+            // While the agent is working, Enter queues a follow-up instead of
+            // refusing the message. The queue drains once the turn settles.
+            self.enqueue_follow_up(session.id, prompt, cx);
+            return;
+        }
+        self.submit_prompt_for_session(session.id, prompt, cx);
+    }
+
+    /// Deliver a steering message into the running turn. Providers without a
+    /// live-turn transport (or a session that is not actively working) fall
+    /// back to queueing a follow-up.
+    pub(super) fn steer_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session().cloned() else {
+            return;
+        };
+        if !session.is_busy() {
+            self.submit_prompt(prompt, cx);
+            return;
+        }
+        // A turn that has not reached the provider yet cannot be steered; the
+        // driver reports the outcome asynchronously via SteerAccepted or
+        // SteerRejected once it is handed off.
+        let steerable = session.status != SessionStatus::Connecting
+            && self
+                .runtimes
+                .get(&session.id)
+                .is_some_and(|runtime| runtime.driver.supports_steer());
+        if !steerable {
+            self.enqueue_follow_up(session.id, prompt, cx);
+            return;
+        }
+        if let Some(runtime) = self.runtimes.get_mut(&session.id) {
+            runtime.driver.steer(prompt);
+        } else {
+            self.enqueue_follow_up(session.id, prompt, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn enqueue_follow_up(
+        &mut self,
+        session_id: Uuid,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = prompt.trim().to_owned();
+        if prompt.is_empty() {
+            return;
+        }
+        if let Some(session) = self.state.session_mut(session_id) {
+            session.queued_messages.push(QueuedMessage::new(prompt));
+            session.updated_at = unix_time();
+        }
+        self.save();
+        cx.notify();
+    }
+
+    pub(super) fn remove_queued_message(
+        &mut self,
+        session_id: Uuid,
+        message_id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.state.session_mut(session_id) {
+            session
+                .queued_messages
+                .retain(|message| message.id != message_id);
+        }
+        self.save();
+        cx.notify();
+    }
+
+    /// Pop a queued message back into the composer so the user can edit and
+    /// resubmit it.
+    pub(super) fn edit_queued_message(
+        &mut self,
+        session_id: Uuid,
+        message_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(content) = self.state.session_mut(session_id).and_then(|session| {
+            let index = session
+                .queued_messages
+                .iter()
+                .position(|message| message.id == message_id)?;
+            Some(session.queued_messages.remove(index).content)
+        }) else {
+            return;
+        };
+        self.composer
+            .update(cx, |input, cx| input.set_content(content, cx));
+        let focus_handle = self.composer_focus(cx);
+        window.focus(&focus_handle, cx);
+        self.save();
+        cx.notify();
+    }
+
+    /// Start the next queued follow-up as a fresh turn. Only called once a
+    /// settled turn has been fully closed, so the session is Idle.
+    fn drain_queued_message(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let Some(session) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
         else {
             return;
         };
-        if matches!(
-            status,
-            SessionStatus::Working | SessionStatus::Connecting | SessionStatus::Waiting
-        ) {
-            self.toast = Some("The agent is already working. Stop it before sending again.".into());
-            cx.notify();
+        if session.is_busy() || session.queued_messages.is_empty() {
             return;
         }
-        self.sync_transcript_rows();
-        let previous_kinds = self.transcript_row_kinds.borrow().clone();
+        let Some(prompt) = self
+            .state
+            .session_mut(session_id)
+            .map(|session| session.queued_messages.remove(0).content)
+        else {
+            return;
+        };
+        self.submit_prompt_for_session(session_id, prompt, cx);
+    }
+
+    pub(super) fn submit_prompt_for_session(
+        &mut self,
+        session_id: Uuid,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self.state.selected_session == Some(session_id);
+        let Some((project_id, status, next_turn_count)) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| (session.project_id, session.status, session.turns.len() + 1))
+        else {
+            return;
+        };
+        if status.is_busy() {
+            self.enqueue_follow_up(session_id, prompt, cx);
+            return;
+        }
+        if selected {
+            self.sync_transcript_rows();
+        }
+        let previous_kinds = if selected {
+            self.transcript_row_kinds.borrow().clone()
+        } else {
+            Vec::new()
+        };
         let project_path = self
             .state
             .projects
@@ -1278,12 +1421,12 @@ impl Waku {
                     .map(|error| format!("Could not capture the pre-turn checkpoint: {error}"))
             });
         self.invalidate_checkpoint_refs();
-        let transcript_anchor = if let Some(session) = self.selected_session_mut() {
+        let transcript_anchor = if let Some(session) = self.state.session_mut(session_id) {
             session.set_title_from_prompt(&prompt);
             let turn_id = session.begin_turn(&prompt);
             session.status = SessionStatus::Connecting;
             session.updated_at = unix_time();
-            Some(TranscriptAnchor {
+            selected.then_some(TranscriptAnchor {
                 session_id,
                 turn_id,
             })
@@ -1298,17 +1441,19 @@ impl Waku {
             runtime.pending_computer_approval = None;
             runtime.last_active_at = Instant::now();
         }
-        self.reasoning_expanded.clear();
-        self.activities_expanded.clear();
-        self.expanded_activity_items.clear();
-        self.expanded_turns.clear();
-        self.message_edit = None;
-        self.toast = checkpoint_warning;
-        self.transcript_anchor.set(transcript_anchor);
-        self.transcript_anchor_end_space.set(Pixels::ZERO);
-        self.transcript_anchor_following.set(true);
-        self.splice_transcript_rows_after_visibility_change(&previous_kinds);
-        self.scroll_transcript_to_anchor();
+        if selected {
+            self.reasoning_expanded.clear();
+            self.activities_expanded.clear();
+            self.expanded_activity_items.clear();
+            self.expanded_turns.clear();
+            self.message_edit = None;
+            self.toast = checkpoint_warning;
+            self.transcript_anchor.set(transcript_anchor);
+            self.transcript_anchor_end_space.set(Pixels::ZERO);
+            self.transcript_anchor_following.set(true);
+            self.splice_transcript_rows_after_visibility_change(&previous_kinds);
+            self.scroll_transcript_to_anchor();
+        }
         // Template commands expand here, at the seam between the transcript
         // and the transport: the user message keeps the typed `/name …` —
         // the same echo the CLIs show — while the provider receives the
@@ -1318,12 +1463,12 @@ impl Waku {
             crate::composer_complete::expanded_submission(&prompt, &self.slash_command_index)
                 .unwrap_or(prompt);
         let mut failed_to_start = false;
-        match self.ensure_driver() {
+        match self.ensure_driver_for_session(session_id) {
             Ok(driver) => driver.prompt(driver_prompt),
             Err(error) => {
                 failed_to_start = true;
                 let message = format!("Could not start the agent: {error}");
-                if let Some(session) = self.selected_session_mut() {
+                if let Some(session) = self.state.session_mut(session_id) {
                     session.status = SessionStatus::Failed;
                     session.push_message(MessageRole::Assistant, message);
                     session.finish_active_turn(TurnStatus::Failed);
@@ -1331,7 +1476,7 @@ impl Waku {
             }
         }
         if failed_to_start {
-            self.capture_latest_turn_checkpoint();
+            self.capture_latest_turn_checkpoint_for(session_id);
             self.start_pending_checkpoint_captures(cx);
         }
         self.save();
@@ -1376,7 +1521,7 @@ impl Waku {
         changed
     }
 
-    pub(super) fn drain_driver_events(&mut self) -> bool {
+    pub(super) fn drain_driver_events(&mut self, cx: &mut Context<Self>) -> bool {
         let session_ids = self.runtimes.keys().copied().collect::<Vec<_>>();
         let mut changed = false;
         let mut force_save = false;
@@ -1410,13 +1555,15 @@ impl Waku {
                     event,
                     DriverEvent::Connected { .. }
                         | DriverEvent::Permission { .. }
+                        | DriverEvent::SteerAccepted { .. }
+                        | DriverEvent::SteerRejected { .. }
                         | DriverEvent::TurnFinished { .. }
                         | DriverEvent::Error(_)
                         | DriverEvent::ProcessExited
                 );
                 markdown_changed |= matches!(event, DriverEvent::TextDelta(_));
                 runtime_changed = true;
-                keep_runtime &= self.handle_driver_event(session_id, &mut runtime, event);
+                keep_runtime &= self.handle_driver_event(session_id, &mut runtime, event, true, cx);
                 if !keep_runtime {
                     break;
                 }
@@ -1431,6 +1578,14 @@ impl Waku {
             {
                 selected_changed = true;
             }
+        }
+
+        if !self.pending_queue_drains.is_empty() {
+            let drains = std::mem::take(&mut self.pending_queue_drains);
+            for session_id in drains {
+                self.drain_queued_message(session_id, cx);
+            }
+            changed = true;
         }
 
         if changed {

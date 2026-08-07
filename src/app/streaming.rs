@@ -173,11 +173,18 @@ impl Waku {
     }
 
     /// Returns whether the runtime should remain attached after this event.
+    ///
+    /// `allow_queue_drain` is false when the caller is flushing buffered
+    /// events for a turn the user just stopped: a settling event must not
+    /// start queued follow-ups then, because the user asked to stop, not to
+    /// continue.
     pub(super) fn handle_driver_event(
         &mut self,
         session_id: Uuid,
         runtime: &mut SessionRuntime,
         event: DriverEvent,
+        allow_queue_drain: bool,
+        cx: &mut Context<Self>,
     ) -> bool {
         runtime.last_active_at = Instant::now();
         match event {
@@ -271,6 +278,60 @@ impl Waku {
                     Self::upsert_computer_use_preview(runtime, state);
                 }
             }
+            DriverEvent::SteerAccepted { message } => {
+                // The provider folded the message into the live turn. Append
+                // it to the same turn so the transcript mirrors the provider
+                // conversation (no new turn boundary).
+                if let Some(session) = self.state.session_mut(session_id) {
+                    session.push_message(MessageRole::User, message);
+                    session.updated_at = unix_time();
+                }
+            }
+            DriverEvent::SteerRejected { message, reason } => {
+                let (busy, settled_cleanly) = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| {
+                        let settled_cleanly = session
+                            .turns
+                            .last()
+                            .is_some_and(|turn| turn.status == TurnStatus::Completed);
+                        (session.is_busy(), settled_cleanly)
+                    })
+                    .unwrap_or((false, false));
+                if busy {
+                    self.enqueue_follow_up(session_id, message, cx);
+                    if self.state.selected_session == Some(session_id) {
+                        self.toast = Some(format!(
+                            "The agent couldn't be steered ({}); the message was queued as a follow-up.",
+                            compact_driver_error(&reason)
+                        ));
+                    }
+                } else if settled_cleanly {
+                    // The turn settled before the steer arrived; run the
+                    // message as a fresh turn instead of losing it. Submission
+                    // is deferred through the queue-drain pass because this
+                    // session's runtime is detached from the map while its
+                    // events are handled — an inline submit would spawn a
+                    // second driver process only to have it clobbered when the
+                    // drain re-inserts the detached runtime.
+                    if let Some(session) = self.state.session_mut(session_id) {
+                        session
+                            .queued_messages
+                            .insert(0, QueuedMessage::new(message));
+                    }
+                    if allow_queue_drain {
+                        self.pending_queue_drains.push(session_id);
+                    }
+                } else {
+                    // The user stopped the turn (or the provider died) before
+                    // the steer landed. Keep the message visible and
+                    // user-controlled instead of auto-running it.
+                    self.enqueue_follow_up(session_id, message, cx);
+                }
+            }
             DriverEvent::TurnFinished { success, summary } => {
                 runtime.last_driver_error = None;
                 if self
@@ -322,6 +383,11 @@ impl Waku {
                 }
                 runtime.computer_use_previews.clear();
                 self.capture_latest_turn_checkpoint_for(session_id);
+                if allow_queue_drain && success {
+                    // Start the next queued follow-up once the runtime has
+                    // been re-inserted so the same process is reused.
+                    self.pending_queue_drains.push(session_id);
+                }
             }
             DriverEvent::Error(error) => {
                 let error = compact_driver_error(&error);

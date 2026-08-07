@@ -8,6 +8,13 @@
 //!
 //! The payload shapes here were read off live agents (`opencode acp`,
 //! `grok agent stdio`), not the specification alone.
+//!
+//! A second `session/prompt` sent while one is open is ACP's steer: the agent
+//! continues the same conversation under the newer request, and only the last
+//! open prompt's response settles the merged turn. How the agent absorbs the
+//! message differs — probed against both: Cursor resolves the superseded
+//! request `cancelled` and re-plans with the message in context; Grok finishes
+//! the current work first and answers the message before settling.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -33,6 +40,7 @@ const PROTOCOL_VERSION: u64 = 1;
 
 enum CommandMessage {
     Prompt(String),
+    Steer(String),
     Cancel,
     Respond {
         request_id: String,
@@ -154,14 +162,16 @@ impl AcpDriver {
 
         let (commands, command_rx) = unbounded();
         let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
-        // The prompt request stays open for the whole turn, so it is tracked
+        // Prompt requests stay open for the whole turn, so they are tracked
         // apart from the blocking request table: the writer must stay free to
-        // send a cancel while it is outstanding.
-        let prompt_request = Arc::new(Mutex::new(None::<u64>));
+        // send a cancel while they are outstanding. More than one is open
+        // exactly while a steer is in flight, and only the last one to resolve
+        // settles the merged turn.
+        let prompt_requests = Arc::new(Mutex::new(Vec::<u64>::new()));
         let auto_approve = mode != RuntimeMode::Ask;
 
         let reader_pending = pending.clone();
-        let reader_prompt = prompt_request.clone();
+        let reader_prompt = prompt_requests.clone();
         let reader_commands = commands.clone();
         let reader_events = events.clone();
         let reader_thread = thread::Builder::new()
@@ -189,7 +199,7 @@ impl AcpDriver {
             })?;
 
         let writer_pending = pending.clone();
-        let writer_prompt = prompt_request;
+        let writer_prompt = prompt_requests;
         let writer_events = events.clone();
         let provider_name = provider.display_name();
         thread::Builder::new()
@@ -317,7 +327,7 @@ impl AcpDriver {
                                 .unwrap_or(text);
                             let _ = writer_events.send(DriverEvent::TurnStarted);
                             next_id += 1;
-                            *writer_prompt.lock() = Some(next_id);
+                            writer_prompt.lock().push(next_id);
                             let sent = write_line(
                                 &mut stdin,
                                 &json!({
@@ -331,7 +341,7 @@ impl AcpDriver {
                                 }),
                             );
                             if let Err(error) = sent {
-                                *writer_prompt.lock() = None;
+                                writer_prompt.lock().retain(|id| *id != next_id);
                                 let _ = writer_events.send(DriverEvent::Error(format!(
                                     "{provider_name} transport write failed: {error}"
                                 )));
@@ -341,6 +351,49 @@ impl AcpDriver {
                                         "{provider_name} could not receive the prompt."
                                     )),
                                 });
+                            }
+                        }
+                        CommandMessage::Steer(text) => {
+                            // A second `session/prompt` while one is open: the
+                            // agent continues the conversation under this newer
+                            // request and the superseded one resolves without
+                            // settling the merged turn (see the module doc for
+                            // the per-agent absorption policies).
+                            if writer_prompt.lock().is_empty() {
+                                let _ = writer_events.send(DriverEvent::SteerRejected {
+                                    message: text,
+                                    reason: format!("{provider_name} has no active turn to steer."),
+                                });
+                                continue;
+                            }
+                            next_id += 1;
+                            writer_prompt.lock().push(next_id);
+                            let sent = write_line(
+                                &mut stdin,
+                                &json!({
+                                    "jsonrpc": "2.0",
+                                    "id": next_id,
+                                    "method": "session/prompt",
+                                    "params": {
+                                        "sessionId": session_id,
+                                        "prompt": [{"type": "text", "text": text.clone()}]
+                                    }
+                                }),
+                            );
+                            match sent {
+                                Ok(()) => {
+                                    let _ = writer_events
+                                        .send(DriverEvent::SteerAccepted { message: text });
+                                }
+                                Err(error) => {
+                                    writer_prompt.lock().retain(|id| *id != next_id);
+                                    let _ = writer_events.send(DriverEvent::SteerRejected {
+                                        message: text,
+                                        reason: format!(
+                                            "{provider_name} transport write failed: {error}"
+                                        ),
+                                    });
+                                }
                             }
                         }
                         CommandMessage::Cancel => {
@@ -442,6 +495,14 @@ impl AcpDriver {
 impl DriverControl for AcpDriver {
     fn prompt(&self, prompt: String) {
         let _ = self.commands.send(CommandMessage::Prompt(prompt));
+    }
+
+    fn supports_steer(&self) -> bool {
+        true
+    }
+
+    fn steer(&self, prompt: String) {
+        let _ = self.commands.send(CommandMessage::Steer(prompt));
     }
 
     fn cancel(&self) {
@@ -590,7 +651,7 @@ struct AcpStreamState {
 fn handle_message(
     value: Value,
     pending: &PendingResponses,
-    prompt_request: &Mutex<Option<u64>>,
+    prompt_requests: &Mutex<Vec<u64>>,
     commands: &Sender<CommandMessage>,
     events: &Sender<DriverEvent>,
     auto_approve: bool,
@@ -603,10 +664,21 @@ fn handle_message(
     if let Some(id) = id
         && method.is_none()
     {
-        if *prompt_request.lock() == Some(id) {
-            *prompt_request.lock() = None;
-            finish_turn(&value, events);
-            return;
+        {
+            let mut prompts = prompt_requests.lock();
+            if let Some(position) = prompts.iter().position(|prompt| *prompt == id) {
+                prompts.remove(position);
+                let settles = prompts.is_empty();
+                drop(prompts);
+                // A steer-superseded prompt resolves early — Cursor answers it
+                // `cancelled` the moment the newer prompt lands — while the
+                // merged turn keeps running under that newer request. Only the
+                // last open prompt settles the turn.
+                if settles {
+                    finish_turn(&value, events);
+                }
+                return;
+            }
         }
         let result = value
             .pointer("/error/message")
@@ -897,7 +969,7 @@ mod tests {
 
     fn harness() -> (
         PendingResponses,
-        Mutex<Option<u64>>,
+        Mutex<Vec<u64>>,
         Sender<CommandMessage>,
         crossbeam_channel::Receiver<CommandMessage>,
         Sender<DriverEvent>,
@@ -908,7 +980,7 @@ mod tests {
         let (events, event_rx) = unbounded();
         (
             Arc::new(Mutex::new(HashMap::new())),
-            Mutex::new(None),
+            Mutex::new(Vec::new()),
             commands,
             command_rx,
             events,
@@ -1071,7 +1143,7 @@ mod tests {
     #[test]
     fn the_open_prompt_request_settles_the_turn_exactly_once() {
         let (pending, prompt, commands, _command_rx, events, event_rx, mut state) = harness();
-        *prompt.lock() = Some(3);
+        prompt.lock().push(3);
 
         handle_message(
             json!({"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}),
@@ -1087,7 +1159,7 @@ mod tests {
             event_rx.try_recv().unwrap(),
             DriverEvent::TurnFinished { success: true, .. }
         ));
-        assert!(prompt.lock().is_none());
+        assert!(prompt.lock().is_empty());
         // A late duplicate must not settle a turn that already ended.
         handle_message(
             json!({"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}),
@@ -1102,9 +1174,145 @@ mod tests {
     }
 
     #[test]
+    fn a_steer_superseded_prompt_resolves_without_settling_the_merged_turn() {
+        let (pending, prompt, commands, _command_rx, events, event_rx, mut state) = harness();
+        prompt.lock().push(3);
+        prompt.lock().push(4);
+
+        // Cursor answers the superseded request `cancelled` the moment the
+        // steering prompt lands; the merged turn must keep running.
+        handle_message(
+            json!({"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}),
+            &pending,
+            &prompt,
+            &commands,
+            &events,
+            true,
+            &mut state,
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a superseded prompt must not settle the merged turn"
+        );
+        assert_eq!(*prompt.lock(), vec![4]);
+
+        // The last open prompt is what settles it.
+        handle_message(
+            json!({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}),
+            &pending,
+            &prompt,
+            &commands,
+            &events,
+            true,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::TurnFinished { success: true, .. }
+        ));
+        assert!(prompt.lock().is_empty());
+    }
+
+    /// Proves steering through the actual driver against a real ACP agent: the
+    /// message injected while the shell tool sleeps lands inside the same
+    /// merged turn — one SteerAccepted, one TurnFinished, and a reply that
+    /// honors the injected instruction. Ignored by default: needs the CLI
+    /// installed, credentials, and the network.
+    fn acp_steering_against_a_real_agent(provider: ProviderKind, binary_name: &str) {
+        let binary = crate::command_env::find_executable(binary_name)
+            .unwrap_or_else(|| panic!("{binary_name} is not installed"));
+        let (events, event_rx) = unbounded();
+        let driver = AcpDriver::start(
+            provider,
+            DriverStartOptions {
+                binary,
+                cwd: std::env::temp_dir(),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the ACP session should open");
+
+        driver.prompt(
+            "Run exactly `sleep 6` in the shell (nothing else). \
+             After the command completes, reply with exactly: FIRST DONE"
+                .into(),
+        );
+
+        let mut text = String::new();
+        let mut steered = false;
+        let mut steer_accepted = false;
+        let mut turns_finished = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while std::time::Instant::now() < deadline {
+            let Ok(event) = event_rx.recv_timeout(Duration::from_secs(5)) else {
+                // Quiet after the turn settled means no second turn is coming.
+                if turns_finished == 1 {
+                    break;
+                }
+                continue;
+            };
+            match event {
+                DriverEvent::RichActivity(item) if !steered && !item.complete => {
+                    // The tool is running: the turn is unambiguously live.
+                    steered = true;
+                    driver.steer(
+                        "ADDITIONAL INSTRUCTION: end your very next reply \
+                         with the word BANANA."
+                            .into(),
+                    );
+                }
+                DriverEvent::SteerAccepted { message } => {
+                    assert!(message.contains("BANANA"));
+                    steer_accepted = true;
+                }
+                DriverEvent::SteerRejected { reason, .. } => {
+                    panic!("the steer should be accepted, got rejection: {reason}");
+                }
+                DriverEvent::TextDelta(delta) => text.push_str(&delta),
+                DriverEvent::TurnFinished { success, .. } => {
+                    assert!(success, "the turn should settle successfully");
+                    turns_finished += 1;
+                }
+                DriverEvent::Error(error) => panic!("the agent reported: {error}"),
+                _ => {}
+            }
+        }
+
+        assert!(steered, "the probe never saw the tool start");
+        assert!(steer_accepted, "the driver should acknowledge the steer");
+        assert_eq!(
+            turns_finished, 1,
+            "a steered message must not settle a second turn"
+        );
+        assert!(
+            text.contains("BANANA"),
+            "the steered instruction should shape the same turn's reply, got {text:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an installed, authenticated cursor-agent"]
+    fn cursor_steering_folds_a_mid_turn_message_into_the_running_turn() {
+        acp_steering_against_a_real_agent(ProviderKind::Cursor, "cursor-agent");
+    }
+
+    #[test]
+    #[ignore = "requires an installed, authenticated grok"]
+    fn grok_steering_folds_a_mid_turn_message_into_the_running_turn() {
+        acp_steering_against_a_real_agent(ProviderKind::Grok, "grok");
+    }
+
+    #[test]
     fn a_failed_prompt_reports_the_agent_error_and_fails_the_turn() {
         let (pending, prompt, commands, _command_rx, events, event_rx, mut state) = harness();
-        *prompt.lock() = Some(3);
+        prompt.lock().push(3);
 
         // Shape observed from `grok agent stdio` with an exhausted balance.
         handle_message(

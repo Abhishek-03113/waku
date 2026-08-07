@@ -433,6 +433,8 @@ impl BrowserView {
             &address,
             |this: &mut Self, address, event: &ComposerEvent, cx| match event {
                 ComposerEvent::Submit(text) => this.navigate_to_input(text.clone(), cx),
+                // Search-mode fields never emit a steer; nothing to do here.
+                ComposerEvent::SubmitSteer(_) => {}
                 ComposerEvent::Edited => {
                     // Edits from the page echo itself also land here (events
                     // flush after the update that set the content), so dirty

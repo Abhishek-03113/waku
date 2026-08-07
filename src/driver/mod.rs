@@ -26,6 +26,16 @@ impl DriverHandle {
         self.inner.prompt(prompt);
     }
 
+    /// Whether this transport can inject a user message into the currently
+    /// running turn (steering) instead of starting a new one.
+    pub fn supports_steer(&self) -> bool {
+        self.inner.supports_steer()
+    }
+
+    pub fn steer(&self, prompt: String) {
+        self.inner.steer(prompt);
+    }
+
     pub fn cancel(&self) {
         self.inner.cancel();
     }
@@ -61,6 +71,13 @@ impl DriverHandle {
 
 pub trait DriverControl: Send + Sync {
     fn prompt(&self, prompt: String);
+    fn supports_steer(&self) -> bool {
+        false
+    }
+    /// Deliver a steering message to the running turn. Implementations report
+    /// the outcome asynchronously through `DriverEvent::SteerAccepted` or
+    /// `DriverEvent::SteerRejected`.
+    fn steer(&self, _prompt: String) {}
     fn cancel(&self);
     fn cancel_computer_use(&self) {}
     fn respond(&self, request_id: String, option_id: String);

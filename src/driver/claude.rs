@@ -5,6 +5,9 @@
 //! the SDK is a wrapper around these flags, not a separate capability. One
 //! process serves the whole conversation, and `--permission-prompt-tool stdio`
 //! makes it ask the host before running a tool instead of deciding alone.
+//! A user message written mid-turn is folded into the running turn at the next
+//! model call rather than queued as a turn of its own, which is what makes
+//! steering a plain write.
 //!
 //! Flags and payloads here were read off the real CLI and the SDK's own
 //! invocation, not guessed. `--permission-prompt-tool` in particular is absent
@@ -30,6 +33,7 @@ use crate::model::{
 
 enum CommandMessage {
     Prompt(String),
+    Steer(String),
     Cancel,
     Respond {
         request_id: String,
@@ -37,6 +41,18 @@ enum CommandMessage {
     },
     Options(SessionOptions),
     Shutdown,
+}
+
+/// The stream-json user message both prompts and steers are delivered as.
+fn user_message_payload(text: &str) -> Value {
+    json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": text}]
+        },
+        "parent_tool_use_id": null
+    })
 }
 
 pub struct ClaudeDriver {
@@ -198,17 +214,41 @@ impl ClaudeDriver {
                         CommandMessage::Prompt(text) => {
                             *writer_turn.lock() = true;
                             let _ = writer_events.send(DriverEvent::TurnStarted);
-                            write_line(
-                                &mut stdin,
-                                &json!({
-                                    "type": "user",
-                                    "message": {
-                                        "role": "user",
-                                        "content": [{"type": "text", "text": text}]
-                                    },
-                                    "parent_tool_use_id": null
-                                }),
-                            )
+                            write_line(&mut stdin, &user_message_payload(&text))
+                        }
+                        CommandMessage::Steer(text) => {
+                            // A mid-turn user message is held by the CLI and
+                            // folded into the running turn at the next model
+                            // call — one `result` settles everything, and the
+                            // isReplay echo marks the moment it is absorbed.
+                            // Verified against the real CLI (2.1.223). Unlike
+                            // Amp, no marker is needed: folding is the default.
+                            if !*writer_turn.lock() {
+                                let _ = writer_events.send(DriverEvent::SteerRejected {
+                                    message: text,
+                                    reason: "Claude has no active turn to steer.".into(),
+                                });
+                                continue;
+                            }
+                            // No TurnStarted and no turn re-arm: the turn the
+                            // message joins is already running.
+                            let written = write_line(&mut stdin, &user_message_payload(&text));
+                            match &written {
+                                Ok(()) => {
+                                    let _ = writer_events
+                                        .send(DriverEvent::SteerAccepted { message: text });
+                                }
+                                Err(error) => {
+                                    let _ = writer_events.send(DriverEvent::SteerRejected {
+                                        message: text,
+                                        reason: format!("Claude transport write failed: {error}"),
+                                    });
+                                }
+                            }
+                            // A failed write still falls through to the shared
+                            // transport-failure path: the running turn cannot
+                            // settle once stdin is gone.
+                            written
                         }
                         CommandMessage::Cancel => {
                             next_request_id += 1;
@@ -327,6 +367,14 @@ impl ClaudeDriver {
 impl DriverControl for ClaudeDriver {
     fn prompt(&self, prompt: String) {
         let _ = self.commands.send(CommandMessage::Prompt(prompt));
+    }
+
+    fn supports_steer(&self) -> bool {
+        true
+    }
+
+    fn steer(&self, prompt: String) {
+        let _ = self.commands.send(CommandMessage::Steer(prompt));
     }
 
     fn cancel(&self) {
@@ -699,6 +747,110 @@ mod tests {
             second.contains("BANANA"),
             "the session should retain context across turns, got {second:?}"
         );
+    }
+
+    /// Proves steering through the actual driver: the message injected while
+    /// the Bash tool sleeps lands inside the same turn — one SteerAccepted,
+    /// one TurnFinished, and a reply that honors both instructions. Ignored by
+    /// default: needs the CLI installed, credentials, and the network.
+    #[test]
+    #[ignore = "requires an installed, authenticated claude"]
+    fn claude_steering_folds_a_mid_turn_message_into_the_running_turn() {
+        let binary =
+            crate::command_env::find_executable("claude").expect("claude is not installed");
+        let (events, event_rx) = unbounded();
+        let driver = ClaudeDriver::start(
+            DriverStartOptions {
+                binary,
+                cwd: std::env::temp_dir(),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: Some("claude-haiku-4-5-20251001".into()),
+                reasoning_effort: None,
+                service_tier: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the streaming session should start");
+
+        driver.prompt(
+            "Use the Bash tool to run exactly `sleep 6` (nothing else). \
+             After the command completes, reply with exactly: FIRST DONE"
+                .into(),
+        );
+
+        let mut text = String::new();
+        let mut steered = false;
+        let mut steer_accepted = false;
+        let mut turns_finished = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while std::time::Instant::now() < deadline {
+            let Ok(event) = event_rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+                // Quiet after the turn settled means no second turn is coming.
+                if turns_finished == 1 {
+                    break;
+                }
+                continue;
+            };
+            match event {
+                DriverEvent::RichActivity(item) if !steered && !item.complete => {
+                    // The tool is running: the turn is unambiguously live.
+                    steered = true;
+                    driver.steer(
+                        "ADDITIONAL INSTRUCTION: end your very next reply \
+                         with the word BANANA."
+                            .into(),
+                    );
+                }
+                DriverEvent::SteerAccepted { message } => {
+                    assert!(message.contains("BANANA"));
+                    steer_accepted = true;
+                }
+                DriverEvent::SteerRejected { reason, .. } => {
+                    panic!("the steer should be accepted, got rejection: {reason}");
+                }
+                DriverEvent::TextDelta(delta) => text.push_str(&delta),
+                DriverEvent::TurnFinished { success, .. } => {
+                    assert!(success, "the turn should settle successfully");
+                    turns_finished += 1;
+                }
+                DriverEvent::Error(error) => panic!("the CLI reported: {error}"),
+                _ => {}
+            }
+        }
+
+        assert!(steered, "the probe never saw the tool start");
+        assert!(steer_accepted, "the driver should acknowledge the steer");
+        assert_eq!(
+            turns_finished, 1,
+            "a steered message must not settle a second turn"
+        );
+        assert!(
+            text.contains("BANANA"),
+            "the steered instruction should shape the same turn's reply, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn steering_is_advertised_and_rides_the_command_channel() {
+        let (commands, command_rx) = unbounded();
+        let driver = ClaudeDriver {
+            commands,
+            mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Build,
+        };
+
+        assert!(driver.supports_steer());
+        driver.steer("Focus on the failing tests first".into());
+        match command_rx.try_recv() {
+            Ok(CommandMessage::Steer(text)) => {
+                assert_eq!(text, "Focus on the failing tests first");
+            }
+            Ok(_) => panic!("expected a steer command"),
+            Err(_) => panic!("no command was sent"),
+        }
     }
 
     #[test]

@@ -35,6 +35,7 @@ const DISABLE_CODEX_NODE_REPL: &str = "mcp_servers.node_repl.enabled=false";
 
 enum CommandMessage {
     Prompt(String),
+    Steer(String),
     Cancel,
     Respond {
         request_id: String,
@@ -206,12 +207,14 @@ impl CodexDriver {
         let pending_forks = Arc::new(Mutex::new(
             HashMap::<u64, Sender<Result<String, String>>>::new(),
         ));
+        let pending_steers = Arc::new(Mutex::new(HashMap::<u64, String>::new()));
 
         let writer_thread_id = thread_id.clone();
         let writer_turn_id = turn_id.clone();
         let writer_turn_ids = turn_ids.clone();
         let writer_pending_rollbacks = pending_rollbacks.clone();
         let writer_pending_forks = pending_forks.clone();
+        let writer_pending_steers = pending_steers.clone();
         let writer_events = events.clone();
         let cwd_string = cwd.display().to_string();
         thread::Builder::new()
@@ -354,6 +357,44 @@ impl CodexDriver {
                                 "params": params
                             })
                         }
+                        CommandMessage::Steer(text) => {
+                            let (thread_id, active_turn_id) = (
+                                writer_thread_id.lock().clone(),
+                                writer_turn_id.lock().clone(),
+                            );
+                            let (Some(thread_id), Some(expected_turn_id)) =
+                                (thread_id, active_turn_id)
+                            else {
+                                let _ = writer_events.send(DriverEvent::SteerRejected {
+                                    message: text,
+                                    reason: "Codex has no active turn to steer.".into(),
+                                });
+                                continue;
+                            };
+                            next_request_id += 1;
+                            let request_id = next_request_id;
+                            writer_pending_steers
+                                .lock()
+                                .insert(request_id, text.clone());
+                            let message = json!({
+                                "method": "turn/steer",
+                                "id": request_id,
+                                "params": {
+                                    "threadId": thread_id,
+                                    "expectedTurnId": expected_turn_id,
+                                    "input": [{"type": "text", "text": text}]
+                                }
+                            });
+                            if let Err(error) = write_json_line(&mut stdin, &message)
+                                && let Some(text) = writer_pending_steers.lock().remove(&request_id)
+                            {
+                                let _ = writer_events.send(DriverEvent::SteerRejected {
+                                    message: text,
+                                    reason: format!("Codex transport write failed: {error}"),
+                                });
+                            }
+                            continue;
+                        }
                         CommandMessage::Cancel => {
                             let (Some(thread_id), Some(turn_id)) = (
                                 writer_thread_id.lock().clone(),
@@ -467,6 +508,7 @@ impl CodexDriver {
         let reader_turn_ids = turn_ids.clone();
         let reader_pending_rollbacks = pending_rollbacks.clone();
         let reader_pending_forks = pending_forks.clone();
+        let reader_pending_steers = pending_steers.clone();
         let reader_events = events.clone();
         let reader_thread = thread::Builder::new()
             .name("waku-codex-reader".into())
@@ -483,6 +525,7 @@ impl CodexDriver {
                                     &reader_turn_ids,
                                     &reader_pending_rollbacks,
                                     &reader_pending_forks,
+                                    &reader_pending_steers,
                                     &reader_events,
                                     &mut stream_state,
                                 ),
@@ -583,6 +626,14 @@ fn toml_string(value: &str) -> String {
 impl DriverControl for CodexDriver {
     fn prompt(&self, prompt: String) {
         let _ = self.commands.send(CommandMessage::Prompt(prompt));
+    }
+
+    fn supports_steer(&self) -> bool {
+        true
+    }
+
+    fn steer(&self, prompt: String) {
+        let _ = self.commands.send(CommandMessage::Steer(prompt));
     }
 
     fn cancel(&self) {
@@ -796,6 +847,7 @@ fn markdown_link_destination(url: &str) -> String {
         .replace(')', "\\)")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_codex_message(
     value: Value,
     thread_id: &Mutex<Option<String>>,
@@ -803,6 +855,7 @@ fn handle_codex_message(
     turn_ids: &Mutex<Vec<String>>,
     pending_rollbacks: &Mutex<HashMap<u64, (usize, Sender<Result<(), String>>)>>,
     pending_forks: &Mutex<HashMap<u64, Sender<Result<String, String>>>>,
+    pending_steers: &Mutex<HashMap<u64, String>>,
     events: &Sender<DriverEvent>,
     stream_state: &mut CodexStreamState,
 ) {
@@ -810,6 +863,22 @@ fn handle_codex_message(
     // the same numeric ID as one of Waku's earlier requests. Only messages
     // without a method are responses to Waku-originated requests.
     let is_response = value.get("method").is_none();
+    if is_response
+        && let Some(id) = value.get("id").and_then(Value::as_u64)
+        && id != 1
+        && let Some(message) = pending_steers.lock().remove(&id)
+    {
+        if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
+            let _ = events.send(DriverEvent::SteerRejected {
+                message,
+                reason: error.to_owned(),
+            });
+        } else {
+            let _ = events.send(DriverEvent::SteerAccepted { message });
+        }
+        return;
+    }
+
     if is_response
         && let Some(id) = value.get("id").and_then(Value::as_u64)
         && id != 1
@@ -1527,6 +1596,7 @@ mod tests {
         let turn_ids = Mutex::new(vec!["turn-1".to_owned(), "turn-2".to_owned()]);
         let pending_rollbacks = Mutex::new(HashMap::new());
         let pending_forks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
         let (response_tx, response_rx) = bounded(1);
         pending_rollbacks.lock().insert(42, (1, response_tx));
         let (event_tx, event_rx) = unbounded();
@@ -1539,6 +1609,7 @@ mod tests {
             &turn_ids,
             &pending_rollbacks,
             &pending_forks,
+            &pending_steers,
             &event_tx,
             &mut stream_state,
         );
@@ -1556,6 +1627,7 @@ mod tests {
         let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
         let pending_rollbacks = Mutex::new(HashMap::new());
         let pending_forks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
         let (response_tx, response_rx) = bounded(1);
         pending_rollbacks.lock().insert(43, (1, response_tx));
         let (event_tx, event_rx) = unbounded();
@@ -1568,6 +1640,7 @@ mod tests {
             &turn_ids,
             &pending_rollbacks,
             &pending_forks,
+            &pending_steers,
             &event_tx,
             &mut stream_state,
         );
@@ -1587,6 +1660,7 @@ mod tests {
         let turn_ids = Mutex::new(vec!["turn-1".to_owned()]);
         let pending_rollbacks = Mutex::new(HashMap::new());
         let pending_forks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
         let (response_tx, response_rx) = bounded(1);
         pending_forks.lock().insert(44, response_tx);
         let (event_tx, event_rx) = unbounded();
@@ -1599,12 +1673,84 @@ mod tests {
             &turn_ids,
             &pending_rollbacks,
             &pending_forks,
+            &pending_steers,
             &event_tx,
             &mut stream_state,
         );
 
         assert_eq!(response_rx.recv().unwrap(), Ok("thread-fork".to_owned()));
         assert!(pending_forks.lock().is_empty());
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn steer_rpc_success_is_reported_as_an_accepted_steer() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-9".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-9".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        pending_steers
+            .lock()
+            .insert(50, "Focus on the failing tests first".to_owned());
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+
+        handle_codex_message(
+            json!({"id": 50, "result": {"turnId": "turn-9"}}),
+            &thread_id,
+            &turn_id,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_forks,
+            &pending_steers,
+            &event_tx,
+            &mut stream_state,
+        );
+
+        assert!(pending_steers.lock().is_empty());
+        match event_rx.try_recv().unwrap() {
+            DriverEvent::SteerAccepted { message } => {
+                assert_eq!(message, "Focus on the failing tests first");
+            }
+            other => panic!("expected an accepted steer, got {other:?}"),
+        }
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn steer_rpc_errors_fall_back_to_a_rejected_steer() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-9".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-9".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        pending_steers.lock().insert(51, "Steer me".to_owned());
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+
+        handle_codex_message(
+            json!({"id": 51, "error": {"message": "expected turn mismatch"}}),
+            &thread_id,
+            &turn_id,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_forks,
+            &pending_steers,
+            &event_tx,
+            &mut stream_state,
+        );
+
+        assert!(pending_steers.lock().is_empty());
+        match event_rx.try_recv().unwrap() {
+            DriverEvent::SteerRejected { message, reason } => {
+                assert_eq!(message, "Steer me");
+                assert_eq!(reason, "expected turn mismatch");
+            }
+            other => panic!("expected a rejected steer, got {other:?}"),
+        }
         assert!(event_rx.try_recv().is_err());
     }
 

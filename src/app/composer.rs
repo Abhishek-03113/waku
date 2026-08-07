@@ -1425,19 +1425,115 @@ impl Waku {
         row
     }
 
+    /// The pending follow-up chips between the transcript and the composer:
+    /// one row per queued message, clickable to pull the text back into the
+    /// composer, with a remove affordance per row.
+    pub(super) fn render_queued_messages(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let session_id = self.state.selected_session?;
+        let session = self.selected_session()?;
+        if session.queued_messages.is_empty() {
+            return None;
+        }
+        let theme = Theme::current(cx);
+        let busy = session.is_busy();
+        let mut list = div().flex().flex_col().gap(px(6.0));
+        for message in &session.queued_messages {
+            let message_id = message.id;
+            let content = message.content.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("queued-message-{message_id}")))
+                    .h(px(34.0))
+                    .px(px(11.0))
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.composer)
+                    .flex()
+                    .items_center()
+                    .gap(px(9.0))
+                    .cursor_default()
+                    .hover(|element| element.bg(theme.overlay))
+                    .tooltip(Tooltip::text("Edit in composer"))
+                    .child(icon("icons/arrow-up.svg", 10.5, theme.text_tertiary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.5))
+                            .text_color(theme.text_secondary)
+                            .child(SharedString::from(content)),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "queued-message-remove-{message_id}"
+                            )))
+                            .w(px(22.0))
+                            .h(px(22.0))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_default()
+                            .hover(|element| element.bg(theme.overlay_strong))
+                            .active(|element| element.opacity(0.8))
+                            .child(icon("icons/x.svg", 9.5, theme.text_ghost))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_queued_message(session_id, message_id, cx);
+                            })),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.edit_queued_message(session_id, message_id, window, cx);
+                    })),
+            );
+        }
+        Some(
+            div().flex_none().px(px(20.0)).pb(px(6.0)).child(
+                div()
+                    .w_full()
+                    .max_w(px(CONTENT_MAX_WIDTH))
+                    .mx_auto()
+                    .child(
+                        div()
+                            .mb(px(5.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(icon("icons/list.svg", 10.5, theme.text_tertiary))
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text_tertiary)
+                                    .child(if busy {
+                                        "Queued follow-ups · sends when the current turn finishes"
+                                    } else {
+                                        "Queued follow-ups"
+                                    }),
+                            ),
+                    )
+                    .child(list),
+            ),
+        )
+    }
+
     pub(super) fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let session = self.selected_session();
-        let working = session
-            .map(|session| {
-                matches!(
-                    session.status,
-                    SessionStatus::Working | SessionStatus::Connecting | SessionStatus::Waiting
-                )
-            })
-            .unwrap_or(false);
+        let working = session.map(AgentSession::is_busy).unwrap_or(false);
         let has_draft = !self.composer.read(cx).content().trim().is_empty()
             || !self.composer_attachments.is_empty();
+        let steerable = session.is_some_and(|session| {
+            session.is_busy()
+                && session.status != SessionStatus::Connecting
+                && self
+                    .runtimes
+                    .get(&session.id)
+                    .is_some_and(|runtime| runtime.driver.supports_steer())
+        });
         let autocomplete = self.render_composer_autocomplete(window, cx);
         let autocomplete_open = autocomplete.is_some();
         // Files dragged in from the OS light the card up as a drop target and
@@ -1506,21 +1602,90 @@ impl Waku {
                         .child(div().flex_1())
                         .child(if working {
                             div()
-                                .id("send-or-stop")
-                                .w(px(26.0))
-                                .h(px(26.0))
-                                .rounded_full()
+                                .id("working-actions")
                                 .flex()
                                 .items_center()
-                                .justify_center()
-                                .cursor_default()
-                                .bg(theme.overlay_strong)
-                                .hover(|element| element.bg(theme.danger_soft))
-                                .active(|element| element.opacity(0.8))
-                                .child(icon("icons/stop.svg", 18.0, theme.text))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cancel_turn(cx);
-                                }))
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .id("send-or-stop")
+                                        .w(px(26.0))
+                                        .h(px(26.0))
+                                        .rounded_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_default()
+                                        .bg(theme.overlay_strong)
+                                        .hover(|element| element.bg(theme.danger_soft))
+                                        .active(|element| element.opacity(0.8))
+                                        .child(icon("icons/stop.svg", 18.0, theme.text))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cancel_turn(cx);
+                                        })),
+                                )
+                                .when(steerable && has_draft, |element| {
+                                    element.child(
+                                        div()
+                                            .id("steer-turn")
+                                            .w(px(26.0))
+                                            .h(px(26.0))
+                                            .rounded_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_default()
+                                            .bg(theme.overlay_strong)
+                                            .hover(|element| element.bg(theme.overlay))
+                                            .active(|element| element.opacity(0.8))
+                                            .child(icon("icons/zap.svg", 13.0, theme.warning))
+                                            .tooltip(Tooltip::text("Steer the running turn (⌘↩)"))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                let prompt =
+                                                    this.composer.read(cx).content().to_owned();
+                                                if let Some(prompt) =
+                                                    this.submission_with_attachments(&prompt)
+                                                {
+                                                    this.composer
+                                                        .update(cx, |input, cx| input.clear(cx));
+                                                    this.steer_prompt(prompt, cx);
+                                                }
+                                            })),
+                                    )
+                                })
+                                .when(has_draft, |element| {
+                                    element.child(
+                                        div()
+                                            .id("queue-follow-up")
+                                            .w(px(26.0))
+                                            .h(px(26.0))
+                                            .rounded_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_default()
+                                            .bg(theme.inverse)
+                                            .hover(|element| element.opacity(0.9))
+                                            .active(|element| element.opacity(0.8))
+                                            .child(icon(
+                                                "icons/arrow-up.svg",
+                                                16.0,
+                                                theme.on_inverse,
+                                            ))
+                                            .tooltip(Tooltip::text("Queue as follow-up (⏎)"))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                let prompt =
+                                                    this.composer.read(cx).content().to_owned();
+                                                if let Some(prompt) =
+                                                    this.submission_with_attachments(&prompt)
+                                                {
+                                                    this.composer
+                                                        .update(cx, |input, cx| input.clear(cx));
+                                                    this.submit_prompt(prompt, cx);
+                                                }
+                                            })),
+                                    )
+                                })
                         } else {
                             div()
                                 .id("send-or-stop")

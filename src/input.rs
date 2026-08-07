@@ -43,6 +43,7 @@ actions!(
         Undo,
         Redo,
         Enter,
+        SubmitSteer,
     ]
 );
 
@@ -98,6 +99,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-z", Undo, Some("ComposerInput")),
         KeyBinding::new("cmd-shift-z", Redo, Some("ComposerInput")),
         KeyBinding::new("enter", Enter, Some("ComposerInput")),
+        // While a turn is running, Enter queues a follow-up; ⌘Enter injects
+        // the message into the running turn when the provider supports it.
+        KeyBinding::new("cmd-enter", SubmitSteer, Some("ComposerInput")),
     ]);
 }
 
@@ -425,6 +429,9 @@ fn common_suffix_len(a: &str, b: &str) -> usize {
 #[derive(Clone)]
 pub enum ComposerEvent {
     Submit(String),
+    /// ⌘Enter: deliver the message into the running turn instead of queueing
+    /// it behind the turn. Only composer-mode fields emit this.
+    SubmitSteer(String),
     /// The field took focus. A code editor uses this to re-read its file, so
     /// clicking back into it picks up changes made on disk meanwhile.
     Focus,
@@ -1005,6 +1012,20 @@ impl ComposerInput {
                     self.clear(cx);
                 }
             }
+        }
+    }
+
+    fn submit_steer(&mut self, _: &SubmitSteer, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != FieldMode::Composer {
+            // Search and code fields have no running turn to steer; let an
+            // outer handler claim ⌘Enter instead of swallowing it.
+            cx.propagate();
+            return;
+        }
+        let value = self.content.trim().to_owned();
+        if !value.is_empty() {
+            cx.emit(ComposerEvent::SubmitSteer(value));
+            self.clear(cx);
         }
     }
 
@@ -1922,6 +1943,7 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::enter))
+            .on_action(cx.listener(Self::submit_steer))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))

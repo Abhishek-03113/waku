@@ -19,6 +19,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum CommandMessage {
     Prompt(String),
+    Steer(String),
     Cancel,
     CancelExtensionRequest(String),
     Options(SessionOptions),
@@ -287,6 +288,26 @@ impl PiDriver {
                                 });
                             }
                         }
+                        CommandMessage::Steer(prompt) => {
+                            let result = send_request(
+                                &mut stdin,
+                                &writer_pending,
+                                &mut next_request_id,
+                                json!({"type": "steer", "message": prompt}),
+                            );
+                            match result {
+                                Ok(_) => {
+                                    let _ = writer_events
+                                        .send(DriverEvent::SteerAccepted { message: prompt });
+                                }
+                                Err(error) => {
+                                    let _ = writer_events.send(DriverEvent::SteerRejected {
+                                        message: prompt,
+                                        reason: error,
+                                    });
+                                }
+                            }
+                        }
                         CommandMessage::Cancel => {
                             if let Err(error) = send_request(
                                 &mut stdin,
@@ -439,6 +460,14 @@ impl PiDriver {
 impl DriverControl for PiDriver {
     fn prompt(&self, prompt: String) {
         let _ = self.commands.send(CommandMessage::Prompt(prompt));
+    }
+
+    fn supports_steer(&self) -> bool {
+        true
+    }
+
+    fn steer(&self, prompt: String) {
+        let _ = self.commands.send(CommandMessage::Steer(prompt));
     }
 
     fn cancel(&self) {
