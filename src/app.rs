@@ -837,6 +837,18 @@ impl Waku {
             })
             .detach();
 
+            // A closed surface can take the window's focus down with it —
+            // closing a browser tab drops the focused address input — and
+            // with nothing focused, action availability walks only the root
+            // dispatch node, so every app menu item greys out. When focus
+            // dies with its element, send it home to the composer, the way
+            // Zed's workspace refocuses itself.
+            cx.on_focus_lost(window, |this: &mut Self, window, cx| {
+                let focus = this.composer_focus(cx);
+                window.focus(&focus, cx);
+            })
+            .detach();
+
             // Edits, not raw notifies: a field also notifies for caret blinks
             // and selection changes, and none of the app chrome depends on
             // those — re-rendering the window twice a second for a blinking
