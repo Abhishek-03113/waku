@@ -250,22 +250,14 @@ impl PersistedState {
     }
 
     /// A session only earns a row once it has started; drafts stay in memory.
+    /// A draft selection is stored as no selection at all, so relaunching
+    /// recreates a draft and lands on the new-session page the user quit from.
     fn persistable_selected_session(&self) -> Option<Uuid> {
-        self.selected_session
-            .filter(|selected| {
-                self.sessions
-                    .iter()
-                    .any(|session| session.id == *selected && session.has_started())
-            })
-            .or_else(|| {
-                self.selected_project.and_then(|project| {
-                    self.sessions
-                        .iter()
-                        .filter(|session| session.project_id == project && session.has_started())
-                        .max_by_key(|session| session.updated_at)
-                        .map(|session| session.id)
-                })
-            })
+        self.selected_session.filter(|selected| {
+            self.sessions
+                .iter()
+                .any(|session| session.id == *selected && session.has_started())
+        })
     }
 
     fn ensure_runtime_session(&mut self) {
@@ -2081,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_draft_falls_back_to_latest_started_session_on_disk() {
+    fn quitting_on_a_draft_relaunches_to_the_new_session_page() {
         let directory = temporary_directory();
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
@@ -2095,9 +2087,22 @@ mod tests {
         store.save(&mut state).unwrap();
         let restored = store_in(&directory).load().unwrap();
 
+        // Only the started session earned a row, and the draft selection was
+        // stored as no selection so launch recreates the new-session page.
         assert_eq!(restored.sessions.len(), 1);
         assert_eq!(restored.sessions[0].id, started_id);
-        assert_eq!(restored.selected_session, Some(started_id));
+        assert_eq!(restored.selected_session, None);
+
+        let relaunched = store_in(&directory).load_or_fresh(PathBuf::from("/tmp/project"));
+        let selected = relaunched.selected_session.expect("draft selected");
+        assert_ne!(selected, started_id);
+        let session = relaunched
+            .sessions
+            .iter()
+            .find(|session| session.id == selected)
+            .expect("draft exists");
+        assert!(!session.has_started());
+        assert_eq!(session.project_id, relaunched.selected_project.unwrap());
         fs::remove_dir_all(directory).ok();
     }
 
