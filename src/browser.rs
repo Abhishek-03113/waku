@@ -139,13 +139,105 @@ fn display_url(url: &str) -> &str {
 #[cfg(target_os = "macos")]
 mod host {
     use std::cell::Cell;
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
 
     use gpui::{Bounds, Pixels};
     use objc2::rc::Retained;
-    use objc2_app_kit::NSView;
+    use objc2::runtime::AnyObject;
+    use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
+    use objc2_app_kit::{NSApplication, NSEventType, NSView, NSWindow};
+    use objc2_foundation::{
+        MainThreadMarker, NSDictionary, NSKeyValueChangeKey, NSKeyValueObservingOptions,
+        NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSProcessInfo, NSString,
+        ns_string,
+    };
     use objc2_web_kit::WKWebView;
     use wry::WebViewExtMacOS;
     use wry::dpi::{LogicalPosition, LogicalSize};
+
+    /// Whether AppKit is currently dispatching (or just dispatched) a mouse
+    /// press — the discriminator between a user's click handing the page the
+    /// keyboard and a page script pulling it over on its own: a click-driven
+    /// responder change happens inside that click's dispatch, so the current
+    /// event is a fresh press; a script's `focus()` fires from a WebKit
+    /// callout with only a stale event behind it.
+    fn recent_user_gesture() -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let Some(event) = NSApplication::sharedApplication(mtm).currentEvent() else {
+            return false;
+        };
+        let pressed = matches!(
+            unsafe { event.r#type() },
+            NSEventType::LeftMouseDown
+                | NSEventType::LeftMouseUp
+                | NSEventType::RightMouseDown
+                | NSEventType::OtherMouseDown
+        );
+        pressed
+            && NSProcessInfo::processInfo().systemUptime() - unsafe { event.timestamp() } < 0.5
+    }
+
+    pub(super) struct ResponderObserverIvars {
+        window: Retained<NSWindow>,
+        handler: Box<dyn Fn(bool)>,
+    }
+
+    define_class!(
+        #[unsafe(super(objc2::runtime::NSObject))]
+        #[ivars = ResponderObserverIvars]
+        pub(super) struct ResponderObserver;
+
+        /// NSKeyValueObserving: the window's `firstResponder` is documented
+        /// KVO-compliant, and observing it is the only push signal for native
+        /// focus moves — the webview taking or losing the keyboard produces
+        /// no GPUI event at all.
+        impl ResponderObserver {
+            #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+            fn observe_value_for_key_path(
+                &self,
+                key_path: Option<&NSString>,
+                _of_object: Option<&AnyObject>,
+                _change: Option<&NSDictionary<NSKeyValueChangeKey, AnyObject>>,
+                _context: *mut c_void,
+            ) {
+                if key_path.is_some_and(|path| path.isEqualToString(ns_string!("firstResponder")))
+                {
+                    (self.ivars().handler)(recent_user_gesture());
+                }
+            }
+        }
+
+        unsafe impl NSObjectProtocol for ResponderObserver {}
+    );
+
+    impl ResponderObserver {
+        fn new(window: Retained<NSWindow>, handler: Box<dyn Fn(bool)>) -> Retained<Self> {
+            let observer = Self::alloc().set_ivars(ResponderObserverIvars { window, handler });
+            let observer: Retained<Self> = unsafe { msg_send![super(observer), init] };
+            unsafe {
+                observer.ivars().window.addObserver_forKeyPath_options_context(
+                    &observer,
+                    ns_string!("firstResponder"),
+                    NSKeyValueObservingOptions::New,
+                    null_mut(),
+                );
+            }
+            observer
+        }
+    }
+
+    impl Drop for ResponderObserver {
+        fn drop(&mut self) {
+            unsafe {
+                self.ivars()
+                    .window
+                    .removeObserver_forKeyPath(self, ns_string!("firstResponder"));
+            }
+        }
+    }
 
     /// The wry webview plus deduplication state, so per-frame syncs only call
     /// into AppKit when geometry or visibility actually changed.
@@ -154,17 +246,24 @@ mod host {
         wk: Retained<WKWebView>,
         last_bounds: Cell<Option<(i32, i32, i32, i32)>>,
         visible: Cell<bool>,
+        /// Watches the window's first responder; dropped (and unregistered)
+        /// with the host.
+        _responder_observer: Option<Retained<ResponderObserver>>,
     }
 
     impl WebviewHost {
-        pub fn new(webview: wry::WebView) -> Self {
+        pub fn new(webview: wry::WebView, on_responder_change: Box<dyn Fn(bool)>) -> Self {
             let wk: Retained<WKWebView> = Retained::into_super(webview.webview());
             lower_below_scene_overlay(&wk);
+            let responder_observer = wk
+                .window()
+                .map(|window| ResponderObserver::new(window, on_responder_change));
             Self {
                 webview,
                 wk,
                 last_bounds: Cell::new(None),
                 visible: Cell::new(false),
+                _responder_observer: responder_observer,
             }
         }
 
@@ -345,8 +444,57 @@ impl BrowserView {
             },
         );
 
+        let focus_handle = cx.focus_handle();
+        let address_focus = address.read(cx).focus();
+        let weak_for_focus_in = cx.entity().downgrade();
+        let weak_for_focus_out = cx.entity().downgrade();
+
+        // GPUI focus moves are invisible to render-time reconciliation when
+        // they don't re-render this view (focusing the address bar only
+        // re-renders the input entity; focusing the chat composer renders
+        // nothing of ours), so the reclaim rides the window's focus
+        // listeners, which fire on every focus change.
+        let focus_in_address = window.on_focus_in(&address_focus, cx, {
+            let view = weak_for_focus_in;
+            move |_, cx| {
+                let _ = view.update(cx, |this: &mut Self, cx| {
+                    // Clicking, ⌘L-ing, or tabbing into the address bar while
+                    // the page holds the native keyboard: take it back, or
+                    // every keystroke keeps going to the page.
+                    if this
+                        .host
+                        .as_ref()
+                        .is_some_and(|host| host.native_focus_within())
+                    {
+                        this.reclaim_native_keyboard(cx);
+                    }
+                });
+            }
+        });
+        let focus_out_surface = window.on_focus_out(&focus_handle, cx, {
+            let view = weak_for_focus_out;
+            move |_, window, cx| {
+                // GPUI focus left this surface for another control (the chat
+                // composer, a find bar): that control owns the keyboard now,
+                // so the page hands the native side back. Deactivating the
+                // window also reports an empty focus path; keep the page's
+                // focus through that.
+                let focused_elsewhere = window.is_window_active() && window.focused(cx).is_some();
+                let _ = view.update(cx, |this: &mut Self, cx| {
+                    if focused_elsewhere
+                        && this
+                            .host
+                            .as_ref()
+                            .is_some_and(|host| host.native_focus_within())
+                    {
+                        this.reclaim_native_keyboard(cx);
+                    }
+                });
+            }
+        });
+
         let mut this = Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             address,
             host: None,
             host_error: None,
@@ -363,7 +511,7 @@ impl BrowserView {
             snapshot: None,
             snapshot_pending: false,
             snapshot_epoch: 0,
-            _subscriptions: vec![submit_subscription],
+            _subscriptions: vec![submit_subscription, focus_in_address, focus_out_surface],
         };
         this.build_webview(window, cx);
         this
@@ -392,6 +540,28 @@ impl BrowserView {
         let on_page_load = deferred.clone();
         let on_title = deferred.clone();
         let on_new_window = deferred.clone();
+
+        // The responder observer's decision needs the window (GPUI focus
+        // moves), which `Deferred` cannot reach; go through the window handle.
+        let on_responder_change: Box<dyn Fn(bool)> = {
+            let executor = cx.foreground_executor().clone();
+            let async_cx = cx.to_async();
+            let view = cx.entity().downgrade();
+            let window_handle = window.window_handle();
+            Box::new(move |user_gesture| {
+                let mut cx = async_cx.clone();
+                let view = view.clone();
+                executor
+                    .spawn(async move {
+                        let _ = window_handle.update(&mut cx, |_, window, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.native_responder_changed(user_gesture, window, cx);
+                            });
+                        });
+                    })
+                    .detach();
+            })
+        };
 
         let built = wry::WebViewBuilder::new()
             .with_bounds(wry::Rect {
@@ -435,9 +605,41 @@ impl BrowserView {
             .build_as_child(window);
 
         match built {
-            Ok(webview) => self.host = Some(Rc::new(WebviewHost::new(webview))),
+            Ok(webview) => {
+                self.host = Some(Rc::new(WebviewHost::new(webview, on_responder_change)))
+            }
             Err(error) => self.host_error = Some(error.to_string()),
         }
+    }
+
+    /// The native first responder moved (KVO on the window): resolve the two
+    /// focus systems immediately instead of waiting for a render. While the
+    /// address bar is being typed into, a script-initiated grab (a page
+    /// autofocusing its own input) loses the keyboard right back; a grab
+    /// carried by a user click means the user entered the page, so GPUI
+    /// focus follows onto this surface and the address bar drops its caret.
+    #[cfg(target_os = "macos")]
+    fn native_responder_changed(
+        &mut self,
+        user_gesture: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let natively_focused = self
+            .host
+            .as_ref()
+            .is_some_and(|host| host.native_focus_within());
+        if natively_focused {
+            let address_focused = self.address.read(cx).focus().is_focused(window);
+            if address_focused && !user_gesture {
+                self.reclaim_native_keyboard(cx);
+            } else {
+                window.focus(&self.focus_handle, cx);
+            }
+        }
+        self.was_natively_focused = natively_focused;
+        self.last_window_focus = window.focused(cx);
+        cx.notify();
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -687,7 +889,13 @@ impl BrowserView {
         if natively_focused && window_focus_changed && focus_on_gpui_control {
             self.reclaim_native_keyboard(cx);
         } else if native_became_focused && !window_focus_changed {
-            window.focus(&self.focus_handle, cx);
+            if self.address.read(cx).focus().is_focused(window) {
+                // A stale native edge must never rip GPUI focus out of the
+                // address bar mid-typing — the keyboard comes back instead.
+                self.reclaim_native_keyboard(cx);
+            } else {
+                window.focus(&self.focus_handle, cx);
+            }
         }
 
         self.was_natively_focused = natively_focused;
