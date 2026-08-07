@@ -325,6 +325,7 @@ impl BrowserView {
         let address = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
+                .select_all_on_focus_click()
                 .placeholder("Search or enter address")
         });
 

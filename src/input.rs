@@ -452,6 +452,12 @@ pub struct ComposerInput {
     focus_handle: FocusHandle,
     mode: FieldMode,
     read_only: bool,
+    /// The focusing click selects the whole content on release, the way a
+    /// browser address bar arms its URL for retyping.
+    select_all_on_focus_click: bool,
+    /// A plain click landed while the field was unfocused; unless it grows
+    /// into a drag-selection first, the release selects everything.
+    focus_click_select_all: bool,
     /// Language for paint-only syntax colouring, in code mode.
     language: Option<Lang>,
     /// Cached token spans over `content`, as absolute byte ranges. Recomputed
@@ -469,6 +475,11 @@ pub struct ComposerInput {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    /// How far a single-line (search-mode) field's text is slid left of its
+    /// clipped viewport, in pixels. Reconciled every prepaint to keep the
+    /// caret in view; pinned to zero while the field is unfocused so the
+    /// address bar's page echo shows the start of the URL.
+    scroll_offset: Pixels,
     last_layout: Option<TextLayout>,
     is_selecting: bool,
     selected_word_range: Option<Range<usize>>,
@@ -502,6 +513,8 @@ impl ComposerInput {
             focus_handle,
             mode: FieldMode::Composer,
             read_only: false,
+            select_all_on_focus_click: false,
+            focus_click_select_all: false,
             language: None,
             highlight: Vec::new(),
             search_matches: Vec::new(),
@@ -511,6 +524,7 @@ impl ComposerInput {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            scroll_offset: px(0.),
             last_layout: None,
             is_selecting: false,
             selected_word_range: None,
@@ -598,6 +612,14 @@ impl ComposerInput {
     /// "find next" keeps the query, and pasted line breaks become spaces.
     pub fn search_field(mut self) -> Self {
         self.mode = FieldMode::Search;
+        self
+    }
+
+    /// Make the focusing click select the whole content on release, the way a
+    /// browser address bar arms its URL for retyping. A drag from unfocused
+    /// still selects the dragged range, and the next click places the caret.
+    pub fn select_all_on_focus_click(mut self) -> Self {
+        self.select_all_on_focus_click = true;
         self
     }
 
@@ -801,6 +823,8 @@ impl ComposerInput {
     }
 
     fn on_blur(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        // An armed focusing click dies with the focus it was tied to.
+        self.focus_click_select_all = false;
         if self.context_menu_preserves_visual_focus() {
             cx.notify();
             return;
@@ -1085,9 +1109,22 @@ impl ComposerInput {
         cx.notify();
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.is_selecting = true;
         self.selected_word_range = None;
+        // A plain click that is also the focusing click arms select-all for
+        // its release. This handler runs before gpui's focus-on-mouse-down
+        // transfer (user listeners dispatch first in the bubble phase), so
+        // the pre-click focus is still observable here.
+        self.focus_click_select_all = self.select_all_on_focus_click
+            && event.click_count == 1
+            && !event.modifiers.shift
+            && !self.is_visually_focused(window);
         let offset = self.index_for_mouse_position(event.position);
 
         if event.click_count >= 3 {
@@ -1125,14 +1162,23 @@ impl ComposerInput {
         window.focus(&self.focus_handle, cx);
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.is_selecting = false;
         self.selected_word_range = None;
+        if self.focus_click_select_all {
+            self.focus_click_select_all = false;
+            self.select_all_text(cx);
+        }
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.is_selecting {
             self.select_to(self.index_for_mouse_position(event.position), cx);
+            // Growing a real drag-selection turns the focusing click into a
+            // range selection; releasing must keep it.
+            if !self.selected_range.is_empty() {
+                self.focus_click_select_all = false;
+            }
         }
     }
 
@@ -1437,8 +1483,126 @@ fn cursor_should_be_visible(
     window_active && (context_menu_preserves_focus || (input_focused && blink_visible))
 }
 
+/// Horizontal scroll for a focused single-line field, reconciled every frame
+/// against the selection the way Zed's `autoscroll_horizontally` resolves an
+/// autoscroll request. `start_x`/`head_x`/`end_x` are text-relative pixel
+/// positions of the selection edges (all equal for a caret), `em` is one
+/// character advance of lookahead kept past the caret, and `previous` is last
+/// frame's scroll, moved as little as possible:
+/// - a caret, or a selection that fits, is revealed whole plus the lookahead;
+/// - a partial selection too wide to fit follows its head, the way a native
+///   field tracks shift+End;
+/// - a whole-content selection holds still — native `selectAll` never moves
+///   the view, which keeps ⌘L on the address bar showing the host.
+fn single_line_scroll(
+    previous: Pixels,
+    viewport: Pixels,
+    em: Pixels,
+    text_width: Pixels,
+    (start_x, head_x, end_x): (Pixels, Pixels, Pixels),
+    whole_content_selected: bool,
+) -> Pixels {
+    let max_scroll = (text_width + em - viewport).max(px(0.));
+    let scroll = previous.min(max_scroll).max(px(0.));
+    let (target_left, target_right) = if end_x - start_x + em <= viewport {
+        (start_x, end_x + em)
+    } else if whole_content_selected {
+        return scroll;
+    } else {
+        (head_x, head_x + em)
+    };
+    if target_left < scroll {
+        target_left
+    } else if target_right > scroll + viewport {
+        target_right - viewport
+    } else {
+        scroll
+    }
+}
+
 struct InputElement {
     input: Entity<ComposerInput>,
+}
+
+impl InputElement {
+    /// For a single-line (search-mode) field, the bounds the text is actually
+    /// laid out at: the unwrapped line anchored `scroll_offset` left of the
+    /// clipped viewport so the caret stays in view. `None` for wrapping
+    /// fields, which lay out at their element bounds. Also reconciles the
+    /// scroll for this frame, so the caller must prepaint at the returned
+    /// bounds for index↔position math to agree with what is painted.
+    fn single_line_text_bounds(
+        &self,
+        bounds: Bounds<Pixels>,
+        layout_state: &mut InputLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        let (focused, selection, whole_content_selected, previous_scroll) = {
+            let input = self.input.read(cx);
+            if input.mode != FieldMode::Search {
+                return None;
+            }
+            (
+                input.is_visually_focused(window),
+                (
+                    input.selected_range.start,
+                    input.cursor_offset(),
+                    input.selected_range.end,
+                ),
+                !input.content.is_empty()
+                    && input.selected_range == (0..input.content.len()),
+                input.scroll_offset,
+            )
+        };
+        // Anchor the line at the natural origin first so index → position
+        // can measure it; the definitive prepaint happens at the scrolled
+        // origin returned from here.
+        layout_state.text.prepaint(
+            None,
+            None,
+            bounds,
+            &mut layout_state.text_layout_state,
+            window,
+            cx,
+        );
+        let layout = layout_state.text.layout().clone();
+        let x_for_index = |index: usize| {
+            layout
+                .position_for_index(index)
+                .map_or(px(0.), |position| position.x - bounds.origin.x)
+        };
+        let text_width = x_for_index(layout.len());
+        let scroll = if focused {
+            let style = window.text_style();
+            let font_id = window.text_system().resolve_font(&style.font());
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let em = window
+                .text_system()
+                .em_advance(font_id, font_size)
+                .unwrap_or(px(8.));
+            single_line_scroll(
+                previous_scroll,
+                bounds.size.width,
+                em,
+                text_width,
+                (
+                    x_for_index(selection.0),
+                    x_for_index(selection.1),
+                    x_for_index(selection.2),
+                ),
+                whole_content_selected,
+            )
+        } else {
+            px(0.)
+        };
+        self.input
+            .update(cx, |input, _| input.scroll_offset = scroll);
+        Some(Bounds::new(
+            point(bounds.origin.x - scroll, bounds.origin.y),
+            size(bounds.size.width.max(text_width), bounds.size.height),
+        ))
+    }
 }
 
 struct InputLayoutState {
@@ -1647,10 +1811,13 @@ impl Element for InputElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let text_bounds = self
+            .single_line_text_bounds(bounds, layout_state, window, cx)
+            .unwrap_or(bounds);
         layout_state.text.prepaint(
             None,
             None,
-            bounds,
+            text_bounds,
             &mut layout_state.text_layout_state,
             window,
             cx,
@@ -1763,6 +1930,12 @@ impl Render for ComposerInput {
                     .line_height(px(22.0))
                     .text_size(px(13.5))
             })
+            // A search-mode field is visually one line: the text never wraps,
+            // and the overlong remainder slides horizontally under this
+            // clipped viewport to follow the caret — no scrollbar.
+            .when(self.mode == FieldMode::Search, |field| {
+                field.whitespace_nowrap().overflow_hidden()
+            })
             .child(InputElement { input });
 
         context_menu(
@@ -1852,8 +2025,8 @@ mod tests {
     use super::TokenClass;
     use super::{
         EditHistory, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP, cursor_should_be_visible,
-        input_text_runs, next_word_boundary, previous_word_boundary, trimmed_splice,
-        word_range_at,
+        input_text_runs, next_word_boundary, previous_word_boundary, single_line_scroll,
+        trimmed_splice, word_range_at,
     };
 
     /// Type each string in sequence at `at`, advancing the caret, the way
@@ -2329,5 +2502,96 @@ mod tests {
         assert_eq!(background_at(8), Some(active_color));
         assert_eq!(background_at(14), Some(match_color));
         assert_eq!(background_at(6), None);
+    }
+
+    /// The single-line scroll follows the caret with an em of lookahead and
+    /// otherwise moves as little as possible.
+    #[test]
+    fn single_line_scroll_follows_the_caret() {
+        use gpui::px;
+        let caret = |x: f32| (px(x), px(x), px(x));
+
+        // Text narrower than the viewport never scrolls, whatever is stale.
+        assert_eq!(
+            single_line_scroll(px(40.), px(200.), px(8.), px(100.), caret(100.), false),
+            px(0.)
+        );
+        // Caret at the end of long text: the end comes into view with the
+        // lookahead, which is exactly the maximum scroll.
+        assert_eq!(
+            single_line_scroll(px(0.), px(200.), px(8.), px(1000.), caret(1000.), false),
+            px(808.)
+        );
+        // Caret already visible: the view holds still.
+        assert_eq!(
+            single_line_scroll(px(300.), px(200.), px(8.), px(1000.), caret(400.), false),
+            px(300.)
+        );
+        // Caret left of the view: align it at the left edge.
+        assert_eq!(
+            single_line_scroll(px(300.), px(200.), px(8.), px(1000.), caret(250.), false),
+            px(250.)
+        );
+        // Stale scroll past the end of shrunk text clamps back into range.
+        assert_eq!(
+            single_line_scroll(px(900.), px(200.), px(8.), px(400.), caret(0.), false),
+            px(0.)
+        );
+    }
+
+    /// Selections reveal their whole span when it fits; a wider partial
+    /// selection follows its head, and select-all holds the view still.
+    #[test]
+    fn single_line_scroll_reveals_selections_by_zed_rules() {
+        use gpui::px;
+
+        // A selection that fits scrolls just enough to show all of it.
+        assert_eq!(
+            single_line_scroll(
+                px(0.),
+                px(200.),
+                px(8.),
+                px(1000.),
+                (px(300.), px(400.), px(400.)),
+                false
+            ),
+            px(208.)
+        );
+        // A partial selection wider than the viewport tracks its head.
+        assert_eq!(
+            single_line_scroll(
+                px(0.),
+                px(200.),
+                px(8.),
+                px(1000.),
+                (px(100.), px(600.), px(600.)),
+                false
+            ),
+            px(408.)
+        );
+        // …including a reversed head extending left.
+        assert_eq!(
+            single_line_scroll(
+                px(400.),
+                px(200.),
+                px(8.),
+                px(1000.),
+                (px(100.), px(100.), px(600.)),
+                false
+            ),
+            px(100.)
+        );
+        // Select-all keeps whatever was shown, only clamped into range.
+        assert_eq!(
+            single_line_scroll(
+                px(300.),
+                px(200.),
+                px(8.),
+                px(1000.),
+                (px(0.), px(1000.), px(1000.)),
+                true
+            ),
+            px(300.)
+        );
     }
 }
