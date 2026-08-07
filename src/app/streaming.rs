@@ -332,8 +332,49 @@ impl Waku {
                     self.enqueue_follow_up(session_id, message, cx);
                 }
             }
+            DriverEvent::PlanUsageUpdated(usage) => {
+                if let Some(provider) = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| session.provider)
+                {
+                    self.plan_usage.insert(provider, usage);
+                }
+            }
+            DriverEvent::UsageUpdated {
+                context_tokens,
+                context_window,
+            } => {
+                // Meta about the conversation, not turn output: it applies
+                // even while a rewound or cancelled turn's tail drains.
+                if let Some(session) = self.state.session_mut(session_id) {
+                    let usage = session.context_usage.get_or_insert(ContextUsage::default());
+                    if let Some(tokens) = context_tokens {
+                        usage.tokens = tokens;
+                    }
+                    if let Some(window) = context_window {
+                        usage.window = Some(window);
+                    }
+                    self.state.mark_session_dirty(session_id);
+                }
+            }
             DriverEvent::TurnFinished { success, summary } => {
                 runtime.last_driver_error = None;
+                // A settled turn moved the account's rate-limit needles; ask
+                // that provider's plan meter to refresh once its backoff
+                // allows.
+                if let Some(provider) = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| session.provider)
+                    .filter(|provider| usage_meter::PLAN_USAGE_PROVIDERS.contains(provider))
+                {
+                    self.plan_usage_stale.insert(provider);
+                }
                 if self
                     .state
                     .sessions

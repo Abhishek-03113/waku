@@ -1729,12 +1729,13 @@ impl Waku {
         )
     }
 
-    pub(super) fn render_workspace_footer(&self, cx: &App) -> Div {
+    pub(super) fn render_workspace_footer(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let path = self
             .selected_project()
             .map(|project| compact_path(&project.path))
             .unwrap_or_default();
+        let usage_meter = self.render_usage_meter(cx);
         div()
             .flex_none()
             .px(px(20.0))
@@ -1779,7 +1780,9 @@ impl Waku {
                             .text_size(px(10.5))
                             .text_color(theme.text_ghost)
                             .child(SharedString::from(path)),
-                    ),
+                    )
+                    .child(div().flex_1())
+                    .children(usage_meter),
             )
     }
 }

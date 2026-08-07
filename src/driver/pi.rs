@@ -776,6 +776,18 @@ fn handle_pi_message(
         }
         "message_end" => {
             if value.pointer("/message/role").and_then(Value::as_str) == Some("assistant") {
+                // Pi's `totalTokens` already sums prompt, cache, and output —
+                // the context the next call starts from.
+                if let Some(tokens) = value
+                    .pointer("/message/usage/totalTokens")
+                    .and_then(Value::as_u64)
+                    .filter(|tokens| *tokens > 0)
+                {
+                    let _ = events.send(DriverEvent::UsageUpdated {
+                        context_tokens: Some(tokens),
+                        context_window: None,
+                    });
+                }
                 emit_completed_message_fallback(value.get("message"), events, state);
             }
         }

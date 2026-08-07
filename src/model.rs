@@ -528,6 +528,18 @@ pub struct AgentTurn {
     pub checkpoint: Option<Checkpoint>,
 }
 
+/// How full the provider's context window is, from the latest main-thread
+/// model call. `tokens` is prompt + cache + output of that call; `window` is
+/// the model's context size, which the provider only reports once a turn
+/// settles — `None` means "not known yet", and the meter degrades to a bare
+/// token count.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ContextUsage {
+    pub tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<u64>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentSession {
     pub id: Uuid,
@@ -558,6 +570,10 @@ pub struct AgentSession {
     /// handshake.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_commands: Vec<ReportedCommand>,
+    /// Context-window occupancy from the live stream, kept so a resumed
+    /// session's meter starts where the conversation left off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<ContextUsage>,
     /// Read-only compatibility field for v1 state files. New saves omit it.
     #[serde(default, skip_serializing)]
     pub provider_session_id: Option<String>,
@@ -607,6 +623,7 @@ impl AgentSession {
             detail_loaded: true,
             provider_cursor: None,
             available_commands: Vec::new(),
+            context_usage: None,
             provider_session_id: None,
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
@@ -1007,6 +1024,18 @@ pub enum DriverEvent {
         message: String,
         reason: String,
     },
+    /// Context-window occupancy reported by the live stream. Fields arrive at
+    /// different moments — token counts with each assistant message, the
+    /// window size with the settled turn — so each is optional and the app
+    /// merges them into [`ContextUsage`].
+    UsageUpdated {
+        context_tokens: Option<u64>,
+        context_window: Option<u64>,
+    },
+    /// Account-level rate-limit meters carried by the provider's own stream
+    /// (Codex's `account/rateLimits/updated`). Same shape the OAuth fetcher
+    /// produces for Claude, so the panel renders both identically.
+    PlanUsageUpdated(crate::usage::PlanUsage),
     TurnFinished {
         success: bool,
         summary: Option<String>,

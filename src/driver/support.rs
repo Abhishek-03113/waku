@@ -15,6 +15,24 @@ use serde_json::Value;
 use super::computer_use as computer_use_runtime;
 use crate::model::{ActivityKind, DriverEvent, ProviderKind};
 
+/// The context-window occupancy of one API call from a Claude-wire `usage`
+/// object (Claude Code and Amp share the format): prompt (fresh + cached) plus
+/// output. Multi-call messages carry per-call `iterations`; the last one is
+/// the live context, and summed outer fields would double-count cache reads.
+pub(super) fn claude_context_tokens(usage: &Value) -> Option<u64> {
+    let call = usage
+        .get("iterations")
+        .and_then(Value::as_array)
+        .and_then(|iterations| iterations.last())
+        .unwrap_or(usage);
+    let field = |name: &str| call.get(name).and_then(Value::as_u64).unwrap_or(0);
+    let total = field("input_tokens")
+        + field("cache_read_input_tokens")
+        + field("cache_creation_input_tokens")
+        + field("output_tokens");
+    (total > 0).then_some(total)
+}
+
 #[derive(Clone)]
 pub(super) enum HeadlessComputerUseConfig {
     OpenCode {

@@ -1017,6 +1017,30 @@ fn handle_codex_message(
                 summary: error,
             });
         }
+        "thread/tokenUsage/updated" => {
+            // `last` is the newest model call, so its total is what occupies
+            // the context window right now; `total` sums the whole thread.
+            let usage = params.get("tokenUsage");
+            let tokens = usage
+                .and_then(|usage| usage.pointer("/last/totalTokens"))
+                .and_then(Value::as_u64)
+                .filter(|tokens| *tokens > 0);
+            let window = usage
+                .and_then(|usage| usage.get("modelContextWindow"))
+                .and_then(Value::as_u64)
+                .filter(|window| *window > 0);
+            if tokens.is_some() || window.is_some() {
+                let _ = events.send(DriverEvent::UsageUpdated {
+                    context_tokens: tokens,
+                    context_window: window,
+                });
+            }
+        }
+        "account/rateLimits/updated" => {
+            if let Some(plan) = codex_plan_usage(params.get("rateLimits")) {
+                let _ = events.send(DriverEvent::PlanUsageUpdated(plan));
+            }
+        }
         "error" => {
             if let Some(message) = params.get("message").and_then(Value::as_str) {
                 let _ = events.send(DriverEvent::Error(message.to_owned()));
@@ -1058,6 +1082,36 @@ fn handle_codex_message(
         }
         _ => {}
     }
+}
+
+/// Map an `account/rateLimits/updated` snapshot into the panel's plan rows.
+/// The primary window is the short lane (300 min on ChatGPT plans), the
+/// secondary the weekly one; both carry a percent and a unix reset time.
+fn codex_plan_usage(snapshot: Option<&Value>) -> Option<crate::usage::PlanUsage> {
+    let snapshot = snapshot?;
+    let mut windows = Vec::new();
+    for key in ["primary", "secondary"] {
+        let Some(window) = snapshot.get(key).filter(|window| !window.is_null()) else {
+            continue;
+        };
+        let Some(percent) = window.get("usedPercent").and_then(Value::as_f64) else {
+            continue;
+        };
+        windows.push(crate::usage::PlanWindow {
+            label: crate::usage::window_label_from_minutes(
+                window.get("windowDurationMins").and_then(Value::as_i64),
+            ),
+            percent: percent.clamp(0.0, 100.0),
+            resets_at: window.get("resetsAt").and_then(Value::as_i64),
+        });
+    }
+    if windows.is_empty() {
+        return None;
+    }
+    Some(crate::usage::PlanUsage {
+        plan_label: crate::usage::openai_plan_label(snapshot.get("planType").and_then(Value::as_str)),
+        windows,
+    })
 }
 
 fn codex_activity_kind(item: &Value) -> Option<ActivityKind> {
@@ -1882,5 +1936,31 @@ mod tests {
             codex_item_image_urls(&item),
             vec!["data:image/png;base64,aGVsbG8=".to_owned()]
         );
+    }
+
+    #[test]
+    fn rate_limit_snapshots_become_plan_rows() {
+        // Shape from the app-server protocol schema (v2): RateLimitSnapshot.
+        let snapshot = json!({
+            "planType": "plus",
+            "primary": {"usedPercent": 37, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+            "secondary": {"usedPercent": 8, "windowDurationMins": 10080, "resetsAt": 1_800_500_000}
+        });
+
+        let plan = codex_plan_usage(Some(&snapshot)).expect("both windows should map");
+        assert_eq!(plan.plan_label.as_deref(), Some("Plus"));
+        assert_eq!(
+            plan.windows
+                .iter()
+                .map(|window| (window.label.as_str(), window.percent, window.resets_at))
+                .collect::<Vec<_>>(),
+            [
+                ("5-hour limit", 37.0, Some(1_800_000_000)),
+                ("Weekly limit", 8.0, Some(1_800_500_000)),
+            ]
+        );
+
+        assert!(codex_plan_usage(Some(&json!({"planType": "plus"}))).is_none());
+        assert!(codex_plan_usage(None).is_none());
     }
 }

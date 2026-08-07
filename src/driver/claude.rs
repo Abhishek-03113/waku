@@ -421,6 +421,28 @@ struct ClaudeStreamState {
     saw_text_delta: bool,
     saw_reasoning_delta: bool,
     tools: HashMap<String, (ActivityKind, String)>,
+    /// Model of the latest main-thread assistant message, so the settled
+    /// turn's `modelUsage` map can be read for that model's context window
+    /// rather than a subagent's.
+    last_assistant_model: Option<String>,
+}
+
+/// The context window of the model that served this turn, from the result
+/// message's per-model usage map. Falls back to the largest reported window
+/// when the model key does not line up.
+fn context_window_from_result(value: &Value, last_model: Option<&str>) -> Option<u64> {
+    let models = value.get("modelUsage")?.as_object()?;
+    if let Some(model) = last_model {
+        for (key, entry) in models {
+            if key == model || entry.get("canonicalModel").and_then(Value::as_str) == Some(model) {
+                return entry.get("contextWindow").and_then(Value::as_u64);
+            }
+        }
+    }
+    models
+        .values()
+        .filter_map(|entry| entry.get("contextWindow").and_then(Value::as_u64))
+        .max()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -491,6 +513,21 @@ fn handle_message(
             }
         }
         Some("assistant") => {
+            // Subagent calls (a set `parent_tool_use_id`) run their own
+            // context; only the main thread's usage describes this session.
+            if value.get("parent_tool_use_id").is_none_or(Value::is_null)
+                && let Some(usage) = value.pointer("/message/usage")
+            {
+                if let Some(model) = value.pointer("/message/model").and_then(Value::as_str) {
+                    state.last_assistant_model = Some(model.to_owned());
+                }
+                if let Some(tokens) = super::support::claude_context_tokens(usage) {
+                    let _ = events.send(DriverEvent::UsageUpdated {
+                        context_tokens: Some(tokens),
+                        context_window: None,
+                    });
+                }
+            }
             let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
                 return;
             };
@@ -579,6 +616,15 @@ fn handle_message(
             let failed = value.get("is_error").and_then(Value::as_bool) == Some(true);
             if failed && let Some(result) = value.get("result").and_then(Value::as_str) {
                 let _ = events.send(DriverEvent::Error(result.to_owned()));
+            }
+            // Ahead of TurnFinished, whose forced save should include it.
+            if let Some(window) =
+                context_window_from_result(value, state.last_assistant_model.as_deref())
+            {
+                let _ = events.send(DriverEvent::UsageUpdated {
+                    context_tokens: None,
+                    context_window: Some(window),
+                });
             }
             if !std::mem::take(&mut *turn_active.lock()) {
                 return;
@@ -974,5 +1020,48 @@ mod tests {
                 .any(|event| matches!(event, DriverEvent::TurnFinished { .. })),
             "a second result must not settle an already-finished turn"
         );
+    }
+
+    #[test]
+    fn usage_flows_from_main_thread_messages_and_the_settled_result() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        // Shapes captured from a live 2.1.223 stream.
+        let wire = [
+            // Main-thread call: the last iteration is the live context.
+            json!({"type":"assistant","parent_tool_use_id":null,"message":{
+                "model":"claude-fable-5",
+                "usage":{
+                    "input_tokens":900,"cache_read_input_tokens":70,
+                    "cache_creation_input_tokens":20,"output_tokens":50,
+                    "iterations":[{"input_tokens":2,"cache_read_input_tokens":100,
+                        "cache_creation_input_tokens":10,"output_tokens":8}]
+                },
+                "content":[]}}),
+            // A subagent runs its own context; it must not touch this meter.
+            json!({"type":"assistant","parent_tool_use_id":"toolu_9","message":{
+                "model":"claude-haiku-4-5-20251001",
+                "usage":{"input_tokens":999999,"output_tokens":1},
+                "content":[]}}),
+            json!({"type":"result","is_error":false,"modelUsage":{
+                "claude-haiku-4-5-20251001":{"contextWindow":200000,"canonicalModel":"claude-haiku-4-5"},
+                "claude-fable-5":{"contextWindow":1000000,"canonicalModel":"claude-fable-5"}
+            }}),
+        ];
+        for message in wire {
+            handle_message(&message, "s", &events, &commands, &turn, true, &mut state);
+        }
+
+        let usage: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .filter_map(|event| match event {
+                DriverEvent::UsageUpdated {
+                    context_tokens,
+                    context_window,
+                } => Some((context_tokens, context_window)),
+                _ => None,
+            })
+            .collect();
+        // 2+100+10+8 from the last iteration, then the main model's window —
+        // not the subagent's tokens, not the smaller subagent window.
+        assert_eq!(usage, [(Some(120), None), (None, Some(1_000_000))]);
     }
 }

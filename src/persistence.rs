@@ -693,6 +693,7 @@ impl StateStore {
         session.interaction_mode = stored.interaction_mode;
         session.reasoning_effort = stored.reasoning_effort;
         session.service_tier = stored.service_tier;
+        session.context_usage = stored.context_usage;
 
         let mut statement = connection
             .prepare(
@@ -916,6 +917,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         last_reply_at: last_reply_at.map(|at| at as u64),
         provider_cursor: None,
         available_commands: Vec::new(),
+        context_usage: None,
         provider_session_id: None,
         messages: Vec::new(),
         transcript_blocks: Vec::new(),

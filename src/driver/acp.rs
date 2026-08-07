@@ -764,8 +764,26 @@ fn handle_message(
                 let _ = events.send(DriverEvent::AvailableCommands(commands));
             }
         }
+        Some("usage_update") => {
+            // Grok reports the tokens occupying the model's context; a bound
+            // arrives under provider-specific names when it arrives at all.
+            let used = update
+                .get("used")
+                .and_then(Value::as_u64)
+                .filter(|used| *used > 0);
+            let window = ["max", "limit", "size", "contextWindow", "context_window"]
+                .into_iter()
+                .find_map(|key| update.get(key).and_then(Value::as_u64))
+                .filter(|window| *window > 0);
+            if used.is_some() || window.is_some() {
+                let _ = events.send(DriverEvent::UsageUpdated {
+                    context_tokens: used,
+                    context_window: window,
+                });
+            }
+        }
         // `user_message_chunk` is Waku's own prompt echoed back, and
-        // `usage_update` / `session_info_update` are not transcript content.
+        // `session_info_update` is not transcript content.
         _ => {}
     }
 }
@@ -1077,7 +1095,15 @@ mod tests {
                     && item.title == "fixture.txt"
                     && item.output.as_deref().is_some_and(|output| output.contains("waku probe fixture"))));
         assert!(matches!(&seen[3], DriverEvent::TextDelta(text) if text == "OK"));
-        assert_eq!(seen.len(), 4, "control traffic leaked into the transcript");
+        // `usage_update` feeds the context meter rather than the transcript.
+        assert!(matches!(
+            &seen[4],
+            DriverEvent::UsageUpdated {
+                context_tokens: Some(9677),
+                context_window: None,
+            }
+        ));
+        assert_eq!(seen.len(), 5, "control traffic leaked into the transcript");
     }
 
     #[test]

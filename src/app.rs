@@ -27,10 +27,11 @@ use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::input::{ComposerEvent, ComposerInput};
 use crate::md;
 use crate::model::{
-    ActivityItem, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, FavoriteModel,
-    InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind, ProviderModel,
-    ProviderProbe, ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
-    TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
+    ActivityItem, AgentSession, Checkpoint, CheckpointStatus, ContextUsage, DriverEvent,
+    FavoriteModel, InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind,
+    ProviderModel, ProviderProbe, ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode,
+    SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time,
+    unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -61,7 +62,7 @@ use crate::{
     CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
     NavigateBack, NavigateForward, NewSession, OpenFind, OpenFindReplace, OpenSettings,
     ReplaceAllMatches, SaveFile, ToggleFindCaseSensitive, ToggleFindRegex, ToggleFindWholeWord,
-    ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel, ToggleSidebar,
+    ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel, ToggleSidebar, ToggleUsagePanel,
 };
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
@@ -515,6 +516,22 @@ pub struct Waku {
     computer_permission_tx: Sender<Result<ComputerPermissions, String>>,
     computer_permission_events: Receiver<Result<ComputerPermissions, String>>,
     computer_permission_request_pending: bool,
+    /// Account rate-limit meters per provider, fetched off-thread (Claude and
+    /// Codex over HTTPS, Grok through a stdio probe) and refreshed live by
+    /// Codex's own stream. Frames read only this snapshot.
+    plan_usage: HashMap<ProviderKind, crate::usage::PlanUsage>,
+    /// Why a provider's last fetch failed, kept alongside stale data for the
+    /// meter's tooltip. Cleared by that provider's next success.
+    plan_usage_error: HashMap<ProviderKind, String>,
+    plan_usage_tx: Sender<(ProviderKind, Result<crate::usage::PlanUsage, String>)>,
+    plan_usage_events: Receiver<(ProviderKind, Result<crate::usage::PlanUsage, String>)>,
+    plan_usage_pending: HashSet<ProviderKind>,
+    /// When each provider's last fetch settled, successful or not — the
+    /// refresh backoff measures from here.
+    plan_usage_checked_at: HashMap<ProviderKind, Instant>,
+    /// Providers whose turn settled since the last fetch, so the meters have
+    /// moved.
+    plan_usage_stale: HashSet<ProviderKind>,
     computer_use_app_icons: RefCell<HashMap<String, Option<std::sync::Arc<gpui::Image>>>>,
     computer_use_app_icon_loads: RefCell<HashSet<String>>,
     model_picker_tab: ModelPickerTab,
@@ -700,6 +717,7 @@ mod sidebar;
 mod streaming;
 mod transcript;
 mod transcript_view;
+mod usage_meter;
 
 pub use autocomplete::init as init_composer_autocomplete;
 use components::*;
@@ -813,6 +831,7 @@ impl Waku {
         let (provider_version_tx, provider_version_events) = unbounded();
         let (provider_detection_tx, provider_detection_events) = unbounded();
         let (computer_permission_tx, computer_permission_events) = unbounded();
+        let (plan_usage_tx, plan_usage_events) = unbounded();
         {
             let computer_permission_tx = computer_permission_tx.clone();
             std::thread::Builder::new()
@@ -992,9 +1011,11 @@ impl Waku {
                                 || this.drain_provider_version_events()
                                 || this.drain_provider_detection_events()
                                 || this.drain_computer_permission_events()
+                                || this.drain_plan_usage_events()
                             {
                                 cx.notify();
                             }
+                            this.maybe_refresh_plan_usage(cx);
                             if std::mem::take(&mut this.workspace_queries_stale) {
                                 this.invalidate_workspace_queries(cx);
                             }
@@ -1042,6 +1063,13 @@ impl Waku {
                 computer_permission_tx,
                 computer_permission_events,
                 computer_permission_request_pending: false,
+                plan_usage: HashMap::new(),
+                plan_usage_error: HashMap::new(),
+                plan_usage_tx,
+                plan_usage_events,
+                plan_usage_pending: HashSet::new(),
+                plan_usage_checked_at: HashMap::new(),
+                plan_usage_stale: HashSet::new(),
                 computer_use_app_icons: RefCell::new(HashMap::new()),
                 computer_use_app_icon_loads: RefCell::new(HashSet::new()),
                 model_picker_tab,
