@@ -304,7 +304,7 @@ impl Waku {
                 if busy {
                     self.enqueue_follow_up(session_id, message, cx);
                     if self.state.selected_session == Some(session_id) {
-                        self.toast = Some(format!(
+                        self.show_toast(format!(
                             "The agent couldn't be steered ({}); the message was queued as a follow-up.",
                             compact_driver_error(&reason)
                         ));
@@ -434,7 +434,7 @@ impl Waku {
                 let error = compact_driver_error(&error);
                 runtime.last_driver_error = Some(error.clone());
                 if self.state.selected_session == Some(session_id) {
-                    self.toast = Some(error.clone());
+                    self.show_toast(error.clone());
                 }
                 let has_active_turn = self
                     .state

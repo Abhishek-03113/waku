@@ -10,10 +10,10 @@ use super::{
     fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
     maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
     navigation_rail_height, navigation_rail_scale, navigation_rail_tick_count,
-    navigation_rail_tick_turn, navigation_rail_turn_tick, pop_stream_chunk, session_is_reapable,
-    should_show_navigation_rail, take_stream_prefix, transcript_anchor_end_space,
-    transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
-    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
+    navigation_rail_tick_turn, navigation_rail_turn_tick, paused_toast_duration, pop_stream_chunk,
+    session_is_reapable, should_show_navigation_rail, take_stream_prefix,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
+    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -28,6 +28,18 @@ use std::{
     time::Duration,
 };
 use uuid::Uuid;
+
+#[test]
+fn toast_pause_preserves_time_with_a_readable_minimum() {
+    assert_eq!(
+        paused_toast_duration(Duration::from_secs(10), Duration::from_secs(3)),
+        Duration::from_secs(7)
+    );
+    assert_eq!(
+        paused_toast_duration(Duration::from_secs(1), Duration::from_secs(5)),
+        Duration::from_millis(800)
+    );
+}
 
 #[test]
 fn dropped_files_mention_project_relative_paths() {

@@ -193,7 +193,12 @@ impl Waku {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let selected = self.transcript_selection.selection.borrow().selected_text();
+        let selected = self
+            .toast_selection
+            .selection
+            .borrow()
+            .selected_text()
+            .or_else(|| self.transcript_selection.selection.borrow().selected_text());
         match selected {
             Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             None => cx.propagate(),
@@ -205,6 +210,17 @@ impl Waku {
     /// painted element's geometry, so per-element listeners would be redundant.
     fn transcript_selection_input(&self) -> impl IntoElement {
         let selection = self.transcript_selection.clone();
+        canvas(
+            |_, _, _| (),
+            move |_, _, window, _| md::render::install_selection_input(window, &selection),
+        )
+        .absolute()
+        .w(px(0.0))
+        .h(px(0.0))
+    }
+
+    pub(super) fn toast_selection_input(&self) -> impl IntoElement {
+        let selection = self.toast_selection.clone();
         canvas(
             |_, _, _| (),
             move |_, _, window, _| md::render::install_selection_input(window, &selection),

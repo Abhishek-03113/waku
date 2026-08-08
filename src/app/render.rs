@@ -89,7 +89,15 @@ impl Render for Waku {
             .unwrap_or(true);
         let permission = self.render_permission(cx);
         let computer_use = self.render_computer_use_overlay(cx);
-        let toast = self.toast.clone();
+        self.start_toast_dismiss_timer(cx);
+        let toast = self
+            .toast
+            .as_ref()
+            .map(|toast| (toast.message.clone(), toast.id));
+        let toast = toast.map(|(message, generation)| {
+            self.render_toast(message, generation, cx)
+                .into_any_element()
+        });
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
         let chat_viewport_width = f32::from(window.viewport_size().width)
             - if self.sidebar_visible {
@@ -155,32 +163,6 @@ impl Render for Waku {
                         self.render_transcript(window, chat_viewport_width, cx)
                     })
                     .children(permission)
-                    .when_some(toast, |element, toast| {
-                        element.child(
-                            div()
-                                .px(px(20.0))
-                                .pb(px(8.0))
-                                .flex()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .max_w(px(CONTENT_MAX_WIDTH))
-                                        .min_w_0()
-                                        .px(px(12.0))
-                                        .py(px(6.0))
-                                        .rounded_full()
-                                        .border_1()
-                                        .border_color(theme.border_strong)
-                                        .bg(theme.raised)
-                                        .shadow_sm()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.danger)
-                                        .whitespace_normal()
-                                        .child(SharedString::from(toast)),
-                                ),
-                        )
-                    })
                     .when(self.selected_project().is_some(), |element| {
                         element
                             .children(self.render_queued_messages(cx))
@@ -188,6 +170,7 @@ impl Render for Waku {
                             .child(self.render_workspace_footer(cx))
                     })
                     .relative()
+                    .children(toast)
                     .children(computer_use)
                     .when(self.sidebar_visible, |element| {
                         element.child(self.render_panel_resize_handle(
@@ -201,5 +184,108 @@ impl Render for Waku {
                 root.child(self.render_right_panel(right_panel_width, window, cx))
             })
             .into_any_element()
+    }
+}
+
+impl Waku {
+    fn render_toast(
+        &self,
+        message: String,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = Theme::current(cx);
+        let palette = MarkdownPalette::from_theme(&theme);
+        let text_ctx = MarkdownCtx::new(
+            format!("toast-{generation}"),
+            &palette,
+            MarkdownMetrics::COMPACT,
+            self.toast_selection.clone(),
+        );
+        let message = md::render::plain_text(
+            message,
+            md::render::SANS_FAMILY,
+            FontWeight::NORMAL,
+            theme.text,
+            &text_ctx,
+        );
+        let dismiss = div()
+            .id(SharedString::from(format!("dismiss-toast-{generation}")))
+            .tab_index(0)
+            .size(px(26.0))
+            .flex_none()
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .active(|element| element.bg(theme.overlay_strong))
+            .tooltip(Tooltip::text("Dismiss notification"))
+            .child(icon("icons/x.svg", 12.0, theme.text_tertiary))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.hide_toast();
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space" | "escape") {
+                    this.hide_toast();
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }));
+
+        div()
+            .id(SharedString::from(format!("toast-layer-{generation}")))
+            .absolute()
+            .left_0()
+            .top(px(56.0))
+            .w_full()
+            .px(px(20.0))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id(SharedString::from(format!("toast-{generation}")))
+                    .occlude()
+                    .max_w(px(560.0))
+                    .min_w_0()
+                    .px(px(10.0))
+                    .py(px(7.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(theme.raised)
+                    .shadow_lg()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .text_size(px(11.5))
+                    .line_height(px(16.0))
+                    .text_color(theme.text)
+                    .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
+                        this.set_toast_hovered(*hovering, cx);
+                    }))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(md::render::frame_reset(self.toast_selection.clone()))
+                    .child(icon("icons/alert.svg", 14.0, theme.danger))
+                    .child(div().flex_1().min_w_0().whitespace_normal().child(message))
+                    .child(dismiss)
+                    .child(self.toast_selection_input()),
+            )
+            // Keep the toast top-centered just beneath Waku's 48px header.
+            // GPUI's animation path honors the system reduce-motion preference
+            // and resolves immediately.
+            .with_animation(
+                SharedString::from(format!("toast-enter-{generation}")),
+                Animation::new(TOAST_ANIMATION_DURATION).with_easing(ease_out_quint()),
+                |element, delta| {
+                    element
+                        .top(px(48.0 + 8.0 * delta))
+                        .opacity(0.4 + 0.6 * delta)
+                },
+            )
     }
 }

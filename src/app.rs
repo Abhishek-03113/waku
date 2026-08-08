@@ -101,6 +101,11 @@ const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const IDLE_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
+/// Zed keeps status toasts on screen for ten seconds, pausing the countdown
+/// while the pointer is over the toast so a long message remains readable.
+const DEFAULT_TOAST_DURATION: Duration = Duration::from_secs(5);
+const MINIMUM_TOAST_RESUME_DURATION: Duration = Duration::from_millis(800);
+const TOAST_ANIMATION_DURATION: Duration = Duration::from_millis(150);
 /// Source bytes of parsed messages kept across session switches.
 ///
 /// Measured at ~17x expansion into parsed structures, plus flattened text and
@@ -171,6 +176,22 @@ struct PanelResizeDrag {
     target: PanelResizeTarget,
     start_mouse_x: f32,
     start_width: f32,
+}
+
+#[derive(Debug)]
+struct ToastState {
+    message: String,
+    id: u64,
+    timer_generation: u64,
+    duration_remaining: Duration,
+    timer_started: Option<Instant>,
+    hovered: bool,
+}
+
+fn paused_toast_duration(remaining: Duration, elapsed: Duration) -> Duration {
+    remaining
+        .saturating_sub(elapsed)
+        .max(MINIMUM_TOAST_RESUME_DURATION)
 }
 
 /// A file dropped onto the composer, staged as a chip until the next
@@ -662,7 +683,8 @@ pub struct Waku {
     scene_overlay_enabled: bool,
     settings_page: Option<SettingsPage>,
     header_drag_armed: bool,
-    toast: Option<String>,
+    toast: Option<ToastState>,
+    toast_generation: u64,
     copied_message_feedback: HashMap<Uuid, u64>,
     copied_message_generation: u64,
     copied_activity_feedback: HashMap<(Uuid, ActivityDisclosureSectionKind), u64>,
@@ -725,6 +747,10 @@ pub struct Waku {
     block_markdown: RefCell<HashMap<usize, MarkdownView>>,
     /// Transcript-wide text selection, spanning messages and tool output.
     transcript_selection: TranscriptSelection,
+    /// Independent selection for the transient toast message. Keeping it out
+    /// of the transcript registry prevents an overlay from joining a drag to
+    /// whatever happens to be painted beneath it.
+    toast_selection: TranscriptSelection,
     transcript_scrollbar: Rc<ScrollbarState>,
     /// Every menu site in the app, keyed by a stable id. Handles are created on
     /// first use and live as long as the window.
@@ -789,6 +815,88 @@ fn migrate_legacy_projectless_projects(state: &mut PersistedState) -> std::io::R
 }
 
 impl Waku {
+    pub(super) fn show_toast(&mut self, message: impl Into<String>) {
+        self.toast_selection.selection.borrow_mut().clear();
+        self.toast_selection.registry.borrow_mut().clear();
+        self.toast_generation = self.toast_generation.wrapping_add(1);
+        self.toast = Some(ToastState {
+            message: message.into(),
+            id: self.toast_generation,
+            timer_generation: self.toast_generation,
+            duration_remaining: DEFAULT_TOAST_DURATION,
+            timer_started: None,
+            hovered: false,
+        });
+    }
+
+    pub(super) fn replace_toast(&mut self, message: Option<String>) {
+        match message {
+            Some(message) => self.show_toast(message),
+            None => self.hide_toast(),
+        }
+    }
+
+    pub(super) fn hide_toast(&mut self) {
+        if self.toast.take().is_some() {
+            self.toast_selection.selection.borrow_mut().clear();
+            self.toast_selection.registry.borrow_mut().clear();
+            // Detached timers are deliberately cheap, but their generation
+            // must stop them from dismissing a newer toast.
+            self.toast_generation = self.toast_generation.wrapping_add(1);
+        }
+    }
+
+    fn start_toast_dismiss_timer(&mut self, cx: &mut Context<Self>) {
+        let Some(toast) = self.toast.as_mut() else {
+            return;
+        };
+        if toast.hovered || toast.timer_started.is_some() {
+            return;
+        }
+
+        let duration = toast.duration_remaining;
+        let generation = toast.timer_generation;
+        toast.timer_started = Some(Instant::now());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.timer_generation == generation && !toast.hovered)
+                {
+                    this.hide_toast();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn set_toast_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        let Some(toast) = self.toast.as_ref() else {
+            return;
+        };
+        if toast.hovered == hovered {
+            return;
+        }
+
+        self.toast_generation = self.toast_generation.wrapping_add(1);
+        let generation = self.toast_generation;
+        let toast = self.toast.as_mut().expect("toast checked above");
+        toast.timer_generation = generation;
+        toast.hovered = hovered;
+        if hovered {
+            if let Some(started) = toast.timer_started.take() {
+                toast.duration_remaining =
+                    paused_toast_duration(toast.duration_remaining, started.elapsed());
+            }
+        } else {
+            toast.timer_started = None;
+            self.start_toast_dismiss_timer(cx);
+        }
+    }
+
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
         let model_search = cx.new(|cx| {
@@ -1259,7 +1367,15 @@ impl Waku {
                 scene_overlay_enabled,
                 settings_page: None,
                 header_drag_armed: false,
-                toast: startup_toast,
+                toast: startup_toast.map(|message| ToastState {
+                    message,
+                    id: 0,
+                    timer_generation: 0,
+                    duration_remaining: DEFAULT_TOAST_DURATION,
+                    timer_started: None,
+                    hovered: false,
+                }),
+                toast_generation: 0,
                 copied_message_feedback: HashMap::new(),
                 copied_message_generation: 0,
                 copied_activity_feedback: HashMap::new(),
@@ -1288,6 +1404,7 @@ impl Waku {
                 message_markdown: RefCell::new(HashMap::new()),
                 block_markdown: RefCell::new(HashMap::new()),
                 transcript_selection: TranscriptSelection::default(),
+                toast_selection: TranscriptSelection::default(),
                 transcript_scrollbar: ScrollbarState::new(),
                 menus: RefCell::new(HashMap::new()),
                 navigation_rail: navigation_rail.clone(),

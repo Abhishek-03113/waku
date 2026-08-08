@@ -2302,7 +2302,7 @@ impl Waku {
             return;
         };
         if !editor.writable {
-            self.toast = Some(if editor.reading {
+            self.show_toast(if editor.reading {
                 format!("Could not save {relative_path}: still opening")
             } else {
                 format!("Could not save {relative_path}: file is not editable")
@@ -2325,7 +2325,7 @@ impl Waku {
                 cx.notify();
             }
             Err(error) => {
-                self.toast = Some(format!("Could not save {relative_path}: {error}"));
+                self.show_toast(format!("Could not save {relative_path}: {error}"));
                 cx.notify();
             }
         }

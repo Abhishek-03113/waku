@@ -317,7 +317,7 @@ impl Waku {
     pub(super) fn save(&mut self) {
         self.last_stream_save = Instant::now();
         if let Err(error) = self.store.save(&mut self.state) {
-            self.toast = Some(format!("Could not save local state: {error}"));
+            self.show_toast(format!("Could not save local state: {error}"));
         } else {
             self.stream_state_dirty = false;
         }
@@ -397,8 +397,9 @@ impl Waku {
                     let checkpoint = match captured {
                         Ok(checkpoint) => checkpoint,
                         Err(error) => {
-                            waku.toast =
-                                Some(format!("Could not capture the turn checkpoint: {error}"));
+                            waku.show_toast(format!(
+                                "Could not capture the turn checkpoint: {error}"
+                            ));
                             Checkpoint {
                                 turn_count,
                                 git_ref: checkpoint::checkpoint_ref(session_id, turn_count),
@@ -438,7 +439,7 @@ impl Waku {
             .find(|session| session.id == session_id)
             .cloned()
         else {
-            self.toast = Some("That response is no longer available.".into());
+            self.show_toast("That response is no longer available.");
             cx.notify();
             return;
         };
@@ -450,7 +451,7 @@ impl Waku {
                 .get(turn_count.saturating_sub(1))
                 .is_none_or(|turn| turn.turn_count != turn_count || !turn.provider_turn_started)
         {
-            self.toast = Some("That response cannot be forked right now.".into());
+            self.show_toast("That response cannot be forked right now.");
             cx.notify();
             return;
         }
@@ -458,7 +459,7 @@ impl Waku {
             .workspace_path_for_session(&source)
             .map(std::path::Path::to_path_buf)
         else {
-            self.toast = Some("That task's project could not be found.".into());
+            self.show_toast("That task's project could not be found.");
             cx.notify();
             return;
         };
@@ -621,13 +622,13 @@ impl Waku {
                     // process on that fork. Recreate it from the source cursor.
                     self.runtimes.remove(&session_id);
                 }
-                self.toast = Some(format!("Could not fork the task: {error}"));
+                self.show_toast(format!("Could not fork the task: {error}"));
                 cx.notify();
                 return;
             }
         };
         let Some(mut forked) = source.fork_through_turn(turn_count, provider_cursor) else {
-            self.toast = Some("That response could not be copied into a new task.".into());
+            self.show_toast("That response could not be copied into a new task.");
             cx.notify();
             return;
         };
@@ -654,7 +655,7 @@ impl Waku {
 
         self.state.push_session(forked);
         self.select_session(fork_id, cx);
-        self.toast = Some(match checkpoint_warning {
+        self.show_toast(match checkpoint_warning {
             Some(error) => {
                 format!("Forked task; some Git checkpoints could not be copied: {error}")
             }
@@ -695,7 +696,7 @@ impl Waku {
                     })
             })
         else {
-            self.toast = Some("That message is not editable right now.".into());
+            self.show_toast("That message is not editable right now.");
             cx.notify();
             return;
         };
@@ -720,7 +721,7 @@ impl Waku {
             turn_count,
             input: input.clone(),
         });
-        self.toast = None;
+        self.hide_toast();
         self.remeasure_transcript_message(message_index);
         let focus_handle = input.read(cx).focus();
         window.focus(&focus_handle, cx);
@@ -755,7 +756,7 @@ impl Waku {
         };
         let prompt = edit.input.read(cx).content().trim().to_owned();
         if prompt.is_empty() {
-            self.toast = Some("The edited message cannot be empty.".into());
+            self.show_toast("The edited message cannot be empty.");
             cx.notify();
             return;
         }
@@ -814,24 +815,24 @@ impl Waku {
                     })
             })
         else {
-            self.toast = Some("That message is no longer available.".into());
+            self.show_toast("That message is no longer available.");
             cx.notify();
             return false;
         };
         if self.state.selected_session != Some(session_id) {
-            self.toast = Some("Select the task before rewinding its conversation.".into());
+            self.show_toast("Select the task before rewinding its conversation.");
             cx.notify();
             return false;
         }
         if !matches!(status, SessionStatus::Idle | SessionStatus::Failed) {
-            self.toast = Some("Stop the current turn before rewinding the conversation.".into());
+            self.show_toast("Stop the current turn before rewinding the conversation.");
             cx.notify();
             return false;
         }
         if !provider.supports_conversation_rollback()
             || (rollback_turns > 0 && provider_cursor.is_none())
         {
-            self.toast = Some(format!(
+            self.show_toast(format!(
                 "{} cannot safely roll back its native conversation yet.",
                 provider.display_name()
             ));
@@ -846,13 +847,13 @@ impl Waku {
             .and_then(|session| self.workspace_path_for_session(session))
             .map(std::path::Path::to_path_buf)
         else {
-            self.toast = Some("The task's project could not be found.".into());
+            self.show_toast("The task's project could not be found.");
             cx.notify();
             return false;
         };
         let checkpoint_ref = checkpoint::checkpoint_ref(session_id, retained_turn_count);
         if !checkpoint::has_ref(&project_path, &checkpoint_ref) {
-            self.toast = Some("The message's pre-turn Git checkpoint is missing.".into());
+            self.show_toast("The message's pre-turn Git checkpoint is missing.");
             cx.notify();
             return false;
         }
@@ -870,7 +871,7 @@ impl Waku {
                     ..
                 }) = provider_cursor.as_ref()
                 else {
-                    self.toast = Some("Claude's native session cursor is unavailable.".into());
+                    self.show_toast("Claude's native session cursor is unavailable.");
                     cx.notify();
                     return false;
                 };
@@ -882,7 +883,7 @@ impl Waku {
                     ) {
                         Ok(message_id) => message_id,
                         Err(error) => {
-                            self.toast = Some(format!(
+                            self.show_toast(format!(
                                 "Claude's native checkpoint for that turn is unavailable: {error}"
                             ));
                             cx.notify();
@@ -897,14 +898,14 @@ impl Waku {
 
         let safety_ref = format!("refs/waku/revert-backup-{session_id}-{}", Uuid::new_v4());
         if let Err(error) = checkpoint::capture_ref(&project_path, &safety_ref) {
-            self.toast = Some(format!(
+            self.show_toast(format!(
                 "Could not create a rewind safety snapshot: {error}"
             ));
             cx.notify();
             return false;
         }
         if let Err(error) = checkpoint::restore_ref(&project_path, &checkpoint_ref) {
-            self.toast = Some(match checkpoint::restore_ref(&project_path, &safety_ref) {
+            self.show_toast(match checkpoint::restore_ref(&project_path, &safety_ref) {
                 Ok(()) => {
                     let _ = checkpoint::delete_ref(&project_path, &safety_ref);
                     format!("Could not restore the checkpoint: {error}")
@@ -934,7 +935,7 @@ impl Waku {
                     session_id: native_session_id,
                 }) = provider_cursor.as_ref()
                 else {
-                    self.toast = Some("OpenCode's native session cursor is unavailable.".into());
+                    self.show_toast("OpenCode's native session cursor is unavailable.");
                     cx.notify();
                     return false;
                 };
@@ -944,7 +945,7 @@ impl Waku {
                     .find(|probe| probe.provider == ProviderKind::OpenCode)
                     .and_then(|probe| probe.path.as_deref())
                 else {
-                    self.toast = Some("OpenCode is not installed or could not be found.".into());
+                    self.show_toast("OpenCode is not installed or could not be found.");
                     cx.notify();
                     return false;
                 };
@@ -961,7 +962,7 @@ impl Waku {
                     fork_context,
                 }) = provider_cursor.as_ref()
                 else {
-                    self.toast = Some("Amp's native thread cursor is unavailable.".into());
+                    self.show_toast("Amp's native thread cursor is unavailable.");
                     cx.notify();
                     return false;
                 };
@@ -971,7 +972,7 @@ impl Waku {
                     .find(|probe| probe.provider == ProviderKind::Amp)
                     .and_then(|probe| probe.path.as_deref())
                 else {
-                    self.toast = Some("Amp is not installed or could not be found.".into());
+                    self.show_toast("Amp is not installed or could not be found.");
                     cx.notify();
                     return false;
                 };
@@ -990,7 +991,7 @@ impl Waku {
                     .iter()
                     .find(|session| session.id == session_id)
                 else {
-                    self.toast = Some("Cursor's Waku task is unavailable.".into());
+                    self.show_toast("Cursor's Waku task is unavailable.");
                     cx.notify();
                     return false;
                 };
@@ -1001,7 +1002,7 @@ impl Waku {
                     session_id: native_session_id,
                 }) = provider_cursor.as_ref()
                 else {
-                    self.toast = Some("Grok's native session cursor is unavailable.".into());
+                    self.show_toast("Grok's native session cursor is unavailable.");
                     cx.notify();
                     return false;
                 };
@@ -1011,7 +1012,7 @@ impl Waku {
                     .find(|probe| probe.provider == ProviderKind::Grok)
                     .and_then(|probe| probe.path.as_deref())
                 else {
-                    self.toast = Some("Grok Build is not installed or could not be found.".into());
+                    self.show_toast("Grok Build is not installed or could not be found.");
                     cx.notify();
                     return false;
                 };
@@ -1029,7 +1030,7 @@ impl Waku {
             };
             if let Err(error) = rollback_result {
                 let restore_result = checkpoint::restore_ref(&project_path, &safety_ref);
-                self.toast = Some(match restore_result {
+                self.show_toast(match restore_result {
                     Ok(()) => {
                         let _ = checkpoint::delete_ref(&project_path, &safety_ref);
                         format!(
@@ -1111,7 +1112,7 @@ impl Waku {
         self.expanded_activity_items.clear();
         self.expanded_turns.clear();
         self.splice_transcript_rows_after_visibility_change(&previous_kinds);
-        self.toast = Some(match cleanup_result {
+        self.show_toast(match cleanup_result {
             Ok(()) => format!("Rewound to before turn {turn_count}."),
             Err(error) => {
                 format!("Rewound to before turn {turn_count}; stale refs remain: {error}")
@@ -1441,7 +1442,7 @@ impl Waku {
             if selected {
                 self.composer
                     .update(cx, |input, cx| input.set_content(prompt, cx));
-                self.toast = Some(format!("Could not create the worktree: {error}"));
+                self.show_toast(format!("Could not create the worktree: {error}"));
             }
             cx.notify();
             return;
@@ -1508,7 +1509,7 @@ impl Waku {
             self.expanded_activity_items.clear();
             self.expanded_turns.clear();
             self.message_edit = None;
-            self.toast = checkpoint_warning;
+            self.replace_toast(checkpoint_warning);
             self.transcript_anchor.set(transcript_anchor);
             self.transcript_anchor_end_space.set(Pixels::ZERO);
             self.transcript_anchor_following.set(true);
@@ -1575,7 +1576,7 @@ impl Waku {
             self.computer_permission_request_pending = false;
             match result {
                 Ok(permissions) => self.computer_permissions = permissions,
-                Err(error) => self.toast = Some(error),
+                Err(error) => self.show_toast(error),
             }
             changed = true;
         }

@@ -42,7 +42,7 @@ impl Waku {
             return;
         };
         if let Err(error) = self.store.hydrate(session) {
-            self.toast = Some(format!("Could not open that session: {error}"));
+            self.show_toast(format!("Could not open that session: {error}"));
         }
     }
 
@@ -527,7 +527,7 @@ impl Waku {
         self.block_markdown.borrow_mut().clear();
         self.menus.borrow_mut().clear();
         self.message_edit = None;
-        self.toast = None;
+        self.hide_toast();
         self.navigation_rail_active_scale_enabled.set(false);
         self.navigation_rail_reset_generation
             .set(self.navigation_rail_reset_generation.get().wrapping_add(1));
@@ -926,7 +926,7 @@ impl Waku {
         let workspace = match crate::projectless::create_workspace(None) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.toast = Some(format!("Could not create a task beneath ~/.waku: {error}"));
+                self.show_toast(format!("Could not create a task beneath ~/.waku: {error}"));
                 cx.notify();
                 return;
             }
