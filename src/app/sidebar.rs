@@ -609,7 +609,6 @@ impl Waku {
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current(cx);
         let session = self.selected_session();
-        let status = session.map(|session| session.status).unwrap_or_default();
         div()
             .id("window-header")
             .h(px(48.0))
@@ -689,32 +688,6 @@ impl Waku {
                     cx,
                 ),
             )
-            .when(status != SessionStatus::Idle, |element| {
-                element.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(px(11.0))
-                        .line_height(px(14.0))
-                        .child(match status {
-                            SessionStatus::Connecting | SessionStatus::Working => {
-                                pulse_dot("header-status-pulse", 5.0, status_color(&theme, status))
-                            }
-                            _ => div()
-                                .w(px(5.0))
-                                .h(px(5.0))
-                                .rounded_full()
-                                .bg(status_color(&theme, status))
-                                .into_any_element(),
-                        })
-                        .child(
-                            div()
-                                .text_color(status_color(&theme, status))
-                                .child(status_label(status)),
-                        ),
-                )
-            })
             .when(!self.right_panel_visible, |element| {
                 element
                     .when(self.fps_counter_visible, |element| {

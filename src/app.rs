@@ -57,7 +57,7 @@ use crate::theme::{Theme, ThemePreference};
 use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, icon, icon_button, provider_color,
-    provider_icon, status_color, status_label,
+    provider_icon, status_color,
 };
 use crate::{
     CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
@@ -865,6 +865,9 @@ pub struct Waku {
     navigation_rail: Entity<ConversationNavigationRail>,
     navigation_rail_active_scale_enabled: Rc<Cell<bool>>,
     navigation_rail_reset_generation: Cell<u64>,
+    /// Whether the once-per-second "Working for Ns" notify loop is live, so a
+    /// frame can ensure it without stacking a second loop.
+    working_elapsed_ticker_running: Cell<bool>,
     /// Live frames-per-second measurement for the header counter.
     fps_last_frame: Instant,
     fps_frame_count: u64,
@@ -935,13 +938,6 @@ impl Waku {
             timer_started: None,
             hovered: false,
         });
-    }
-
-    pub(super) fn replace_toast(&mut self, message: Option<String>) {
-        match message {
-            Some(message) => self.show_toast(message),
-            None => self.hide_toast(),
-        }
     }
 
     pub(super) fn hide_toast(&mut self) {
@@ -1559,6 +1555,7 @@ impl Waku {
                 navigation_rail: navigation_rail.clone(),
                 navigation_rail_active_scale_enabled,
                 navigation_rail_reset_generation: Cell::new(0),
+                working_elapsed_ticker_running: Cell::new(false),
                 fps_last_frame: Instant::now(),
                 fps_frame_count: 0,
                 fps_value: 0,

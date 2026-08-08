@@ -323,6 +323,11 @@ pub(super) enum TranscriptRowKind {
     Message(usize),
     TurnBlock(usize),
     TurnFold(Uuid),
+    /// The live turn's footer — pulsing dots plus "Working for Ns". Present
+    /// from the moment the prompt lands until the turn settles, so a provider
+    /// that has not produced a chunk yet still shows visible progress, and a
+    /// streaming one shows it below whatever content has arrived.
+    WorkingIndicator,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -554,7 +559,9 @@ pub(super) fn assistant_response_footer(
             .iter()
             .filter_map(|row| match *row {
                 TranscriptRowKind::Message(index) => session.messages.get(index),
-                TranscriptRowKind::TurnBlock(_) | TranscriptRowKind::TurnFold(_) => None,
+                TranscriptRowKind::TurnBlock(_)
+                | TranscriptRowKind::TurnFold(_)
+                | TranscriptRowKind::WorkingIndicator => None,
             })
             .filter(|part| !part.content.trim().is_empty())
             .map(|part| part.content.as_str())
@@ -692,6 +699,11 @@ pub(super) fn transcript_rows_fingerprint(
 ) -> u64 {
     let mut hash = mix_uuid(EMPTY_TRANSCRIPT_FINGERPRINT, session.id);
 
+    // The working indicator row exists only while the session is busy, and a
+    // driver error can drop the busy status without touching any turn — the
+    // turn statuses below would hold still while the rows moved.
+    hash = mix(hash, session.status.is_busy() as u64);
+
     hash = mix(hash, session.messages.len() as u64);
     for message in &session.messages {
         hash = mix(hash, message.role as u64);
@@ -784,7 +796,7 @@ pub(super) fn folded_transcript_row_kinds(
         hidden_rows.extend(hidden.iter().copied());
     }
 
-    let mut rows = Vec::with_capacity(raw_rows.len() + fold_anchors.len());
+    let mut rows = Vec::with_capacity(raw_rows.len() + fold_anchors.len() + 1);
     for row in raw_rows {
         if let Some(turn_id) = fold_anchors.get(&row).copied() {
             rows.push(TranscriptRowKind::TurnFold(turn_id));
@@ -794,6 +806,12 @@ pub(super) fn folded_transcript_row_kinds(
         if expanded || !hidden_rows.contains(&row) {
             rows.push(row);
         }
+    }
+    // A busy session with a live turn closes with the working indicator. The
+    // busy check matters on its own: a driver error can fail the session while
+    // its turn is still marked running, and "Working" over a failure misleads.
+    if session.status.is_busy() && session.active_turn_id().is_some() {
+        rows.push(TranscriptRowKind::WorkingIndicator);
     }
     rows
 }
@@ -847,7 +865,9 @@ fn turn_answer_start(session: &AgentSession, turn_rows: &[TranscriptRowKind]) ->
             .messages
             .get(message_index)
             .is_some_and(|message| !message.content.trim().is_empty()),
-        TranscriptRowKind::TurnBlock(_) | TranscriptRowKind::TurnFold(_) => false,
+        TranscriptRowKind::TurnBlock(_)
+        | TranscriptRowKind::TurnFold(_)
+        | TranscriptRowKind::WorkingIndicator => false,
     };
     let Some(last_text) = turn_rows.iter().rposition(is_answer_text) else {
         return turn_rows.len();
@@ -863,6 +883,7 @@ fn row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
         TranscriptRowKind::Message(index) => session.messages.get(index)?.turn_id,
         TranscriptRowKind::TurnBlock(index) => session.transcript_blocks.get(index)?.turn_id,
         TranscriptRowKind::TurnFold(turn_id) => Some(turn_id),
+        TranscriptRowKind::WorkingIndicator => None,
     }
 }
 
@@ -906,6 +927,29 @@ pub(super) fn format_worked_duration(seconds: u64) -> String {
                 unit(hours, "hour")
             } else {
                 format!("{} {}", unit(hours, "hour"), unit(minutes, "minute"))
+            }
+        }
+    }
+}
+
+/// The live indicator's elapsed label: "9s", "1m 5s", "1h 2m". Compact where
+/// [`format_worked_duration`] is prose — the settled fold reads as a sentence,
+/// while this one ticks every second beside the pulsing dots.
+pub(super) fn format_working_elapsed(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => {
+            let minutes = seconds / 60;
+            match seconds % 60 {
+                0 => format!("{minutes}m"),
+                seconds => format!("{minutes}m {seconds}s"),
+            }
+        }
+        _ => {
+            let hours = seconds / 3600;
+            match (seconds % 3600) / 60 {
+                0 => format!("{hours}h"),
+                minutes => format!("{hours}h {minutes}m"),
             }
         }
     }

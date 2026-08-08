@@ -93,6 +93,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.prefetch_checkpoint_refs(cx);
+        self.ensure_working_elapsed_ticker(cx);
         self.sync_transcript_rows();
         self.sync_transcript_layout_width(window);
         let transcript_rows = self.active_transcript_rows().clone();
@@ -889,7 +890,9 @@ impl Waku {
                     message_starts_followup_turn(&session.messages, message_index)
                 })
             }
-            TranscriptRowKind::TurnBlock(_) | TranscriptRowKind::TurnFold(_) => false,
+            TranscriptRowKind::TurnBlock(_)
+            | TranscriptRowKind::TurnFold(_)
+            | TranscriptRowKind::WorkingIndicator => false,
         };
         let inner = match kind {
             TranscriptRowKind::Message(message_index) => self
@@ -964,6 +967,7 @@ impl Waku {
                 })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
+            TranscriptRowKind::WorkingIndicator => self.render_working_indicator_row(&theme),
         };
         div()
             .w_full()
@@ -1036,6 +1040,76 @@ impl Waku {
             )
             .child(div().h(px(1.0)).flex_1().bg(theme.border))
             .into_any_element()
+    }
+
+    /// The live turn's closing row: pulsing dots and "Working for Ns". It is
+    /// on screen from the moment the prompt lands — before the provider has
+    /// produced a single chunk — and stays below whatever streams in until
+    /// the turn settles into its "Worked for N" fold.
+    fn render_working_indicator_row(&self, theme: &Theme) -> AnyElement {
+        let elapsed = self
+            .selected_session()
+            .and_then(|session| session.turns.last())
+            .filter(|turn| turn.status == TurnStatus::Running)
+            .map(|turn| unix_time().saturating_sub(turn.started_at))
+            .unwrap_or(0);
+        div()
+            .h(px(22.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(working_wave_dots(theme.text_tertiary))
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .line_height(px(16.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_tertiary)
+                    .child(SharedString::from(format!(
+                        "Working for {}",
+                        format_working_elapsed(elapsed)
+                    ))),
+            )
+            .into_any_element()
+    }
+
+    /// Keep the "Working for Ns" label advancing once per second.
+    ///
+    /// While motion is enabled the pulsing dots already schedule animation
+    /// frames, and every frame rebuilds the visible rows with a fresh elapsed
+    /// value. Under reduce-motion GPUI renders those animations as a single
+    /// static frame, so without this notify the label would freeze at the
+    /// second it first appeared.
+    fn ensure_working_elapsed_ticker(&self, cx: &mut Context<Self>) {
+        if self.working_elapsed_ticker_running.get()
+            || !self
+                .selected_session()
+                .is_some_and(|session| session.status.is_busy())
+        {
+            return;
+        }
+        self.working_elapsed_ticker_running.set(true);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let still_busy = this.update(cx, |this, cx| {
+                    let busy = this
+                        .selected_session()
+                        .is_some_and(|session| session.status.is_busy());
+                    if busy {
+                        cx.notify();
+                    } else {
+                        // The next busy render restarts the loop.
+                        this.working_elapsed_ticker_running.set(false);
+                    }
+                    busy
+                });
+                if !still_busy.unwrap_or(false) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The turn's reasoning as a disclosure: open while the provider is

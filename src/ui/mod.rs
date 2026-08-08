@@ -79,16 +79,6 @@ pub fn status_color(theme: &Theme, status: SessionStatus) -> Hsla {
     }
 }
 
-pub fn status_label(status: SessionStatus) -> &'static str {
-    match status {
-        SessionStatus::Idle => "Ready",
-        SessionStatus::Connecting => "Connecting",
-        SessionStatus::Working => "Working",
-        SessionStatus::Waiting => "Needs input",
-        SessionStatus::Failed => "Failed",
-    }
-}
-
 pub fn activity_icon(kind: ActivityKind) -> &'static str {
     match kind {
         ActivityKind::Reasoning => "icons/sparkle.svg",
@@ -388,10 +378,5 @@ mod tests {
                 "missing embedded icon: {path}"
             );
         }
-    }
-
-    #[test]
-    fn failed_sessions_are_not_labeled_as_user_stops() {
-        assert_eq!(status_label(SessionStatus::Failed), "Failed");
     }
 }

@@ -1501,11 +1501,46 @@ impl Waku {
         // Busy is visible before any Git work begins. The separate transient
         // set keeps this non-cancellable phase visually distinct from a
         // connecting provider, whose runtime already has a working Stop path.
-        if let Some(session) = self.state.session_mut(session_id) {
+        //
+        // The turn also begins now, not once preparation settles: the sent
+        // message and its working indicator belong in the transcript the
+        // moment the submission is accepted — a first prompt otherwise leaves
+        // the empty state on screen for as long as a `git add -A` takes.
+        // Preparation failure unwinds the turn and restores the prompt.
+        if selected {
+            self.sync_transcript_rows();
+        }
+        let previous_kinds = if selected {
+            self.transcript_row_kinds.borrow().clone()
+        } else {
+            Vec::new()
+        };
+        let transcript_anchor = if let Some(session) = self.state.session_mut(session_id) {
+            session.set_title_from_prompt(&prompt);
+            let turn_id = session.begin_turn(&prompt);
             session.status = SessionStatus::Connecting;
             session.updated_at = unix_time();
-        }
+            selected.then_some(TranscriptAnchor {
+                session_id,
+                turn_id,
+            })
+        } else {
+            None
+        };
         self.submission_preparations.insert(session_id);
+        if selected {
+            self.reasoning_expanded.clear();
+            self.activities_expanded.clear();
+            self.expanded_activity_items.clear();
+            self.expanded_turns.clear();
+            self.message_edit = None;
+            self.hide_toast();
+            self.transcript_anchor.set(transcript_anchor);
+            self.transcript_anchor_end_space.set(Pixels::ZERO);
+            self.transcript_anchor_following.set(true);
+            self.splice_transcript_rows_after_visibility_change(&previous_kinds);
+            self.scroll_transcript_to_anchor();
+        }
         cx.notify();
 
         let recovery_prompt = prompt.clone();
@@ -1546,13 +1581,35 @@ impl Waku {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.submission_preparations.remove(&session_id);
+                if selected {
+                    self.sync_transcript_rows();
+                }
+                let previous_kinds = if selected {
+                    self.transcript_row_kinds.borrow().clone()
+                } else {
+                    Vec::new()
+                };
                 if let Some(session) = self.state.session_mut(session_id)
                     && session.status == SessionStatus::Connecting
-                    && session.active_turn_id().is_none()
                 {
+                    // The submission never reached a provider and its prompt
+                    // returns to the composer, so the eagerly-begun turn and
+                    // its message leave the transcript with it.
+                    if let Some(turn_id) = session.active_turn_id() {
+                        session.unwind_unstarted_turn(turn_id);
+                    }
                     session.status = SessionStatus::Idle;
                 }
                 if selected {
+                    if self
+                        .transcript_anchor
+                        .get()
+                        .is_some_and(|anchor| anchor.session_id == session_id)
+                    {
+                        self.transcript_anchor.set(None);
+                        self.transcript_anchor_following.set(false);
+                    }
+                    self.splice_transcript_rows_after_visibility_change(&previous_kinds);
                     self.composer
                         .update(cx, |input, cx| input.set_content(prompt, cx));
                     self.show_toast(format!("Could not create the worktree: {error}"));
@@ -1566,13 +1623,20 @@ impl Waku {
             checkpoint_warning,
             driver: prepared_driver,
         } = prepared;
+        // The turn began at accept time; it must still be the untouched one
+        // this preparation belongs to. Cancellation is blocked while the
+        // preparation set holds the session, so a mismatch means the session
+        // was replaced under the preparation rather than a user action.
         let can_start = self
             .state
             .sessions
             .iter()
             .find(|session| session.id == session_id)
             .is_some_and(|session| {
-                session.status == SessionStatus::Connecting && session.active_turn_id().is_none()
+                session.status == SessionStatus::Connecting
+                    && session.turns.last().is_some_and(|turn| {
+                        turn.status == TurnStatus::Running && !turn.provider_turn_started
+                    })
             });
         if !can_start {
             self.submission_preparations.remove(&session_id);
@@ -1600,25 +1664,6 @@ impl Waku {
             Some(Err(error)) => Err(error),
         };
         self.invalidate_checkpoint_refs();
-        if selected {
-            self.sync_transcript_rows();
-        }
-        let previous_kinds = if selected {
-            self.transcript_row_kinds.borrow().clone()
-        } else {
-            Vec::new()
-        };
-        let transcript_anchor = if let Some(session) = self.state.session_mut(session_id) {
-            session.set_title_from_prompt(&prompt);
-            let turn_id = session.begin_turn(&prompt);
-            session.updated_at = unix_time();
-            selected.then_some(TranscriptAnchor {
-                session_id,
-                turn_id,
-            })
-        } else {
-            None
-        };
         if let Some(runtime) = self.runtimes.get_mut(&session_id) {
             runtime.pending_events.clear();
             runtime.stream_remeasure_pending = false;
@@ -1627,18 +1672,11 @@ impl Waku {
             runtime.pending_computer_approval = None;
             runtime.last_active_at = Instant::now();
         }
-        if selected {
-            self.reasoning_expanded.clear();
-            self.activities_expanded.clear();
-            self.expanded_activity_items.clear();
-            self.expanded_turns.clear();
-            self.message_edit = None;
-            self.replace_toast(checkpoint_warning);
-            self.transcript_anchor.set(transcript_anchor);
-            self.transcript_anchor_end_space.set(Pixels::ZERO);
-            self.transcript_anchor_following.set(true);
-            self.splice_transcript_rows_after_visibility_change(&previous_kinds);
-            self.scroll_transcript_to_anchor();
+        // The transcript already shows the turn — the prompt message, its
+        // anchor, and the working indicator all landed at accept time. Only
+        // preparation's own output surfaces here.
+        if selected && let Some(warning) = checkpoint_warning {
+            self.show_toast(warning);
         }
         // Template commands expand here, at the seam between the transcript
         // and the transport: the user message keeps the typed `/name …` —

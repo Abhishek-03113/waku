@@ -9,12 +9,13 @@ use super::{
     assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
     compact_driver_error, disclosure_leading_space, fenced_code, fitted_file_tree_width,
     fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
-    maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
-    navigation_rail_height, navigation_rail_scale, navigation_rail_tick_count,
-    navigation_rail_tick_turn, navigation_rail_turn_tick, paused_toast_duration, pop_stream_chunk,
-    session_is_reapable, should_show_navigation_rail, take_stream_prefix,
-    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
-    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
+    format_working_elapsed, maintain_transcript_anchor, message_starts_followup_turn,
+    navigation_preview_snippet, navigation_rail_height, navigation_rail_scale,
+    navigation_rail_tick_count, navigation_rail_tick_turn, navigation_rail_turn_tick,
+    paused_toast_duration, pop_stream_chunk, session_is_reapable, should_show_navigation_rail,
+    take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -1049,6 +1050,72 @@ fn worked_duration_uses_readable_units() {
     assert_eq!(format_worked_duration(60), "1 minute");
     assert_eq!(format_worked_duration(88), "1 minute 28 seconds");
     assert_eq!(format_worked_duration(7_320), "2 hours 2 minutes");
+}
+
+#[test]
+fn working_elapsed_stays_compact() {
+    assert_eq!(format_working_elapsed(0), "0s");
+    assert_eq!(format_working_elapsed(9), "9s");
+    assert_eq!(format_working_elapsed(59), "59s");
+    assert_eq!(format_working_elapsed(60), "1m");
+    assert_eq!(format_working_elapsed(65), "1m 5s");
+    assert_eq!(format_working_elapsed(3_600), "1h");
+    assert_eq!(format_working_elapsed(3_720), "1h 2m");
+}
+
+/// The working indicator is on screen for the whole live turn: from before
+/// the first chunk, below streamed content once chunks arrive, through the
+/// permission pause — and gone the moment the session stops being busy.
+#[test]
+fn a_busy_turn_pins_the_working_indicator_after_the_last_row() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("Build it");
+    session.status = SessionStatus::Working;
+
+    // No chunks yet: the indicator alone follows the prompt.
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), WorkingIndicator]
+    );
+
+    // Streamed content pushes it down, never off.
+    session.push_message(MessageRole::Assistant, "Starting on it.");
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), Message(1), WorkingIndicator]
+    );
+
+    // A pending permission keeps the turn — and the indicator — alive.
+    session.status = SessionStatus::Waiting;
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), Message(1), WorkingIndicator]
+    );
+
+    // A driver error can fail the session while its last turn is still
+    // marked running. Busy-ness is the only input that moved, so the
+    // fingerprint must move with it or the stale indicator lingers.
+    session.status = SessionStatus::Working;
+    let busy_fingerprint = transcript_rows_fingerprint(&session, &HashSet::new());
+    session.status = SessionStatus::Failed;
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), Message(1)]
+    );
+    assert_ne!(
+        transcript_rows_fingerprint(&session, &HashSet::new()),
+        busy_fingerprint,
+        "dropping the busy status changed the rows but not the fingerprint"
+    );
+
+    // A settled turn swaps the indicator for its final transcript shape.
+    session.status = SessionStatus::Working;
+    session.finish_active_turn(TurnStatus::Completed);
+    session.status = SessionStatus::Idle;
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), Message(1)]
+    );
 }
 
 #[test]

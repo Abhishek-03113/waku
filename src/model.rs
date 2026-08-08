@@ -657,11 +657,13 @@ fn detail_loaded_default() -> bool {
 }
 
 impl AgentSession {
+    pub const DEFAULT_TITLE: &'static str = "New task";
+
     pub fn new(project_id: Uuid, provider: ProviderKind) -> Self {
         let now = unix_time();
         Self {
             id: Uuid::new_v4(),
-            title: "New task".to_owned(),
+            title: Self::DEFAULT_TITLE.to_owned(),
             project_id,
             workspace: SessionWorkspace::Local,
             provider,
@@ -715,7 +717,7 @@ impl AgentSession {
     }
 
     pub fn set_title_from_prompt(&mut self, prompt: &str) {
-        if self.messages.len() > 1 || self.title != "New task" {
+        if self.messages.len() > 1 || self.title != Self::DEFAULT_TITLE {
             return;
         }
         let mut title = prompt
@@ -834,6 +836,26 @@ impl AgentSession {
             .last()
             .filter(|turn| turn.status == TurnStatus::Running)
             .map(|turn| turn.id)
+    }
+
+    /// Undo [`Self::begin_turn`] for a turn whose provider never started —
+    /// the submission-preparation failure path, where the prompt returns to
+    /// the composer. The turn and its messages leave the transcript, and a
+    /// first-prompt unwind also gives back the default title that
+    /// [`Self::set_title_from_prompt`] replaced.
+    pub fn unwind_unstarted_turn(&mut self, turn_id: Uuid) {
+        let unstarted = self.turns.last().is_some_and(|turn| {
+            turn.id == turn_id && turn.status == TurnStatus::Running && !turn.provider_turn_started
+        });
+        if !unstarted {
+            return;
+        }
+        self.turns.pop();
+        self.messages
+            .retain(|message| message.turn_id != Some(turn_id));
+        if self.messages.is_empty() {
+            self.title = Self::DEFAULT_TITLE.to_owned();
+        }
     }
 
     pub fn mark_active_turn_provider_started(&mut self) {
@@ -1370,6 +1392,40 @@ mod tests {
         session.set_title_from_prompt(&prompt);
         assert_eq!(session.title.chars().count(), 54);
         assert!(session.title.ends_with('…'));
+    }
+
+    #[test]
+    fn a_failed_preparation_unwinds_the_turn_it_eagerly_began() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+
+        // A first prompt: the unwind restores the untouched session, default
+        // title included, because the prompt returns to the composer.
+        session.set_title_from_prompt("Build the thing");
+        let turn_id = session.begin_turn("Build the thing");
+        session.unwind_unstarted_turn(turn_id);
+        assert!(session.turns.is_empty());
+        assert!(session.messages.is_empty());
+        assert_eq!(session.title, AgentSession::DEFAULT_TITLE);
+
+        // A follow-up prompt unwinds only itself.
+        let first = session.begin_turn("first");
+        session.push_message(MessageRole::Assistant, "done");
+        session.finish_active_turn(TurnStatus::Completed);
+        session.set_title_from_prompt("first");
+        let follow_up = session.begin_turn("second");
+        session.unwind_unstarted_turn(follow_up);
+        assert_eq!(session.turns.len(), 1);
+        assert_eq!(session.turns[0].id, first);
+        assert_eq!(session.messages.len(), 2);
+
+        // A turn the provider has already started never unwinds — losing a
+        // live conversation turn would desync the provider transcript.
+        let started = session.begin_turn("third");
+        session.mark_active_turn_provider_started();
+        session.unwind_unstarted_turn(started);
+        assert_eq!(session.turns.len(), 2);
+        assert_eq!(session.messages.len(), 3);
     }
 
     #[test]
