@@ -77,7 +77,13 @@ impl Waku {
             && self
                 .usage_history_scanned_at
                 .is_some_and(|scanned| scanned.elapsed() < USAGE_RESCAN_AFTER);
-        if !force && (satisfied || self.usage_history_pending_for == Some(window)) {
+        // A scan for this window already inbound absorbs even a forced
+        // refresh — it only just started reading the same files, and a
+        // duplicate would burn a background pass to produce the same answer.
+        if self.usage_history_pending_for == Some(window) {
+            return;
+        }
+        if !force && satisfied {
             return;
         }
         self.usage_history_pending_for = Some(window);
@@ -339,6 +345,23 @@ impl Waku {
             window_options
         });
 
+        let refresh_glyph: AnyElement = if pending {
+            icon("icons/loader-circle.svg", 12.0, theme.text_tertiary)
+                .with_animation(
+                    "usage-refresh-spinner",
+                    Animation::new(Duration::from_millis(900))
+                        .repeat()
+                        .with_easing(gpui::linear),
+                    |icon, delta| {
+                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(
+                            delta,
+                        )))
+                    },
+                )
+                .into_any_element()
+        } else {
+            icon("icons/rotate-cw.svg", 12.0, theme.text_tertiary).into_any_element()
+        };
         let refresh = div()
             .id("usage-refresh")
             .tab_index(0)
@@ -351,14 +374,13 @@ impl Waku {
             .flex()
             .items_center()
             .cursor_default()
-            .opacity(if pending { 0.6 } else { 1.0 })
             .hover(|element| element.bg(theme.overlay))
             .tooltip(Tooltip::text(if pending {
                 "Scanning provider transcripts…"
             } else {
                 "Rescan provider transcripts"
             }))
-            .child(icon("icons/rotate-cw.svg", 12.0, theme.text_tertiary))
+            .child(refresh_glyph)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.ensure_usage_history(true, cx);
             }));
