@@ -61,7 +61,7 @@ use crate::ui::{
 };
 use crate::{
     CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
-    NavigateBack, NavigateForward, NewSession, OpenFind, OpenFindReplace, OpenSettings,
+    NavigateBack, NavigateForward, NewProject, NewSession, OpenFind, OpenFindReplace, OpenSettings,
     ReplaceAllMatches, SaveFile, ToggleFindCaseSensitive, ToggleFindRegex, ToggleFindWholeWord,
     ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel, ToggleSidebar, ToggleUsagePanel,
 };

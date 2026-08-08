@@ -43,8 +43,10 @@ actions!(
     waku,
     [
         Quit,
+        About,
         CloseWindow,
         NewSession,
+        NewProject,
         OpenSettings,
         CheckForUpdates,
         ToggleSidebar,
@@ -124,11 +126,13 @@ fn main() {
                     updater.check_for_updates();
                 }
             });
+            cx.on_action(|_: &About, _| crate::platform::show_about_panel());
 
             cx.bind_keys([
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("cmd-w", CloseWindow, None),
                 KeyBinding::new("cmd-n", NewSession, None),
+                KeyBinding::new("cmd-o", NewProject, None),
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-shift-b", ToggleRightPanel, None),
@@ -181,14 +185,11 @@ fn main() {
                     name: APP_NAME.into(),
                     disabled: false,
                     items: {
-                        let mut items = vec![
-                            MenuItem::action("New Session", NewSession),
-                            MenuItem::separator(),
-                        ];
+                        let mut items = vec![MenuItem::action(format!("About {APP_NAME}"), About)];
                         if updater_available {
                             items.push(MenuItem::action("Check for Updates…", CheckForUpdates));
-                            items.push(MenuItem::separator());
                         }
+                        items.push(MenuItem::separator());
                         items.extend([
                             MenuItem::action("Settings…", OpenSettings),
                             MenuItem::separator(),
@@ -196,6 +197,14 @@ fn main() {
                         ]);
                         items
                     },
+                },
+                Menu {
+                    name: "File".into(),
+                    disabled: false,
+                    items: vec![
+                        MenuItem::action("New Session", NewSession),
+                        MenuItem::action("New Project…", NewProject),
+                    ],
                 },
                 Menu {
                     name: "Edit".into(),

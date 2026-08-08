@@ -227,6 +227,15 @@ impl Waku {
         window.focus(&focus_handle, cx);
     }
 
+    pub(super) fn new_project_action(
+        &mut self,
+        _: &NewProject,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_project(cx);
+    }
+
     pub(super) fn open_settings_action(
         &mut self,
         _: &OpenSettings,

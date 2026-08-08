@@ -1,5 +1,19 @@
 use gpui::Window;
 
+#[cfg(target_os = "macos")]
+pub fn show_about_panel() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+    NSApplication::sharedApplication(main_thread).orderFrontStandardAboutPanel(None);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn show_about_panel() {}
+
 /// Register embedded font data with CoreText at process scope. GPUI's
 /// `add_fonts` only feeds its private font-kit source, which CoreText cascade
 /// matching cannot see — and it refuses symbols-only faces outright (fonts
