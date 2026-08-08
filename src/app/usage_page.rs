@@ -1377,7 +1377,7 @@ impl Waku {
 
     /// Display name and path caption for a project row: a known Waku
     /// project's name when the path is one, else the directory's own name
-    /// over its compacted path.
+    /// alongside its full path.
     fn usage_project_identity(&self, project: &ProjectSlice) -> (String, Option<String>) {
         if project.path.is_empty() {
             return ("Other sessions".to_owned(), None);
@@ -1395,7 +1395,8 @@ impl Waku {
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .unwrap_or_else(|| project.path.clone());
-        (name, Some(compact_path(path)))
+        let home = crate::projectless::workspace_root().and_then(Path::parent);
+        (name, Some(usage_project_path(path, home)))
     }
 }
 
@@ -2684,6 +2685,15 @@ fn format_percent(share: f64) -> String {
     format!("{:.1}%", share * 100.0)
 }
 
+/// Keep the full project path, abbreviating only the user's home directory.
+fn usage_project_path(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(relative) if relative.as_os_str().is_empty() => "~".to_owned(),
+        Some(relative) => format!("~/{}", relative.display()),
+        None => path.display().to_string(),
+    }
+}
+
 /// `2026-08-07` → `Aug 7`.
 fn format_day_short(day: NaiveDate) -> String {
     day.format("%b %-d").to_string()
@@ -2740,6 +2750,25 @@ mod tests {
         assert_eq!(format_usd(0.0), "$0.00");
         assert_eq!(format_usd(1_234.5), "$1,234.50");
         assert_eq!(format_usd(1_234_567.891), "$1,234,567.89");
+    }
+
+    #[test]
+    fn project_paths_only_shorten_the_home_prefix() {
+        let home = Path::new("/Users/developer");
+
+        assert_eq!(
+            usage_project_path(Path::new("/Users/developer/dev/waku"), Some(home)),
+            "~/dev/waku"
+        );
+        assert_eq!(usage_project_path(home, Some(home)), "~");
+        assert_eq!(
+            usage_project_path(Path::new("/Users/developer-2/waku"), Some(home)),
+            "/Users/developer-2/waku"
+        );
+        assert_eq!(
+            usage_project_path(Path::new("/Volumes/work/waku"), Some(home)),
+            "/Volumes/work/waku"
+        );
     }
 
     #[test]
