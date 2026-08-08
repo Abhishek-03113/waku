@@ -191,17 +191,11 @@ impl Waku {
             .child(self.render_usage_header(range, pending, &theme, cx));
 
         let Some(history) = history else {
+            // First scan (or a window-shape switch) still in flight: a
+            // skeleton in the incoming view's silhouette, so the swap to
+            // data doesn't jump.
             return page
-                .child(
-                    div()
-                        .py(px(64.0))
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_secondary)
-                        .child("Scanning provider transcripts…"),
-                )
+                .child(usage_skeleton(self.usage_view, &theme))
                 .into_any_element();
         };
 
@@ -1805,6 +1799,176 @@ fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
                     format_usd(history.quality.cache_savings_usd),
                 )),
         )
+}
+
+/* ------------------------------------------------------------------------- */
+/* Loading skeleton                                                          */
+/* ------------------------------------------------------------------------- */
+
+/// Placeholder for the page while the first transcript scan is in flight,
+/// shaped like the view it will become and pulsing gently. `with_animation`
+/// honors the system's reduce-motion setting on its own.
+fn usage_skeleton(view: UsageViewMode, theme: &Theme) -> AnyElement {
+    let bar = |width: f32, height: f32| {
+        div()
+            .h(px(height))
+            .w(px(width))
+            .flex_none()
+            .rounded(px(height / 2.0))
+            .bg(theme.overlay_strong)
+    };
+    let track = || {
+        div()
+            .h(px(4.0))
+            .w_full()
+            .flex_none()
+            .rounded_full()
+            .bg(theme.overlay_strong)
+    };
+
+    let body = match view {
+        UsageViewMode::Daily => {
+            let provider_group = || {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(bar(110.0, 12.0))
+                            .child(div().flex_1())
+                            .child(bar(56.0, 12.0)),
+                    )
+                    .child(track())
+                    .child(bar(150.0, 8.0))
+            };
+            div()
+                .mt(px(20.0))
+                .flex()
+                .items_start()
+                .gap(px(28.0))
+                .child(
+                    div()
+                        .w(px(300.0))
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .gap(px(18.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.0))
+                                .child(bar(96.0, 9.0))
+                                .child(bar(150.0, 26.0))
+                                .child(bar(180.0, 9.0)),
+                        )
+                        .child(provider_group())
+                        .child(provider_group()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(320.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .child(bar(90.0, 12.0))
+                                .child(div().flex_1())
+                                .child(bar(150.0, 10.0)),
+                        )
+                        .child(
+                            div()
+                                .h(px(CHART_HEIGHT))
+                                .w_full()
+                                .rounded(px(8.0))
+                                .bg(theme.overlay),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .child(bar(40.0, 8.0))
+                                .child(bar(40.0, 8.0))
+                                .child(bar(40.0, 8.0)),
+                        ),
+                )
+                .into_any_element()
+        }
+        UsageViewMode::Monthly | UsageViewMode::Projects => {
+            let row = || {
+                div()
+                    .py(px(13.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(bar(110.0, 12.0))
+                            .child(div().flex_1())
+                            .child(bar(64.0, 12.0)),
+                    )
+                    .child(bar(210.0, 8.0))
+                    .child(track())
+            };
+            let mut card = div()
+                .mt(px(20.0))
+                .px(px(20.0))
+                .rounded(px(13.0))
+                .bg(theme.raised)
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .py(px(13.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(16.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(5.0))
+                                .child(bar(90.0, 12.0))
+                                .child(bar(170.0, 8.0)),
+                        )
+                        .when(view == UsageViewMode::Projects, |element| {
+                            element.child(
+                                div()
+                                    .h(px(26.0))
+                                    .w(px(240.0))
+                                    .flex_none()
+                                    .rounded(px(7.0))
+                                    .bg(theme.overlay_strong),
+                            )
+                        }),
+                );
+            for _ in 0..4 {
+                card = card.child(row());
+            }
+            card.into_any_element()
+        }
+    };
+
+    div()
+        .child(body)
+        .with_animation(
+            "usage-page-skeleton",
+            Animation::new(Duration::from_millis(1400))
+                .repeat()
+                .with_easing(pulsating_between(0.45, 0.9)),
+            |element, delta| element.opacity(delta),
+        )
+        .into_any_element()
 }
 
 /* ------------------------------------------------------------------------- */
