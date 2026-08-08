@@ -29,7 +29,10 @@ export const sessions = sqliteTable(
   {
     id: text("id").primaryKey(),
     projectId: text("project_id").notNull(),
+    /** Explicit user title; "New task" means the automatic fallback is active. */
     title: text("title").notNull(),
+    /** Provider-generated title, with the first prompt as a local fallback. */
+    autoTitle: text("auto_title"),
     provider: text("provider").notNull(),
     model: text("model"),
     status: text("status").notNull(),

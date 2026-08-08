@@ -593,7 +593,13 @@ pub struct ContextUsage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentSession {
     pub id: Uuid,
+    /// A title explicitly chosen by the user. [`Self::DEFAULT_TITLE`] means
+    /// no explicit title has been set, so [`Self::auto_title`] may be shown.
     pub title: String,
+    /// Best-effort title supplied by the provider, or derived locally from the
+    /// first prompt until the provider reports a better one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_title: Option<String>,
     pub project_id: Uuid,
     /// Local project checkout or an isolated Git worktree for this task.
     #[serde(default, skip_serializing_if = "SessionWorkspace::is_local")]
@@ -664,6 +670,7 @@ impl AgentSession {
         Self {
             id: Uuid::new_v4(),
             title: Self::DEFAULT_TITLE.to_owned(),
+            auto_title: None,
             project_id,
             workspace: SessionWorkspace::Local,
             provider,
@@ -716,8 +723,20 @@ impl AgentSession {
             || self.provider_cursor.is_some()
     }
 
+    pub fn display_title(&self) -> &str {
+        if self.title != Self::DEFAULT_TITLE && !self.title.trim().is_empty() {
+            &self.title
+        } else {
+            self.auto_title
+                .as_deref()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or(Self::DEFAULT_TITLE)
+        }
+    }
+
     pub fn set_title_from_prompt(&mut self, prompt: &str) {
-        if self.messages.len() > 1 || self.title != Self::DEFAULT_TITLE {
+        if self.messages.len() > 1 || self.title != Self::DEFAULT_TITLE || self.auto_title.is_some()
+        {
             return;
         }
         let mut title = prompt
@@ -729,8 +748,23 @@ impl AgentSession {
             if title.chars().count() > 54 {
                 title = format!("{}…", title.chars().take(53).collect::<String>());
             }
-            self.title = title;
+            self.auto_title = Some(title);
         }
+    }
+
+    /// Replaces the provider-owned title without disturbing an explicit user
+    /// title. Returns whether the stored fallback changed.
+    pub fn set_auto_title(&mut self, title: Option<String>) -> bool {
+        let title = title.and_then(|title| {
+            let title = title.trim();
+            (!title.is_empty()).then(|| title.to_owned())
+        });
+        if self.auto_title == title {
+            return false;
+        }
+        self.auto_title = title;
+        self.updated_at = unix_time();
+        true
     }
 
     pub fn can_choose_model(&self, provider: ProviderKind) -> bool {
@@ -854,7 +888,7 @@ impl AgentSession {
         self.messages
             .retain(|message| message.turn_id != Some(turn_id));
         if self.messages.is_empty() {
-            self.title = Self::DEFAULT_TITLE.to_owned();
+            self.auto_title = None;
         }
     }
 
@@ -943,6 +977,7 @@ impl AgentSession {
             return None;
         }
 
+        let fork_title = format!("{} (fork)", self.display_title());
         let mut fork = self.clone();
         fork.truncate_after_turn(turn_count);
         let fork_id = Uuid::new_v4();
@@ -970,7 +1005,8 @@ impl AgentSession {
 
         let now = unix_time();
         fork.id = fork_id;
-        fork.title = format!("{} (fork)", self.title);
+        fork.title = Self::DEFAULT_TITLE.to_owned();
+        fork.auto_title = Some(fork_title);
         fork.status = SessionStatus::Idle;
         fork.created_at = now;
         fork.updated_at = now;
@@ -1067,6 +1103,9 @@ pub enum DriverEvent {
     Connected {
         provider_cursor: Option<ProviderResumeCursor>,
     },
+    /// A provider-owned, automatically generated session title. `None`
+    /// clears that fallback but never overwrites a user-owned title.
+    AutoTitleUpdated(Option<String>),
     /// The slash commands the live process itself reports — Claude's
     /// stream-json init handshake and ACP's `available_commands_update`.
     /// Authoritative over filesystem discovery, which cannot see plugin or
@@ -1310,9 +1349,28 @@ mod tests {
         let mut session = AgentSession::new(project.id, ProviderKind::Codex);
         session.set_title_from_prompt("build a really polished local agent interface for rust");
         assert_eq!(
-            session.title,
+            session.auto_title.as_deref(),
+            Some("build a really polished local agent interface")
+        );
+        assert_eq!(
+            session.display_title(),
             "build a really polished local agent interface"
         );
+        assert_eq!(session.title, AgentSession::DEFAULT_TITLE);
+    }
+
+    #[test]
+    fn provider_title_replaces_prompt_fallback_but_not_an_explicit_title() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::OpenCode);
+        session.set_title_from_prompt("investigate the broken provider event");
+
+        assert!(session.set_auto_title(Some("Fix provider title events".into())));
+        assert_eq!(session.display_title(), "Fix provider title events");
+
+        session.title = "My title".into();
+        assert!(session.set_auto_title(Some("A newer provider title".into())));
+        assert_eq!(session.display_title(), "My title");
     }
 
     #[test]
@@ -1390,8 +1448,9 @@ mod tests {
         let mut session = AgentSession::new(project.id, ProviderKind::Claude);
         let prompt = "界".repeat(70);
         session.set_title_from_prompt(&prompt);
-        assert_eq!(session.title.chars().count(), 54);
-        assert!(session.title.ends_with('…'));
+        let title = session.auto_title.as_deref().unwrap();
+        assert_eq!(title.chars().count(), 54);
+        assert!(title.ends_with('…'));
     }
 
     #[test]
@@ -1407,6 +1466,7 @@ mod tests {
         assert!(session.turns.is_empty());
         assert!(session.messages.is_empty());
         assert_eq!(session.title, AgentSession::DEFAULT_TITLE);
+        assert!(session.auto_title.is_none());
 
         // A follow-up prompt unwinds only itself.
         let first = session.begin_turn("first");
@@ -1489,7 +1549,8 @@ mod tests {
             .unwrap();
 
         assert_ne!(fork.id, session.id);
-        assert_eq!(fork.title, "New task (fork)");
+        assert_eq!(fork.title, AgentSession::DEFAULT_TITLE);
+        assert_eq!(fork.auto_title.as_deref(), Some("New task (fork)"));
         assert_eq!(fork.status, SessionStatus::Idle);
         assert_eq!(fork.turns.len(), 1);
         assert_eq!(fork.messages.len(), 2);

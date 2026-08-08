@@ -513,7 +513,7 @@ impl Waku {
                     let fork = crate::claude_session::fork_session_at(
                         native_session_id,
                         &resume_at,
-                        &format!("{} (fork)", source.title),
+                        &format!("{} (fork)", source.display_title()),
                     )?;
                     let fork_resume_at = fork
                         .message_ids
@@ -823,7 +823,7 @@ impl Waku {
                                 .checked_sub(1)
                                 .and_then(|index| session.turns.get(index))
                                 .and_then(|turn| turn.provider_resume_at.clone()),
-                            session.title.clone(),
+                            session.display_title().to_owned(),
                         )
                     })
             })
@@ -1789,6 +1789,7 @@ impl Waku {
                 force_save |= matches!(
                     event,
                     DriverEvent::Connected { .. }
+                        | DriverEvent::AutoTitleUpdated(_)
                         | DriverEvent::Permission { .. }
                         | DriverEvent::SteerAccepted { .. }
                         | DriverEvent::SteerRejected { .. }

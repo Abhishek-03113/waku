@@ -605,7 +605,7 @@ impl StateStore {
         // how much history exists.
         let mut sessions = connection
             .prepare(
-                "SELECT id, project_id, title, provider, model, status,
+                "SELECT id, project_id, title, auto_title, provider, model, status,
                         created_at, updated_at, last_reply_at
                  FROM sessions ORDER BY updated_at",
             )
@@ -617,12 +617,13 @@ impl StateStore {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
                     row.get::<_, i64>(7)?,
-                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
                 ))
             })
             .map_err(to_io_error)?
@@ -885,6 +886,7 @@ type SessionColumns = (
     String,
     String,
     String,
+    Option<String>,
     String,
     Option<String>,
     String,
@@ -899,11 +901,22 @@ type SessionColumns = (
 /// Built field by field rather than through `AgentSession::new`, which would
 /// spend a random-number syscall per row on an id that is then overwritten.
 fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
-    let (id, project_id, title, provider, model, status, created_at, updated_at, last_reply_at) =
-        row;
+    let (
+        id,
+        project_id,
+        title,
+        auto_title,
+        provider,
+        model,
+        status,
+        created_at,
+        updated_at,
+        last_reply_at,
+    ) = row;
     Some(AgentSession {
         id: Uuid::parse_str(&id).ok()?,
         title,
+        auto_title,
         project_id: Uuid::parse_str(&project_id).ok()?,
         workspace: SessionWorkspace::Local,
         provider: serde_json::from_value(serde_json::Value::String(provider)).ok()?,
@@ -1077,12 +1090,13 @@ fn message_fingerprint(message: &Message, position: usize) -> u64 {
 /// Columns the sidebar sorts and filters on are stored alongside the JSON so
 /// listing sessions never has to deserialize a transcript.
 const UPSERT_SESSION: &str = "INSERT INTO sessions(
-         id, project_id, title, provider, model, status,
+         id, project_id, title, auto_title, provider, model, status,
          created_at, updated_at, last_reply_at
-     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
      ON CONFLICT(id) DO UPDATE SET
          project_id    = excluded.project_id,
          title         = excluded.title,
+         auto_title    = excluded.auto_title,
          provider      = excluded.provider,
          model         = excluded.model,
          status        = excluded.status,
@@ -1118,6 +1132,7 @@ fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
         Value::Text(session.id.to_string()),
         Value::Text(session.project_id.to_string()),
         Value::Text(session.title.clone()),
+        session.auto_title.clone().map_or(Value::Null, Value::Text),
         Value::Text(tag_of(session.provider)),
         session.model.clone().map_or(Value::Null, Value::Text),
         Value::Text(tag_of(session.status)),
@@ -1200,7 +1215,7 @@ mod tests {
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         let id = state.sessions[0].id;
-        state.sessions[0].title = "Investigate".into();
+        state.sessions[0].auto_title = Some("Investigate".into());
         state.sessions[0].workspace = SessionWorkspace::Worktree {
             path: PathBuf::from("/tmp/worktrees/investigate"),
             branch: "waku/investigate".into(),
@@ -1214,7 +1229,9 @@ mod tests {
         let mut restored = reopened.load().unwrap();
         let session = &restored.sessions[0];
         // The list has everything it renders...
-        assert_eq!(session.title, "Investigate");
+        assert_eq!(session.title, AgentSession::DEFAULT_TITLE);
+        assert_eq!(session.auto_title.as_deref(), Some("Investigate"));
+        assert_eq!(session.display_title(), "Investigate");
         assert_eq!(session.id, id);
         assert!(session.last_reply_at.is_some());
         // ...and none of what it does not.
@@ -1714,6 +1731,40 @@ mod tests {
     }
 
     #[test]
+    fn auto_title_migration_preserves_existing_generated_titles_as_fallbacks() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(MIGRATIONS_TABLE).unwrap();
+        connection.execute_batch(MIGRATIONS[0].1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO migrations(tag, applied_at) VALUES(?1, 0)",
+                params![MIGRATIONS[0].0],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions(
+                    id, project_id, title, provider, model, status,
+                    created_at, updated_at, last_reply_at
+                 ) VALUES('session-1', 'project-1', 'Investigate the parser',
+                          'codex', NULL, 'idle', 1, 1, NULL)",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(apply_migrations(&connection).unwrap(), MIGRATIONS.len() - 1);
+        let (title, auto_title): (String, Option<String>) = connection
+            .query_row(
+                "SELECT title, auto_title FROM sessions WHERE id = 'session-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, AgentSession::DEFAULT_TITLE);
+        assert_eq!(auto_title.as_deref(), Some("Investigate the parser"));
+    }
+
+    #[test]
     fn messages_round_trip_through_their_own_table() {
         let directory = temporary_directory();
         let store = store_in(&directory);
@@ -1850,6 +1901,7 @@ mod tests {
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].title = "Investigate the parser".into();
+        state.sessions[0].auto_title = Some("Provider fallback".into());
         state.sessions[0].model = Some("gpt-5.6-luna".into());
         state.sessions[0].begin_turn("Go");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
@@ -1857,34 +1909,30 @@ mod tests {
         store.save(&mut state).unwrap();
 
         let connection = Connection::open(directory.join("app.db")).unwrap();
-        let (title, provider, model, status, created, updated, last_reply): (
-            String,
-            String,
-            Option<String>,
-            String,
-            i64,
-            i64,
-            Option<i64>,
-        ) = connection
+        let columns = connection
             .query_row(
-                "SELECT title, provider, model, status, created_at, updated_at, last_reply_at
+                "SELECT title, auto_title, provider, model, status,
+                        created_at, updated_at, last_reply_at
                  FROM sessions WHERE id = ?1",
                 params![session.id.to_string()],
                 |row| {
                     Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
                     ))
                 },
             )
             .unwrap();
+        let (title, auto_title, provider, model, status, created, updated, last_reply) = columns;
 
         assert_eq!(title, "Investigate the parser");
+        assert_eq!(auto_title.as_deref(), Some("Provider fallback"));
         assert_eq!(provider, tag_of(session.provider));
         assert_eq!(model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(status, tag_of(session.status));

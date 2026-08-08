@@ -212,6 +212,11 @@ impl Waku {
                     }
                 }
             }
+            DriverEvent::AutoTitleUpdated(title) => {
+                if let Some(session) = self.state.session_mut(session_id) {
+                    session.set_auto_title(title);
+                }
+            }
             DriverEvent::AvailableCommands(names) => {
                 if let Some(session) = self
                     .state

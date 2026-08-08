@@ -592,7 +592,7 @@ impl Waku {
                             .text_overflow(gpui::TextOverflow::Truncate("...".into()))
                             .text_size(px(13.5))
                             .text_color(theme.text)
-                            .child(SharedString::from(session.title.clone())),
+                            .child(SharedString::from(session.display_title().to_owned())),
                     )
                     .when(active, |element| {
                         element.child(pulse_dot(
@@ -724,7 +724,7 @@ impl Waku {
                         .text_color(theme.text)
                         .child(SharedString::from(
                             session
-                                .map(|session| session.title.clone())
+                                .map(|session| session.display_title().to_owned())
                                 .unwrap_or_else(|| "New task".into()),
                         )),
                     cx,

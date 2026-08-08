@@ -928,6 +928,13 @@ fn handle_codex_message(
                 .flatten()
                 .filter_map(|turn| turn.get("id").and_then(Value::as_str).map(str::to_owned))
                 .collect();
+            if let Some(title) = value
+                .pointer("/result/thread/name")
+                .and_then(Value::as_str)
+                .filter(|title| !title.trim().is_empty())
+            {
+                let _ = events.send(DriverEvent::AutoTitleUpdated(Some(title.to_owned())));
+            }
             let _ = events.send(DriverEvent::Connected {
                 provider_cursor: Some(ProviderResumeCursor::Codex {
                     thread_id: id.to_owned(),
@@ -1016,6 +1023,16 @@ fn handle_codex_message(
                 success: status == "completed",
                 summary: error,
             });
+        }
+        "thread/name/updated" => {
+            let current_thread_id = thread_id.lock().clone();
+            if params.get("threadId").and_then(Value::as_str) == current_thread_id.as_deref() {
+                let title = params
+                    .get("threadName")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+            }
         }
         "thread/tokenUsage/updated" => {
             // `last` is the newest model call, so its total is what occupies
@@ -1643,6 +1660,69 @@ mod tests {
             computer_use_runtime::process_executable(std::process::id() as i32),
             Some(current)
         );
+    }
+
+    #[test]
+    fn provider_thread_names_are_forwarded_only_for_the_current_thread() {
+        let thread_id = Mutex::new(None);
+        let turn_id = Mutex::new(None);
+        let turn_ids = Mutex::new(Vec::new());
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+        let mut send = |value| {
+            handle_codex_message(
+                value,
+                &thread_id,
+                &turn_id,
+                &turn_ids,
+                &pending_rollbacks,
+                &pending_forks,
+                &pending_steers,
+                &event_tx,
+                &mut stream_state,
+            );
+        };
+
+        // `thread/start` and `thread/resume` both return the current name.
+        send(json!({
+            "id": 1,
+            "result": {
+                "thread": {
+                    "id": "thread-1",
+                    "name": "Initial provider title",
+                    "turns": []
+                }
+            }
+        }));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(Some(title)) if title == "Initial provider title"
+        ));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::Connected {
+                provider_cursor: Some(ProviderResumeCursor::Codex { thread_id })
+            } if thread_id == "thread-1"
+        ));
+
+        // Exact notification shape from Codex's generated app-server protocol.
+        send(json!({
+            "method": "thread/name/updated",
+            "params": {"threadId": "thread-1", "threadName": "Updated provider title"}
+        }));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(Some(title)) if title == "Updated provider title"
+        ));
+
+        send(json!({
+            "method": "thread/name/updated",
+            "params": {"threadId": "another-thread", "threadName": "Not ours"}
+        }));
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]

@@ -445,11 +445,21 @@ fn handle_event(
                 .unwrap_or("OpenCode reported an error");
             let _ = events.send(DriverEvent::Error(message.to_owned()));
         }
+        "session.updated" => {
+            let title = properties
+                .pointer("/info/title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty() && !title.starts_with("New session - "));
+            if let Some(title) = title {
+                let _ = events.send(DriverEvent::AutoTitleUpdated(Some(title.to_owned())));
+            }
+        }
         _ if kind.starts_with("permission.") => {
             request_permission(properties, events, commands, auto_approve);
         }
-        // `session.created`, `session.updated`, `session.diff`, `message.updated`,
-        // and the plugin/catalog/reference chatter are not transcript content.
+        // `session.created`, `session.diff`, `message.updated`, and the
+        // plugin/catalog/reference chatter are not transcript content.
         _ => {}
     }
 }
@@ -779,6 +789,49 @@ mod tests {
         ));
         assert_eq!(seen.len(), 5, "non-transcript events leaked");
         assert!(!*turn.lock(), "the turn should be settled exactly once");
+    }
+
+    #[test]
+    fn generated_session_titles_replace_the_local_fallback() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+
+        // OpenCode emits this placeholder before its title-generation model call.
+        handle_event(
+            &json!({
+                "type": "session.updated",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "info": {"title": "New session - 2026-08-08T18:33:35.122Z"}
+                }
+            }),
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(event_rx.try_recv().is_err());
+
+        // Exact envelope captured from a live isolated `opencode serve` stream.
+        handle_event(
+            &json!({
+                "type": "session.updated",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "info": {"title": "Generated provider title"}
+                }
+            }),
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(Some(title)) if title == "Generated provider title"
+        ));
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]

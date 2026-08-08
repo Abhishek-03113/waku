@@ -764,6 +764,15 @@ fn handle_message(
                 let _ = events.send(DriverEvent::AvailableCommands(commands));
             }
         }
+        Some("session_info_update") => {
+            if update.get("title").is_some() {
+                let title = update
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+            }
+        }
         Some("usage_update") => {
             // Grok reports the tokens occupying the model's context; a bound
             // arrives under provider-specific names when it arrives at all.
@@ -782,8 +791,7 @@ fn handle_message(
                 });
             }
         }
-        // `user_message_chunk` is Waku's own prompt echoed back, and
-        // `session_info_update` is not transcript content.
+        // `user_message_chunk` is Waku's own prompt echoed back.
         _ => {}
     }
 }
@@ -1104,6 +1112,47 @@ mod tests {
             }
         ));
         assert_eq!(seen.len(), 5, "control traffic leaked into the transcript");
+    }
+
+    #[test]
+    fn session_info_titles_follow_acp_optional_nullable_semantics() {
+        let (pending, prompt, commands, _command_rx, events, event_rx, mut state) = harness();
+        let mut send = |update| {
+            handle_message(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"sessionId": "s", "update": update}
+                }),
+                &pending,
+                &prompt,
+                &commands,
+                &events,
+                true,
+                &mut state,
+            );
+        };
+
+        send(json!({"sessionUpdate": "session_info_update"}));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "an omitted title is no update"
+        );
+
+        send(json!({
+            "sessionUpdate": "session_info_update",
+            "title": "Provider session title"
+        }));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(Some(title)) if title == "Provider session title"
+        ));
+
+        send(json!({"sessionUpdate": "session_info_update", "title": null}));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(None)
+        ));
     }
 
     #[test]

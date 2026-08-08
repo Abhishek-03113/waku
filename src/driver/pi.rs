@@ -264,6 +264,14 @@ impl PiDriver {
                 let _ = writer_events.send(DriverEvent::Connected {
                     provider_cursor: Some(cursor.clone()),
                 });
+                if let Some(title) = state
+                    .pointer("/data/sessionName")
+                    .and_then(Value::as_str)
+                    .filter(|title| !title.trim().is_empty())
+                {
+                    let _ =
+                        writer_events.send(DriverEvent::AutoTitleUpdated(Some(title.to_owned())));
+                }
 
                 // Pi exposes setters for both, so changing either is an RPC on
                 // the live session rather than a restart.
@@ -731,6 +739,15 @@ fn handle_pi_message(
     }
 
     match event_type {
+        "session_info_changed" => {
+            let title = value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned);
+            let _ = events.send(DriverEvent::AutoTitleUpdated(title));
+        }
         "agent_start" | "turn_start" => {
             if !state.run_started {
                 state.run_started = true;
@@ -1138,6 +1155,36 @@ mod tests {
             DriverEvent::TurnFinished { success: true, .. }
         ));
         assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn session_name_changes_are_forwarded_as_automatic_titles() {
+        let (pending, commands, _command_rx, mut state) = harness();
+        let (events, event_rx) = unbounded();
+
+        handle_pi_message(
+            json!({"type": "session_info_changed", "name": "Named by Pi"}),
+            &pending,
+            &commands,
+            &events,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(Some(title)) if title == "Named by Pi"
+        ));
+
+        handle_pi_message(
+            json!({"type": "session_info_changed", "name": null}),
+            &pending,
+            &commands,
+            &events,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(None)
+        ));
     }
 
     #[test]
