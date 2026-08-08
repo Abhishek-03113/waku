@@ -99,7 +99,7 @@ impl Waku {
 
     fn render_settings_sidebar(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let current_page = self.settings_page.unwrap_or(SettingsPage::Appearance);
+        let current_page = self.settings_page.unwrap_or(SettingsPage::General);
         let query = self.settings_search_query(cx);
         let mut navigation = div().flex().flex_col().gap(px(3.0));
 
@@ -224,7 +224,7 @@ impl Waku {
         let pages = visible_settings_pages(&query)
             .map(|(page, ..)| page)
             .collect::<Vec<_>>();
-        let current_page = self.settings_page.unwrap_or(SettingsPage::Appearance);
+        let current_page = self.settings_page.unwrap_or(SettingsPage::General);
         let current = pages.iter().position(|page| *page == current_page);
         let Some(next) = next_picker_highlight(current, pages.len(), key) else {
             return;
@@ -258,7 +258,7 @@ impl Waku {
 
     fn render_settings_content(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let page = self.settings_page.unwrap_or(SettingsPage::Appearance);
+        let page = self.settings_page.unwrap_or(SettingsPage::General);
 
         div()
             .flex_1()

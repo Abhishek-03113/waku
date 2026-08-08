@@ -233,7 +233,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.settings_page = Some(SettingsPage::Appearance);
+        self.settings_page = Some(SettingsPage::General);
         // Sparkle owns this value and its consent prompt can flip it outside
         // the settings UI, so re-mirror it each time settings opens.
         self.automatic_updates_enabled = cx
