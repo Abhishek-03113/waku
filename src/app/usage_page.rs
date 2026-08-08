@@ -234,10 +234,12 @@ impl Waku {
                         .child(usage_quality_panel(history, &theme)),
                 ),
             UsageViewMode::Monthly => page.child(usage_month_list(
+                self,
                 history,
                 &theme,
                 &self.usage_months_scroll,
                 &self.usage_months_scrollbar,
+                cx,
             )),
             UsageViewMode::Projects => page.child(self.render_usage_projects(history, &theme, cx)),
         };
@@ -1257,11 +1259,14 @@ impl Waku {
         let colors = usage_provider_colors(&theme);
         let rows = self.usage_projects_rows.borrow();
         let last = row + 1 == rows.len();
-        let Some(project) = rows.get(row).copied().and_then(|index| {
-            self.usage_history
-                .as_ref()
-                .and_then(|history| history.projects.get(index))
-        }) else {
+        let Some(index) = rows.get(row).copied() else {
+            return div().into_any_element();
+        };
+        let Some(project) = self
+            .usage_history
+            .as_ref()
+            .and_then(|history| history.projects.get(index))
+        else {
             return div().into_any_element();
         };
 
@@ -1283,6 +1288,16 @@ impl Waku {
         if let Some(last_day) = project.last_day {
             caption_parts.push(format!("last active {}", format_day_short(last_day)));
         }
+        let models_control = self.usage_models_control(
+            format!(
+                "usage-project-models-{}-{index}",
+                self.usage_history_generation
+            ),
+            &project.top_models,
+            project.cost_usd,
+            &theme,
+            cx,
+        );
 
         div()
             // The list lays items out at their content size; without an
@@ -1357,22 +1372,62 @@ impl Waku {
                     .gap(px(12.0))
                     .child(usage_provider_values(&theme, &project.by_provider, by_cost))
                     .child(div().flex_1())
-                    .when_some(
-                        usage_top_models_label(&project.top_models),
-                        |element, label| {
-                            element.child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .max_w(px(280.0))
-                                    .text_size(px(9.5))
-                                    .text_color(theme.text_ghost)
-                                    .child(SharedString::from(label)),
-                            )
-                        },
-                    ),
+                    .when_some(models_control, |element, control| element.child(control)),
             )
             .into_any_element()
+    }
+
+    /// A compact model summary that opens a lazy, keyboard-operable detail
+    /// menu. Closed rows retain no cloned model list; only the open row builds
+    /// the detail data and card.
+    fn usage_models_control(
+        &self,
+        id: impl Into<SharedString>,
+        top_models: &[(String, f64)],
+        total_cost: f64,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let label = usage_top_models_label(top_models)?;
+        let model_count = top_models.len() as u64;
+        let id = id.into();
+        let handle = self.menu_handle(id.clone(), cx);
+        let open_models = handle.is_open().then(|| Rc::new(top_models.to_vec()));
+        let trigger = div()
+            .id(SharedString::from(format!("{id}-trigger")))
+            .h(px(22.0))
+            .max_w(px(300.0))
+            .px(px(6.0))
+            .rounded(px(5.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_default()
+            .text_size(px(9.5))
+            .text_color(theme.text_tertiary)
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .when(handle.is_open(), |element| element.bg(theme.overlay_strong))
+            .hover(|element| element.bg(theme.overlay))
+            .tooltip(Tooltip::text(SharedString::from(format!(
+                "Show {} with spend details",
+                count_noun(model_count, "model")
+            ))))
+            .child(div().min_w_0().truncate().child(SharedString::from(label)))
+            .child(icon("icons/chevron-down.svg", 8.0, theme.text_ghost));
+
+        Some(dropdown_menu(
+            trigger,
+            SharedString::from(format!("{id}-popover")),
+            &handle,
+            MenuAlign::BelowRight,
+            move |_| {
+                open_models
+                    .as_ref()
+                    .map(|models| usage_models_menu_items(models.clone(), total_cost))
+                    .unwrap_or_default()
+            },
+        ))
     }
 
     /// Display name and path caption for a project row: a known Waku
@@ -2190,6 +2245,77 @@ fn usage_top_models_label(top_models: &[(String, f64)]) -> Option<String> {
     Some(label)
 }
 
+/// Lazily built contents of a row's model dropdown. A single custom menu row
+/// owns the scrolling list so projects with many models do not grow the card
+/// past the window.
+fn usage_models_menu_items(top_models: Rc<Vec<(String, f64)>>, total_cost: f64) -> Vec<MenuItem> {
+    let count = top_models.len() as u64;
+    let header = if total_cost > 0.0 {
+        format!("{} · by spend", count_noun(count, "model"))
+    } else {
+        count_noun(count, "model")
+    };
+    vec![
+        MenuItem::Header(SharedString::from(header)),
+        MenuItem::custom(move |_, cx| {
+            let theme = Theme::current(cx);
+            let mut rows = div()
+                .id("usage-models-scroll")
+                .w(px(288.0))
+                .max_h(px(320.0))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col();
+            for (index, (name, cost_usd)) in top_models.iter().enumerate() {
+                rows = rows.child(
+                    div()
+                        .min_h(px(34.0))
+                        .py(px(6.0))
+                        .when(index > 0, |element| {
+                            element.border_t_1().border_color(theme.border)
+                        })
+                        .flex()
+                        .items_center()
+                        .gap(px(14.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_secondary)
+                                .child(SharedString::from(name.clone())),
+                        )
+                        .when(total_cost > 0.0, |element| {
+                            element.child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .flex_col()
+                                    .items_end()
+                                    .child(
+                                        div()
+                                            .text_size(px(10.5))
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(format_usd(*cost_usd))),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(9.0))
+                                            .text_color(theme.text_ghost)
+                                            .child(SharedString::from(format_percent(
+                                                *cost_usd / total_cost,
+                                            ))),
+                                    ),
+                            )
+                        }),
+                );
+            }
+            rows.into_any_element()
+        }),
+    ]
+}
+
 /// One tiny bottom-aligned column per day of the month, stacked by provider
 /// and scaled against the whole period's busiest day, so quiet and heavy
 /// months are honestly comparable at a glance. Decorative texture — every
@@ -2259,10 +2385,12 @@ fn usage_month_strip(
 /// the timeline reads honestly. The card pins its header and scrolls the
 /// rows internally, matching the projects view.
 fn usage_month_list(
+    waku: &Waku,
     history: &UsageHistory,
     theme: &Theme,
     scroll: &ScrollHandle,
     scrollbar_state: &Rc<ScrollbarState>,
+    cx: &mut Context<Waku>,
 ) -> Div {
     let by_cost = rank_by_cost(history);
     let colors = usage_provider_colors(theme);
@@ -2298,17 +2426,27 @@ fn usage_month_list(
         for (index, first_day) in months.iter().rev().enumerate() {
             let last = index + 1 == count;
             rows = rows.child(match history.month(*first_day) {
-                Some(month) => usage_month_row(
-                    history,
-                    month,
-                    theme,
-                    colors,
-                    by_cost,
-                    peak,
-                    day_peak,
-                    *first_day == current_month,
-                    last,
-                ),
+                Some(month) => {
+                    let models_control = waku.usage_models_control(
+                        format!("usage-month-models-{first_day}"),
+                        &month.top_models,
+                        month.cost_usd,
+                        theme,
+                        cx,
+                    );
+                    usage_month_row(
+                        history,
+                        month,
+                        theme,
+                        colors,
+                        by_cost,
+                        peak,
+                        day_peak,
+                        *first_day == current_month,
+                        last,
+                        models_control,
+                    )
+                }
                 None => usage_empty_month_row(theme, *first_day, last),
             });
         }
@@ -2371,6 +2509,7 @@ fn usage_month_row(
     day_peak: f64,
     current: bool,
     last: bool,
+    models_control: Option<AnyElement>,
 ) -> Div {
     let value = if by_cost {
         month.cost_usd
@@ -2465,20 +2604,7 @@ fn usage_month_row(
                 .gap(px(12.0))
                 .child(usage_provider_values(theme, &month.by_provider, by_cost))
                 .child(div().flex_1())
-                .when_some(
-                    usage_top_models_label(&month.top_models),
-                    |element, label| {
-                        element.child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .max_w(px(280.0))
-                                .text_size(px(9.5))
-                                .text_color(theme.text_ghost)
-                                .child(SharedString::from(label)),
-                        )
-                    },
-                ),
+                .when_some(models_control, |element, control| element.child(control)),
         )
 }
 
@@ -2743,6 +2869,25 @@ mod tests {
         assert_eq!(format_tokens_compact(950.0), "950");
         assert_eq!(format_tokens_compact(1_000.0), "1K");
         assert_eq!(format_tokens_compact(1_500.0), "1.50K");
+    }
+
+    #[test]
+    fn model_summary_names_the_hidden_count() {
+        let models = vec![
+            ("gpt-5.6-sol".to_owned(), 30.0),
+            ("claude-fable-5".to_owned(), 20.0),
+            ("gpt-5.6-luna".to_owned(), 10.0),
+        ];
+
+        assert_eq!(usage_top_models_label(&[]), None);
+        assert_eq!(
+            usage_top_models_label(&models[..2]).as_deref(),
+            Some("gpt-5.6-sol · claude-fable-5")
+        );
+        assert_eq!(
+            usage_top_models_label(&models).as_deref(),
+            Some("gpt-5.6-sol · claude-fable-5 · +1")
+        );
     }
 
     #[test]
