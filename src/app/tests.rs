@@ -1053,6 +1053,90 @@ fn worked_duration_uses_readable_units() {
 }
 
 #[test]
+fn sidebar_time_labels_prefer_the_live_turn_over_the_last_reply() {
+    use super::sidebar::{format_time_ago, session_time_label};
+
+    assert_eq!(format_time_ago(0), "just now");
+    assert_eq!(format_time_ago(59), "just now");
+    assert_eq!(format_time_ago(300), "5m");
+    assert_eq!(format_time_ago(7_200), "2h");
+    assert_eq!(format_time_ago(420 * 86_400), "420d");
+
+    // Never replied, nothing running: the row stays quiet.
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    assert_eq!(session_time_label(&session, 1_000), None);
+
+    // A live turn counts up instead of showing the previous reply's age.
+    session.last_reply_at = Some(40);
+    session.begin_turn("go");
+    session.status = SessionStatus::Working;
+    session.turns[0].started_at = 100;
+    assert_eq!(
+        session_time_label(&session, 109).as_deref(),
+        Some("Working for 9s")
+    );
+
+    // Settled again: back to how long ago the agent last replied.
+    session.finish_active_turn(TurnStatus::Completed);
+    session.status = SessionStatus::Idle;
+    session.last_reply_at = Some(500);
+    assert_eq!(session_time_label(&session, 800).as_deref(), Some("5m"));
+}
+
+/// The time-label wake-up chain arms exactly one timer, aimed at the next
+/// instant a visible label rolls over. Firing early leaves a stale label on
+/// screen for a unit; firing often burns wake-ups an idle window shouldn't
+/// pay — so the boundary math is pinned here.
+#[test]
+fn time_label_wakes_land_exactly_on_label_boundaries() {
+    use super::next_time_label_change;
+
+    // Nothing on the clock: no sessions, or none that ever replied.
+    assert_eq!(next_time_label_change(&[], 1_000), None);
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    assert_eq!(
+        next_time_label_change(std::slice::from_ref(&session), 1_000),
+        None
+    );
+
+    // "just now" becomes "1m" sixty seconds after the reply.
+    session.last_reply_at = Some(1_000);
+    let sessions = [session];
+    assert_eq!(next_time_label_change(&sessions, 1_030), Some(30));
+    // "1m" → "2m" at the next minute multiple, not on a fixed cadence.
+    assert_eq!(next_time_label_change(&sessions, 1_090), Some(30));
+    // Hours-old labels wake hourly…
+    assert_eq!(
+        next_time_label_change(&sessions, 1_000 + 3 * 3_600 + 1_200),
+        Some(2_400)
+    );
+    // …and day-old labels daily.
+    assert_eq!(
+        next_time_label_change(&sessions, 1_000 + 2 * 86_400 + 3_600),
+        Some(82_800)
+    );
+
+    // The earliest boundary across sessions wins.
+    let mut fresher = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    fresher.last_reply_at = Some(1_000 + 2 * 86_400 + 3_550);
+    let sessions = [&sessions[0], &fresher]
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        next_time_label_change(&sessions, 1_000 + 2 * 86_400 + 3_600),
+        Some(10)
+    );
+
+    // A live turn pins the chain to seconds for its elapsed counter.
+    let mut busy = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    busy.begin_turn("go");
+    busy.status = SessionStatus::Working;
+    let sessions = [busy];
+    assert_eq!(next_time_label_change(&sessions, 1_030), Some(1));
+}
+
+#[test]
 fn working_elapsed_stays_compact() {
     assert_eq!(format_working_elapsed(0), "0s");
     assert_eq!(format_working_elapsed(9), "9s");

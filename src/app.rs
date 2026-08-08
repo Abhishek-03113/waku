@@ -865,9 +865,11 @@ pub struct Waku {
     navigation_rail: Entity<ConversationNavigationRail>,
     navigation_rail_active_scale_enabled: Rc<Cell<bool>>,
     navigation_rail_reset_generation: Cell<u64>,
-    /// Whether the once-per-second "Working for Ns" notify loop is live, so a
-    /// frame can ensure it without stacking a second loop.
-    working_elapsed_ticker_running: Cell<bool>,
+    /// The unix second the pending time-label wake-up targets, or `None` when
+    /// none is armed. See `schedule_time_label_wake`.
+    time_label_wake: Cell<Option<u64>>,
+    /// Bumped per (re)arm so a superseded wake-up discards itself.
+    time_label_wake_generation: Cell<u64>,
     /// Live frames-per-second measurement for the header counter.
     fps_last_frame: Instant,
     fps_frame_count: u64,
@@ -898,6 +900,35 @@ use sidebar::SidebarRow;
 use streaming::*;
 use transcript::*;
 use transcript_view::ConversationNavigationRail;
+
+/// Seconds until any session's time label next changes value, or `None` when
+/// no label is on the clock at all. A running turn's elapsed counter moves
+/// every second; a settled reply's "5m"/"3h"/"2d" moves only at its unit
+/// boundary, so the wake-up this feeds gets rarer as the history ages.
+pub(super) fn next_time_label_change(sessions: &[AgentSession], now: u64) -> Option<u64> {
+    let mut next: Option<u64> = None;
+    for session in sessions {
+        if session.is_busy()
+            && session
+                .turns
+                .last()
+                .is_some_and(|turn| turn.status == TurnStatus::Running)
+        {
+            return Some(1);
+        }
+        if let Some(last_reply_at) = session.last_reply_at {
+            let elapsed = now.saturating_sub(last_reply_at);
+            let step = match elapsed {
+                0..=3_599 => 60,
+                3_600..=86_399 => 3_600,
+                _ => 86_400,
+            };
+            let remaining = (step - elapsed % step).max(1);
+            next = Some(next.map_or(remaining, |next| next.min(remaining)));
+        }
+    }
+    next
+}
 
 fn migrate_legacy_projectless_projects(state: &mut PersistedState) -> std::io::Result<bool> {
     let legacy_indices = state
@@ -938,6 +969,50 @@ impl Waku {
             timer_started: None,
             hovered: false,
         });
+    }
+
+    /// Arm one wake-up for the moment a time-derived label next changes —
+    /// the sidebar's relative reply times and every "Working for Ns" elapsed.
+    ///
+    /// There is deliberately no standing timer. Render calls this each frame;
+    /// while the scheduled instant is unchanged it is a `Cell` comparison and
+    /// nothing spawns. The timer fires exactly when a visible label rolls to
+    /// its next value, notifies once, and the frame that draws the new value
+    /// arms the next boundary. An idle window with hour-old sessions wakes
+    /// once an hour; with nothing to show it wakes never. (T3 Code's
+    /// equivalent is one minute-aligned interval gated on subscribers; label
+    /// boundaries make even that unnecessary.) A busy session pins the chain
+    /// to one-second steps — that is what keeps its elapsed counters moving
+    /// under reduce-motion, where the pulse animations that normally drive
+    /// frames are suppressed, and while a background turn sits between
+    /// stream events.
+    fn schedule_time_label_wake(&self, cx: &mut Context<Self>) {
+        let now = unix_time();
+        let target = next_time_label_change(&self.state.sessions, now).map(|seconds| now + seconds);
+        if self.time_label_wake.get() == target {
+            return;
+        }
+        self.time_label_wake.set(target);
+        let generation = self.time_label_wake_generation.get().wrapping_add(1);
+        self.time_label_wake_generation.set(generation);
+        let Some(target) = target else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let delay = target.saturating_sub(unix_time()).max(1);
+            cx.background_executor()
+                .timer(Duration::from_secs(delay))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.time_label_wake_generation.get() != generation {
+                    return;
+                }
+                // Consumed: the notified frame re-arms the next boundary.
+                this.time_label_wake.set(None);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn hide_toast(&mut self) {
@@ -1555,7 +1630,8 @@ impl Waku {
                 navigation_rail: navigation_rail.clone(),
                 navigation_rail_active_scale_enabled,
                 navigation_rail_reset_generation: Cell::new(0),
-                working_elapsed_ticker_running: Cell::new(false),
+                time_label_wake: Cell::new(None),
+                time_label_wake_generation: Cell::new(0),
                 fps_last_frame: Instant::now(),
                 fps_frame_count: 0,
                 fps_value: 0,

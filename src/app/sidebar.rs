@@ -98,6 +98,38 @@ fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
 /// rows have been measured.
 const SIDEBAR_SESSION_ROW_HEIGHT: f32 = 51.0;
 
+/// The session row's trailing time: how long the live turn has been working,
+/// or how long ago the agent last replied. A session that has never replied
+/// shows nothing.
+pub(super) fn session_time_label(session: &AgentSession, now: u64) -> Option<String> {
+    if session.is_busy()
+        && let Some(turn) = session
+            .turns
+            .last()
+            .filter(|turn| turn.status == TurnStatus::Running)
+    {
+        return Some(format!(
+            "Working {}",
+            format_working_elapsed(now.saturating_sub(turn.started_at))
+        ));
+    }
+    session
+        .last_reply_at
+        .map(|last_reply_at| format_time_ago(now.saturating_sub(last_reply_at)))
+}
+
+/// Compact "how long ago" for the sidebar: "just now", then one coarse unit —
+/// "5m", "3h", "420d". Days are the largest unit so a glance still reads as a
+/// count rather than a date.
+pub(super) fn format_time_ago(seconds: u64) -> String {
+    match seconds {
+        0..=59 => "just now".to_owned(),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
 /// One row of the virtualized sidebar session history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SidebarRow {
@@ -580,10 +612,26 @@ impl Waku {
                     .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(project_name)),
+                    )
+                    .when_some(
+                        session_time_label(session, unix_time()),
+                        |element, label| {
+                            element.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(if session.is_busy() {
+                                        theme.text_tertiary
+                                    } else {
+                                        theme.text_ghost
+                                    })
+                                    .child(SharedString::from(label)),
+                            )
+                        },
                     ),
             )
             .on_click(cx.listener(move |this, _, _, cx| {

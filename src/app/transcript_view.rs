@@ -93,7 +93,6 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.prefetch_checkpoint_refs(cx);
-        self.ensure_working_elapsed_ticker(cx);
         self.sync_transcript_rows();
         self.sync_transcript_layout_width(window);
         let transcript_rows = self.active_transcript_rows().clone();
@@ -1071,45 +1070,6 @@ impl Waku {
                     ))),
             )
             .into_any_element()
-    }
-
-    /// Keep the "Working for Ns" label advancing once per second.
-    ///
-    /// While motion is enabled the pulsing dots already schedule animation
-    /// frames, and every frame rebuilds the visible rows with a fresh elapsed
-    /// value. Under reduce-motion GPUI renders those animations as a single
-    /// static frame, so without this notify the label would freeze at the
-    /// second it first appeared.
-    fn ensure_working_elapsed_ticker(&self, cx: &mut Context<Self>) {
-        if self.working_elapsed_ticker_running.get()
-            || !self
-                .selected_session()
-                .is_some_and(|session| session.status.is_busy())
-        {
-            return;
-        }
-        self.working_elapsed_ticker_running.set(true);
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let still_busy = this.update(cx, |this, cx| {
-                    let busy = this
-                        .selected_session()
-                        .is_some_and(|session| session.status.is_busy());
-                    if busy {
-                        cx.notify();
-                    } else {
-                        // The next busy render restarts the loop.
-                        this.working_elapsed_ticker_running.set(false);
-                    }
-                    busy
-                });
-                if !still_busy.unwrap_or(false) {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 
     /// The turn's reasoning as a disclosure: open while the provider is

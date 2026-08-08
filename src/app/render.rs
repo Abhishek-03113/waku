@@ -81,6 +81,9 @@ impl Render for Waku {
         if self.settings_page.is_some() {
             return self.render_settings(cx).into_any_element();
         }
+        // Re-armed every frame this window shows time labels; parks while
+        // settings covers them and while the window isn't drawing at all.
+        self.schedule_time_label_wake(cx);
 
         let theme = Theme::current(cx);
         let empty = self
