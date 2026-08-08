@@ -27,10 +27,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, AnyElement, App, Bounds, ElementId, FocusHandle, FontWeight, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
-    RenderOnce, SharedString, Styled, Window, actions, anchored, canvas, deferred, div,
-    prelude::FluentBuilder, px,
+    AnyElement, App, Bounds, Display, Element, ElementId, FocusHandle, FontWeight, GlobalElementId,
+    InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent, LayoutId, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, Point, Position, RenderOnce, SharedString, Size, Style,
+    Styled, Window, actions, anchored, canvas, deferred, div, prelude::FluentBuilder, px,
 };
 
 actions!(
@@ -352,10 +352,7 @@ pub enum MenuAlign {
     BelowRight,
     /// Above the trigger, left edges aligned.
     AboveLeft,
-    /// Above the trigger, right edges aligned. No site needs this corner yet;
-    /// the four are kept together because they are one coordinate system, not
-    /// four independent options.
-    #[allow(dead_code)]
+    /// Above the trigger, right edges aligned.
     AboveRight,
 }
 
@@ -368,13 +365,12 @@ impl MenuAlign {
         matches!(self, Self::BelowRight | Self::AboveRight)
     }
 
-    /// The card corner pinned to the anchor point.
-    fn corner(self) -> Anchor {
-        match self {
-            Self::BelowLeft => Anchor::TopLeft,
-            Self::BelowRight => Anchor::TopRight,
-            Self::AboveLeft => Anchor::BottomLeft,
-            Self::AboveRight => Anchor::BottomRight,
+    fn from_sides(above: bool, right_aligned: bool) -> Self {
+        match (above, right_aligned) {
+            (false, false) => Self::BelowLeft,
+            (false, true) => Self::BelowRight,
+            (true, false) => Self::AboveLeft,
+            (true, true) => Self::AboveRight,
         }
     }
 
@@ -391,6 +387,226 @@ impl MenuAlign {
             bounds.bottom() + gap
         };
         Point::new(x, y)
+    }
+}
+
+/// Final placement for an anchored surface after `flip` and `shift`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FloatingPlacement {
+    bounds: Bounds<Pixels>,
+    align: MenuAlign,
+}
+
+/// Resolve a trigger-aware placement using Floating UI's core policy:
+///
+/// 1. Keep the requested vertical side while it fits.
+/// 2. Flip to the opposite side when it fits better.
+/// 3. Try the opposite horizontal alignment, then shift inside the viewport.
+///
+/// Unlike GPUI's point-based anchor switching, a vertical flip uses the
+/// trigger's opposite edge, so the card never lands across the trigger merely
+/// because the preferred side ran out of room.
+fn resolve_floating_placement(
+    trigger: Bounds<Pixels>,
+    surface_size: Size<Pixels>,
+    viewport: Bounds<Pixels>,
+    preferred: MenuAlign,
+    gap: Pixels,
+    margin: Pixels,
+) -> FloatingPlacement {
+    let viewport_left = f32::from(viewport.left() + margin);
+    let viewport_right = f32::from(viewport.right() - margin);
+    let viewport_top = f32::from(viewport.top() + margin);
+    let viewport_bottom = f32::from(viewport.bottom() - margin);
+    let trigger_left = f32::from(trigger.left());
+    let trigger_right = f32::from(trigger.right());
+    let trigger_top = f32::from(trigger.top());
+    let trigger_bottom = f32::from(trigger.bottom());
+    let width = f32::from(surface_size.width);
+    let height = f32::from(surface_size.height);
+    let gap = f32::from(gap);
+
+    let above_space = (trigger_top - gap - viewport_top).max(0.0);
+    let below_space = (viewport_bottom - trigger_bottom - gap).max(0.0);
+    let preferred_above = preferred.above();
+    let preferred_space = if preferred_above {
+        above_space
+    } else {
+        below_space
+    };
+    let opposite_space = if preferred_above {
+        below_space
+    } else {
+        above_space
+    };
+    let above = if height <= preferred_space || preferred_space >= opposite_space {
+        preferred_above
+    } else {
+        !preferred_above
+    };
+
+    let left_aligned_x = trigger_left;
+    let right_aligned_x = trigger_right - width;
+    let overflow = |x: f32| (viewport_left - x).max(0.0) + (x + width - viewport_right).max(0.0);
+    let preferred_right = preferred.right_aligned();
+    let preferred_x = if preferred_right {
+        right_aligned_x
+    } else {
+        left_aligned_x
+    };
+    let opposite_x = if preferred_right {
+        left_aligned_x
+    } else {
+        right_aligned_x
+    };
+    let right_aligned = if overflow(preferred_x) <= overflow(opposite_x) {
+        preferred_right
+    } else {
+        !preferred_right
+    };
+    let mut x = if right_aligned {
+        right_aligned_x
+    } else {
+        left_aligned_x
+    };
+    let mut y = if above {
+        trigger_top - gap - height
+    } else {
+        trigger_bottom + gap
+    };
+
+    // `shift`: keep the chosen side and alignment, moving only enough to stay
+    // inside the viewport. If a card is larger than the usable viewport, pin
+    // it to the leading edge; a caller can then constrain its own contents.
+    let usable_width = (viewport_right - viewport_left).max(0.0);
+    if width <= usable_width {
+        x = x.clamp(viewport_left, viewport_right - width);
+    } else {
+        x = viewport_left;
+    }
+    let usable_height = (viewport_bottom - viewport_top).max(0.0);
+    if height <= usable_height {
+        y = y.clamp(viewport_top, viewport_bottom - height);
+    } else {
+        y = viewport_top;
+    }
+
+    FloatingPlacement {
+        bounds: Bounds::new(Point::new(px(x), px(y)), surface_size),
+        align: MenuAlign::from_sides(above, right_aligned),
+    }
+}
+
+/// A measured, trigger-aware deferred surface. This mirrors GPUI's
+/// `Anchored` element lifecycle, but resolves placement from the trigger's
+/// rectangle instead of a single point so vertical flips remain attached to
+/// the correct edge.
+struct FloatingSurface {
+    child: AnyElement,
+    trigger: Bounds<Pixels>,
+    preferred: MenuAlign,
+    gap: Pixels,
+    margin: Pixels,
+}
+
+struct FloatingSurfaceState {
+    child_layout_id: LayoutId,
+}
+
+impl FloatingSurface {
+    fn new(
+        child: AnyElement,
+        trigger: Bounds<Pixels>,
+        preferred: MenuAlign,
+        gap: Pixels,
+        margin: Pixels,
+    ) -> Self {
+        Self {
+            child,
+            trigger,
+            preferred,
+            gap,
+            margin,
+        }
+    }
+}
+
+impl Element for FloatingSurface {
+    type RequestLayoutState = FloatingSurfaceState;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let child_layout_id = self.child.request_layout(window, cx);
+        let layout_id = window.request_layout(
+            Style {
+                position: Position::Absolute,
+                display: Display::Flex,
+                ..Style::default()
+            },
+            [child_layout_id],
+            cx,
+        );
+        (layout_id, FloatingSurfaceState { child_layout_id })
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let surface_size = window.layout_bounds(request_layout.child_layout_id).size;
+        let viewport = Bounds::new(Point::default(), window.viewport_size());
+        let margin = self.margin + window.client_inset().unwrap_or(px(0.0));
+        let placement = resolve_floating_placement(
+            self.trigger,
+            surface_size,
+            viewport,
+            self.preferred,
+            self.gap,
+            margin,
+        );
+        let offset = placement.bounds.origin - bounds.origin;
+        let offset = Point::new(offset.x.round(), offset.y.round());
+        window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for FloatingSurface {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
     }
 }
 
@@ -515,16 +731,20 @@ where
     let Some(position) = open_at else {
         return trigger.into_any_element();
     };
+    let trigger_bounds = handle
+        .trigger_bounds
+        .get()
+        .unwrap_or_else(|| Bounds::new(position, Size::default()));
 
     trigger
         .child(
-            deferred(
-                anchored()
-                    .position(position)
-                    .anchor(align.corner())
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(card(handle)),
-            )
+            deferred(FloatingSurface::new(
+                card(handle),
+                trigger_bounds,
+                align,
+                px(TRIGGER_GAP),
+                px(8.0),
+            ))
             .with_priority(1),
         )
         .into_any_element()
@@ -871,7 +1091,7 @@ fn on_menu_key(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Context, Modifiers, Render, TestAppContext, point};
+    use gpui::{Context, Modifiers, Render, TestAppContext, point, size};
 
     use super::*;
 
@@ -886,6 +1106,67 @@ mod tests {
     struct Harness {
         handle: ContextMenuHandle,
         surface: Surface,
+    }
+
+    #[test]
+    fn floating_surface_keeps_a_preferred_side_that_fits() {
+        let placement = resolve_floating_placement(
+            Bounds::new(point(px(600.0), px(200.0)), size(px(100.0), px(20.0))),
+            size(px(240.0), px(180.0)),
+            Bounds::new(Point::default(), size(px(800.0), px(600.0))),
+            MenuAlign::BelowRight,
+            px(4.0),
+            px(8.0),
+        );
+
+        assert_eq!(placement.align, MenuAlign::BelowRight);
+        assert_eq!(placement.bounds.origin, point(px(460.0), px(224.0)));
+    }
+
+    #[test]
+    fn floating_surface_flips_across_the_trigger_when_below_does_not_fit() {
+        let trigger = Bounds::new(point(px(600.0), px(500.0)), size(px(100.0), px(20.0)));
+        let placement = resolve_floating_placement(
+            trigger,
+            size(px(240.0), px(180.0)),
+            Bounds::new(Point::default(), size(px(800.0), px(600.0))),
+            MenuAlign::BelowRight,
+            px(4.0),
+            px(8.0),
+        );
+
+        assert_eq!(placement.align, MenuAlign::AboveRight);
+        assert_eq!(placement.bounds.origin, point(px(460.0), px(316.0)));
+        assert_eq!(placement.bounds.bottom() + px(4.0), trigger.top());
+    }
+
+    #[test]
+    fn floating_surface_flips_alignment_before_shifting() {
+        let placement = resolve_floating_placement(
+            Bounds::new(point(px(10.0), px(200.0)), size(px(40.0), px(20.0))),
+            size(px(240.0), px(180.0)),
+            Bounds::new(Point::default(), size(px(800.0), px(600.0))),
+            MenuAlign::BelowRight,
+            px(4.0),
+            px(8.0),
+        );
+
+        assert_eq!(placement.align, MenuAlign::BelowLeft);
+        assert_eq!(placement.bounds.origin, point(px(10.0), px(224.0)));
+    }
+
+    #[test]
+    fn floating_surface_shifts_oversized_content_to_the_viewport_margin() {
+        let placement = resolve_floating_placement(
+            Bounds::new(point(px(100.0), px(200.0)), size(px(40.0), px(20.0))),
+            size(px(900.0), px(180.0)),
+            Bounds::new(Point::default(), size(px(800.0), px(600.0))),
+            MenuAlign::BelowLeft,
+            px(4.0),
+            px(8.0),
+        );
+
+        assert_eq!(placement.bounds.origin.x, px(8.0));
     }
 
     impl Render for Harness {
