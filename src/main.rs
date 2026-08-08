@@ -21,6 +21,7 @@ mod model_catalog;
 mod opencode_session;
 mod persistence;
 mod platform;
+mod projectless;
 mod query;
 mod terminal;
 mod theme;

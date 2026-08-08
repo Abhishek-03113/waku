@@ -1768,7 +1768,13 @@ impl Waku {
         let theme = Theme::current(cx);
         let path = self
             .selected_project()
-            .map(|project| compact_path(&project.path))
+            .map(|project| {
+                if project.is_projectless() {
+                    Project::PROJECTLESS_NAME.to_owned()
+                } else {
+                    compact_path(&project.path)
+                }
+            })
             .unwrap_or_default();
         let usage_meter = self.render_usage_meter(cx);
         div()

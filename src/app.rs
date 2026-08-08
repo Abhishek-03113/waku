@@ -486,6 +486,8 @@ pub struct Waku {
     model_search: Entity<ComposerInput>,
     settings_search: Entity<ComposerInput>,
     settings_focus: FocusHandle,
+    onboarding_add_project_focus: FocusHandle,
+    onboarding_projectless_focus: FocusHandle,
     /// Mirror of Sparkle's persisted automatic-check setting. Refreshed when
     /// settings opens and on toggle, so frames never read user defaults —
     /// that lookup can reach cfprefsd.
@@ -731,6 +733,32 @@ use streaming::*;
 use transcript::*;
 use transcript_view::ConversationNavigationRail;
 
+fn migrate_legacy_projectless_projects(state: &mut PersistedState) -> std::io::Result<bool> {
+    let legacy_indices = state
+        .projects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, project)| {
+            crate::projectless::is_legacy_root_path(&project.path).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if legacy_indices.is_empty() {
+        return Ok(false);
+    }
+
+    // Allocate everything first so a later failure never leaves only part of
+    // the in-memory project list rewritten.
+    let workspaces = legacy_indices
+        .iter()
+        .map(|_| crate::projectless::create_workspace(None))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    for (index, workspace) in legacy_indices.into_iter().zip(workspaces) {
+        state.projects[index].name = Project::PROJECTLESS_NAME.to_owned();
+        state.projects[index].path = workspace.cwd;
+    }
+    Ok(true)
+}
+
 impl Waku {
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
@@ -754,6 +782,16 @@ impl Waku {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
         let mut state = store.load_or_fresh(cwd);
+        let startup_toast = match migrate_legacy_projectless_projects(&mut state) {
+            Ok(false) => None,
+            Ok(true) => store
+                .save(&mut state)
+                .err()
+                .map(|error| format!("Could not save the projectless task migration: {error}")),
+            Err(error) => Some(format!(
+                "Could not move the old root-level projectless task beneath ~/.waku: {error}"
+            )),
+        };
         let sidebar_visible = state.sidebar_visible;
         let right_panel_visible = state.right_panel_visible;
         let sidebar_width = sanitize_panel_width(
@@ -905,6 +943,8 @@ impl Waku {
         let scene_overlay_enabled = window.enable_scene_overlay().is_ok();
         let entity = cx.new(|cx| {
             let settings_focus = cx.focus_handle();
+            let onboarding_add_project_focus = cx.focus_handle();
+            let onboarding_projectless_focus = cx.focus_handle();
 
             cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
                 if this.state.theme == ThemePreference::System {
@@ -1054,6 +1094,8 @@ impl Waku {
                 model_search,
                 settings_search,
                 settings_focus,
+                onboarding_add_project_focus,
+                onboarding_projectless_focus,
                 automatic_updates_enabled: cx
                     .try_global::<crate::updater::UpdaterState>()
                     .and_then(|updater| updater.0.as_ref())
@@ -1146,7 +1188,7 @@ impl Waku {
                 header_drag_armed: false,
                 branch,
                 branches,
-                toast: None,
+                toast: startup_toast,
                 copied_message_feedback: HashMap::new(),
                 copied_message_generation: 0,
                 copied_activity_feedback: HashMap::new(),

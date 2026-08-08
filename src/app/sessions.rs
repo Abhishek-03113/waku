@@ -172,6 +172,12 @@ impl Waku {
             return;
         };
         let project_id = self.state.sessions[index].project_id;
+        let projectless = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .is_some_and(Project::is_projectless);
         let last_turn_count = self.state.sessions[index].turns.len();
         let project_path = self
             .state
@@ -184,6 +190,19 @@ impl Waku {
         self.remove_right_panel_session_state(session_id);
         self.state.sessions.remove(index);
         self.session_navigation.remove(session_id);
+        let project_still_used = self
+            .state
+            .sessions
+            .iter()
+            .any(|session| session.project_id == project_id);
+        if projectless && !project_still_used {
+            self.state
+                .projects
+                .retain(|project| project.id != project_id);
+            if self.state.selected_project == Some(project_id) {
+                self.state.selected_project = None;
+            }
+        }
         if let Some(project_path) = project_path {
             let _ = checkpoint::delete_session_refs(&project_path, session_id, last_turn_count);
         }
@@ -200,6 +219,8 @@ impl Waku {
                 .map(|session| session.id);
             if let Some(session_id) = next_session {
                 self.select_session(session_id, cx);
+            } else if projectless {
+                self.create_projectless_session(cx);
             } else {
                 self.create_session_for(project_id, self.state.last_provider, cx);
             }
@@ -224,7 +245,9 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         self.settings_page = None;
-        if let Some(project_id) = self.state.selected_project {
+        if self.selected_project().is_some_and(Project::is_projectless) {
+            self.create_projectless_session(cx);
+        } else if let Some(project_id) = self.state.selected_project {
             self.create_session_for(project_id, self.state.last_provider, cx);
         }
         let focus_handle = self.composer_focus(cx);
@@ -907,6 +930,40 @@ impl Waku {
             }
         })
         .detach();
+    }
+
+    pub(super) fn create_projectless_session(&mut self, cx: &mut Context<Self>) {
+        if let Some(draft_id) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| {
+                !session.has_started()
+                    && self.state.projects.iter().any(|project| {
+                        project.id == session.project_id
+                            && project.is_projectless()
+                            && !crate::projectless::is_legacy_root_path(&project.path)
+                    })
+            })
+            .map(|session| session.id)
+        {
+            self.select_session(draft_id, cx);
+            return;
+        }
+
+        let workspace = match crate::projectless::create_workspace(None) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                self.toast = Some(format!("Could not create a task beneath ~/.waku: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let mut project = Project::from_path(workspace.cwd);
+        project.name = Project::PROJECTLESS_NAME.to_owned();
+        let project_id = project.id;
+        self.state.projects.push(project);
+        self.create_session_for(project_id, self.state.last_provider, cx);
     }
 }
 

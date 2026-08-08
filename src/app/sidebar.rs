@@ -318,7 +318,9 @@ impl Waku {
                     .active(|element| element.bg(theme.overlay_strong))
                     .child(icon("icons/plus.svg", 15.0, theme.text_ghost))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(project_id) = this.state.selected_project {
+                        if this.selected_project().is_some_and(Project::is_projectless) {
+                            this.create_projectless_session(cx);
+                        } else if let Some(project_id) = this.state.selected_project {
                             this.create_session_for(project_id, this.state.last_provider, cx);
                         }
                     })),
@@ -758,38 +760,99 @@ impl Waku {
                 )
                 .child(
                     div()
-                        .id("onboarding-add-project")
                         .mt(px(20.0))
-                        .h(px(32.0))
-                        .px(px(14.0))
-                        .rounded_full()
                         .flex()
+                        .flex_col()
                         .items_center()
-                        .cursor_default()
-                        .bg(theme.inverse)
-                        .text_color(theme.on_inverse)
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .hover(|element| element.opacity(0.9))
-                        .active(|element| element.opacity(0.8))
-                        .child("Open project folder…")
-                        .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
+                        .gap(px(8.0))
+                        .tab_index(0)
+                        .tab_group()
+                        .tab_stop(false)
+                        .child(
+                            div()
+                                .id("onboarding-add-project")
+                                .track_focus(&self.onboarding_add_project_focus)
+                                .tab_index(0)
+                                .focus_visible(|style| {
+                                    style.border_1().border_color(theme.accent)
+                                })
+                                .h(px(32.0))
+                                .px(px(14.0))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .cursor_default()
+                                .bg(theme.inverse)
+                                .text_color(theme.on_inverse)
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .hover(|element| element.opacity(0.9))
+                                .active(|element| element.opacity(0.8))
+                                .child("Open project folder…")
+                                .on_click(cx.listener(|this, _, _, cx| this.add_project(cx)))
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.add_project(cx);
+                                        cx.stop_propagation();
+                                    }
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("onboarding-projectless")
+                                .track_focus(&self.onboarding_projectless_focus)
+                                .tab_index(1)
+                                .focus_visible(|style| {
+                                    style.border_1().border_color(theme.accent)
+                                })
+                                .h(px(30.0))
+                                .px(px(12.0))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .cursor_default()
+                                .text_color(theme.text_secondary)
+                                .text_size(px(12.0))
+                                .hover(|element| element.bg(theme.overlay))
+                                .active(|element| element.bg(theme.overlay_strong))
+                                .child(icon("icons/x.svg", 11.0, theme.text_tertiary))
+                                .child("Don't work in a project")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.create_projectless_session(cx);
+                                }))
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.create_projectless_session(cx);
+                                        cx.stop_propagation();
+                                    }
+                                })),
+                        ),
                 );
         }
         let selected_project_id = self.state.selected_project;
+        let projectless_selected = self.selected_project().is_some_and(Project::is_projectless);
         let project_name = self
             .selected_project()
-            .map(|project| project.name.clone())
+            .map(|project| {
+                if project.is_projectless() {
+                    "without a project".to_owned()
+                } else {
+                    project.name.clone()
+                }
+            })
             .unwrap_or_else(|| "your project".to_owned());
         let project_options = self
             .state
             .projects
             .iter()
+            .filter(|project| !project.is_projectless())
             .filter(|project| Some(project.id) == selected_project_id)
             .chain(
                 self.state
                     .projects
                     .iter()
+                    .filter(|project| !project.is_projectless())
                     .filter(|project| Some(project.id) != selected_project_id),
             )
             .map(|project| (project.id, project.name.clone()))
@@ -817,13 +880,27 @@ impl Waku {
                         .selected(Some(project_id) == selected_project_id)
                     })
                     .collect::<Vec<_>>();
-                items.push(MenuItem::Separator);
-                let weak = weak.clone();
+                if !items.is_empty() {
+                    items.push(MenuItem::Separator);
+                }
+                let add_project_weak = weak.clone();
                 items.push(
                     MenuItem::new("New project…", move |_, cx| {
-                        let _ = weak.update(cx, |this, cx| this.add_project(cx));
+                        let _ = add_project_weak.update(cx, |this, cx| this.add_project(cx));
                     })
                     .icon("icons/folder-new.svg"),
+                );
+                let projectless_weak = weak.clone();
+                items.push(
+                    MenuItem::new("Don't work in a project", move |_, cx| {
+                        let _ = projectless_weak.update(cx, |this, cx| {
+                            if !this.selected_project().is_some_and(Project::is_projectless) {
+                                this.create_projectless_session(cx);
+                            }
+                        });
+                    })
+                    .icon("icons/x.svg")
+                    .selected(projectless_selected),
                 );
                 items
             },
@@ -845,7 +922,11 @@ impl Waku {
                     .text_size(px(20.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("What should we build in\u{00a0}")
+                    .child(if projectless_selected {
+                        "What should we work on\u{00a0}"
+                    } else {
+                        "What should we build in\u{00a0}"
+                    })
                     .child(project_selector)
                     .child("?"),
             )

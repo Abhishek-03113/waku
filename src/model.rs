@@ -427,6 +427,8 @@ pub struct Project {
 }
 
 impl Project {
+    pub const PROJECTLESS_NAME: &'static str = "No project";
+
     pub fn from_path(path: PathBuf) -> Self {
         let name = path
             .file_name()
@@ -440,6 +442,10 @@ impl Project {
             path,
             created_at: unix_time(),
         }
+    }
+
+    pub fn is_projectless(&self) -> bool {
+        crate::projectless::is_projectless_path(&self.path)
     }
 }
 
@@ -1214,6 +1220,19 @@ pub fn compact_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projectless_projects_are_descendants_of_the_waku_root() {
+        let home = dirs::home_dir().expect("test user has a home directory");
+        let root = home.join(".waku");
+        let legacy = Project::from_path(root.clone());
+        let project = Project::from_path(root.join("2026-08-08/new-chat"));
+        let ordinary = Project::from_path(home.join("dev/waku"));
+
+        assert!(legacy.is_projectless());
+        assert!(project.is_projectless());
+        assert!(!ordinary.is_projectless());
+    }
 
     #[test]
     fn prompt_generates_a_short_session_title() {
