@@ -426,6 +426,45 @@ pub struct Project {
     pub created_at: u64,
 }
 
+/// Filesystem context a task runs in.
+///
+/// Drafts may carry [`Self::NewWorktree`] until their first prompt. Waku then
+/// creates the Git worktree and replaces it with [`Self::Worktree`] before any
+/// checkpoint or provider process can observe the task.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum SessionWorkspace {
+    /// Work directly in the project's ordinary checkout.
+    #[default]
+    Local,
+    /// Create an isolated worktree when this draft is first submitted.
+    NewWorktree,
+    /// A materialized worktree. `path` preserves a project that points at a
+    /// subdirectory of its repository rather than the repository root itself.
+    Worktree { path: PathBuf, branch: String },
+}
+
+impl SessionWorkspace {
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+
+    pub fn is_worktree(&self) -> bool {
+        matches!(self, Self::NewWorktree | Self::Worktree { .. })
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Worktree { path, .. } => Some(path),
+            Self::Local | Self::NewWorktree => None,
+        }
+    }
+}
+
 impl Project {
     pub const PROJECTLESS_NAME: &'static str = "No project";
 
@@ -551,6 +590,9 @@ pub struct AgentSession {
     pub id: Uuid,
     pub title: String,
     pub project_id: Uuid,
+    /// Local project checkout or an isolated Git worktree for this task.
+    #[serde(default, skip_serializing_if = "SessionWorkspace::is_local")]
+    pub workspace: SessionWorkspace,
     pub provider: ProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -616,6 +658,7 @@ impl AgentSession {
             id: Uuid::new_v4(),
             title: "New task".to_owned(),
             project_id,
+            workspace: SessionWorkspace::Local,
             provider,
             model: None,
             runtime_mode: RuntimeMode::FullAccess,

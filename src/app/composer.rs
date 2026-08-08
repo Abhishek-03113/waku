@@ -1308,7 +1308,9 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let root = self.selected_project().map(|project| project.path.clone());
+        let root = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf);
         let mut staged = false;
         for path in paths.paths() {
             if self
@@ -1766,16 +1768,155 @@ impl Waku {
 
     pub(super) fn render_workspace_footer(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let path = self
+        let selected_project_id = self.state.selected_project;
+        let projectless_selected = self.selected_project().is_some_and(Project::is_projectless);
+        let project_name = self
             .selected_project()
             .map(|project| {
                 if project.is_projectless() {
-                    Project::PROJECTLESS_NAME.to_owned()
+                    "choose a project".to_owned()
                 } else {
-                    compact_path(&project.path)
+                    project.name.clone()
                 }
             })
+            .unwrap_or_else(|| "choose a project".to_owned());
+        let can_configure_workspace = self
+            .selected_session()
+            .is_some_and(|session| !session.has_started());
+
+        let project_handle = self.menu_handle("workspace-project", cx);
+        let project_trigger = MenuChip::new("workspace-project")
+            .icon("icons/folder.svg", theme.text_tertiary)
+            .label(project_name)
+            .caret(can_configure_workspace)
+            .disabled(!can_configure_workspace)
+            .selected(can_configure_workspace && project_handle.is_open())
+            .max_w(px(190.0));
+        let project_selector = if can_configure_workspace {
+            let project_options = self
+                .state
+                .projects
+                .iter()
+                .filter(|project| !project.is_projectless())
+                .filter(|project| Some(project.id) == selected_project_id)
+                .chain(
+                    self.state
+                        .projects
+                        .iter()
+                        .filter(|project| !project.is_projectless())
+                        .filter(|project| Some(project.id) != selected_project_id),
+                )
+                .map(|project| (project.id, project.name.clone()))
+                .collect::<Vec<_>>();
+            let weak = cx.entity().downgrade();
+            dropdown_menu(
+                project_trigger,
+                "workspace-project-menu",
+                &project_handle,
+                MenuAlign::AboveLeft,
+                move |_| {
+                    let mut items = project_options
+                        .clone()
+                        .into_iter()
+                        .map(|(project_id, project_name)| {
+                            let weak = weak.clone();
+                            MenuItem::new(project_name, move |_, cx| {
+                                if Some(project_id) != selected_project_id {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.select_project(project_id, cx);
+                                    });
+                                }
+                            })
+                            .selected(Some(project_id) == selected_project_id)
+                        })
+                        .collect::<Vec<_>>();
+                    if !items.is_empty() {
+                        items.push(MenuItem::Separator);
+                    }
+                    let add_project = weak.clone();
+                    items.push(
+                        MenuItem::new("New project…", move |_, cx| {
+                            let _ = add_project.update(cx, |this, cx| this.add_project(cx));
+                        })
+                        .icon("icons/folder-new.svg"),
+                    );
+                    let projectless = weak.clone();
+                    items.push(
+                        MenuItem::new("Don't work in a project", move |_, cx| {
+                            let _ = projectless.update(cx, |this, cx| {
+                                if !this.selected_project().is_some_and(Project::is_projectless) {
+                                    this.create_projectless_session(cx);
+                                }
+                            });
+                        })
+                        .icon("icons/x.svg")
+                        .selected(projectless_selected),
+                    );
+                    items
+                },
+            )
+        } else {
+            project_trigger.into_any_element()
+        };
+
+        let workspace = self
+            .selected_session()
+            .map(|session| session.workspace.clone())
             .unwrap_or_default();
+        let workspace_label = match &workspace {
+            SessionWorkspace::Local => SharedString::from("Local"),
+            SessionWorkspace::NewWorktree => SharedString::from("New worktree"),
+            SessionWorkspace::Worktree { branch, .. } => SharedString::from(branch.clone()),
+        };
+        let workspace_icon = if workspace.is_local() {
+            "icons/laptop.svg"
+        } else {
+            "icons/fork.svg"
+        };
+        let worktree_handle = self.menu_handle("workspace-worktree", cx);
+        let worktree_trigger = MenuChip::new("workspace-worktree")
+            .icon(workspace_icon, theme.text_tertiary)
+            .label(workspace_label)
+            .caret(can_configure_workspace)
+            .disabled(!can_configure_workspace)
+            .selected(can_configure_workspace && worktree_handle.is_open())
+            .max_w(px(180.0));
+        let worktree_selector = if can_configure_workspace {
+            let local_selected = workspace.is_local();
+            let worktree_selected = workspace.is_worktree();
+            let weak = cx.entity().downgrade();
+            dropdown_menu(
+                worktree_trigger,
+                "workspace-worktree-menu",
+                &worktree_handle,
+                MenuAlign::AboveLeft,
+                move |_| {
+                    let local = weak.clone();
+                    let worktree = weak.clone();
+                    vec![
+                        MenuItem::Header("Work in".into()),
+                        MenuItem::new("Local", move |_, cx| {
+                            let _ = local.update(cx, |this, cx| {
+                                this.select_workspace(SessionWorkspace::Local, cx);
+                            });
+                        })
+                        .icon("icons/laptop.svg")
+                        .selected(local_selected),
+                        MenuItem::new("New worktree", move |_, cx| {
+                            let _ = worktree.update(cx, |this, cx| {
+                                this.select_workspace(SessionWorkspace::NewWorktree, cx);
+                            });
+                        })
+                        .icon("icons/fork.svg")
+                        .selected(worktree_selected)
+                        .disabled(projectless_selected),
+                    ]
+                },
+            )
+        } else {
+            worktree_trigger.into_any_element()
+        };
+
         let usage_meter = self.render_usage_meter(cx);
         div()
             .flex_none()
@@ -1787,41 +1928,21 @@ impl Waku {
                     .w_full()
                     .max_w(px(CONTENT_MAX_WIDTH))
                     .mx_auto()
-                    .h(px(20.0))
-                    // Left edge lines up with the composer card's inner icon
-                    // column (10px card padding + 7px chip padding).
-                    .pl(px(17.0))
+                    .h(px(28.0))
+                    // The chip contributes 7px, lining its icon up with the
+                    // composer's 10px padding plus the controls' 7px inset.
+                    .pl(px(10.0))
                     .pr(px(10.0))
                     .flex()
                     .items_center()
-                    .gap(px(7.0))
+                    .gap(px(2.0))
+                    .tab_index(0)
+                    .tab_group()
+                    .tab_stop(false)
                     .text_size(px(11.0))
                     .line_height(px(14.0))
-                    .when_some(self.branch.clone(), |element, branch| {
-                        element
-                            .child(icon("icons/git-branch.svg", 10.5, theme.text_tertiary))
-                            .child(
-                                div()
-                                    .text_color(theme.text_secondary)
-                                    .child(SharedString::from(branch)),
-                            )
-                            .child(
-                                div()
-                                    .w(px(2.5))
-                                    .h(px(2.5))
-                                    .flex_none()
-                                    .rounded_full()
-                                    .bg(theme.text_ghost),
-                            )
-                    })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(10.5))
-                            .text_color(theme.text_ghost)
-                            .child(SharedString::from(path)),
-                    )
+                    .child(project_selector)
+                    .child(worktree_selector)
                     .child(div().flex_1())
                     .children(usage_meter),
             )

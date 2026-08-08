@@ -28,6 +28,7 @@ mod theme;
 mod ui;
 mod updater;
 mod usage;
+mod worktree;
 
 use gpui::{
     App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,

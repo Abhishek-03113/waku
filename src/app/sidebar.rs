@@ -922,13 +922,15 @@ impl Waku {
                     .text_size(px(20.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(if projectless_selected {
-                        "What should we work on\u{00a0}"
-                    } else {
-                        "What should we build in\u{00a0}"
+                    .when(projectless_selected, |element| {
+                        element.child("What should we build?")
                     })
-                    .child(project_selector)
-                    .child("?"),
+                    .when(!projectless_selected, |element| {
+                        element
+                            .child("What should we build in\u{00a0}")
+                            .child(project_selector)
+                            .child("?")
+                    }),
             )
     }
 }

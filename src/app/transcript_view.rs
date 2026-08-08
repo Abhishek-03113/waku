@@ -736,11 +736,8 @@ impl Waku {
             return;
         }
         let Some(project_path) = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .map(|project| project.path.clone())
+            .workspace_path_for_session(session)
+            .map(std::path::Path::to_path_buf)
         else {
             return;
         };

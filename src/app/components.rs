@@ -712,16 +712,6 @@ pub(super) fn activity_preview(activity: &ActivityItem) -> String {
     detail.to_owned()
 }
 
-pub(super) fn git_branch(path: &std::path::Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(path)
-        .output()
-        .ok()?;
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!branch.is_empty()).then_some(branch)
-}
-
 #[cfg(test)]
 mod message_time_tests {
     use super::*;

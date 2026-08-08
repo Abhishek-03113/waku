@@ -138,6 +138,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "git-branch",
     "globe",
     "hexagon",
+    "laptop",
     "list",
     "lock",
     "lock-open",

@@ -30,8 +30,8 @@ use crate::model::{
     ActivityItem, AgentSession, Checkpoint, CheckpointStatus, ContextUsage, DriverEvent,
     FavoriteModel, InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind,
     ProviderModel, ProviderProbe, ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode,
-    SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus, compact_path, unix_time,
-    unix_time_millis,
+    SessionStatus, SessionWorkspace, TranscriptBlock, TranscriptBlockContent, TurnStatus,
+    compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -631,9 +631,6 @@ pub struct Waku {
     scene_overlay_enabled: bool,
     settings_page: Option<SettingsPage>,
     header_drag_armed: bool,
-    branch: Option<String>,
-    /// Branch per project path. `git` is too slow for the UI thread.
-    branches: QueryCache<PathBuf, Option<String>>,
     toast: Option<String>,
     copied_message_feedback: HashMap<Uuid, u64>,
     copied_message_generation: u64,
@@ -837,12 +834,16 @@ impl Waku {
             // `git` invocations each — paid here, before the window has drawn
             // once. Queue them and let the first frames go out first.
             if let Some(turn_count) = interrupted_turn
-                && let Some(project_path) = project_paths.get(&session.project_id)
+                && let Some(project_path) = session
+                    .workspace
+                    .path()
+                    .map(std::path::Path::to_path_buf)
+                    .or_else(|| project_paths.get(&session.project_id).cloned())
             {
                 interrupted_turn_checkpoints.push(PendingCheckpointCapture {
                     session_id: session.id,
                     turn_count,
-                    project_path: project_path.clone(),
+                    project_path,
                 });
             }
             for message in &mut session.messages {
@@ -895,12 +896,6 @@ impl Waku {
                 .map(|session| session.provider)
                 .unwrap_or(state.last_provider),
         );
-        // The branch is a query like any other: `git branch --show-current` is
-        // a subprocess, and running it here would hold the first frame for it.
-        // `refresh_branch` below fills the cache off-thread, and the header
-        // simply has no branch to draw until it lands.
-        let branch = None;
-        let branches = QueryCache::new(MAX_CACHED_WORKSPACES);
         // Measure visible rows only, with a generous overdraw — the same shape
         // Zed's own agent chat uses. `measure_all` lays out every row in the
         // session on the first frame and again after any structural splice,
@@ -1186,8 +1181,6 @@ impl Waku {
                 scene_overlay_enabled,
                 settings_page: None,
                 header_drag_armed: false,
-                branch,
-                branches,
                 toast: startup_toast,
                 copied_message_feedback: HashMap::new(),
                 copied_message_generation: 0,
@@ -1232,11 +1225,9 @@ impl Waku {
         entity.read(cx).reset_transcript_rows(initial_row_count);
         // Everything launch needs from `git` or the filesystem, started now
         // that there is an entity to notify and deliberately not before the
-        // first frame: checkpoints for turns a previous run left running, and
-        // the selected project's branch.
+        // first frame.
         entity.update(cx, |this, cx| {
             this.start_pending_checkpoint_captures(cx);
-            this.refresh_branch(cx);
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.
             this.refresh_composer_sources(cx);

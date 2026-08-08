@@ -102,11 +102,14 @@ impl AutocompleteUi {
 impl Waku {
     /// Refresh the drawn command and file indexes for the selected session.
     ///
-    /// Same shape as `refresh_branch`: a cache hit lands immediately, a miss
-    /// starts discovery on the background executor and re-runs this when it
-    /// arrives. Nothing here may touch the filesystem directly.
+    /// A cache hit lands immediately; a miss starts discovery on the
+    /// background executor and re-runs this when it arrives. Nothing here may
+    /// touch the filesystem directly.
     pub(super) fn refresh_composer_sources(&mut self, cx: &mut Context<Self>) {
-        let Some(project_path) = self.selected_project().map(|project| project.path.clone()) else {
+        let Some(project_path) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        else {
             self.slash_command_index = Rc::new(Vec::new());
             self.slash_command_index_key = None;
             self.mention_file_index = Rc::new(Vec::new());
@@ -202,7 +205,10 @@ impl Waku {
 
     /// Invalidate and re-request both indexes for the selected workspace.
     pub(super) fn invalidate_composer_sources(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.selected_project().map(|project| project.path.clone()) {
+        if let Some(path) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        {
             let provider = self
                 .selected_session()
                 .map(|session| session.provider)

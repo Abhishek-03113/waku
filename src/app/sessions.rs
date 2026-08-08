@@ -76,7 +76,6 @@ impl Waku {
             self.ensure_right_panel_terminals(cx);
         }
         self.reset_visible_state();
-        self.refresh_branch(cx);
         self.refresh_composer_sources(cx);
         self.reset_transcript_rows(self.transcript_row_count());
         self.save();
@@ -90,51 +89,11 @@ impl Waku {
     /// expire on a timer, they are dropped at the moments the answer plausibly
     /// moved — coming back to the window, or a turn finishing.
     pub(super) fn invalidate_workspace_queries(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.selected_project().map(|project| project.path.clone()) else {
+        if self.selected_workspace_path().is_none() {
             return;
-        };
-        self.branches.invalidate(&path);
-        self.refresh_branch(cx);
+        }
         self.refresh_workspace_surfaces(cx);
         self.invalidate_composer_sources(cx);
-    }
-
-    /// Resolves the checked-out branch for the selected project.
-    ///
-    /// `git` costs upwards of 10ms, more than a frame at 120Hz, so it is a
-    /// query: a cache hit is free, a miss draws the previous value and fills in
-    /// when the lookup lands.
-    pub(super) fn refresh_branch(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.selected_project().map(|project| project.path.clone()) else {
-            self.branch = None;
-            return;
-        };
-        match self.branches.read(&path) {
-            Query::Ready(branch) => self.branch = (*branch).clone(),
-            // Leave the previous value on screen rather than flashing empty.
-            Query::Pending => {}
-            Query::Missing(token) => {
-                cx.spawn(async move |waku, cx| {
-                    let branch = cx
-                        .background_executor()
-                        .spawn({
-                            let path = path.clone();
-                            async move { git_branch(&path) }
-                        })
-                        .await;
-                    waku.update(cx, |waku, cx| {
-                        if waku.branches.fulfill(token, branch.clone())
-                            && waku.selected_project().is_some_and(|p| p.path == path)
-                        {
-                            waku.branch = branch;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-                })
-                .detach();
-            }
-        }
     }
 
     pub(super) fn create_session_for(
@@ -159,6 +118,18 @@ impl Waku {
         self.select_session(id, cx);
     }
 
+    pub(super) fn select_workspace(&mut self, workspace: SessionWorkspace, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session_mut() else {
+            return;
+        };
+        if session.has_started() || session.workspace == workspace {
+            return;
+        }
+        session.workspace = workspace;
+        self.save();
+        cx.notify();
+    }
+
     pub(super) fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         // The turn count drives checkpoint cleanup, so the transcript has to be
         // loaded before it can be trusted.
@@ -180,11 +151,8 @@ impl Waku {
             .is_some_and(Project::is_projectless);
         let last_turn_count = self.state.sessions[index].turns.len();
         let project_path = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-            .map(|project| project.path.clone());
+            .workspace_path_for_session(&self.state.sessions[index])
+            .map(std::path::Path::to_path_buf);
         let was_selected = self.state.selected_session == Some(session_id);
         self.reset_session_runtime(session_id);
         self.remove_right_panel_session_state(session_id);

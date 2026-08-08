@@ -121,6 +121,7 @@ pub struct MenuChip {
     caret: bool,
     outlined: bool,
     selected: bool,
+    disabled: bool,
 }
 
 impl MenuChip {
@@ -132,6 +133,7 @@ impl MenuChip {
             caret: true,
             outlined: false,
             selected: false,
+            disabled: false,
         }
     }
 
@@ -147,6 +149,16 @@ impl MenuChip {
 
     pub fn outlined(mut self) -> Self {
         self.outlined = true;
+        self
+    }
+
+    pub fn caret(mut self, caret: bool) -> Self {
+        self.caret = caret;
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -188,6 +200,7 @@ impl RenderOnce for MenuChip {
             .text_size(px(11.5))
             .line_height(px(14.0))
             .cursor_default()
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
             .when(self.outlined, |element| {
                 element
                     .border_1()
@@ -195,11 +208,20 @@ impl RenderOnce for MenuChip {
                     .bg(theme.raised)
             })
             .when(self.selected, |element| element.bg(theme.overlay))
-            .hover(|element| element.bg(theme.overlay))
+            .when(!self.disabled, |element| {
+                element.hover(|element| element.bg(theme.overlay))
+            })
+            .when(self.disabled, |element| element.opacity(0.7))
             .when_some(self.icon, |element, (path, color)| {
                 element.child(icon(path, 10.5, color))
             })
-            .child(div().text_color(theme.text_secondary).child(self.label))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text_secondary)
+                    .child(self.label),
+            )
             .when(self.caret, |element| {
                 element.child(icon("icons/chevron-down.svg", 9.0, theme.text_ghost))
             })
@@ -262,6 +284,7 @@ impl RenderOnce for ProjectNameSelector {
             .relative()
             .flex_none()
             .cursor_default()
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
             .child(self.label)
             .child(
                 canvas(
@@ -309,6 +332,7 @@ mod tests {
             "icons/chevron-right.svg",
             "icons/folder.svg",
             "icons/folder-new.svg",
+            "icons/laptop.svg",
             "icons/file-diff.svg",
             "icons/globe.svg",
             "icons/alert.svg",

@@ -25,7 +25,7 @@ use crate::computer_use::ComputerAppGrant;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
     AgentSession, FavoriteModel, InteractionMode, Message, Project, ProviderKind, RuntimeMode,
-    TranscriptBlockContent,
+    SessionWorkspace, TranscriptBlockContent,
 };
 use crate::theme::ThemePreference;
 
@@ -688,6 +688,7 @@ impl StateStore {
         session.transcript_blocks = stored.transcript_blocks;
         session.turns = stored.turns;
         session.queued_messages = stored.queued_messages;
+        session.workspace = stored.workspace;
         session.provider_cursor = stored.provider_cursor;
         session.runtime_mode = stored.runtime_mode;
         session.interaction_mode = stored.interaction_mode;
@@ -904,6 +905,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         id: Uuid::parse_str(&id).ok()?,
         title,
         project_id: Uuid::parse_str(&project_id).ok()?,
+        workspace: SessionWorkspace::Local,
         provider: serde_json::from_value(serde_json::Value::String(provider)).ok()?,
         model,
         // Hydration replaces these; the list never reads them.
@@ -1199,6 +1201,10 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         let id = state.sessions[0].id;
         state.sessions[0].title = "Investigate".into();
+        state.sessions[0].workspace = SessionWorkspace::Worktree {
+            path: PathBuf::from("/tmp/worktrees/investigate"),
+            branch: "waku/investigate".into(),
+        };
         state.sessions[0].begin_turn("Ask");
         state.sessions[0].push_message(MessageRole::Assistant, "an answer");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
@@ -1215,6 +1221,7 @@ mod tests {
         assert!(!session.detail_loaded);
         assert!(session.messages.is_empty());
         assert!(session.turns.is_empty());
+        assert_eq!(session.workspace, SessionWorkspace::Local);
         // A skeleton still counts as started, since only started sessions
         // are stored at all.
         assert!(session.has_started());
@@ -1223,6 +1230,13 @@ mod tests {
         let session = &restored.sessions[0];
         assert!(session.detail_loaded);
         assert_eq!(session.turns.len(), 1);
+        assert_eq!(
+            session.workspace,
+            SessionWorkspace::Worktree {
+                path: PathBuf::from("/tmp/worktrees/investigate"),
+                branch: "waku/investigate".into(),
+            }
+        );
         assert!(
             session
                 .messages

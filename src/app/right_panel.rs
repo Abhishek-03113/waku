@@ -1373,7 +1373,9 @@ impl Waku {
     }
 
     fn ensure_right_panel_terminal(&mut self, terminal_id: Uuid, cx: &mut Context<Self>) {
-        let Some(working_directory) = self.selected_project().map(|project| project.path.clone())
+        let Some(working_directory) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
         else {
             self.right_panel_terminals.remove(&terminal_id);
             return;
@@ -2033,7 +2035,9 @@ impl Waku {
     /// editor is still the one that asked, so a read started before a project
     /// or session switch cannot write another workspace's text into the view.
     fn read_right_panel_file_into_editor(&mut self, relative_path: String, cx: &mut Context<Self>) {
-        let project_path = self.selected_project().map(|project| project.path.clone());
+        let project_path = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf);
         let (Some(project_path), Some(session_id)) = (project_path, self.state.selected_session)
         else {
             // Nothing to read from. Say so in the editor rather than leaving it
@@ -2071,8 +2075,8 @@ impl Waku {
             waku.update(cx, |waku, cx| {
                 if waku.state.selected_session != Some(session_id)
                     || waku
-                        .selected_project()
-                        .is_none_or(|project| project.path != project_path)
+                        .selected_workspace_path()
+                        .is_none_or(|path| path != project_path)
                 {
                     // The editor moved into another session's stored state, or
                     // the project changed. Clear the flag so a later reload can
@@ -2288,7 +2292,10 @@ impl Waku {
         let Some(relative_path) = self.visible_right_panel_file_path() else {
             return;
         };
-        let Some(project_path) = self.selected_project().map(|project| project.path.clone()) else {
+        let Some(project_path) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        else {
             return;
         };
         let Some(editor) = self.right_panel_file_editors.get(&relative_path) else {
@@ -2498,7 +2505,10 @@ impl Waku {
     /// the panel keeps drawing the previous listing until the result lands.
     /// Called when the tree's inputs change, never from a frame.
     fn refresh_right_panel_working_tree(&mut self, cx: &mut Context<Self>) {
-        let Some(project_path) = self.selected_project().map(|project| project.path.clone()) else {
+        let Some(project_path) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        else {
             self.right_panel_working_tree.clear();
             return;
         };
@@ -2521,8 +2531,8 @@ impl Waku {
                     waku.update(cx, |waku, cx| {
                         if waku.working_trees.fulfill(token, entries.clone())
                             && waku
-                                .selected_project()
-                                .is_some_and(|project| project.path == project_path)
+                                .selected_workspace_path()
+                                .is_some_and(|path| path == project_path)
                         {
                             waku.right_panel_working_tree = entries;
                             cx.notify();
@@ -2541,11 +2551,13 @@ impl Waku {
     /// several frames at 120Hz — so it is a query keyed by project path. The
     /// panel keeps showing its previous list until the result lands.
     fn refresh_right_panel_diff(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.selected_project() else {
+        let Some(project_path) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        else {
             self.right_panel_diff_files.clear();
             return;
         };
-        let project_path = project.path.clone();
         // The working tree moves under us, so a cached list is only good until
         // something asks for it again.
         self.right_panel_diffs.invalidate(&project_path);
@@ -2564,8 +2576,8 @@ impl Waku {
                     waku.update(cx, |waku, cx| {
                         if waku.right_panel_diffs.fulfill(token, files.clone())
                             && waku
-                                .selected_project()
-                                .is_some_and(|project| project.path == project_path)
+                                .selected_workspace_path()
+                                .is_some_and(|path| path == project_path)
                         {
                             waku.right_panel_diff_files = files;
                             cx.notify();

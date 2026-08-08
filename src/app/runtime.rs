@@ -15,10 +15,79 @@ impl Waku {
         self.state.sessions.iter().find(|session| session.id == id)
     }
 
+    /// The directory every filesystem and provider operation for `session`
+    /// must use. A not-yet-materialized worktree draft deliberately reads the
+    /// local checkout until its first submission creates the isolated copy.
+    pub(super) fn workspace_path_for_session<'a>(
+        &'a self,
+        session: &'a AgentSession,
+    ) -> Option<&'a std::path::Path> {
+        let project = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)?;
+        Some(session.workspace.path().unwrap_or(&project.path))
+    }
+
+    pub(super) fn selected_workspace_path(&self) -> Option<&std::path::Path> {
+        let session = self.selected_session()?;
+        self.workspace_path_for_session(session)
+    }
+
     /// Marks the session for the next save; see `PersistedState::session_mut`.
     pub(super) fn selected_session_mut(&mut self) -> Option<&mut AgentSession> {
         let id = self.state.selected_session?;
         self.state.session_mut(id)
+    }
+
+    /// Materialize a draft's requested worktree before the first checkpoint
+    /// or provider starts. Submission is a one-shot user action where this
+    /// synchronous handoff is preferable to letting any frame or background
+    /// session observe an ambiguous working directory.
+    fn materialize_session_workspace(
+        &mut self,
+        session_id: Uuid,
+        prompt: &str,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let Some((project_id, workspace)) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| (session.project_id, session.workspace.clone()))
+        else {
+            anyhow::bail!("Session not found");
+        };
+        if !matches!(workspace, SessionWorkspace::NewWorktree) {
+            return Ok(());
+        }
+        let project = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+        if project.is_projectless() {
+            anyhow::bail!("a projectless task cannot create a Git worktree");
+        }
+        let created = crate::worktree::create(&project.path, project.id, session_id, prompt)?;
+        let Some(session) = self.state.session_mut(session_id) else {
+            anyhow::bail!("Session not found");
+        };
+        session.workspace = SessionWorkspace::Worktree {
+            path: created.path,
+            branch: created.branch,
+        };
+
+        if self.state.selected_session == Some(session_id) {
+            self.invalidate_workspace_queries(cx);
+            self.reload_clean_right_panel_file_editors(cx);
+            self.ensure_right_panel_terminals(cx);
+        }
+        Ok(())
     }
 
     pub(super) fn selected_runtime(&self) -> Option<&SessionRuntime> {
@@ -257,7 +326,7 @@ impl Waku {
     /// [`Self::start_pending_checkpoint_captures`], which every caller that
     /// holds a `Context` runs straight after queueing.
     pub(super) fn capture_latest_turn_checkpoint_for(&mut self, session_id: Uuid) {
-        let Some((project_id, turn_count)) = self
+        let Some((session, turn_count)) = self
             .state
             .sessions
             .iter()
@@ -267,17 +336,14 @@ impl Waku {
                     .turns
                     .last()
                     .filter(|turn| turn.status != TurnStatus::Running)
-                    .map(|turn| (session.project_id, turn.turn_count))
+                    .map(|turn| (session, turn.turn_count))
             })
         else {
             return;
         };
         let Some(project_path) = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-            .map(|project| project.path.clone())
+            .workspace_path_for_session(session)
+            .map(std::path::Path::to_path_buf)
         else {
             return;
         };
@@ -382,6 +448,14 @@ impl Waku {
             cx.notify();
             return;
         }
+        let Some(source_workspace_path) = self
+            .workspace_path_for_session(&source)
+            .map(std::path::Path::to_path_buf)
+        else {
+            self.toast = Some("That task's project could not be found.".into());
+            cx.notify();
+            return;
+        };
 
         let provider_turn_count = source
             .turns
@@ -455,13 +529,6 @@ impl Waku {
                     else {
                         anyhow::bail!("Amp's native thread is unavailable");
                     };
-                    let project_path = self
-                        .state
-                        .projects
-                        .iter()
-                        .find(|project| project.id == source.project_id)
-                        .map(|project| project.path.as_path())
-                        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
                     let binary = self
                         .probes
                         .iter()
@@ -471,7 +538,7 @@ impl Waku {
                     Ok((
                         crate::amp_session::fork_session_at_turn(
                             binary,
-                            project_path,
+                            &source_workspace_path,
                             native_thread_id,
                             fork_context.as_deref(),
                             provider_turn_count,
@@ -486,13 +553,6 @@ impl Waku {
                     else {
                         anyhow::bail!("OpenCode's native session is unavailable");
                     };
-                    let project_path = self
-                        .state
-                        .projects
-                        .iter()
-                        .find(|project| project.id == source.project_id)
-                        .map(|project| project.path.as_path())
-                        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
                     let binary = self
                         .probes
                         .iter()
@@ -502,7 +562,7 @@ impl Waku {
                     Ok((
                         crate::opencode_session::fork_session_at_turn(
                             binary,
-                            project_path,
+                            &source_workspace_path,
                             native_session_id,
                             provider_turn_count,
                         )?,
@@ -516,13 +576,6 @@ impl Waku {
                     else {
                         anyhow::bail!("Grok's native session is unavailable");
                     };
-                    let project_path = self
-                        .state
-                        .projects
-                        .iter()
-                        .find(|project| project.id == source.project_id)
-                        .map(|project| project.path.as_path())
-                        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
                     let binary = self
                         .probes
                         .iter()
@@ -532,7 +585,7 @@ impl Waku {
                     Ok((
                         crate::grok_session::fork_session_at_turn(
                             binary,
-                            project_path,
+                            &source_workspace_path,
                             native_session_id,
                             provider_turn_count,
                         )?,
@@ -588,14 +641,9 @@ impl Waku {
                 checkpoint.git_ref = checkpoint::checkpoint_ref(fork_id, checkpoint.turn_count);
             }
         }
-        let checkpoint_warning = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == source.project_id)
-            .and_then(|project| {
-                checkpoint::copy_session_refs(&project.path, source.id, fork_id, turn_count).err()
-            });
+        let checkpoint_warning =
+            checkpoint::copy_session_refs(&source_workspace_path, source.id, fork_id, turn_count)
+                .err();
         self.invalidate_checkpoint_refs();
 
         self.state.push_session(forked);
@@ -720,7 +768,6 @@ impl Waku {
     ) -> bool {
         let retained_turn_count = turn_count.saturating_sub(1);
         let Some((
-            project_id,
             provider,
             status,
             provider_cursor,
@@ -741,7 +788,6 @@ impl Waku {
                     .find(|turn| turn.turn_count == turn_count)
                     .map(|_| {
                         (
-                            session.project_id,
                             session.provider,
                             session.status,
                             session.provider_cursor.clone(),
@@ -788,10 +834,11 @@ impl Waku {
         }
         let Some(project_path) = self
             .state
-            .projects
+            .sessions
             .iter()
-            .find(|project| project.id == project_id)
-            .map(|project| project.path.clone())
+            .find(|session| session.id == session_id)
+            .and_then(|session| self.workspace_path_for_session(session))
+            .map(std::path::Path::to_path_buf)
         else {
             self.toast = Some("The task's project could not be found.".into());
             cx.notify();
@@ -1180,11 +1227,9 @@ impl Waku {
         if let Some(runtime) = self.runtimes.get(&session.id) {
             return Ok(runtime.driver.clone());
         }
-        let project = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
+        let workspace_path = self
+            .workspace_path_for_session(&session)
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
         let binary = self
             .probes
@@ -1209,7 +1254,7 @@ impl Waku {
             session.provider,
             DriverStartOptions {
                 binary,
-                cwd: project.path.clone(),
+                cwd: workspace_path,
                 mode,
                 interaction_mode,
                 model,
@@ -1373,17 +1418,26 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         let selected = self.state.selected_session == Some(session_id);
-        let Some((project_id, status, next_turn_count)) = self
+        let Some((status, next_turn_count)) = self
             .state
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .map(|session| (session.project_id, session.status, session.turns.len() + 1))
+            .map(|session| (session.status, session.turns.len() + 1))
         else {
             return;
         };
         if status.is_busy() {
             self.enqueue_follow_up(session_id, prompt, cx);
+            return;
+        }
+        if let Err(error) = self.materialize_session_workspace(session_id, &prompt, cx) {
+            if selected {
+                self.composer
+                    .update(cx, |input, cx| input.set_content(prompt, cx));
+                self.toast = Some(format!("Could not create the worktree: {error}"));
+            }
+            cx.notify();
             return;
         }
         if selected {
@@ -1396,10 +1450,11 @@ impl Waku {
         };
         let project_path = self
             .state
-            .projects
+            .sessions
             .iter()
-            .find(|project| project.id == project_id)
-            .map(|project| project.path.clone());
+            .find(|session| session.id == session_id)
+            .and_then(|session| self.workspace_path_for_session(session))
+            .map(std::path::Path::to_path_buf);
         // The pre-turn checkpoint is what a later rewind restores to, so unlike
         // the post-turn one it is captured before the turn starts rather than
         // queued: correctness over latency, on a keystroke the user just made.

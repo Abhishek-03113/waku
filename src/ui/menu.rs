@@ -190,6 +190,9 @@ struct MenuState {
 #[derive(Clone)]
 pub struct ContextMenuHandle {
     state: Rc<RefCell<MenuState>>,
+    /// Stable focus identity for dropdown triggers. Context menus never attach
+    /// it, but sharing the handle keeps the two surface types one abstraction.
+    trigger_focus: FocusHandle,
     focus: FocusHandle,
     /// The trigger's bounds as of the last frame, so a dropdown can align under
     /// it. Recorded by a zero-cost canvas inside the trigger.
@@ -205,6 +208,7 @@ impl ContextMenuHandle {
     pub fn new(cx: &mut App) -> Self {
         Self {
             state: Rc::new(RefCell::new(MenuState::default())),
+            trigger_focus: cx.focus_handle(),
             focus: cx.focus_handle(),
             trigger_bounds: Rc::new(Cell::new(None)),
             on_toggle: Rc::new(Vec::new()),
@@ -490,24 +494,22 @@ where
 {
     let open_at = handle.state.borrow().open;
     let toggle_handle = handle.clone();
+    let key_handle = handle.clone();
 
     let trigger = trigger
         .relative()
+        .track_focus(&handle.trigger_focus)
+        .tab_index(0)
         .child(trigger_bounds_probe(handle))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            if toggle_handle.is_open() {
-                toggle_handle.close(window, cx);
-                window.refresh();
-                cx.stop_propagation();
-                return;
-            }
-            let anchor = toggle_handle
-                .trigger_bounds
-                .get()
-                .map(|bounds| align.anchor_point(bounds, px(TRIGGER_GAP)))
-                .unwrap_or_else(|| window.mouse_position());
-            open_menu(&toggle_handle, anchor, focus_target, window, cx);
+            toggle_anchored_surface(&toggle_handle, align, focus_target, window, cx);
             cx.stop_propagation();
+        })
+        .on_key_down(move |event: &KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                toggle_anchored_surface(&key_handle, align, focus_target, window, cx);
+                cx.stop_propagation();
+            }
         });
 
     let Some(position) = open_at else {
@@ -526,6 +528,26 @@ where
             .with_priority(1),
         )
         .into_any_element()
+}
+
+fn toggle_anchored_surface(
+    handle: &ContextMenuHandle,
+    align: MenuAlign,
+    focus_target: SurfaceFocus,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if handle.is_open() {
+        handle.close(window, cx);
+        window.refresh();
+        return;
+    }
+    let anchor = handle
+        .trigger_bounds
+        .get()
+        .map(|bounds| align.anchor_point(bounds, px(TRIGGER_GAP)))
+        .unwrap_or_else(|| window.mouse_position());
+    open_menu(handle, anchor, focus_target, window, cx);
 }
 
 /// A chrome-less card: dismissal and the menu key context, nothing else.
@@ -813,6 +835,7 @@ fn on_menu_key(
     if key == "escape" {
         handle.close(window, cx);
         window.refresh();
+        cx.stop_propagation();
         return;
     }
     if focusable.is_empty() {
@@ -823,12 +846,15 @@ fn on_menu_key(
     if let Some(next) = next_highlight(focusable, current, key) {
         handle.state.borrow_mut().highlighted = Some(next);
         window.refresh();
+        cx.stop_propagation();
         return;
     }
 
-    if matches!(key, "enter" | "space")
-        && let Some(highlighted) = handle.state.borrow().highlighted
-    {
+    if matches!(key, "enter" | "space") {
+        cx.stop_propagation();
+        let Some(highlighted) = handle.state.borrow().highlighted else {
+            return;
+        };
         // Rebuild to reach the entry's closure: the item list is intentionally
         // not retained between frames.
         let activated = items(cx)
@@ -865,20 +891,25 @@ mod tests {
     impl Render for Harness {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             let trigger = div().w(px(120.0)).h(px(32.0));
-            div().size_full().child(match self.surface {
-                Surface::Popover => {
-                    popover(trigger, &self.handle, MenuAlign::BelowLeft, |_, _, _| {
-                        div().w(px(200.0)).h(px(100.0)).into_any_element()
-                    })
-                }
-                Surface::Dropdown => dropdown_menu(
-                    trigger,
-                    "dropdown",
-                    &self.handle,
-                    MenuAlign::BelowLeft,
-                    |_| vec![MenuItem::new("Entry", |_, _| {})],
-                ),
-            })
+            div()
+                .size_full()
+                .tab_index(0)
+                .tab_group()
+                .tab_stop(false)
+                .child(match self.surface {
+                    Surface::Popover => {
+                        popover(trigger, &self.handle, MenuAlign::BelowLeft, |_, _, _| {
+                            div().w(px(200.0)).h(px(100.0)).into_any_element()
+                        })
+                    }
+                    Surface::Dropdown => dropdown_menu(
+                        trigger,
+                        "dropdown",
+                        &self.handle,
+                        MenuAlign::BelowLeft,
+                        |_| vec![MenuItem::new("Entry", |_, _| {})],
+                    ),
+                })
         }
     }
 
@@ -918,6 +949,29 @@ mod tests {
     #[gpui::test]
     fn dropdown_trigger_toggles(cx: &mut TestAppContext) {
         assert_trigger_toggles(Surface::Dropdown, cx);
+    }
+
+    fn assert_trigger_opens_from_keyboard(surface: Surface, cx: &mut TestAppContext) {
+        let handle = cx.update(ContextMenuHandle::new);
+        let harness = Harness {
+            handle: handle.clone(),
+            surface,
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| harness);
+
+        cx.update(|window, cx| window.focus(&handle.trigger_focus, cx));
+        cx.simulate_keystrokes("enter");
+        assert!(handle.is_open(), "enter on the tab stop should open");
+    }
+
+    #[gpui::test]
+    fn popover_trigger_is_keyboard_operable(cx: &mut TestAppContext) {
+        assert_trigger_opens_from_keyboard(Surface::Popover, cx);
+    }
+
+    #[gpui::test]
+    fn dropdown_trigger_is_keyboard_operable(cx: &mut TestAppContext) {
+        assert_trigger_opens_from_keyboard(Surface::Dropdown, cx);
     }
 
     fn items() -> Vec<MenuItem> {
