@@ -89,9 +89,13 @@ impl Waku {
     /// expire on a timer, they are dropped at the moments the answer plausibly
     /// moved — coming back to the window, or a turn finishing.
     pub(super) fn invalidate_workspace_queries(&mut self, cx: &mut Context<Self>) {
-        if self.selected_workspace_path().is_none() {
+        let Some(workspace_path) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        else {
             return;
-        }
+        };
+        self.branch_snapshots.invalidate(&workspace_path);
         self.refresh_workspace_surfaces(cx);
         self.invalidate_composer_sources(cx);
     }

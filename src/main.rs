@@ -12,6 +12,7 @@ mod composer_complete;
 mod computer_use;
 mod cursor_session;
 mod driver;
+mod git_branch;
 mod grok_session;
 mod identity;
 mod input;

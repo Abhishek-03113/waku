@@ -28,11 +28,19 @@ pub fn create(
     project_id: Uuid,
     session_id: Uuid,
     prompt: &str,
+    base_branch: Option<&str>,
 ) -> anyhow::Result<CreatedWorktree> {
     let root = dirs::home_dir()
         .ok_or_else(|| anyhow!("could not locate the home directory for ~/.waku/worktrees"))?
         .join(".waku/worktrees");
-    create_in(project_path, &root, project_id, session_id, prompt)
+    create_in(
+        project_path,
+        &root,
+        project_id,
+        session_id,
+        prompt,
+        base_branch,
+    )
 }
 
 fn create_in(
@@ -41,6 +49,7 @@ fn create_in(
     project_id: Uuid,
     session_id: Uuid,
     prompt: &str,
+    requested_base: Option<&str>,
 ) -> anyhow::Result<CreatedWorktree> {
     let project_path = fs::canonicalize(project_path)
         .with_context(|| format!("could not open project {}", project_path.display()))?;
@@ -52,7 +61,17 @@ fn create_in(
         .strip_prefix(&repository)
         .context("the project is outside its Git repository root")?
         .to_owned();
-    let base_ref = default_base_ref(&repository)?;
+    let base_ref = requested_base
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
+        .map(Ok)
+        .unwrap_or_else(|| default_base_ref(&repository))?;
+    git_stdout(
+        &repository,
+        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+    )
+    .with_context(|| format!("base branch `{base_ref}` is unavailable"))?;
     let project_worktrees = worktree_root.join(project_id.to_string());
     fs::create_dir_all(&project_worktrees).with_context(|| {
         format!(
@@ -296,6 +315,7 @@ mod tests {
             project_id,
             Uuid::new_v4(),
             "Build a project selector",
+            None,
         )
         .unwrap();
         assert_eq!(first.branch, "waku/build-a-project-selector");
@@ -315,9 +335,24 @@ mod tests {
             project_id,
             Uuid::new_v4(),
             "Build a project selector",
+            None,
         )
         .unwrap();
         assert_eq!(second.branch, "waku/build-a-project-selector-2");
+
+        let from_feature = create_in(
+            &project,
+            &worktree_root,
+            project_id,
+            Uuid::new_v4(),
+            "Use selected base",
+            Some("feature"),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(from_feature.path.join("README.md")).unwrap(),
+            "feature\n"
+        );
 
         fs::remove_dir_all(&root).ok();
     }

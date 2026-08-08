@@ -610,6 +610,21 @@ impl ComposerInput {
         self
     }
 
+    /// Replace the placeholder after construction. Picker fields use this to
+    /// name the workspace they are searching without recreating the focused
+    /// input entity whenever the selected project changes.
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = placeholder.into();
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder;
+            cx.notify();
+        }
+    }
+
     /// Turn the field into a code editor: Enter inserts a newline instead of
     /// submitting, and `language` (when recognised) colours the text.
     pub fn code_editor(mut self, language: Option<&str>) -> Self {

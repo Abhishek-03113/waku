@@ -1766,7 +1766,402 @@ impl Waku {
         )
     }
 
-    pub(super) fn render_workspace_footer(&self, cx: &mut Context<Self>) -> Div {
+    fn render_branch_selector(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = Theme::current(cx);
+        let session = self.selected_session()?;
+        let workspace = session.workspace.clone();
+        let workspace_path = self.workspace_path_for_session(session)?.to_path_buf();
+        self.selected_project()
+            .filter(|project| !project.is_projectless())?;
+        let branch_enabled = !session.is_busy() && !self.branch_operation_pending;
+        let planned_worktree = matches!(workspace, SessionWorkspace::NewWorktree { .. });
+        let snapshot = self.branch_snapshot_for_workspace(&workspace_path, cx)?;
+        let selected_branch = match &workspace {
+            SessionWorkspace::Local => snapshot.display_branch().map(str::to_owned),
+            SessionWorkspace::NewWorktree { base_branch } => base_branch
+                .clone()
+                .or_else(|| snapshot.default_branch.clone())
+                .or_else(|| snapshot.display_branch().map(str::to_owned)),
+            SessionWorkspace::Worktree { branch, .. } => snapshot
+                .current
+                .clone()
+                .or_else(|| Some(branch.clone()))
+                .or_else(|| snapshot.detached_head.clone()),
+        }
+        .unwrap_or_else(|| "Detached HEAD".to_owned());
+
+        let weak = cx.entity().downgrade();
+        let search = self.branch_search.clone();
+        let create_input = self.branch_create_input.clone();
+        let search_focus = search.read(cx).focus_handle(cx);
+        let handle = {
+            let toggle_weak = weak.clone();
+            let reset_search = search.clone();
+            let reset_create = create_input.clone();
+            let picker_focus = search_focus.clone();
+            self.menu_handle_with(BRANCH_PICKER_MENU_ID, cx, move |open, window, cx| {
+                let _ = toggle_weak.update(cx, |this, cx| {
+                    if open {
+                        this.branch_picker_mode = BranchPickerMode::Browse;
+                        this.branch_picker_highlight = None;
+                        let project_name = this
+                            .selected_project()
+                            .map(|project| project.name.clone())
+                            .unwrap_or_else(|| "project".to_owned());
+                        reset_search.update(cx, |input, cx| {
+                            input.set_placeholder(format!("Search {project_name} branches"), cx);
+                            input.clear(cx);
+                        });
+                        reset_create.update(cx, |input, cx| input.clear(cx));
+                        this.refresh_selected_branch_snapshot(cx);
+                    } else {
+                        this.branch_picker_mode = BranchPickerMode::Browse;
+                        let focus = this.composer_focus(cx);
+                        window.focus(&focus, cx);
+                    }
+                    cx.notify();
+                });
+                if open {
+                    let picker_focus = picker_focus.clone();
+                    window.on_next_frame(move |window, _| {
+                        window.on_next_frame(move |window, cx| window.focus(&picker_focus, cx));
+                    });
+                }
+            })
+        };
+
+        let trigger = MenuChip::new("workspace-branch")
+            .icon("icons/git-branch.svg", theme.text_tertiary)
+            .label(if self.branch_operation_pending {
+                "Switching…".to_owned()
+            } else {
+                selected_branch.clone()
+            })
+            .caret(branch_enabled)
+            .disabled(!branch_enabled)
+            .selected(branch_enabled && handle.is_open())
+            .max_w(px(210.0));
+        if !branch_enabled {
+            return Some(trigger.into_any_element());
+        }
+
+        let normalized_query = self
+            .branch_search
+            .read(cx)
+            .content()
+            .trim()
+            .to_ascii_lowercase();
+        let visible_branches = Rc::new(
+            if handle.is_open() && self.branch_picker_mode == BranchPickerMode::Browse {
+                visible_branch_entries(&snapshot.branches, &selected_branch, &normalized_query)
+            } else {
+                Vec::new()
+            },
+        );
+        let allow_create = !planned_worktree;
+        let actions = Rc::new(
+            visible_branches
+                .iter()
+                .filter(|branch| planned_worktree || !branch.checked_out_elsewhere)
+                .map(|branch| BranchPickerAction::Checkout(branch.name.clone()))
+                .chain(allow_create.then_some(BranchPickerAction::Create))
+                .collect::<Vec<_>>(),
+        );
+        let highlight = self
+            .branch_picker_highlight
+            .filter(|index| *index < actions.len());
+        let mode = self.branch_picker_mode;
+        if handle.is_open() && mode == BranchPickerMode::Browse {
+            self.sync_branch_picker_rows(&visible_branches);
+        }
+        let branch_list = self.branch_picker_list_state.clone();
+
+        Some(popover(
+            trigger,
+            &handle,
+            MenuAlign::AboveLeft,
+            move |popover, _window, _cx| {
+                let popover = popover.clone();
+                let next_actions = actions.clone();
+                let previous_actions = actions.clone();
+                let confirm_actions = actions.clone();
+                let next_weak = weak.clone();
+                let previous_weak = weak.clone();
+                let confirm_weak = weak.clone();
+                let confirm_popover = popover.clone();
+
+                let body = if mode == BranchPickerMode::Create {
+                    div()
+                        .w_full()
+                        .p(px(14.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(icon("icons/plus.svg", 14.0, theme.text_secondary))
+                                .child("Create and checkout new branch"),
+                        )
+                        .child(
+                            div()
+                                .mt(px(12.0))
+                                .h(px(36.0))
+                                .px(px(10.0))
+                                .rounded(px(9.0))
+                                .border_1()
+                                .border_color(theme.border_strong)
+                                .bg(theme.surface)
+                                .flex()
+                                .items_center()
+                                .child(div().flex_1().min_w_0().child(create_input.clone())),
+                        )
+                        .child(
+                            div()
+                                .mt(px(9.0))
+                                .text_size(px(10.5))
+                                .text_color(theme.text_tertiary)
+                                .child("Press Return to create · Esc to cancel"),
+                        )
+                        .into_any_element()
+                } else {
+                    let rows = if visible_branches.is_empty() {
+                        div()
+                            .id("branch-picker-list-empty")
+                            .h(px(64.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(11.5))
+                            .text_color(theme.text_ghost)
+                            .child("No branches found")
+                            .into_any_element()
+                    } else {
+                        let list_branches = visible_branches.clone();
+                        let list_actions = actions.clone();
+                        let list_selected_branch = selected_branch.clone();
+                        let list_weak = weak.clone();
+                        let list_popover = popover.clone();
+                        let height =
+                            (visible_branches.len() as f32 * BRANCH_PICKER_ROW_HEIGHT).min(260.0);
+                        div()
+                            .id("branch-picker-list")
+                            .w_full()
+                            .h(px(height))
+                            .flex_none()
+                            .px(px(4.0))
+                            .child(
+                                list(branch_list.clone(), move |index, _window, _cx| {
+                                    let Some(branch) = list_branches.get(index) else {
+                                        return div().into_any_element();
+                                    };
+                                    let selected = branch.name == list_selected_branch;
+                                    let disabled =
+                                        branch.checked_out_elsewhere && !planned_worktree;
+                                    let highlighted = highlight
+                                        .and_then(|index| list_actions.get(index))
+                                        .is_some_and(|action| {
+                                            matches!(
+                                                action,
+                                                BranchPickerAction::Checkout(name)
+                                                    if name == &branch.name
+                                            )
+                                        });
+                                    let color = if disabled {
+                                        theme.text_ghost
+                                    } else {
+                                        theme.text
+                                    };
+                                    let row = div()
+                                        .id(SharedString::from(format!(
+                                            "branch-row-{}",
+                                            branch.name
+                                        )))
+                                        .w_full()
+                                        .h(px(BRANCH_PICKER_ROW_HEIGHT))
+                                        .px(px(8.0))
+                                        .rounded(px(6.0))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .cursor_default()
+                                        .when(highlighted, |element| {
+                                            element.bg(theme.overlay_strong)
+                                        })
+                                        .when(!disabled, |element| {
+                                            element
+                                                .hover(|element| element.bg(theme.overlay))
+                                                .active(|element| element.opacity(0.85))
+                                        })
+                                        .child(icon("icons/git-branch.svg", 12.0, color))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .truncate()
+                                                .text_size(px(11.5))
+                                                .line_height(px(15.0))
+                                                .text_color(color)
+                                                .child(SharedString::from(branch.name.clone())),
+                                        )
+                                        .when(selected, |element| {
+                                            element.child(icon(
+                                                "icons/check.svg",
+                                                11.0,
+                                                theme.text_secondary,
+                                            ))
+                                        });
+                                    if disabled {
+                                        row.into_any_element()
+                                    } else {
+                                        let branch_name = branch.name.clone();
+                                        let select_weak = list_weak.clone();
+                                        let select_popover = list_popover.clone();
+                                        row.on_click(move |_, window, cx| {
+                                            let should_close = select_weak
+                                                .update(cx, |this, cx| {
+                                                    this.choose_workspace_branch(
+                                                        branch_name.clone(),
+                                                        cx,
+                                                    )
+                                                })
+                                                .unwrap_or(false);
+                                            if should_close {
+                                                select_popover.close(window, cx);
+                                                window.refresh();
+                                            }
+                                        })
+                                        .into_any_element()
+                                    }
+                                })
+                                .size_full(),
+                            )
+                            .into_any_element()
+                    };
+
+                    let create_row = allow_create.then(|| {
+                        let create_weak = weak.clone();
+                        div()
+                            .id("create-workspace-branch")
+                            .mx(px(4.0))
+                            .h(px(BRANCH_PICKER_ROW_HEIGHT))
+                            .px(px(8.0))
+                            .rounded(px(6.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .cursor_default()
+                            .when(
+                                highlight.and_then(|index| actions.get(index))
+                                    == Some(&BranchPickerAction::Create),
+                                |element| element.bg(theme.overlay_strong),
+                            )
+                            .hover(|element| element.bg(theme.overlay))
+                            .active(|element| element.opacity(0.85))
+                            .child(icon("icons/plus.svg", 12.0, theme.text_secondary))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .line_height(px(15.0))
+                                    .text_color(theme.text)
+                                    .child("Create and checkout new branch…"),
+                            )
+                            .on_click(move |_, window, cx| {
+                                let _ = create_weak.update(cx, |this, cx| {
+                                    this.begin_branch_creation(window, cx);
+                                });
+                            })
+                    });
+
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .h(px(52.0))
+                                .px(px(12.0))
+                                .pt(px(10.0))
+                                .pb(px(8.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .h(px(34.0))
+                                        .px(px(10.0))
+                                        .rounded(px(9.0))
+                                        .bg(theme.surface)
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(icon("icons/search.svg", 15.0, theme.text_secondary))
+                                        .child(div().flex_1().min_w_0().child(search.clone())),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(14.0))
+                                .pt(px(3.0))
+                                .pb(px(7.0))
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_tertiary)
+                                .child("Branches"),
+                        )
+                        .child(rows)
+                        .when_some(create_row, |element, create_row| {
+                            element
+                                .child(div().mx(px(6.0)).my(px(4.0)).h(px(1.0)).bg(theme.border))
+                                .child(create_row)
+                                .child(div().h(px(4.0)))
+                        })
+                        .into_any_element()
+                };
+
+                div()
+                    .w(px(360.0))
+                    .max_h(px(390.0))
+                    .rounded(px(13.0))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(theme.raised)
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .on_action(move |_: &SelectNextEntry, _, cx| {
+                        let _ = next_weak.update(cx, |this, cx| {
+                            this.move_branch_picker_highlight("down", &next_actions, cx);
+                        });
+                    })
+                    .on_action(move |_: &SelectPreviousEntry, _, cx| {
+                        let _ = previous_weak.update(cx, |this, cx| {
+                            this.move_branch_picker_highlight("up", &previous_actions, cx);
+                        });
+                    })
+                    .on_action(move |_: &ConfirmEntry, window, cx| {
+                        let should_close = confirm_weak
+                            .update(cx, |this, cx| {
+                                this.confirm_branch_picker_action(&confirm_actions, window, cx)
+                            })
+                            .unwrap_or(false);
+                        if should_close {
+                            confirm_popover.close(window, cx);
+                            window.refresh();
+                        }
+                    })
+                    .child(body)
+                    .into_any_element()
+            },
+        ))
+    }
+
+    pub(super) fn render_workspace_footer(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let selected_project_id = self.state.selected_project;
         let projectless_selected = self.selected_project().is_some_and(Project::is_projectless);
@@ -1865,7 +2260,7 @@ impl Waku {
             .unwrap_or_default();
         let workspace_label = match &workspace {
             SessionWorkspace::Local => SharedString::from("Local"),
-            SessionWorkspace::NewWorktree => SharedString::from("New worktree"),
+            SessionWorkspace::NewWorktree { .. } => SharedString::from("New worktree"),
             SessionWorkspace::Worktree { branch, .. } => SharedString::from(branch.clone()),
         };
         let workspace_icon = if workspace.is_local() {
@@ -1904,7 +2299,10 @@ impl Waku {
                         .selected(local_selected),
                         MenuItem::new("New worktree", move |_, cx| {
                             let _ = worktree.update(cx, |this, cx| {
-                                this.select_workspace(SessionWorkspace::NewWorktree, cx);
+                                this.select_workspace(
+                                    SessionWorkspace::NewWorktree { base_branch: None },
+                                    cx,
+                                );
                             });
                         })
                         .icon("icons/fork.svg")
@@ -1916,6 +2314,8 @@ impl Waku {
         } else {
             worktree_trigger.into_any_element()
         };
+
+        let branch_selector = self.render_branch_selector(cx);
 
         let usage_meter = self.render_usage_meter(cx);
         div()
@@ -1943,10 +2343,39 @@ impl Waku {
                     .line_height(px(14.0))
                     .child(project_selector)
                     .child(worktree_selector)
+                    .children(branch_selector)
                     .child(div().flex_1())
                     .children(usage_meter),
             )
     }
+}
+
+/// Branches matching the search, with the selected branch pinned first and
+/// every other row sorted by name. Disabled worktree-owned rows stay in the
+/// result; the UI needs to explain why Git cannot switch to them.
+pub(super) fn visible_branch_entries(
+    branches: &[crate::git_branch::BranchEntry],
+    selected_branch: &str,
+    normalized_query: &str,
+) -> Vec<crate::git_branch::BranchEntry> {
+    let normalized_query = normalized_query.to_ascii_lowercase();
+    let mut visible = branches
+        .iter()
+        .filter(|branch| {
+            normalized_query
+                .split_whitespace()
+                .all(|token| branch.name.to_ascii_lowercase().contains(token))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    visible.sort_by(|left, right| {
+        let left_selected = left.name == selected_branch;
+        let right_selected = right.name == selected_branch;
+        right_selected
+            .cmp(&left_selected)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    visible
 }
 
 /// The mention a dropped file submits: relative to the project root when the

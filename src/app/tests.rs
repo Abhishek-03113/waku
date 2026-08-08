@@ -1,4 +1,6 @@
-use super::composer::{dropped_file_mention, merged_submission, next_picker_highlight};
+use super::composer::{
+    dropped_file_mention, merged_submission, next_picker_highlight, visible_branch_entries,
+};
 use super::settings::visible_settings_pages;
 use super::{
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
@@ -13,6 +15,7 @@ use super::{
     transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
     transcript_rows_fingerprint, widened_panel_width_for_file_editor,
 };
+use crate::git_branch::BranchEntry;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
     ReasoningBlock, SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus,
@@ -71,6 +74,38 @@ fn submissions_append_attachment_mentions_after_the_prompt() {
     );
     assert_eq!(merged_submission(" plain ", &[]).as_deref(), Some("plain"));
     assert_eq!(merged_submission("   ", &[]), None);
+}
+
+#[test]
+fn branch_picker_pins_selection_and_filters_by_name() {
+    let branches = vec![
+        BranchEntry {
+            name: "topic/zebra".into(),
+            checked_out_elsewhere: false,
+        },
+        BranchEntry {
+            name: "main".into(),
+            checked_out_elsewhere: false,
+        },
+        BranchEntry {
+            name: "topic/apple".into(),
+            checked_out_elsewhere: true,
+        },
+    ];
+    assert_eq!(
+        visible_branch_entries(&branches, "main", "")
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["main", "topic/apple", "topic/zebra"]
+    );
+    assert_eq!(
+        visible_branch_entries(&branches, "main", "TOPIC APPLE")
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["topic/apple"]
+    );
 }
 
 #[test]

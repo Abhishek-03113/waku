@@ -24,6 +24,7 @@ use crate::computer_use::{
     ComputerPermissions, ComputerUsePhase, ComputerUseState, PendingComputerApproval,
 };
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
+use crate::git_branch::BranchSnapshot;
 use crate::input::{ComposerEvent, ComposerInput};
 use crate::md;
 use crate::model::{
@@ -70,6 +71,8 @@ const CONTENT_MAX_WIDTH: f32 = 720.0;
 /// Menu-registry id of the composer's model picker, shared by its render site
 /// and the `cmd-/` toggle action.
 const MODEL_PICKER_MENU_ID: &str = "provider-model-picker";
+const BRANCH_PICKER_MENU_ID: &str = "workspace-branch-picker";
+const BRANCH_PICKER_ROW_HEIGHT: f32 = 26.0;
 const SIDEBAR_MIN_WIDTH: f32 = 180.0;
 const SIDEBAR_MAX_WIDTH: f32 = 420.0;
 const RIGHT_PANEL_MIN_WIDTH: f32 = 280.0;
@@ -133,6 +136,19 @@ enum StreamDeltaKind {
 enum ModelPickerTab {
     Favorites,
     Provider(ProviderKind),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum BranchPickerMode {
+    #[default]
+    Browse,
+    Create,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BranchPickerAction {
+    Checkout(String),
+    Create,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -545,6 +561,21 @@ pub struct Waku {
     /// keyboard has not moved yet, so `enter` takes the first row.
     model_picker_highlight: Option<usize>,
     model_picker_scroll: ScrollHandle,
+    branch_search: Entity<ComposerInput>,
+    branch_create_input: Entity<ComposerInput>,
+    branch_picker_mode: BranchPickerMode,
+    /// Keyboard cursor over the branch picker's enabled actions. Disabled
+    /// rows remain visible but never enter this index.
+    branch_picker_highlight: Option<usize>,
+    branch_picker_list_state: ListState,
+    branch_picker_row_cache: RefCell<Vec<crate::git_branch::BranchEntry>>,
+    /// Git subprocess results per concrete workspace path. Render only reads
+    /// this in-memory cache; misses are fulfilled on the background executor.
+    branch_snapshots: QueryCache<PathBuf, Result<Option<BranchSnapshot>, String>>,
+    /// Stale-while-revalidate value for the selected path, avoiding label
+    /// flicker when app activation invalidates the query.
+    visible_branch_snapshot: Option<(PathBuf, BranchSnapshot)>,
+    branch_operation_pending: bool,
     /// Slash commands discovered per (provider, project root). Filesystem
     /// walks live on the background executor; frames read the index below.
     slash_commands: QueryCache<(ProviderKind, PathBuf), Vec<SlashCommand>>,
@@ -708,6 +739,7 @@ pub struct Waku {
 }
 
 mod autocomplete;
+mod branches;
 mod components;
 mod composer;
 mod file_search;
@@ -763,6 +795,16 @@ impl Waku {
             ComposerInput::new(window, cx)
                 .search_field()
                 .placeholder("Search models...")
+        });
+        let branch_search = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder("Search branches")
+        });
+        let branch_create_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder("New branch name")
         });
         let settings_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
@@ -903,6 +945,7 @@ impl Waku {
         let transcript_rows = ListState::new(0, ListAlignment::Bottom, px(2048.0));
         let anchored_transcript_rows = ListState::new(0, ListAlignment::Top, px(2048.0));
         let sidebar_list_state = ListState::new(0, ListAlignment::Top, px(256.0));
+        let branch_picker_list_state = ListState::new(0, ListAlignment::Top, px(152.0));
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
         let navigation_rail_active_scale_enabled = Rc::new(Cell::new(false));
@@ -1025,6 +1068,32 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
+                &branch_search,
+                |this: &mut Self, search, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited)
+                        && this.branch_picker_mode == BranchPickerMode::Browse
+                    {
+                        if search.read(cx).content().trim().is_empty() {
+                            this.branch_picker_highlight = None;
+                        } else {
+                            this.branch_picker_highlight = Some(0);
+                            this.branch_picker_list_state.scroll_to_reveal_item(0);
+                        }
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &branch_create_input,
+                |_: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
                 &settings_search,
                 |_: &mut Self, _, event: &ComposerEvent, cx| {
                     if matches!(event, ComposerEvent::Edited) {
@@ -1087,6 +1156,8 @@ impl Waku {
                 store,
                 composer,
                 model_search,
+                branch_search,
+                branch_create_input,
                 settings_search,
                 settings_focus,
                 onboarding_add_project_focus,
@@ -1127,6 +1198,13 @@ impl Waku {
                 model_picker_tab,
                 model_picker_highlight: None,
                 model_picker_scroll: ScrollHandle::new(),
+                branch_picker_mode: BranchPickerMode::Browse,
+                branch_picker_highlight: None,
+                branch_picker_list_state,
+                branch_picker_row_cache: RefCell::new(Vec::new()),
+                branch_snapshots: QueryCache::new(MAX_CACHED_WORKSPACES),
+                visible_branch_snapshot: None,
+                branch_operation_pending: false,
                 // Providers × workspaces; both scans are small, the cache
                 // only exists to keep them off the frame path.
                 slash_commands: QueryCache::new(2 * MAX_CACHED_WORKSPACES),

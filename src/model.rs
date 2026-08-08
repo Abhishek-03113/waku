@@ -441,8 +441,13 @@ pub enum SessionWorkspace {
     /// Work directly in the project's ordinary checkout.
     #[default]
     Local,
-    /// Create an isolated worktree when this draft is first submitted.
-    NewWorktree,
+    /// Create an isolated worktree when this draft is first submitted. A
+    /// selected base branch is remembered without checking it out in the
+    /// ordinary project directory.
+    NewWorktree {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_branch: Option<String>,
+    },
     /// A materialized worktree. `path` preserves a project that points at a
     /// subdirectory of its repository rather than the repository root itself.
     Worktree { path: PathBuf, branch: String },
@@ -454,13 +459,13 @@ impl SessionWorkspace {
     }
 
     pub fn is_worktree(&self) -> bool {
-        matches!(self, Self::NewWorktree | Self::Worktree { .. })
+        matches!(self, Self::NewWorktree { .. } | Self::Worktree { .. })
     }
 
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::Worktree { path, .. } => Some(path),
-            Self::Local | Self::NewWorktree => None,
+            Self::Local | Self::NewWorktree { .. } => None,
         }
     }
 }
@@ -1497,6 +1502,19 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("queued_messages");
         let legacy_session: AgentSession = serde_json::from_value(legacy).unwrap();
         assert!(legacy_session.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn planned_worktree_base_branch_is_optional_and_round_trips() {
+        let legacy: SessionWorkspace =
+            serde_json::from_value(serde_json::json!({ "kind": "newWorktree" })).unwrap();
+        assert_eq!(legacy, SessionWorkspace::NewWorktree { base_branch: None });
+
+        let selected = SessionWorkspace::NewWorktree {
+            base_branch: Some("release/next".into()),
+        };
+        let restored = serde_json::from_value(serde_json::to_value(&selected).unwrap()).unwrap();
+        assert_eq!(selected, restored);
     }
 
     #[test]

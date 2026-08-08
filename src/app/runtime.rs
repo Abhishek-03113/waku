@@ -60,9 +60,9 @@ impl Waku {
         else {
             anyhow::bail!("Session not found");
         };
-        if !matches!(workspace, SessionWorkspace::NewWorktree) {
+        let SessionWorkspace::NewWorktree { base_branch } = workspace else {
             return Ok(());
-        }
+        };
         let project = self
             .state
             .projects
@@ -73,7 +73,13 @@ impl Waku {
         if project.is_projectless() {
             anyhow::bail!("a projectless task cannot create a Git worktree");
         }
-        let created = crate::worktree::create(&project.path, project.id, session_id, prompt)?;
+        let created = crate::worktree::create(
+            &project.path,
+            project.id,
+            session_id,
+            prompt,
+            base_branch.as_deref(),
+        )?;
         let Some(session) = self.state.session_mut(session_id) else {
             anyhow::bail!("Session not found");
         };
