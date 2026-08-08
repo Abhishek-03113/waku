@@ -29,6 +29,7 @@ mod theme;
 mod ui;
 mod updater;
 mod usage;
+mod usage_history;
 mod worktree;
 
 use gpui::{

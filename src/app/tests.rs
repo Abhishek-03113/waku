@@ -1087,6 +1087,7 @@ fn settings_search_filters_pages_for_arrow_cycling() {
             SettingsPage::General,
             SettingsPage::Appearance,
             SettingsPage::Providers,
+            SettingsPage::Usage,
             SettingsPage::ComputerUse,
         ]
     );
@@ -1096,7 +1097,11 @@ fn settings_search_filters_pages_for_arrow_cycling() {
     // A keyword shared across pages keeps them all reachable.
     assert_eq!(
         pages("codex"),
-        vec![SettingsPage::Providers, SettingsPage::ComputerUse]
+        vec![
+            SettingsPage::Providers,
+            SettingsPage::Usage,
+            SettingsPage::ComputerUse
+        ]
     );
 
     assert_eq!(pages("no such setting"), vec![]);

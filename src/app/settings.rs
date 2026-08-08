@@ -7,6 +7,10 @@ actions!(waku_settings, [ClearSearch]);
 
 const SETTINGS_CONTENT_MAX_WIDTH: f32 = 760.0;
 
+/// The Usage page is a dashboard, not a form; it mirrors T3 Code's wide
+/// two-column layout and needs the extra room for the chart.
+const SETTINGS_USAGE_MAX_WIDTH: f32 = 1024.0;
+
 /// Key context the settings sidebar declares around its search field.
 const SETTINGS_SIDEBAR_CONTEXT: &str = "SettingsSidebar";
 
@@ -19,7 +23,7 @@ const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > ComposerInput";
 
 /// The sidebar's rows in display order, each with the keyword haystack the
 /// search field filters against.
-const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 4] = [
+const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 5] = [
     (
         SettingsPage::General,
         "General",
@@ -37,6 +41,12 @@ const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 4] = [
         "Providers",
         "icons/bot.svg",
         "providers agents models cli version install detect claude codex cursor opencode amp grok pi",
+    ),
+    (
+        SettingsPage::Usage,
+        "Usage",
+        "icons/chart-column.svg",
+        "usage tokens cost spend cache daily chart model breakdown history claude codex",
     ),
     (
         SettingsPage::ComputerUse,
@@ -140,8 +150,7 @@ impl Waku {
                     ))
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings_page = Some(page);
-                        cx.notify();
+                        this.open_settings_page(page, cx);
                     })),
             );
         }
@@ -229,8 +238,7 @@ impl Waku {
         let Some(next) = next_picker_highlight(current, pages.len(), key) else {
             return;
         };
-        self.settings_page = Some(pages[next]);
-        cx.notify();
+        self.open_settings_page(pages[next], cx);
     }
 
     fn render_settings_sidebar_titlebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -280,7 +288,10 @@ impl Waku {
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(SETTINGS_CONTENT_MAX_WIDTH))
+                            .max_w(px(match page {
+                                SettingsPage::Usage => SETTINGS_USAGE_MAX_WIDTH,
+                                _ => SETTINGS_CONTENT_MAX_WIDTH,
+                            }))
                             .mx_auto()
                             .child(
                                 div()
@@ -291,6 +302,7 @@ impl Waku {
                                     .child(match page {
                                         SettingsPage::General => "General",
                                         SettingsPage::Providers => "Providers",
+                                        SettingsPage::Usage => "Usage",
                                         SettingsPage::ComputerUse => "Computer Use",
                                         SettingsPage::Appearance => "Appearance",
                                     }),
@@ -298,6 +310,7 @@ impl Waku {
                             .child(match page {
                                 SettingsPage::General => self.render_general_settings(cx),
                                 SettingsPage::Providers => self.render_providers_settings(cx),
+                                SettingsPage::Usage => self.render_usage_settings(cx),
                                 SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
                                 SettingsPage::Appearance => self.render_appearance_settings(cx),
                             }),

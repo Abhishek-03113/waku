@@ -160,8 +160,23 @@ enum BranchPickerAction {
 enum SettingsPage {
     General,
     Providers,
+    Usage,
     ComputerUse,
     Appearance,
+}
+
+/// Which unit the Usage page's headline and chart read in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UsageMetric {
+    Cost,
+    Tokens,
+}
+
+/// Which table the Usage page's breakdown section shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UsageBreakdown {
+    Model,
+    Day,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -604,6 +619,32 @@ pub struct Waku {
     /// Providers whose turn settled since the last fetch, so the meters have
     /// moved.
     plan_usage_stale: HashSet<ProviderKind>,
+    /// The settings Usage page's snapshot: historical token/cost usage
+    /// scanned from provider transcripts off-thread. Frames read only this.
+    usage_history: Option<crate::usage_history::UsageHistory>,
+    /// The window a scan is currently in flight for, so a repeat request for
+    /// the same window coalesces while a changed window supersedes it.
+    usage_history_pending_for: Option<u32>,
+    /// Bumped per scan; a result from a superseded scan is discarded.
+    usage_history_generation: u64,
+    /// When the current snapshot landed, for the reopen-staleness check.
+    usage_history_scanned_at: Option<Instant>,
+    /// Per-file parsed-record cache, locked only on the background executor.
+    usage_scan_cache: std::sync::Arc<std::sync::Mutex<crate::usage_history::ScanCache>>,
+    /// The LiteLLM rate table plus when it was loaded, shared with scans the
+    /// same way; the TTL re-check happens inside the scan task.
+    usage_rate_table:
+        std::sync::Arc<std::sync::Mutex<Option<(Instant, crate::usage_history::RateTable)>>>,
+    /// Directory holding the rate-table disk cache, beside the app database.
+    usage_rates_dir: PathBuf,
+    usage_window_days: u32,
+    usage_metric: UsageMetric,
+    usage_breakdown: UsageBreakdown,
+    /// Hovered or keyboard-selected day index on the Usage page's chart.
+    usage_chart_hover: Option<usize>,
+    /// The chart plot's window bounds, written during paint so the mouse-move
+    /// handler can map positions to day indices.
+    usage_chart_bounds: Rc<Cell<Option<gpui::Bounds<Pixels>>>>,
     computer_use_app_icons: RefCell<HashMap<String, Option<std::sync::Arc<gpui::Image>>>>,
     computer_use_app_icon_loads: RefCell<HashSet<String>>,
     model_picker_tab: ModelPickerTab,
@@ -812,6 +853,7 @@ mod streaming;
 mod transcript;
 mod transcript_view;
 mod usage_meter;
+mod usage_page;
 
 pub use autocomplete::init as init_composer_autocomplete;
 use components::*;
@@ -1334,6 +1376,21 @@ impl Waku {
                 plan_usage_pending: HashSet::new(),
                 plan_usage_checked_at: HashMap::new(),
                 plan_usage_stale: HashSet::new(),
+                usage_history: None,
+                usage_history_pending_for: None,
+                usage_history_generation: 0,
+                usage_history_scanned_at: None,
+                usage_scan_cache: std::sync::Arc::default(),
+                usage_rate_table: std::sync::Arc::default(),
+                usage_rates_dir: StateStore::default_path()
+                    .parent()
+                    .map(|directory| directory.to_owned())
+                    .unwrap_or_else(std::env::temp_dir),
+                usage_window_days: 30,
+                usage_metric: UsageMetric::Cost,
+                usage_breakdown: UsageBreakdown::Model,
+                usage_chart_hover: None,
+                usage_chart_bounds: Rc::default(),
                 computer_use_app_icons: RefCell::new(HashMap::new()),
                 computer_use_app_icon_loads: RefCell::new(HashSet::new()),
                 model_picker_tab,

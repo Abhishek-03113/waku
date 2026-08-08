@@ -481,8 +481,8 @@ fn parse_credentials(payload: &str) -> anyhow::Result<OauthCredentials> {
 
 /// GET `url` with the given header lines. Headers travel to curl as a config
 /// on stdin, never on argv, so bearer tokens cannot show up in the process
-/// table.
-fn http_get(url: &str, headers: &[String]) -> anyhow::Result<(u16, String)> {
+/// table. Shared with the usage-history rate-table fetch.
+pub(crate) fn http_get(url: &str, headers: &[String]) -> anyhow::Result<(u16, String)> {
     let mut child = Command::new("/usr/bin/curl")
         .args(["-sS", "--max-time", "15", "-D", "-", "-K", "-", url])
         .stdin(Stdio::piped())
