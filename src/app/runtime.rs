@@ -1,5 +1,73 @@
 use super::*;
 
+fn start_driver(mut request: DriverStartRequest, cwd: PathBuf) -> anyhow::Result<PreparedDriver> {
+    request.options.cwd = cwd;
+    let (event_tx, events) = unbounded();
+    let handle = driver::start(request.provider, request.options, event_tx)?;
+    Ok(PreparedDriver { handle, events })
+}
+
+/// Perform every blocking operation between accepting a submission and
+/// starting its provider. This function is called only from the background
+/// executor; the UI thread owns applying the returned workspace afterward.
+fn prepare_submission(
+    project: Project,
+    workspace: SessionWorkspace,
+    driver_start: Option<anyhow::Result<DriverStartRequest>>,
+    session_id: Uuid,
+    prompt: &str,
+    baseline_count: usize,
+    baseline_in_flight: bool,
+) -> anyhow::Result<PreparedSubmission> {
+    let workspace = match workspace {
+        SessionWorkspace::NewWorktree { base_branch } => {
+            if project.is_projectless() {
+                anyhow::bail!("a projectless task cannot create a Git worktree");
+            }
+            let created = crate::worktree::create(
+                &project.path,
+                project.id,
+                session_id,
+                prompt,
+                base_branch.as_deref(),
+            )?;
+            SessionWorkspace::Worktree {
+                path: created.path,
+                branch: created.branch,
+            }
+        }
+        workspace => workspace,
+    };
+    let project_path = workspace.path().unwrap_or(&project.path);
+
+    // The pre-turn checkpoint is what a later rewind restores to. A capture
+    // already running for the same turn writes this exact ref, so starting a
+    // second `git add -A` would only race equivalent work over the workspace.
+    let checkpoint_warning = (!baseline_in_flight)
+        .then(|| {
+            let git_ref = checkpoint::checkpoint_ref(session_id, baseline_count);
+            (!checkpoint::has_ref(project_path, &git_ref))
+                .then(|| checkpoint::capture_turn(project_path, session_id, baseline_count).err())
+                .flatten()
+        })
+        .flatten()
+        .map(|error| format!("Could not capture the pre-turn checkpoint: {error}"));
+
+    // Process startup can synchronously resolve executables, bind sockets,
+    // and spawn children. It belongs behind the same animated preparation
+    // boundary as Git work, otherwise the last spinner frame visibly freezes
+    // just before Stop appears.
+    let driver = driver_start.map(|request| {
+        request.and_then(|request| start_driver(request, project_path.to_path_buf()))
+    });
+
+    Ok(PreparedSubmission {
+        workspace,
+        checkpoint_warning,
+        driver,
+    })
+}
+
 impl Waku {
     pub fn composer_focus(&self, cx: &App) -> FocusHandle {
         self.composer.read(cx).focus()
@@ -39,61 +107,6 @@ impl Waku {
     pub(super) fn selected_session_mut(&mut self) -> Option<&mut AgentSession> {
         let id = self.state.selected_session?;
         self.state.session_mut(id)
-    }
-
-    /// Materialize a draft's requested worktree before the first checkpoint
-    /// or provider starts. Submission is a one-shot user action where this
-    /// synchronous handoff is preferable to letting any frame or background
-    /// session observe an ambiguous working directory.
-    fn materialize_session_workspace(
-        &mut self,
-        session_id: Uuid,
-        prompt: &str,
-        cx: &mut Context<Self>,
-    ) -> anyhow::Result<()> {
-        let Some((project_id, workspace)) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .map(|session| (session.project_id, session.workspace.clone()))
-        else {
-            anyhow::bail!("Session not found");
-        };
-        let SessionWorkspace::NewWorktree { base_branch } = workspace else {
-            return Ok(());
-        };
-        let project = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
-        if project.is_projectless() {
-            anyhow::bail!("a projectless task cannot create a Git worktree");
-        }
-        let created = crate::worktree::create(
-            &project.path,
-            project.id,
-            session_id,
-            prompt,
-            base_branch.as_deref(),
-        )?;
-        let Some(session) = self.state.session_mut(session_id) else {
-            anyhow::bail!("Session not found");
-        };
-        session.workspace = SessionWorkspace::Worktree {
-            path: created.path,
-            branch: created.branch,
-        };
-
-        if self.state.selected_session == Some(session_id) {
-            self.invalidate_workspace_queries(cx);
-            self.reload_clean_right_panel_file_editors(cx);
-            self.ensure_right_panel_terminals(cx);
-        }
-        Ok(())
     }
 
     pub(super) fn selected_runtime(&self) -> Option<&SessionRuntime> {
@@ -1238,6 +1251,18 @@ impl Waku {
             .workspace_path_for_session(&session)
             .map(std::path::Path::to_path_buf)
             .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+        let prepared = start_driver(
+            self.driver_start_request_for_session(&session, workspace_path.clone())?,
+            workspace_path,
+        )?;
+        Ok(self.install_prepared_driver(session.id, prepared))
+    }
+
+    fn driver_start_request_for_session(
+        &self,
+        session: &AgentSession,
+        cwd: PathBuf,
+    ) -> anyhow::Result<DriverStartRequest> {
         let binary = self
             .probes
             .iter()
@@ -1256,12 +1281,11 @@ impl Waku {
             reasoning_effort,
             service_tier,
         } = self.session_options(&session);
-        let (event_tx, event_rx) = unbounded();
-        let handle = driver::start(
-            session.provider,
-            DriverStartOptions {
+        Ok(DriverStartRequest {
+            provider: session.provider,
+            options: DriverStartOptions {
                 binary,
-                cwd: workspace_path,
+                cwd,
                 mode,
                 interaction_mode,
                 model,
@@ -1270,13 +1294,20 @@ impl Waku {
                 computer_use_enabled: self.state.computer_use_enabled,
                 provider_cursor: session.provider_cursor.clone(),
             },
-            event_tx,
-        )?;
+        })
+    }
+
+    fn install_prepared_driver(
+        &mut self,
+        session_id: Uuid,
+        prepared: PreparedDriver,
+    ) -> DriverHandle {
+        let handle = prepared.handle.clone();
         self.runtimes.insert(
-            session.id,
+            session_id,
             SessionRuntime {
-                driver: handle.clone(),
-                events: event_rx,
+                driver: prepared.handle,
+                events: prepared.events,
                 pending_events: VecDeque::new(),
                 stream_phase: None,
                 stream_remeasure_pending: false,
@@ -1288,7 +1319,7 @@ impl Waku {
                 last_active_at: Instant::now(),
             },
         );
-        Ok(handle)
+        handle
     }
 
     pub(super) fn submit_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
@@ -1425,28 +1456,150 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         let selected = self.state.selected_session == Some(session_id);
-        let Some((status, next_turn_count)) = self
+        let Some(session) = self
             .state
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .map(|session| (session.status, session.turns.len() + 1))
         else {
             return;
         };
-        if status.is_busy() {
+        if session.status.is_busy() {
             self.enqueue_follow_up(session_id, prompt, cx);
             return;
         }
-        if let Err(error) = self.materialize_session_workspace(session_id, &prompt, cx) {
+        let next_turn_count = session.turns.len() + 1;
+        let project_id = session.project_id;
+        let workspace = session.workspace.clone();
+        let driver_start = (!self.runtimes.contains_key(&session_id)).then(|| {
+            let provisional_cwd = self
+                .workspace_path_for_session(session)
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default();
+            self.driver_start_request_for_session(session, provisional_cwd)
+        });
+        let Some(project) = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .cloned()
+        else {
             if selected {
                 self.composer
                     .update(cx, |input, cx| input.set_content(prompt, cx));
-                self.show_toast(format!("Could not create the worktree: {error}"));
+                self.show_toast("Could not prepare the task: project not found");
             }
             cx.notify();
             return;
+        };
+        let baseline_count = next_turn_count - 1;
+        let baseline_in_flight = self
+            .checkpoint_captures_in_flight
+            .contains(&(session_id, baseline_count));
+
+        // Busy is visible before any Git work begins. The separate transient
+        // set keeps this non-cancellable phase visually distinct from a
+        // connecting provider, whose runtime already has a working Stop path.
+        if let Some(session) = self.state.session_mut(session_id) {
+            session.status = SessionStatus::Connecting;
+            session.updated_at = unix_time();
         }
+        self.submission_preparations.insert(session_id);
+        cx.notify();
+
+        let recovery_prompt = prompt.clone();
+        cx.spawn(async move |waku, cx| {
+            let prepared = cx
+                .background_executor()
+                .spawn(async move {
+                    prepare_submission(
+                        project,
+                        workspace,
+                        driver_start,
+                        session_id,
+                        &prompt,
+                        baseline_count,
+                        baseline_in_flight,
+                    )
+                })
+                .await;
+            let _ = waku.update(cx, move |waku, cx| {
+                waku.finish_submission_preparation(session_id, recovery_prompt, prepared, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_submission_preparation(
+        &mut self,
+        session_id: Uuid,
+        prompt: String,
+        prepared: anyhow::Result<PreparedSubmission>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.submission_preparations.contains(&session_id) {
+            return;
+        }
+        let selected = self.state.selected_session == Some(session_id);
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.submission_preparations.remove(&session_id);
+                if let Some(session) = self.state.session_mut(session_id)
+                    && session.status == SessionStatus::Connecting
+                    && session.active_turn_id().is_none()
+                {
+                    session.status = SessionStatus::Idle;
+                }
+                if selected {
+                    self.composer
+                        .update(cx, |input, cx| input.set_content(prompt, cx));
+                    self.show_toast(format!("Could not create the worktree: {error}"));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let PreparedSubmission {
+            workspace,
+            checkpoint_warning,
+            driver: prepared_driver,
+        } = prepared;
+        let can_start = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .is_some_and(|session| {
+                session.status == SessionStatus::Connecting && session.active_turn_id().is_none()
+            });
+        if !can_start {
+            self.submission_preparations.remove(&session_id);
+            cx.notify();
+            return;
+        }
+
+        let workspace_changed = self.state.session_mut(session_id).is_some_and(|session| {
+            let changed = session.workspace != workspace;
+            session.workspace = workspace;
+            changed
+        });
+        if selected && workspace_changed {
+            self.invalidate_workspace_queries(cx);
+            self.reload_clean_right_panel_file_editors(cx);
+            self.ensure_right_panel_terminals(cx);
+        }
+        let driver = match prepared_driver {
+            None => self
+                .runtimes
+                .get(&session_id)
+                .map(|runtime| runtime.driver.clone())
+                .ok_or_else(|| anyhow::anyhow!("the prepared agent runtime is unavailable")),
+            Some(Ok(prepared)) => Ok(self.install_prepared_driver(session_id, prepared)),
+            Some(Err(error)) => Err(error),
+        };
+        self.invalidate_checkpoint_refs();
         if selected {
             self.sync_transcript_rows();
         }
@@ -1455,38 +1608,9 @@ impl Waku {
         } else {
             Vec::new()
         };
-        let project_path = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .and_then(|session| self.workspace_path_for_session(session))
-            .map(std::path::Path::to_path_buf);
-        // The pre-turn checkpoint is what a later rewind restores to, so unlike
-        // the post-turn one it is captured before the turn starts rather than
-        // queued: correctness over latency, on a keystroke the user just made.
-        // The exception is a capture already running for this same turn — the
-        // one the previous turn queued writes exactly this ref, so re-running
-        // it here would only fork a second `git add -A` over the same worktree.
-        let baseline_count = next_turn_count - 1;
-        let baseline_in_flight = self
-            .checkpoint_captures_in_flight
-            .contains(&(session_id, baseline_count));
-        let checkpoint_warning = project_path
-            .as_deref()
-            .filter(|_| !baseline_in_flight)
-            .and_then(|path| {
-                let git_ref = checkpoint::checkpoint_ref(session_id, baseline_count);
-                (!checkpoint::has_ref(path, &git_ref))
-                    .then(|| checkpoint::capture_turn(path, session_id, baseline_count).err())
-                    .flatten()
-                    .map(|error| format!("Could not capture the pre-turn checkpoint: {error}"))
-            });
-        self.invalidate_checkpoint_refs();
         let transcript_anchor = if let Some(session) = self.state.session_mut(session_id) {
             session.set_title_from_prompt(&prompt);
             let turn_id = session.begin_turn(&prompt);
-            session.status = SessionStatus::Connecting;
             session.updated_at = unix_time();
             selected.then_some(TranscriptAnchor {
                 session_id,
@@ -1525,7 +1649,7 @@ impl Waku {
             crate::composer_complete::expanded_submission(&prompt, &self.slash_command_index)
                 .unwrap_or(prompt);
         let mut failed_to_start = false;
-        match self.ensure_driver_for_session(session_id) {
+        match driver {
             Ok(driver) => driver.prompt(driver_prompt),
             Err(error) => {
                 failed_to_start = true;
@@ -1537,12 +1661,23 @@ impl Waku {
                 }
             }
         }
+        // From this point onward `cancel_turn` has either a live driver to
+        // cancel or a settled startup failure. The next frame must therefore
+        // show Stop (or Send after failure), never the preparation spinner.
+        self.submission_preparations.remove(&session_id);
         if failed_to_start {
             self.capture_latest_turn_checkpoint_for(session_id);
             self.start_pending_checkpoint_captures(cx);
         }
-        self.save();
         cx.notify();
+        // Persist on the next frame boundary. Saving is intentionally after
+        // the spinner-to-Stop paint: SQLite or blob externalization must not
+        // hold the final preparation frame motionless.
+        cx.spawn(async move |waku, cx| {
+            cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
+            let _ = waku.update(cx, |waku, _| waku.save());
+        })
+        .detach();
     }
 
     pub(super) fn collect_runtime_events(runtime: &mut SessionRuntime) {

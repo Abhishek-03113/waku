@@ -126,7 +126,7 @@ impl Waku {
         let Some(session) = self.selected_session_mut() else {
             return;
         };
-        if session.has_started() || session.workspace == workspace {
+        if session.has_started() || session.is_busy() || session.workspace == workspace {
             return;
         }
         session.workspace = workspace;
@@ -158,6 +158,7 @@ impl Waku {
             .workspace_path_for_session(&self.state.sessions[index])
             .map(std::path::Path::to_path_buf);
         let was_selected = self.state.selected_session == Some(session_id);
+        self.submission_preparations.remove(&session_id);
         self.reset_session_runtime(session_id);
         self.remove_right_panel_session_state(session_id);
         self.state.sessions.remove(index);
@@ -707,6 +708,13 @@ impl Waku {
         let Some(session_id) = self.state.selected_session else {
             return;
         };
+        // Worktree/checkpoint preparation has no safe interrupt contract. The
+        // composer deliberately shows a spinner rather than Stop until the
+        // provider runtime exists, and the keyboard action follows the same
+        // boundary.
+        if self.submission_preparations.contains(&session_id) {
+            return;
+        }
         let retain_runtime = self
             .state
             .sessions

@@ -1,5 +1,6 @@
 use super::composer::{
-    dropped_file_mention, merged_submission, next_picker_highlight, visible_branch_entries,
+    ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
+    next_picker_highlight, visible_branch_entries,
 };
 use super::settings::visible_settings_pages;
 use super::{
@@ -22,12 +23,34 @@ use crate::model::{
 };
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
-    cell::{Cell, RefCell},
     collections::{HashSet, VecDeque},
-    rc::Rc,
     time::Duration,
 };
 use uuid::Uuid;
+
+#[test]
+fn composer_only_offers_stop_after_submission_preparation() {
+    assert_eq!(
+        composer_submit_action(Some(SessionStatus::Idle), false),
+        ComposerSubmitAction::Send
+    );
+    assert_eq!(
+        composer_submit_action(Some(SessionStatus::Connecting), true),
+        ComposerSubmitAction::Preparing
+    );
+    assert_eq!(
+        composer_submit_action(Some(SessionStatus::Connecting), false),
+        ComposerSubmitAction::Stop
+    );
+    assert_eq!(
+        composer_submit_action(Some(SessionStatus::Working), false),
+        ComposerSubmitAction::Stop
+    );
+    assert_eq!(
+        composer_submit_action(Some(SessionStatus::Failed), false),
+        ComposerSubmitAction::Send
+    );
+}
 
 #[test]
 fn toast_pause_preserves_time_with_a_readable_minimum() {

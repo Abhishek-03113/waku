@@ -1,5 +1,25 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ComposerSubmitAction {
+    Send,
+    Preparing,
+    Stop,
+}
+
+pub(super) fn composer_submit_action(
+    status: Option<SessionStatus>,
+    preparing: bool,
+) -> ComposerSubmitAction {
+    if preparing {
+        ComposerSubmitAction::Preparing
+    } else if status.is_some_and(SessionStatus::is_busy) {
+        ComposerSubmitAction::Stop
+    } else {
+        ComposerSubmitAction::Send
+    }
+}
+
 impl Waku {
     // ── Permission ─────────────────────────────────────────────────────────
 
@@ -1561,7 +1581,10 @@ impl Waku {
     pub(super) fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let session = self.selected_session();
-        let working = session.map(AgentSession::is_busy).unwrap_or(false);
+        let preparing =
+            session.is_some_and(|session| self.submission_preparations.contains(&session.id));
+        let submit_action =
+            composer_submit_action(session.map(|session| session.status), preparing);
         let has_draft = !self.composer.read(cx).content().trim().is_empty()
             || !self.composer_attachments.is_empty();
         let steerable = session.is_some_and(|session| {
@@ -1638,8 +1661,35 @@ impl Waku {
                         .child(self.render_access_control(cx))
                         .child(self.render_interaction_mode_control(cx))
                         .child(div().flex_1())
-                        .child(if working {
-                            div()
+                        .child(match submit_action {
+                            ComposerSubmitAction::Preparing => div()
+                                .id("send-or-stop")
+                                .w(px(26.0))
+                                .h(px(26.0))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_default()
+                                .bg(theme.overlay_strong)
+                                .child(
+                                    icon("icons/loader-circle.svg", 15.0, theme.text_secondary)
+                                        .with_animation(
+                                            "submission-preparation-spinner",
+                                            Animation::new(Duration::from_millis(900))
+                                                .repeat()
+                                                .with_easing(gpui::linear),
+                                            |icon, delta| {
+                                                icon.with_transformation(
+                                                    gpui::Transformation::rotate(gpui::percentage(
+                                                        delta,
+                                                    )),
+                                                )
+                                            },
+                                        ),
+                                )
+                                .tooltip(Tooltip::text("Preparing task…")),
+                            ComposerSubmitAction::Stop => div()
                                 .id("working-actions")
                                 .flex()
                                 .items_center()
@@ -1723,9 +1773,8 @@ impl Waku {
                                                 }
                                             })),
                                     )
-                                })
-                        } else {
-                            div()
+                                }),
+                            ComposerSubmitAction::Send => div()
                                 .id("send-or-stop")
                                 .w(px(26.0))
                                 .h(px(26.0))
@@ -1760,7 +1809,7 @@ impl Waku {
                                         this.composer.update(cx, |input, cx| input.clear(cx));
                                         this.submit_prompt(prompt, cx);
                                     }
-                                }))
+                                })),
                         }),
                 ),
         )
@@ -2177,7 +2226,7 @@ impl Waku {
             .unwrap_or_else(|| "choose a project".to_owned());
         let can_configure_workspace = self
             .selected_session()
-            .is_some_and(|session| !session.has_started());
+            .is_some_and(|session| !session.has_started() && !session.is_busy());
 
         let project_handle = self.menu_handle("workspace-project", cx);
         let project_trigger = MenuChip::new("workspace-project")

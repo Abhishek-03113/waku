@@ -140,6 +140,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "hexagon",
     "laptop",
     "list",
+    "loader-circle",
     "lock",
     "lock-open",
     "panel-left",

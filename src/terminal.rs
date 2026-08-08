@@ -537,13 +537,24 @@ pub struct TerminalView {
 
 impl TerminalView {
     pub fn new(working_directory: PathBuf, cx: &mut Context<Self>) -> Self {
-        let session = TerminalSession::new(&working_directory, 52, 36);
-        let (session, error) = match session {
-            Ok(session) => (Some(session), None),
-            Err(error) => (None, Some(error.to_string())),
-        };
-
+        let terminal_cwd = working_directory.clone();
         cx.spawn(async move |this, cx| {
+            let started = cx
+                .background_executor()
+                .spawn(async move { TerminalSession::new(&terminal_cwd, 52, 36) })
+                .await;
+            if this
+                .update(cx, |this, cx| {
+                    match started {
+                        Ok(session) => this.session = Some(session),
+                        Err(error) => this.error = Some(error.to_string()),
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
+                return;
+            }
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(24))
@@ -567,8 +578,8 @@ impl TerminalView {
         let subscriptions = vec![cx.observe(&cursor_blink, |_, _, cx| cx.notify())];
 
         Self {
-            session,
-            error,
+            session: None,
+            error: None,
             focus_handle: cx.focus_handle(),
             title: "Terminal".into(),
             working_directory,
@@ -953,11 +964,15 @@ impl Render for TerminalView {
                     .p(px(12.0))
                     .text_size(px(11.0))
                     .line_height(px(17.0))
-                    .text_color(theme.danger)
+                    .text_color(if self.error.is_some() {
+                        theme.danger
+                    } else {
+                        theme.text_tertiary
+                    })
                     .child(
                         self.error
                             .clone()
-                            .unwrap_or_else(|| "Unable to start terminal".into()),
+                            .unwrap_or_else(|| "Starting terminal…".into()),
                     ),
             );
         }

@@ -345,6 +345,35 @@ struct PendingCheckpointCapture {
     project_path: PathBuf,
 }
 
+/// Sessions between accepting a submission and handing it to a provider.
+///
+/// Worktree creation and the pre-turn checkpoint both run off the UI thread,
+/// but neither operation has a safe interrupt contract. Keeping this separate
+/// from [`SessionStatus`] lets the composer distinguish that non-cancellable
+/// preparation window from a connecting provider that can already be stopped.
+struct PreparedSubmission {
+    workspace: SessionWorkspace,
+    checkpoint_warning: Option<String>,
+    /// `None` reuses an already-live runtime. `Some` contains the result of a
+    /// provider process start performed on the background executor.
+    driver: Option<anyhow::Result<PreparedDriver>>,
+}
+
+/// Everything needed to start a provider process, captured while the session
+/// is still on the UI thread. `cwd` is replaced with the materialized
+/// worktree path by the background preparation task.
+struct DriverStartRequest {
+    provider: ProviderKind,
+    options: DriverStartOptions,
+}
+
+/// A provider process that has started off-thread but is not installed into
+/// Waku's runtime map yet. Its event receiver safely buffers early events.
+struct PreparedDriver {
+    handle: DriverHandle,
+    events: Receiver<DriverEvent>,
+}
+
 struct RightPanelFileEditor {
     state: Entity<ComposerInput>,
     disk_content: String,
@@ -617,6 +646,10 @@ pub struct Waku {
     /// drained into the next submission.
     composer_attachments: Vec<ComposerAttachment>,
     runtimes: HashMap<Uuid, SessionRuntime>,
+    /// Accepted submissions still creating their workspace/checkpoint. The
+    /// session is busy immediately, while the composer draws a spinner until
+    /// the provider runtime exists and cancellation is wired.
+    submission_preparations: HashSet<Uuid>,
     /// Sessions whose just-settled turn should start the next queued
     /// follow-up. Processed at the end of the driver-event drain so the
     /// session's runtime has already been re-inserted before a new prompt
@@ -1325,6 +1358,7 @@ impl Waku {
                 composer_autocomplete: autocomplete::AutocompleteUi::new(),
                 composer_attachments: Vec::new(),
                 runtimes: HashMap::new(),
+                submission_preparations: HashSet::new(),
                 pending_queue_drains: Vec::new(),
                 stream_state_dirty: false,
                 last_stream_save: Instant::now(),
