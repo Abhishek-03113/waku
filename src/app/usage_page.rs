@@ -189,11 +189,17 @@ impl Waku {
         let mut page = div()
             .flex()
             .flex_col()
-            .when(self.usage_view == UsageViewMode::Projects, |element| {
-                // This view's list owns scrolling, so the page fills the
-                // pane instead of growing it.
-                element.flex_1().min_h_0().pb(px(16.0))
-            })
+            .when(
+                matches!(
+                    self.usage_view,
+                    UsageViewMode::Monthly | UsageViewMode::Projects
+                ),
+                |element| {
+                    // These views' lists own scrolling, so the page fills
+                    // the pane instead of growing it.
+                    element.flex_1().min_h_0().pb(px(16.0))
+                },
+            )
             .child(self.render_usage_header(range, pending, &theme, cx));
 
         let Some(history) = history else {
@@ -230,7 +236,12 @@ impl Waku {
                         .child(self.render_usage_breakdown(history, &theme, cx))
                         .child(usage_quality_panel(history, &theme)),
                 ),
-            UsageViewMode::Monthly => page.child(usage_month_list(history, &theme)),
+            UsageViewMode::Monthly => page.child(usage_month_list(
+                history,
+                &theme,
+                &self.usage_months_scroll,
+                &self.usage_months_scrollbar,
+            )),
             UsageViewMode::Projects => page.child(self.render_usage_projects(history, &theme, cx)),
         };
 
@@ -2027,21 +2038,12 @@ fn usage_value_label(cost_usd: f64, total_tokens: u64, by_cost: bool) -> String 
     }
 }
 
-/// The raised card every list view sits in.
-fn usage_list_container(theme: &Theme) -> Div {
-    div()
-        .mt(px(20.0))
-        .px(px(20.0))
-        .rounded(px(13.0))
-        .bg(theme.raised)
-        .flex()
-        .flex_col()
-}
-
 /// The card's lead-in row: what the list covers on the left, the period
-/// total on the right.
+/// total on the right. Carries the card's horizontal padding itself so its
+/// hairline spans the full card width.
 fn usage_list_header(theme: &Theme, title: &'static str, caption: String, total: String) -> Div {
     div()
+        .px(px(20.0))
         .py(px(13.0))
         .border_b_1()
         .border_color(theme.border)
@@ -2256,8 +2258,14 @@ fn usage_month_strip(
 
 /// The statement: one row per calendar month, newest first, from the current
 /// month back to the earliest with activity — gap months stay as dim rows so
-/// the timeline reads honestly.
-fn usage_month_list(history: &UsageHistory, theme: &Theme) -> Div {
+/// the timeline reads honestly. The card pins its header and scrolls the
+/// rows internally, matching the projects view.
+fn usage_month_list(
+    history: &UsageHistory,
+    theme: &Theme,
+    scroll: &ScrollHandle,
+    scrollbar_state: &Rc<ScrollbarState>,
+) -> Div {
     let by_cost = rank_by_cost(history);
     let colors = usage_provider_colors(theme);
     let month_value = |month: &MonthSlice| {
@@ -2285,46 +2293,73 @@ fn usage_month_list(history: &UsageHistory, theme: &Theme) -> Div {
         .fold(0.0_f64, f64::max);
     let current_month = usage_history::first_of_month(history.until_day);
 
-    let container = usage_list_container(theme).child(usage_list_header(
-        theme,
-        "Last 12 months",
-        format!(
-            "{} tokens · {}",
-            format_tokens_compact(history.total_tokens as f64),
-            count_noun(history.sessions, "session")
-        ),
-        usage_headline_value(history, by_cost),
-    ));
-
-    let Some(earliest) = history.months.first().map(|month| month.first_day) else {
-        return container.child(usage_list_empty_row(
+    let mut rows = div().px(px(20.0)).flex().flex_col();
+    if let Some(earliest) = history.months.first().map(|month| month.first_day) {
+        let months = usage_history::enumerate_months(earliest, history.until_day);
+        let count = months.len();
+        for (index, first_day) in months.iter().rev().enumerate() {
+            let last = index + 1 == count;
+            rows = rows.child(match history.month(*first_day) {
+                Some(month) => usage_month_row(
+                    history,
+                    month,
+                    theme,
+                    colors,
+                    by_cost,
+                    peak,
+                    day_peak,
+                    *first_day == current_month,
+                    last,
+                ),
+                None => usage_empty_month_row(theme, *first_day, last),
+            });
+        }
+    } else {
+        rows = rows.child(usage_list_empty_row(
             theme,
             "No activity in the last 12 months.",
         ));
-    };
-
-    let months = usage_history::enumerate_months(earliest, history.until_day);
-    let count = months.len();
-    let mut container = container;
-    for (index, first_day) in months.iter().rev().enumerate() {
-        let last = index + 1 == count;
-        let row = match history.month(*first_day) {
-            Some(month) => usage_month_row(
-                history,
-                month,
-                theme,
-                colors,
-                by_cost,
-                peak,
-                day_peak,
-                *first_day == current_month,
-                last,
-            ),
-            None => usage_empty_month_row(theme, *first_day, last),
-        };
-        container = container.child(row);
     }
-    container
+
+    div()
+        .mt(px(20.0))
+        .flex_1()
+        .min_h_0()
+        .pb(px(8.0))
+        .rounded(px(13.0))
+        .bg(theme.raised)
+        .flex()
+        .flex_col()
+        .child(
+            usage_list_header(
+                theme,
+                "Last 12 months",
+                format!(
+                    "{} tokens · {}",
+                    format_tokens_compact(history.total_tokens as f64),
+                    count_noun(history.sessions, "session")
+                ),
+                usage_headline_value(history, by_cost),
+            )
+            .flex_none(),
+        )
+        .child(
+            // Full-bleed relative wrapper so the overlay scrollbar pins to
+            // the card's edge; content padding lives on the rows column.
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(
+                    div()
+                        .id("usage-months-scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .child(rows),
+                )
+                .child(scrollbar::vertical(scroll, scrollbar_state)),
+        )
 }
 
 #[allow(clippy::too_many_arguments)]

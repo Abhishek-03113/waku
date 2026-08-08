@@ -267,10 +267,14 @@ impl Waku {
     fn render_settings_content(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let page = self.settings_page.unwrap_or(SettingsPage::General);
-        // The virtualized Projects view owns its own scrolling, so its page
-        // fills the viewport instead of riding the shared scroll container.
-        let fills_viewport =
-            page == SettingsPage::Usage && self.usage_view == UsageViewMode::Projects;
+        // The Monthly and Projects list views own their own scrolling, so
+        // their pages fill the viewport instead of riding the shared scroll
+        // container.
+        let fills_viewport = page == SettingsPage::Usage
+            && matches!(
+                self.usage_view,
+                UsageViewMode::Monthly | UsageViewMode::Projects
+            );
         // The titlebar strip is transparent; once content slides under it, a
         // hairline marks the boundary so the clip edge reads as a header
         // rather than a glitch.

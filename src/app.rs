@@ -650,6 +650,10 @@ pub struct Waku {
     usage_window_days: u32,
     usage_metric: UsageMetric,
     usage_breakdown: UsageBreakdown,
+    /// Scroll position of the monthly statement card, which scrolls
+    /// internally like the projects card so the two list views feel alike.
+    usage_months_scroll: ScrollHandle,
+    usage_months_scrollbar: Rc<ScrollbarState>,
     /// Filter query over the Usage page's project rows.
     usage_project_filter: Entity<ComposerInput>,
     /// Virtualized list over the filtered project rows, so only visible rows
@@ -1432,6 +1436,8 @@ impl Waku {
                 usage_window_days: 30,
                 usage_metric: UsageMetric::Cost,
                 usage_breakdown: UsageBreakdown::Model,
+                usage_months_scroll: ScrollHandle::new(),
+                usage_months_scrollbar: ScrollbarState::new(),
                 usage_project_filter,
                 usage_projects_list,
                 usage_projects_scrollbar: ScrollbarState::new(),
