@@ -647,7 +647,9 @@ pub struct Waku {
     /// Directory holding the rate-table disk cache, beside the app database.
     usage_rates_dir: PathBuf,
     usage_view: UsageViewMode,
-    usage_window_days: u32,
+    /// The selected window for the daily and project views; the statement
+    /// view fixes its own.
+    usage_window: crate::usage_history::UsageWindow,
     usage_metric: UsageMetric,
     usage_breakdown: UsageBreakdown,
     /// Scroll position of the monthly statement card, which scrolls
@@ -1433,7 +1435,7 @@ impl Waku {
                     .map(|directory| directory.to_owned())
                     .unwrap_or_else(std::env::temp_dir),
                 usage_view: UsageViewMode::Daily,
-                usage_window_days: 30,
+                usage_window: crate::usage_history::UsageWindow::TrailingDays(30),
                 usage_metric: UsageMetric::Cost,
                 usage_breakdown: UsageBreakdown::Model,
                 usage_months_scroll: ScrollHandle::new(),

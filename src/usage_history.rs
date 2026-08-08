@@ -19,9 +19,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use chrono::{Datelike as _, Local, NaiveDate, TimeZone as _, Utc};
 use serde_json::Value;
 
-/// The trailing-day window lengths the page offers for the daily and
-/// per-project views.
-pub const WINDOW_OPTIONS: [u32; 3] = [7, 30, 90];
+/// The windows the daily and per-project views offer, in menu order.
+pub const WINDOW_CHOICES: [UsageWindow; 5] = [
+    UsageWindow::TrailingDays(7),
+    UsageWindow::TrailingDays(30),
+    UsageWindow::TrailingDays(90),
+    UsageWindow::ThisMonth,
+    UsageWindow::LastMonth,
+];
 
 /// The fixed window the monthly statement view scans.
 pub const MONTHLY_WINDOW: UsageWindow = UsageWindow::Months(12);
@@ -33,17 +38,37 @@ pub enum UsageWindow {
     TrailingDays(u32),
     /// The current calendar month and the N−1 before it.
     Months(u32),
+    /// The current calendar month to date.
+    ThisMonth,
+    /// The previous calendar month, whole.
+    LastMonth,
 }
 
 impl UsageWindow {
-    pub fn since_day(self, until_day: NaiveDate) -> NaiveDate {
+    /// The inclusive `(since, until)` days the window covers, relative to
+    /// `today`. Only `LastMonth` ends before today.
+    pub fn bounds(self, today: NaiveDate) -> (NaiveDate, NaiveDate) {
         match self {
-            UsageWindow::TrailingDays(days) => {
-                until_day - chrono::Days::new(u64::from(days.saturating_sub(1)))
+            UsageWindow::TrailingDays(days) => (
+                today - chrono::Days::new(u64::from(days.saturating_sub(1))),
+                today,
+            ),
+            UsageWindow::Months(months) => (
+                first_of_month(today)
+                    .checked_sub_months(chrono::Months::new(months.saturating_sub(1)))
+                    .unwrap_or_else(|| first_of_month(today)),
+                today,
+            ),
+            UsageWindow::ThisMonth => (first_of_month(today), today),
+            UsageWindow::LastMonth => {
+                let this_first = first_of_month(today);
+                (
+                    this_first
+                        .checked_sub_months(chrono::Months::new(1))
+                        .unwrap_or(this_first),
+                    this_first.pred_opt().unwrap_or(today),
+                )
             }
-            UsageWindow::Months(months) => first_of_month(until_day)
-                .checked_sub_months(chrono::Months::new(months.saturating_sub(1)))
-                .unwrap_or_else(|| first_of_month(until_day)),
         }
     }
 }
@@ -951,8 +976,7 @@ pub fn scan(
     project_roots: &[PathBuf],
 ) -> UsageHistory {
     let started = Instant::now();
-    let until_day = Local::now().date_naive();
-    let since_day = window.since_day(until_day);
+    let (since_day, until_day) = window.bounds(Local::now().date_naive());
     // Local midnight on the window's first day; a DST gap falls back to the
     // day boundary in UTC, which the mtime slack absorbs anyway.
     let window_start_ms = since_day
@@ -1555,14 +1579,24 @@ mod tests {
     #[test]
     fn windows_and_month_enumeration_cover_calendars() {
         let day = NaiveDate::from_ymd_opt(2026, 8, 9).unwrap();
+        let ymd =
+            |year, month, day_of_month| NaiveDate::from_ymd_opt(year, month, day_of_month).unwrap();
         assert_eq!(
-            UsageWindow::TrailingDays(7).since_day(day),
-            NaiveDate::from_ymd_opt(2026, 8, 3).unwrap()
+            UsageWindow::TrailingDays(7).bounds(day),
+            (ymd(2026, 8, 3), day)
         );
         // Twelve months = this month plus the eleven before it.
+        assert_eq!(UsageWindow::Months(12).bounds(day), (ymd(2025, 9, 1), day));
+        assert_eq!(UsageWindow::ThisMonth.bounds(day), (ymd(2026, 8, 1), day));
+        // The whole previous month, ending before today — across a year
+        // boundary too.
         assert_eq!(
-            UsageWindow::Months(12).since_day(day),
-            NaiveDate::from_ymd_opt(2025, 9, 1).unwrap()
+            UsageWindow::LastMonth.bounds(day),
+            (ymd(2026, 7, 1), ymd(2026, 7, 31))
+        );
+        assert_eq!(
+            UsageWindow::LastMonth.bounds(ymd(2026, 1, 15)),
+            (ymd(2025, 12, 1), ymd(2025, 12, 31))
         );
         let months = enumerate_months(
             NaiveDate::from_ymd_opt(2025, 11, 15).unwrap(),

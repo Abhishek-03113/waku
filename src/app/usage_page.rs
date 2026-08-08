@@ -13,7 +13,7 @@ use gpui::{PathBuilder, relative};
 use super::*;
 use crate::usage_history::{
     self, MONTHLY_WINDOW, MonthSlice, PricingStatus, ProjectSlice, ProviderDay, UsageHistory,
-    UsageProvider, UsageWindow, WINDOW_OPTIONS,
+    UsageProvider, UsageWindow, WINDOW_CHOICES,
 };
 
 /// Rendered chart height, matching T3's `h-56` plot.
@@ -58,9 +58,7 @@ impl Waku {
     fn effective_usage_window(&self) -> UsageWindow {
         match self.usage_view {
             UsageViewMode::Monthly => MONTHLY_WINDOW,
-            UsageViewMode::Daily | UsageViewMode::Projects => {
-                UsageWindow::TrailingDays(self.usage_window_days)
-            }
+            UsageViewMode::Daily | UsageViewMode::Projects => self.usage_window,
         }
     }
 
@@ -144,11 +142,11 @@ impl Waku {
         cx.notify();
     }
 
-    fn set_usage_window_days(&mut self, days: u32, cx: &mut Context<Self>) {
-        if self.usage_window_days == days {
+    fn set_usage_window(&mut self, window: UsageWindow, cx: &mut Context<Self>) {
+        if self.usage_window == window {
             return;
         }
-        self.usage_window_days = days;
+        self.usage_window = window;
         self.ensure_usage_history(false, cx);
         cx.notify();
     }
@@ -181,10 +179,9 @@ impl Waku {
                     | (UsageWindow::Months(_), UsageWindow::Months(_))
             )
         });
-        let today = Local::now().date_naive();
         let range = history
             .map(|history| (history.since_day, history.until_day))
-            .unwrap_or_else(|| (expected.since_day(today), today));
+            .unwrap_or_else(|| expected.bounds(Local::now().date_naive()));
 
         let mut page = div()
             .flex()
@@ -316,44 +313,44 @@ impl Waku {
             );
         }
 
-        // The statement view fixes its own range, so the day selector would
-        // be a dead control there.
-        let window_options = (!monthly).then(|| {
-            let mut window_options = div()
-                .rounded(px(7.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .flex()
-                .overflow_hidden();
-            for days in WINDOW_OPTIONS {
-                let selected = self.usage_window_days == days;
-                window_options = window_options.child(
-                    div()
-                        .id(SharedString::from(format!("usage-window-{days}")))
-                        .tab_index(0)
-                        .focus_visible(|style| style.border_1().border_color(theme.accent))
-                        .h(px(26.0))
-                        .px(px(11.0))
-                        .flex()
-                        .items_center()
-                        .cursor_default()
-                        .text_size(px(10.5))
-                        .text_color(if selected {
-                            theme.text
-                        } else {
-                            theme.text_secondary
+        // The statement view fixes its own range, so the window selector
+        // would be a dead control there.
+        let window_selector = (!monthly).then(|| {
+            let selected = self.usage_window;
+            let weak = cx.entity().downgrade();
+            let handle = self.menu_handle("usage-window-selector", cx);
+            dropdown_menu(
+                MenuChip::new("usage-window-selector")
+                    .label(window_choice_label(selected))
+                    .outlined()
+                    // Heights here are border-box: the view switcher is its
+                    // 26px options plus 1px of border each side, so every
+                    // control in this row targets 28px total — and the
+                    // chip's raised-card fill would read as a pill on the
+                    // page surface.
+                    .height(px(28.0))
+                    .background(theme.surface)
+                    .selected(handle.is_open())
+                    .w(px(124.0))
+                    .justify_between(),
+                "usage-window-selector-menu",
+                &handle,
+                MenuAlign::BelowRight,
+                move |_| {
+                    WINDOW_CHOICES
+                        .into_iter()
+                        .map(|window| {
+                            let weak = weak.clone();
+                            MenuItem::new(window_choice_label(window), move |_, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.set_usage_window(window, cx);
+                                });
+                            })
+                            .selected(window == selected)
                         })
-                        .when(selected, |element| element.bg(theme.overlay))
-                        .when(!selected, |element| {
-                            element.hover(|element| element.text_color(theme.text))
-                        })
-                        .child(SharedString::from(format!("{days} days")))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_usage_window_days(days, cx);
-                        })),
-                );
-            }
-            window_options
+                        .collect()
+                },
+            )
         });
 
         let refresh_glyph: AnyElement = if pending {
@@ -377,7 +374,7 @@ impl Waku {
             .id("usage-refresh")
             .tab_index(0)
             .focus_visible(|style| style.border_color(theme.accent))
-            .h(px(26.0))
+            .h(px(28.0))
             .px(px(8.0))
             .rounded(px(7.0))
             .border_1()
@@ -425,7 +422,7 @@ impl Waku {
                     .child(SharedString::from(range_label)),
             )
             .child(view_options)
-            .children(window_options)
+            .children(window_selector)
             .child(refresh)
     }
 
@@ -2700,6 +2697,19 @@ fn format_month(first_day: NaiveDate) -> String {
 /// `2025-09-01` → `Sep 2025`.
 fn format_month_short(day: NaiveDate) -> String {
     day.format("%b %Y").to_string()
+}
+
+/// Menu label for a selectable window.
+fn window_choice_label(window: UsageWindow) -> &'static str {
+    match window {
+        UsageWindow::TrailingDays(7) => "Last 7 days",
+        UsageWindow::TrailingDays(30) => "Last 30 days",
+        UsageWindow::TrailingDays(90) => "Last 90 days",
+        UsageWindow::ThisMonth => "This month",
+        UsageWindow::LastMonth => "Last month",
+        // Not offered by the selector; only the statement view uses these.
+        UsageWindow::TrailingDays(_) | UsageWindow::Months(_) => "Custom",
+    }
 }
 
 /// `1 session`, `214 sessions` — grouped count with a pluralized noun.
