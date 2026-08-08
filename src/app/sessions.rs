@@ -234,6 +234,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         self.settings_page = Some(SettingsPage::General);
+        self.settings_scroll.set_offset(gpui::Point::default());
         // Sparkle owns this value and its consent prompt can flip it outside
         // the settings UI, so re-mirror it each time settings opens.
         self.automatic_updates_enabled = cx

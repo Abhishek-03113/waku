@@ -5,11 +5,16 @@
 //! [`crate::usage_history`], scanned on the background executor; frames read
 //! only the snapshot stored on the entity.
 
-use chrono::NaiveDate;
+use std::path::Path;
+
+use chrono::{Local, NaiveDate};
 use gpui::{PathBuilder, relative};
 
 use super::*;
-use crate::usage_history::{self, PricingStatus, UsageHistory, UsageProvider, WINDOW_OPTIONS};
+use crate::usage_history::{
+    self, MONTHLY_WINDOW, MonthSlice, PricingStatus, ProjectSlice, ProviderDay, UsageHistory,
+    UsageProvider, UsageWindow, WINDOW_OPTIONS,
+};
 
 /// Rendered chart height, matching T3's `h-56` plot.
 const CHART_HEIGHT: f32 = 224.0;
@@ -18,6 +23,9 @@ const CHART_PLOT_TOP: f32 = 8.0;
 const CHART_TICKS: usize = 4;
 /// Width of the y-axis label gutter.
 const CHART_GUTTER: f32 = 56.0;
+/// Uniform height hint for the virtualized project rows, so the scrollbar
+/// knows the total extent before rows are measured.
+const USAGE_PROJECT_ROW_HEIGHT: f32 = 96.0;
 /// A snapshot older than this rescans when the page is next opened.
 const USAGE_RESCAN_AFTER: Duration = Duration::from_secs(120);
 /// The in-memory rate table is revalidated against its disk TTL this often.
@@ -35,10 +43,25 @@ impl Waku {
     /// is where the user is heading.
     pub(super) fn open_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         self.settings_page = Some(page);
+        // Each page starts at its own top; a scroll position carried over
+        // from the previous page would land mid-content.
+        self.settings_scroll.set_offset(gpui::Point::default());
         if page == SettingsPage::Usage {
             self.ensure_usage_history(false, cx);
         }
         cx.notify();
+    }
+
+    /// The scan window the active view needs: the statement view always
+    /// covers a year of calendar months; the daily and project views share
+    /// the trailing-days selector.
+    fn effective_usage_window(&self) -> UsageWindow {
+        match self.usage_view {
+            UsageViewMode::Monthly => MONTHLY_WINDOW,
+            UsageViewMode::Daily | UsageViewMode::Projects => {
+                UsageWindow::TrailingDays(self.usage_window_days)
+            }
+        }
     }
 
     /// Start a background transcript scan unless a current-enough snapshot
@@ -46,23 +69,29 @@ impl Waku {
     /// is the refresh button. Results from superseded scans are discarded by
     /// generation, so a window change mid-scan cannot land stale data.
     pub(super) fn ensure_usage_history(&mut self, force: bool, cx: &mut Context<Self>) {
-        let window_days = self.usage_window_days;
+        let window = self.effective_usage_window();
         let satisfied = self
             .usage_history
             .as_ref()
-            .is_some_and(|history| history.window_days == window_days)
+            .is_some_and(|history| history.window == window)
             && self
                 .usage_history_scanned_at
                 .is_some_and(|scanned| scanned.elapsed() < USAGE_RESCAN_AFTER);
-        if !force && (satisfied || self.usage_history_pending_for == Some(window_days)) {
+        if !force && (satisfied || self.usage_history_pending_for == Some(window)) {
             return;
         }
-        self.usage_history_pending_for = Some(window_days);
+        self.usage_history_pending_for = Some(window);
         self.usage_history_generation += 1;
         let generation = self.usage_history_generation;
         let cache = std::sync::Arc::clone(&self.usage_scan_cache);
         let rate_table = std::sync::Arc::clone(&self.usage_rate_table);
         let rates_dir = self.usage_rates_dir.clone();
+        let project_roots: Vec<PathBuf> = self
+            .state
+            .projects
+            .iter()
+            .map(|project| project.path.clone())
+            .collect();
         cx.spawn(async move |this, cx| {
             let history = cx
                 .background_executor()
@@ -89,7 +118,7 @@ impl Waku {
                     let mut cache = cache
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    usage_history::scan(&mut cache, &rates, window_days)
+                    usage_history::scan(&mut cache, &rates, window, &project_roots)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -118,51 +147,94 @@ impl Waku {
         cx.notify();
     }
 
+    fn set_usage_view(&mut self, view: UsageViewMode, cx: &mut Context<Self>) {
+        if self.usage_view == view {
+            return;
+        }
+        self.usage_view = view;
+        // The statement view scans a different window; the others share one.
+        self.ensure_usage_history(false, cx);
+        cx.notify();
+    }
+
     pub(super) fn render_usage_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
         let pending = self.usage_history_pending_for.is_some();
-        let Some(history) = self.usage_history.as_ref() else {
-            return div()
-                .mt(px(15.0))
-                .py(px(64.0))
-                .w_full()
-                .flex()
-                .justify_center()
-                .text_size(px(12.0))
-                .text_color(theme.text_secondary)
-                .child("Scanning provider transcripts…")
-                .into_any_element();
-        };
+        let expected = self.effective_usage_window();
+        // A snapshot of the other shape (statement months vs trailing days)
+        // must not masquerade as this view's data — a 30-day scan rendered as
+        // a monthly statement would label partial months as whole ones. But
+        // within a shape, the previous window keeps rendering while its
+        // replacement scans: the range caption names what is actually shown,
+        // and swapping to a spinner on every window click would blink away a
+        // page that is still substantially right.
+        let history = self.usage_history.as_ref().filter(|history| {
+            matches!(
+                (history.window, expected),
+                (UsageWindow::TrailingDays(_), UsageWindow::TrailingDays(_))
+                    | (UsageWindow::Months(_), UsageWindow::Months(_))
+            )
+        });
+        let today = Local::now().date_naive();
+        let range = history
+            .map(|history| (history.since_day, history.until_day))
+            .unwrap_or_else(|| (expected.since_day(today), today));
 
         let mut page = div()
             .flex()
             .flex_col()
-            .child(self.render_usage_header(history, pending, &theme, cx));
+            .when(self.usage_view == UsageViewMode::Projects, |element| {
+                // This view's list owns scrolling, so the page fills the
+                // pane instead of growing it.
+                element.flex_1().min_h_0().pb(px(16.0))
+            })
+            .child(self.render_usage_header(range, pending, &theme, cx));
+
+        let Some(history) = history else {
+            return page
+                .child(
+                    div()
+                        .py(px(64.0))
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_secondary)
+                        .child("Scanning provider transcripts…"),
+                )
+                .into_any_element();
+        };
 
         if !history.errors.is_empty() || history.pricing == PricingStatus::Unavailable {
             page = page.child(usage_notices(history, &theme));
         }
 
+        page = match self.usage_view {
+            UsageViewMode::Daily => page
+                .child(
+                    div()
+                        .mt(px(20.0))
+                        .flex()
+                        .items_start()
+                        .gap(px(28.0))
+                        .child(self.render_usage_summary(history, &theme, cx))
+                        .child(self.render_usage_chart_column(history, &theme, cx)),
+                )
+                .child(usage_metric_strip(history, &theme))
+                .child(
+                    div()
+                        .mt(px(24.0))
+                        .flex()
+                        .items_start()
+                        .gap(px(32.0))
+                        .child(self.render_usage_breakdown(history, &theme, cx))
+                        .child(usage_quality_panel(history, &theme)),
+                ),
+            UsageViewMode::Monthly => page.child(usage_month_list(history, &theme)),
+            UsageViewMode::Projects => page.child(self.render_usage_projects(history, &theme, cx)),
+        };
+
         page.child(
-            div()
-                .mt(px(20.0))
-                .flex()
-                .items_start()
-                .gap(px(28.0))
-                .child(self.render_usage_summary(history, &theme, cx))
-                .child(self.render_usage_chart_column(history, &theme, cx)),
-        )
-        .child(usage_metric_strip(history, &theme))
-        .child(
-            div()
-                .mt(px(24.0))
-                .flex()
-                .items_start()
-                .gap(px(32.0))
-                .child(self.render_usage_breakdown(history, &theme, cx))
-                .child(usage_quality_panel(history, &theme)),
-        )
-        .child(
             // What the numbers above are built from, so the totals are
             // auditable at a glance.
             div()
@@ -180,25 +252,35 @@ impl Waku {
         .into_any_element()
     }
 
-    /// The range caption plus the window selector and refresh control.
+    /// The range caption plus the view switcher, the window selector (when
+    /// the view honors it), and the refresh control.
     fn render_usage_header(
         &self,
-        history: &UsageHistory,
+        range: (NaiveDate, NaiveDate),
         pending: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
-        let mut window_options = div()
+        let monthly = self.usage_view == UsageViewMode::Monthly;
+
+        let mut view_options = div()
             .rounded(px(7.0))
             .border_1()
             .border_color(theme.border_strong)
             .flex()
             .overflow_hidden();
-        for days in WINDOW_OPTIONS {
-            let selected = self.usage_window_days == days;
-            window_options = window_options.child(
+        for (view, label) in [
+            (UsageViewMode::Daily, "Daily"),
+            (UsageViewMode::Monthly, "Monthly"),
+            (UsageViewMode::Projects, "Projects"),
+        ] {
+            let selected = self.usage_view == view;
+            view_options = view_options.child(
                 div()
-                    .id(SharedString::from(format!("usage-window-{days}")))
+                    .id(SharedString::from(format!(
+                        "usage-view-{}",
+                        label.to_ascii_lowercase()
+                    )))
                     .tab_index(0)
                     .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .h(px(26.0))
@@ -216,12 +298,52 @@ impl Waku {
                     .when(!selected, |element| {
                         element.hover(|element| element.text_color(theme.text))
                     })
-                    .child(SharedString::from(format!("{days} days")))
+                    .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_usage_window_days(days, cx);
+                        this.set_usage_view(view, cx);
                     })),
             );
         }
+
+        // The statement view fixes its own range, so the day selector would
+        // be a dead control there.
+        let window_options = (!monthly).then(|| {
+            let mut window_options = div()
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .flex()
+                .overflow_hidden();
+            for days in WINDOW_OPTIONS {
+                let selected = self.usage_window_days == days;
+                window_options = window_options.child(
+                    div()
+                        .id(SharedString::from(format!("usage-window-{days}")))
+                        .tab_index(0)
+                        .focus_visible(|style| style.border_1().border_color(theme.accent))
+                        .h(px(26.0))
+                        .px(px(11.0))
+                        .flex()
+                        .items_center()
+                        .cursor_default()
+                        .text_size(px(10.5))
+                        .text_color(if selected {
+                            theme.text
+                        } else {
+                            theme.text_secondary
+                        })
+                        .when(selected, |element| element.bg(theme.overlay))
+                        .when(!selected, |element| {
+                            element.hover(|element| element.text_color(theme.text))
+                        })
+                        .child(SharedString::from(format!("{days} days")))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_usage_window_days(days, cx);
+                        })),
+                );
+            }
+            window_options
+        });
 
         let refresh = div()
             .id("usage-refresh")
@@ -247,6 +369,20 @@ impl Waku {
                 this.ensure_usage_history(true, cx);
             }));
 
+        let range_label = if monthly {
+            format!(
+                "{} to {}",
+                format_month_short(range.0),
+                format_month_short(range.1)
+            )
+        } else {
+            format!(
+                "{} to {}",
+                format_day_short(range.0),
+                format_day_short(range.1)
+            )
+        };
+
         div()
             .mt(px(6.0))
             .flex()
@@ -256,15 +392,13 @@ impl Waku {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .truncate()
                     .text_size(px(12.5))
                     .text_color(theme.text_secondary)
-                    .child(SharedString::from(format!(
-                        "{} to {}",
-                        format_day_short(history.since_day),
-                        format_day_short(history.until_day)
-                    ))),
+                    .child(SharedString::from(range_label)),
             )
-            .child(window_options)
+            .child(view_options)
+            .children(window_options)
             .child(refresh)
     }
 
@@ -887,6 +1021,358 @@ impl Waku {
                 UsageBreakdown::Day => usage_day_table(history, theme),
             })
     }
+
+    /// The per-project ranking: one row per working directory the sessions
+    /// ran in, largest first, with the same split-bar vocabulary as the
+    /// monthly statement. The rows live in a virtualized `list()` behind a
+    /// filter field, so element construction stays proportional to what is
+    /// on screen no matter how many directories have usage.
+    fn render_usage_projects(
+        &self,
+        history: &UsageHistory,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let by_cost = rank_by_cost(history);
+        let filter = self
+            .usage_project_filter
+            .read(cx)
+            .content()
+            .trim()
+            .to_ascii_lowercase();
+        let indices: Vec<usize> = history
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| {
+                if filter.is_empty() {
+                    return true;
+                }
+                let (name, _) = self.usage_project_identity(project);
+                name.to_ascii_lowercase().contains(&filter)
+                    || project.path.to_ascii_lowercase().contains(&filter)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        // The bars scale against the largest visible row; the builder reads
+        // this instead of re-deriving it per row.
+        let peak = indices
+            .iter()
+            .filter_map(|index| history.projects.get(*index))
+            .map(|project| {
+                if by_cost {
+                    project.cost_usd
+                } else {
+                    project.total_tokens as f64
+                }
+            })
+            .fold(0.0_f64, f64::max);
+        self.usage_projects_scale.set((peak, by_cost));
+        self.sync_usage_project_rows(&indices);
+
+        let caption = if filter.is_empty() {
+            format!(
+                "{} · {} tokens · {}",
+                count_noun(history.projects.len() as u64, "project"),
+                format_tokens_compact(history.total_tokens as f64),
+                count_noun(history.sessions, "session")
+            )
+        } else {
+            format!(
+                "{} of {} shown",
+                indices.len(),
+                count_noun(history.projects.len() as u64, "project")
+            )
+        };
+
+        let entity = cx.entity().downgrade();
+        let body: AnyElement = if history.projects.is_empty() {
+            div()
+                .px(px(20.0))
+                .child(usage_list_empty_row(theme, "No activity in this window."))
+                .into_any_element()
+        } else if indices.is_empty() {
+            div()
+                .px(px(20.0))
+                .child(usage_list_empty_row(theme, "No projects match the filter."))
+                .into_any_element()
+        } else {
+            // The relative wrapper is full-bleed so the overlay scrollbar
+            // pins to the card's edge; the content padding lives one level
+            // in, the same way the sidebar hangs its scrollbar.
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(
+                    div().px(px(20.0)).size_full().child(
+                        list(
+                            self.usage_projects_list.clone(),
+                            move |index, _window, cx| {
+                                entity
+                                    .upgrade()
+                                    .map(|entity| {
+                                        entity.update(cx, |this, cx| {
+                                            this.usage_project_row(index, cx)
+                                        })
+                                    })
+                                    .unwrap_or_else(|| div().into_any_element())
+                            },
+                        )
+                        .size_full(),
+                    ),
+                )
+                .child(scrollbar::vertical(
+                    &self.usage_projects_list,
+                    &self.usage_projects_scrollbar,
+                ))
+                .into_any_element()
+        };
+
+        div()
+            .mt(px(20.0))
+            .flex_1()
+            .min_h_0()
+            .pb(px(8.0))
+            .rounded(px(13.0))
+            .bg(theme.raised)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(20.0))
+                    .py(px(13.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .gap(px(16.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child("By project"),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(3.0))
+                                    .flex()
+                                    .items_baseline()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(11.5))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(usage_headline_value(
+                                                history, by_cost,
+                                            ))),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(10.5))
+                                            .text_color(theme.text_tertiary)
+                                            .child(SharedString::from(format!("· {caption}"))),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        TextField::new("usage-project-filter", self.usage_project_filter.clone())
+                            .icon("icons/search.svg", 13.0)
+                            .w(px(240.0))
+                            .flex_none(),
+                    ),
+            )
+            .child(body)
+    }
+
+    /// Keep the virtualized project list in sync with the filtered indices.
+    /// Filtering preserves order, so unrelated churn splices only the
+    /// changed suffix and scroll position survives typing in the filter.
+    fn sync_usage_project_rows(&self, indices: &[usize]) {
+        let mut cached = self.usage_projects_rows.borrow_mut();
+        if cached.as_slice() == indices {
+            return;
+        }
+        let prefix = cached
+            .iter()
+            .zip(indices.iter())
+            .take_while(|(cached, fresh)| cached == fresh)
+            .count();
+        let old_count = cached.len();
+        *cached = indices.to_vec();
+        if old_count == 0 {
+            self.usage_projects_list
+                .reset_with_uniform_height(indices.len(), px(USAGE_PROJECT_ROW_HEIGHT));
+        } else {
+            self.usage_projects_list
+                .splice(prefix..old_count, indices.len() - prefix);
+            // Newly inserted rows have no measured height yet; the uniform
+            // hint keeps the scrollbar's total height honest.
+            self.usage_projects_list
+                .clone()
+                .with_uniform_item_height(px(USAGE_PROJECT_ROW_HEIGHT));
+        }
+    }
+
+    /// One project row, built only while visible. Reads the per-frame row
+    /// cache and scale; a stale index from a frame racing a rescan renders
+    /// as an empty row for that frame rather than panicking.
+    fn usage_project_row(&self, row: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::current(cx);
+        let (peak, by_cost) = self.usage_projects_scale.get();
+        let colors = usage_provider_colors(&theme);
+        let rows = self.usage_projects_rows.borrow();
+        let last = row + 1 == rows.len();
+        let Some(project) = rows.get(row).copied().and_then(|index| {
+            self.usage_history
+                .as_ref()
+                .and_then(|history| history.projects.get(index))
+        }) else {
+            return div().into_any_element();
+        };
+
+        let (name, path_caption) = self.usage_project_identity(project);
+        let row_value = if by_cost {
+            project.cost_usd
+        } else {
+            project.total_tokens as f64
+        };
+        let mut caption_parts = Vec::new();
+        if by_cost && project.cost_share > 0.0 {
+            caption_parts.push(format!("{} of cost", format_percent(project.cost_share)));
+        }
+        caption_parts.push(format!(
+            "{} tokens",
+            format_tokens_compact(project.total_tokens as f64)
+        ));
+        caption_parts.push(count_noun(project.sessions, "session"));
+        if let Some(last_day) = project.last_day {
+            caption_parts.push(format!("last active {}", format_day_short(last_day)));
+        }
+
+        div()
+            // The list lays items out at their content size; without an
+            // explicit width the row and its bars shrink-wrap the text.
+            .w_full()
+            .py(px(13.0))
+            .when(!last, |element| {
+                element.border_b_1().border_color(theme.border)
+            })
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(name)),
+                    )
+                    .when_some(path_caption, |element, path| {
+                        element.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(9.5))
+                                .text_color(theme.text_ghost)
+                                .child(SharedString::from(path)),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(usage_value_label(
+                                project.cost_usd,
+                                project.total_tokens,
+                                by_cost,
+                            ))),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(2.0))
+                    .text_size(px(10.5))
+                    .text_color(theme.text_tertiary)
+                    .truncate()
+                    .child(SharedString::from(caption_parts.join(" · "))),
+            )
+            .child(div().mt(px(9.0)).child(usage_split_bar(
+                &theme,
+                colors,
+                if peak <= 0.0 {
+                    0.0
+                } else {
+                    (row_value / peak) as f32
+                },
+                &project.by_provider,
+                by_cost,
+            )))
+            .child(
+                div()
+                    .mt(px(7.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(usage_provider_values(&theme, &project.by_provider, by_cost))
+                    .child(div().flex_1())
+                    .when_some(
+                        usage_top_models_label(&project.top_models),
+                        |element, label| {
+                            element.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .max_w(px(280.0))
+                                    .text_size(px(9.5))
+                                    .text_color(theme.text_ghost)
+                                    .child(SharedString::from(label)),
+                            )
+                        },
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Display name and path caption for a project row: a known Waku
+    /// project's name when the path is one, else the directory's own name
+    /// over its compacted path.
+    fn usage_project_identity(&self, project: &ProjectSlice) -> (String, Option<String>) {
+        if project.path.is_empty() {
+            return ("Other sessions".to_owned(), None);
+        }
+        let path = Path::new(&project.path);
+        let name = self
+            .state
+            .projects
+            .iter()
+            .find(|known| known.path.as_path() == path)
+            .map(|known| known.name.clone())
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| project.path.clone());
+        (name, Some(compact_path(path)))
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1322,6 +1808,488 @@ fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
 }
 
 /* ------------------------------------------------------------------------- */
+/* Monthly statement and shared list vocabulary                              */
+/* ------------------------------------------------------------------------- */
+
+/// Whether the lists rank by cost, falling back to tokens when nothing in
+/// the window could be priced so the bars still mean something.
+fn rank_by_cost(history: &UsageHistory) -> bool {
+    history.cost_usd > 0.0
+}
+
+fn usage_provider_colors(theme: &Theme) -> [Hsla; 2] {
+    [
+        provider_color(theme, ProviderKind::Claude),
+        provider_color(theme, ProviderKind::Codex),
+    ]
+}
+
+/// The period total in the ranking unit.
+fn usage_headline_value(history: &UsageHistory, by_cost: bool) -> String {
+    if by_cost {
+        format_usd(history.cost_usd)
+    } else {
+        format_tokens_compact(history.total_tokens as f64)
+    }
+}
+
+fn usage_value_label(cost_usd: f64, total_tokens: u64, by_cost: bool) -> String {
+    if by_cost {
+        format_usd(cost_usd)
+    } else {
+        format_tokens_compact(total_tokens as f64)
+    }
+}
+
+/// The raised card every list view sits in.
+fn usage_list_container(theme: &Theme) -> Div {
+    div()
+        .mt(px(20.0))
+        .px(px(20.0))
+        .rounded(px(13.0))
+        .bg(theme.raised)
+        .flex()
+        .flex_col()
+}
+
+/// The card's lead-in row: what the list covers on the left, the period
+/// total on the right.
+fn usage_list_header(theme: &Theme, title: &'static str, caption: String, total: String) -> Div {
+    div()
+        .py(px(13.0))
+        .border_b_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .gap(px(16.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .mt(px(3.0))
+                        .truncate()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_tertiary)
+                        .child(SharedString::from(caption)),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(15.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(SharedString::from(total)),
+        )
+}
+
+fn usage_list_empty_row(theme: &Theme, message: &'static str) -> Div {
+    div()
+        .py(px(24.0))
+        .flex()
+        .justify_center()
+        .text_size(px(11.5))
+        .text_color(theme.text_tertiary)
+        .child(message)
+}
+
+/// A magnitude bar over a faint full-width track: `length` is the row's
+/// share of the list's peak, and the bar splits into provider segments so
+/// one glance carries both size and mix.
+fn usage_split_bar(
+    theme: &Theme,
+    colors: [Hsla; 2],
+    length: f32,
+    by_provider: &[ProviderDay; 2],
+    by_cost: bool,
+) -> Div {
+    let values = [
+        usage_provider_value(&by_provider[0], by_cost),
+        usage_provider_value(&by_provider[1], by_cost),
+    ];
+    let sum = values[0] + values[1];
+    let length = if length > 0.0 {
+        length.clamp(0.02, 1.0)
+    } else {
+        0.0
+    };
+    let mut bar = div()
+        .h_full()
+        .w(relative(length))
+        .rounded_full()
+        .overflow_hidden()
+        .flex();
+    if sum > 0.0 {
+        for (index, value) in values.into_iter().enumerate() {
+            if value > 0.0 {
+                bar = bar.child(
+                    div()
+                        .h_full()
+                        .w(relative((value / sum) as f32))
+                        .bg(colors[index]),
+                );
+            }
+        }
+    }
+    div()
+        .h(px(4.0))
+        .w_full()
+        .rounded_full()
+        .bg(theme.overlay)
+        .child(bar)
+}
+
+fn usage_provider_value(entry: &ProviderDay, by_cost: bool) -> f64 {
+    if by_cost {
+        entry.cost_usd
+    } else {
+        entry.total_tokens as f64
+    }
+}
+
+/// Per-provider amounts with their marks, skipping providers absent from
+/// the row.
+fn usage_provider_values(theme: &Theme, by_provider: &[ProviderDay; 2], by_cost: bool) -> Div {
+    let mut row = div().flex().items_center().gap(px(14.0));
+    for provider in UsageProvider::ALL {
+        let entry = by_provider[provider.index()];
+        if entry.total_tokens == 0 && entry.cost_usd <= 0.0 {
+            continue;
+        }
+        let kind = provider_kind(provider);
+        row = row.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .child(icon(provider_icon(kind), 11.0, provider_color(theme, kind)))
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_secondary)
+                        .child(SharedString::from(usage_value_label(
+                            entry.cost_usd,
+                            entry.total_tokens,
+                            by_cost,
+                        ))),
+                ),
+        );
+    }
+    row
+}
+
+/// "claude-fable-5 · gpt-5.3-codex · +2" — the row's heaviest models.
+fn usage_top_models_label(top_models: &[(String, f64)]) -> Option<String> {
+    if top_models.is_empty() {
+        return None;
+    }
+    let mut label = top_models
+        .iter()
+        .take(2)
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if top_models.len() > 2 {
+        label.push_str(&format!(" · +{}", top_models.len() - 2));
+    }
+    Some(label)
+}
+
+/// One tiny bottom-aligned column per day of the month, stacked by provider
+/// and scaled against the whole period's busiest day, so quiet and heavy
+/// months are honestly comparable at a glance. Decorative texture — every
+/// number it hints at is printed in the row.
+fn usage_month_strip(
+    history: &UsageHistory,
+    first_day: NaiveDate,
+    peak: f64,
+    by_cost: bool,
+    colors: [Hsla; 2],
+) -> impl IntoElement {
+    let day_count = usage_history::days_in_month(first_day);
+    let values: Vec<[f64; 2]> = (0..day_count)
+        .map(|offset| {
+            let day = first_day + chrono::Days::new(u64::from(offset));
+            history
+                .day(day)
+                .map(|slice| {
+                    [
+                        usage_provider_value(&slice.by_provider[0], by_cost),
+                        usage_provider_value(&slice.by_provider[1], by_cost),
+                    ]
+                })
+                .unwrap_or([0.0, 0.0])
+        })
+        .collect();
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            if peak <= 0.0 {
+                return;
+            }
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            let count = values.len().max(1) as f32;
+            let gap = 1.0;
+            let bar_width = ((width - gap * (count - 1.0)) / count).max(1.0);
+            for (index, bands) in values.iter().enumerate() {
+                let x = bounds.origin.x + px(index as f32 * (bar_width + gap));
+                let mut top = bounds.origin.y + bounds.size.height;
+                for (band, color) in bands.iter().zip(colors) {
+                    if *band <= 0.0 {
+                        continue;
+                    }
+                    let band_height = ((*band / peak) as f32 * height).max(1.5);
+                    top = top - px(band_height);
+                    if top < bounds.origin.y {
+                        top = bounds.origin.y;
+                    }
+                    window.paint_quad(fill(
+                        gpui::Bounds::new(
+                            point(x, top),
+                            gpui::size(px(bar_width), px(band_height)),
+                        ),
+                        color,
+                    ));
+                }
+            }
+        },
+    )
+    .w(px(168.0))
+    .h(px(20.0))
+}
+
+/// The statement: one row per calendar month, newest first, from the current
+/// month back to the earliest with activity — gap months stay as dim rows so
+/// the timeline reads honestly.
+fn usage_month_list(history: &UsageHistory, theme: &Theme) -> Div {
+    let by_cost = rank_by_cost(history);
+    let colors = usage_provider_colors(theme);
+    let month_value = |month: &MonthSlice| {
+        if by_cost {
+            month.cost_usd
+        } else {
+            month.total_tokens as f64
+        }
+    };
+    let peak = history
+        .months
+        .iter()
+        .map(month_value)
+        .fold(0.0_f64, f64::max);
+    let day_peak = history
+        .daily
+        .iter()
+        .map(|day| {
+            if by_cost {
+                day.cost_usd
+            } else {
+                day.total_tokens as f64
+            }
+        })
+        .fold(0.0_f64, f64::max);
+    let current_month = usage_history::first_of_month(history.until_day);
+
+    let container = usage_list_container(theme).child(usage_list_header(
+        theme,
+        "Last 12 months",
+        format!(
+            "{} tokens · {}",
+            format_tokens_compact(history.total_tokens as f64),
+            count_noun(history.sessions, "session")
+        ),
+        usage_headline_value(history, by_cost),
+    ));
+
+    let Some(earliest) = history.months.first().map(|month| month.first_day) else {
+        return container.child(usage_list_empty_row(
+            theme,
+            "No activity in the last 12 months.",
+        ));
+    };
+
+    let months = usage_history::enumerate_months(earliest, history.until_day);
+    let count = months.len();
+    let mut container = container;
+    for (index, first_day) in months.iter().rev().enumerate() {
+        let last = index + 1 == count;
+        let row = match history.month(*first_day) {
+            Some(month) => usage_month_row(
+                history,
+                month,
+                theme,
+                colors,
+                by_cost,
+                peak,
+                day_peak,
+                *first_day == current_month,
+                last,
+            ),
+            None => usage_empty_month_row(theme, *first_day, last),
+        };
+        container = container.child(row);
+    }
+    container
+}
+
+#[allow(clippy::too_many_arguments)]
+fn usage_month_row(
+    history: &UsageHistory,
+    month: &MonthSlice,
+    theme: &Theme,
+    colors: [Hsla; 2],
+    by_cost: bool,
+    peak: f64,
+    day_peak: f64,
+    current: bool,
+    last: bool,
+) -> Div {
+    let value = if by_cost {
+        month.cost_usd
+    } else {
+        month.total_tokens as f64
+    };
+    div()
+        .py(px(13.0))
+        .when(!last, |element| {
+            element.border_b_1().border_color(theme.border)
+        })
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(SharedString::from(format_month(month.first_day))),
+                )
+                .when(current, |element| {
+                    element.child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.text_ghost)
+                            .child("so far"),
+                    )
+                })
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(SharedString::from(usage_value_label(
+                            month.cost_usd,
+                            month.total_tokens,
+                            by_cost,
+                        ))),
+                ),
+        )
+        .child(
+            div()
+                .mt(px(2.0))
+                .flex()
+                .items_end()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_tertiary)
+                        .child(SharedString::from(format!(
+                            "{} tokens · {} · {}",
+                            format_tokens_compact(month.total_tokens as f64),
+                            count_noun(month.sessions, "session"),
+                            count_noun(u64::from(month.active_days), "active day"),
+                        ))),
+                )
+                .child(usage_month_strip(
+                    history,
+                    month.first_day,
+                    day_peak,
+                    by_cost,
+                    colors,
+                )),
+        )
+        .child(div().mt(px(9.0)).child(usage_split_bar(
+            theme,
+            colors,
+            if peak <= 0.0 {
+                0.0
+            } else {
+                (value / peak) as f32
+            },
+            &month.by_provider,
+            by_cost,
+        )))
+        .child(
+            div()
+                .mt(px(7.0))
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .child(usage_provider_values(theme, &month.by_provider, by_cost))
+                .child(div().flex_1())
+                .when_some(
+                    usage_top_models_label(&month.top_models),
+                    |element, label| {
+                        element.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .max_w(px(280.0))
+                                .text_size(px(9.5))
+                                .text_color(theme.text_ghost)
+                                .child(SharedString::from(label)),
+                        )
+                    },
+                ),
+        )
+}
+
+/// A month inside the covered span with nothing in it. Kept, dimly, so the
+/// statement's timeline has no silent holes.
+fn usage_empty_month_row(theme: &Theme, first_day: NaiveDate, last: bool) -> Div {
+    div()
+        .py(px(11.0))
+        .when(!last, |element| {
+            element.border_b_1().border_color(theme.border)
+        })
+        .flex()
+        .items_baseline()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(12.5))
+                .text_color(theme.text_tertiary)
+                .child(SharedString::from(format_month(first_day))),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(theme.text_ghost)
+                .child("No activity"),
+        )
+}
+
+/* ------------------------------------------------------------------------- */
 /* Chart math                                                                */
 /* ------------------------------------------------------------------------- */
 
@@ -1501,6 +2469,25 @@ fn format_percent(share: f64) -> String {
 /// `2026-08-07` → `Aug 7`.
 fn format_day_short(day: NaiveDate) -> String {
     day.format("%b %-d").to_string()
+}
+
+/// `2026-08-01` → `August 2026`.
+fn format_month(first_day: NaiveDate) -> String {
+    first_day.format("%B %Y").to_string()
+}
+
+/// `2025-09-01` → `Sep 2025`.
+fn format_month_short(day: NaiveDate) -> String {
+    day.format("%b %Y").to_string()
+}
+
+/// `1 session`, `214 sessions` — grouped count with a pluralized noun.
+fn count_noun(count: u64, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{} {noun}s", format_count(count))
+    }
 }
 
 #[cfg(test)]

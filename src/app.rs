@@ -165,6 +165,15 @@ enum SettingsPage {
     Appearance,
 }
 
+/// Which presentation the Usage page shows: the daily dashboard, the monthly
+/// statement, or the per-project ranking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UsageViewMode {
+    Daily,
+    Monthly,
+    Projects,
+}
+
 /// Which unit the Usage page's headline and chart read in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UsageMetric {
@@ -624,7 +633,7 @@ pub struct Waku {
     usage_history: Option<crate::usage_history::UsageHistory>,
     /// The window a scan is currently in flight for, so a repeat request for
     /// the same window coalesces while a changed window supersedes it.
-    usage_history_pending_for: Option<u32>,
+    usage_history_pending_for: Option<crate::usage_history::UsageWindow>,
     /// Bumped per scan; a result from a superseded scan is discarded.
     usage_history_generation: u64,
     /// When the current snapshot landed, for the reopen-staleness check.
@@ -637,9 +646,22 @@ pub struct Waku {
         std::sync::Arc<std::sync::Mutex<Option<(Instant, crate::usage_history::RateTable)>>>,
     /// Directory holding the rate-table disk cache, beside the app database.
     usage_rates_dir: PathBuf,
+    usage_view: UsageViewMode,
     usage_window_days: u32,
     usage_metric: UsageMetric,
     usage_breakdown: UsageBreakdown,
+    /// Filter query over the Usage page's project rows.
+    usage_project_filter: Entity<ComposerInput>,
+    /// Virtualized list over the filtered project rows, so only visible rows
+    /// build elements no matter how many working directories have usage.
+    usage_projects_list: ListState,
+    usage_projects_scrollbar: Rc<ScrollbarState>,
+    /// Indices into `usage_history.projects` the filter leaves visible — the
+    /// row builder reads only this.
+    usage_projects_rows: RefCell<Vec<usize>>,
+    /// `(peak value, rank-by-cost)` for the visible rows' bars, refreshed
+    /// once per frame rather than per row.
+    usage_projects_scale: Cell<(f64, bool)>,
     /// Hovered or keyboard-selected day index on the Usage page's chart.
     usage_chart_hover: Option<usize>,
     /// The chart plot's window bounds, written during paint so the mouse-move
@@ -756,6 +778,11 @@ pub struct Waku {
     /// swapping in frozen page pixels while an overlay is open.
     scene_overlay_enabled: bool,
     settings_page: Option<SettingsPage>,
+    /// Scroll position of the settings content column, tracked so the pane
+    /// can draw a scrollbar and mark the titlebar boundary once content
+    /// slides under it.
+    settings_scroll: ScrollHandle,
+    settings_scrollbar: Rc<ScrollbarState>,
     header_drag_armed: bool,
     toast: Option<ToastState>,
     toast_generation: u64,
@@ -1000,6 +1027,11 @@ impl Waku {
                 .select_all_on_focus_click()
                 .placeholder("Detected automatically")
         });
+        let usage_project_filter = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder("Filter projects")
+        });
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::new(StateStore::default_path());
@@ -1128,6 +1160,7 @@ impl Waku {
         let transcript_rows = ListState::new(0, ListAlignment::Bottom, px(2048.0));
         let anchored_transcript_rows = ListState::new(0, ListAlignment::Top, px(2048.0));
         let sidebar_list_state = ListState::new(0, ListAlignment::Top, px(256.0));
+        let usage_projects_list = ListState::new(0, ListAlignment::Top, px(256.0));
         let branch_picker_list_state = ListState::new(0, ListAlignment::Top, px(152.0));
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
@@ -1286,6 +1319,15 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
+                &usage_project_filter,
+                |_: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
                 &provider_path_input,
                 |this: &mut Self, _, event: &ComposerEvent, cx| {
                     if matches!(event, ComposerEvent::Submit(_)) {
@@ -1386,9 +1428,15 @@ impl Waku {
                     .parent()
                     .map(|directory| directory.to_owned())
                     .unwrap_or_else(std::env::temp_dir),
+                usage_view: UsageViewMode::Daily,
                 usage_window_days: 30,
                 usage_metric: UsageMetric::Cost,
                 usage_breakdown: UsageBreakdown::Model,
+                usage_project_filter,
+                usage_projects_list,
+                usage_projects_scrollbar: ScrollbarState::new(),
+                usage_projects_rows: RefCell::new(Vec::new()),
+                usage_projects_scale: Cell::new((0.0, true)),
                 usage_chart_hover: None,
                 usage_chart_bounds: Rc::default(),
                 computer_use_app_icons: RefCell::new(HashMap::new()),
@@ -1457,6 +1505,8 @@ impl Waku {
                 right_panel_pending_browser_focus: None,
                 scene_overlay_enabled,
                 settings_page: None,
+                settings_scroll: ScrollHandle::new(),
+                settings_scrollbar: ScrollbarState::new(),
                 header_drag_armed: false,
                 toast: startup_toast.map(|message| ToastState {
                     message,

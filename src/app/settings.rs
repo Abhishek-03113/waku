@@ -267,6 +267,47 @@ impl Waku {
     fn render_settings_content(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let page = self.settings_page.unwrap_or(SettingsPage::General);
+        // The virtualized Projects view owns its own scrolling, so its page
+        // fills the viewport instead of riding the shared scroll container.
+        let fills_viewport =
+            page == SettingsPage::Usage && self.usage_view == UsageViewMode::Projects;
+        // The titlebar strip is transparent; once content slides under it, a
+        // hairline marks the boundary so the clip edge reads as a header
+        // rather than a glitch.
+        let content_scrolled = !fills_viewport && self.settings_scroll.offset().y < px(-1.0);
+
+        let inner = div()
+            .w_full()
+            .max_w(px(match page {
+                SettingsPage::Usage => SETTINGS_USAGE_MAX_WIDTH,
+                _ => SETTINGS_CONTENT_MAX_WIDTH,
+            }))
+            .mx_auto()
+            .when(fills_viewport, |element| {
+                element.h_full().min_h_0().flex().flex_col()
+            })
+            .child(
+                div()
+                    .pt(px(2.0))
+                    .flex_none()
+                    .text_size(px(18.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(match page {
+                        SettingsPage::General => "General",
+                        SettingsPage::Providers => "Providers",
+                        SettingsPage::Usage => "Usage",
+                        SettingsPage::ComputerUse => "Computer Use",
+                        SettingsPage::Appearance => "Appearance",
+                    }),
+            )
+            .child(match page {
+                SettingsPage::General => self.render_general_settings(cx),
+                SettingsPage::Providers => self.render_providers_settings(cx),
+                SettingsPage::Usage => self.render_usage_settings(cx),
+                SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
+                SettingsPage::Appearance => self.render_appearance_settings(cx),
+            });
 
         div()
             .flex_1()
@@ -277,44 +318,39 @@ impl Waku {
             .border_l_1()
             .border_color(theme.sidebar_border)
             .bg(theme.surface)
-            .child(self.render_settings_drag_region("settings-content-titlebar", cx))
+            .child(
+                self.render_settings_drag_region("settings-content-titlebar", cx)
+                    .when(content_scrolled, |element| {
+                        element.border_b_1().border_color(theme.border)
+                    }),
+            )
             .child(
                 div()
-                    .id("settings-content-scroll")
                     .flex_1()
-                    .overflow_y_scroll()
-                    .px(px(32.0))
-                    .pb(px(48.0))
+                    .min_h_0()
+                    .relative()
                     .child(
                         div()
-                            .w_full()
-                            .max_w(px(match page {
-                                SettingsPage::Usage => SETTINGS_USAGE_MAX_WIDTH,
-                                _ => SETTINGS_CONTENT_MAX_WIDTH,
-                            }))
-                            .mx_auto()
-                            .child(
-                                div()
-                                    .pt(px(2.0))
-                                    .text_size(px(18.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(match page {
-                                        SettingsPage::General => "General",
-                                        SettingsPage::Providers => "Providers",
-                                        SettingsPage::Usage => "Usage",
-                                        SettingsPage::ComputerUse => "Computer Use",
-                                        SettingsPage::Appearance => "Appearance",
-                                    }),
-                            )
-                            .child(match page {
-                                SettingsPage::General => self.render_general_settings(cx),
-                                SettingsPage::Providers => self.render_providers_settings(cx),
-                                SettingsPage::Usage => self.render_usage_settings(cx),
-                                SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
-                                SettingsPage::Appearance => self.render_appearance_settings(cx),
-                            }),
-                    ),
+                            .id("settings-content-scroll")
+                            .size_full()
+                            .when(!fills_viewport, |element| {
+                                element
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.settings_scroll)
+                                    .pb(px(48.0))
+                            })
+                            .when(fills_viewport, |element| {
+                                element.min_h_0().flex().flex_col()
+                            })
+                            .px(px(32.0))
+                            .child(inner),
+                    )
+                    .when(!fills_viewport, |element| {
+                        element.child(scrollbar::vertical(
+                            &self.settings_scroll,
+                            &self.settings_scrollbar,
+                        ))
+                    }),
             )
     }
 
