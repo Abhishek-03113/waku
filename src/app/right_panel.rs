@@ -1339,6 +1339,7 @@ impl Waku {
     /// the live page swaps for a frozen snapshot.
     fn any_overlay_open(&self, cx: &App) -> bool {
         self.menus.borrow().values().any(ContextMenuHandle::is_open)
+            || self.command_palette.is_open()
             || self.composer.read(cx).context_menu_open()
             || self
                 .right_panel_browsers

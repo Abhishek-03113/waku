@@ -133,7 +133,9 @@ pub(super) fn format_time_ago(seconds: u64) -> String {
 /// One row of the virtualized sidebar session history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SidebarRow {
-    /// Date-group header; the first row also carries the session actions.
+    /// Opens the window-wide command palette and scrolls with history.
+    Search,
+    /// Date-group header; the first row also carries the project action.
     Header(SessionDateGroup),
     /// A started session.
     Session(Uuid),
@@ -315,48 +317,101 @@ impl Waku {
             ))
     }
 
-    fn render_sidebar_session_actions(&self, cx: &mut Context<Self>) -> Div {
+    fn render_sidebar_project_action(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        div().flex().items_center().child(
+            div()
+                .id("add-project")
+                .w(px(20.0))
+                .h(px(20.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .hover(|element| element.bg(theme.overlay))
+                .active(|element| element.bg(theme.overlay_strong))
+                .child(icon("icons/folder-new.svg", 15.0, theme.text_ghost))
+                .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
+        )
+    }
+
+    fn render_sidebar_action_row(
+        &self,
+        id: &'static str,
+        icon_path: &'static str,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let theme = Theme::current(cx);
         div()
+            .id(id)
+            .tab_index(0)
+            .w_full()
+            .h(px(32.0))
+            .flex_none()
+            .px(px(4.0))
+            .rounded(px(7.0))
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(10.0))
+            .cursor_default()
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .hover(|element| element.bg(theme.sidebar_item_background))
+            .active(|element| element.bg(theme.overlay_strong))
             .child(
                 div()
-                    .id("add-project")
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .rounded(px(6.0))
+                    .size(px(20.0))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .cursor_default()
-                    .hover(|element| element.bg(theme.overlay))
-                    .active(|element| element.bg(theme.overlay_strong))
-                    .child(icon("icons/folder-new.svg", 15.0, theme.text_ghost))
-                    .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
+                    .child(icon(icon_path, 16.0, theme.text_secondary)),
             )
             .child(
                 div()
-                    .id("new-session")
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_default()
-                    .hover(|element| element.bg(theme.overlay))
-                    .active(|element| element.bg(theme.overlay_strong))
-                    .child(icon("icons/plus.svg", 15.0, theme.text_ghost))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.selected_project().is_some_and(Project::is_projectless) {
-                            this.create_projectless_session(cx);
-                        } else if let Some(project_id) = this.state.selected_project {
-                            this.create_session_for(project_id, this.state.last_provider, cx);
-                        }
-                    })),
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.0))
+                    .text_color(theme.text_secondary)
+                    .child(label),
             )
+    }
+
+    fn render_sidebar_new_session(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.render_sidebar_action_row(
+            "sidebar-new-session",
+            "icons/compose.svg",
+            tr!("menu.new_session"),
+            cx,
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.new_session_action(&NewSession, window, cx);
+        }))
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                this.new_session_action(&NewSession, window, cx);
+                cx.stop_propagation();
+            }
+        }))
+    }
+
+    fn render_sidebar_search(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.render_sidebar_action_row(
+            "sidebar-search",
+            "icons/search.svg",
+            tr!("sidebar.search"),
+            cx,
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
+        }))
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
+                cx.stop_propagation();
+            }
+        }))
     }
 
     fn render_sidebar_footer(&self, cx: &mut Context<Self>) -> Div {
@@ -400,6 +455,8 @@ impl Waku {
         // heavy element construction happens only for rows the list can see.
         let rows = Rc::new(self.sidebar_rows(Local::now().date_naive()));
         self.sync_sidebar_rows(&rows);
+        let history_scrolled =
+            self.sidebar_list_state.scroll_px_offset_for_scrollbar().y < px(-0.5);
         let entity = cx.entity().downgrade();
 
         div()
@@ -416,12 +473,18 @@ impl Waku {
             .child(self.render_sidebar_titlebar(cx))
             .child(
                 div()
+                    .flex_none()
+                    .px(px(10.0))
+                    .child(self.render_sidebar_new_session(cx)),
+            )
+            .child(
+                div()
                     .id("sidebar-scroll")
                     .flex_1()
                     .min_h_0()
                     .relative()
                     .child(
-                        div().px(px(10.0)).pt(px(2.0)).size_full().child(
+                        div().px(px(10.0)).size_full().child(
                             list(
                                 self.sidebar_list_state.clone(),
                                 move |index, _window, cx| {
@@ -441,7 +504,18 @@ impl Waku {
                     .child(scrollbar::vertical(
                         &self.sidebar_list_state,
                         &self.sidebar_scrollbar,
-                    )),
+                    ))
+                    .when(history_scrolled, |scroll| {
+                        scroll.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w_full()
+                                .h(px(1.0))
+                                .bg(theme.border),
+                        )
+                    }),
             )
             .child(self.render_sidebar_footer(cx))
     }
@@ -462,7 +536,7 @@ impl Waku {
                 .push(session.id);
         }
 
-        let mut rows = Vec::new();
+        let mut rows = vec![SidebarRow::Search];
         for group in SessionDateGroup::ALL {
             let group_sessions = &grouped_sessions[group.index()];
             if group_sessions.is_empty() {
@@ -472,8 +546,8 @@ impl Waku {
             rows.extend(group_sessions.iter().copied().map(SidebarRow::Session));
             rows.push(SidebarRow::GroupSpacer);
         }
-        if rows.is_empty() {
-            // Keep the session actions row visible while there is no history.
+        if rows.len() == 1 {
+            // Keep the project action visible while there is no history.
             rows.push(SidebarRow::Header(SessionDateGroup::Today));
         }
         rows
@@ -514,8 +588,9 @@ impl Waku {
             return div().into_any_element();
         };
         match *row {
+            SidebarRow::Search => self.render_sidebar_search(cx).into_any_element(),
             SidebarRow::Header(group) => self
-                .render_sidebar_group_header(group, index == 0, cx)
+                .render_sidebar_group_header(group, index == 1, cx)
                 .into_any_element(),
             SidebarRow::Session(session_id) => self
                 .render_sidebar_session_item(session_id, cx)
@@ -536,7 +611,7 @@ impl Waku {
             .when(first, |element| {
                 element
                     .justify_between()
-                    .child(self.render_sidebar_session_actions(cx))
+                    .child(self.render_sidebar_project_action(cx))
             })
     }
 

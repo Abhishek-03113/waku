@@ -45,6 +45,9 @@ menu.select_all:
 menu.view:
   en: View
   zh-CN: 显示
+menu.command_palette:
+  en: Command Palette…
+  zh-CN: 命令面板…
 menu.toggle_sidebar:
   en: Toggle Sidebar
   zh-CN: 显示或隐藏侧边栏
@@ -69,6 +72,58 @@ menu.toggle_fps_counter:
 menu.close_window:
   en: Close Window
   zh-CN: 关闭窗口
+
+command_palette.placeholder:
+  en: Search tasks or run a command…
+  zh-CN: 搜索任务或运行命令…
+command_palette.suggested:
+  en: Suggested
+  zh-CN: 建议
+command_palette.tasks:
+  en: Tasks
+  zh-CN: 任务
+command_palette.commands:
+  en: Commands
+  zh-CN: 命令
+command_palette.settings:
+  en: Settings
+  zh-CN: 设置
+command_palette.new_task:
+  en: New task
+  zh-CN: 新建任务
+command_palette.open_project:
+  en: Open project…
+  zh-CN: 打开项目…
+command_palette.choose_model:
+  en: Choose model…
+  zh-CN: 选择模型…
+command_palette.show_sidebar:
+  en: Show sidebar
+  zh-CN: 显示侧边栏
+command_palette.hide_sidebar:
+  en: Hide sidebar
+  zh-CN: 隐藏侧边栏
+command_palette.show_right_panel:
+  en: Show right panel
+  zh-CN: 显示右侧面板
+command_palette.hide_right_panel:
+  en: Hide right panel
+  zh-CN: 隐藏右侧面板
+command_palette.current:
+  en: Current
+  zh-CN: 当前
+command_palette.you:
+  en: You
+  zh-CN: 你
+command_palette.agent:
+  en: Agent
+  zh-CN: 助手
+command_palette.no_results:
+  en: No matching tasks or commands
+  zh-CN: 未找到匹配的任务或命令
+command_palette.no_results_hint:
+  en: Try a task title, message, project, setting, or command.
+  zh-CN: 可尝试搜索任务标题、消息、项目、设置或命令。
 
 language.title:
   en: Language
@@ -292,6 +347,9 @@ session.new_task:
 sidebar.today:
   en: Today
   zh-CN: 今天
+sidebar.search:
+  en: Search
+  zh-CN: 搜索
 sidebar.yesterday:
   en: Yesterday
   zh-CN: 昨天

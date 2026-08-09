@@ -79,7 +79,14 @@ impl Render for Waku {
             self.tick_fps(window);
         }
         if self.settings_page.is_some() {
-            return self.render_settings(cx).into_any_element();
+            let command_palette = self.render_command_palette(window, cx);
+            return div()
+                .relative()
+                .size_full()
+                .on_action(cx.listener(Self::toggle_command_palette_action))
+                .child(self.render_settings(cx))
+                .children(command_palette)
+                .into_any_element();
         }
         // Re-armed every frame this window shows time labels; parks while
         // settings covers them and while the window isn't drawing at all.
@@ -92,6 +99,7 @@ impl Render for Waku {
             .unwrap_or(true);
         let permission = self.render_permission(cx);
         let computer_use = self.render_computer_use_overlay(cx);
+        let command_palette = self.render_command_palette(window, cx);
         self.start_toast_dismiss_timer(cx);
         let toast = self
             .toast
@@ -121,6 +129,7 @@ impl Render for Waku {
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
+            .on_action(cx.listener(Self::toggle_command_palette_action))
             .on_action(cx.listener(Self::toggle_fps_counter_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
@@ -143,6 +152,7 @@ impl Render for Waku {
             .on_mouse_move(cx.listener(Self::resize_panel_mouse_move))
             .capture_any_mouse_up(cx.listener(Self::finish_panel_resize))
             .size_full()
+            .relative()
             .flex()
             .text_color(theme.text)
             .font_family(".SystemUIFont")
@@ -187,6 +197,7 @@ impl Render for Waku {
             .when(self.right_panel_visible, |root| {
                 root.child(self.render_right_panel(right_panel_width, window, cx))
             })
+            .children(command_palette)
             .into_any_element()
     }
 }

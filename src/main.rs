@@ -71,6 +71,7 @@ actions!(
         CheckForUpdates,
         ToggleSidebar,
         ToggleRightPanel,
+        ToggleCommandPalette,
         ToggleFpsCounter,
         NavigateBack,
         NavigateForward,
@@ -132,6 +133,7 @@ fn main() {
             crate::ui::menu::init(cx);
             crate::app::init_composer_autocomplete(cx);
             crate::app::init_settings_keys(cx);
+            crate::app::init_command_palette(cx);
             crate::theme::init(cx);
             cx.set_reduce_motion(crate::platform::reduce_motion_enabled());
 
@@ -156,6 +158,7 @@ fn main() {
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-shift-b", ToggleRightPanel, None),
+                KeyBinding::new("cmd-k", ToggleCommandPalette, None),
                 KeyBinding::new("cmd-alt-shift-f", ToggleFpsCounter, None),
                 KeyBinding::new("cmd-[", NavigateBack, Some("Waku")),
                 KeyBinding::new("cmd-]", NavigateForward, Some("Waku")),
@@ -294,6 +297,8 @@ pub(crate) fn set_app_menus(cx: &mut App, updater_available: bool) {
             name: tr!("menu.view").into(),
             disabled: false,
             items: vec![
+                MenuItem::action(tr!("menu.command_palette"), ToggleCommandPalette),
+                MenuItem::separator(),
                 MenuItem::action(tr!("menu.toggle_sidebar"), ToggleSidebar),
                 MenuItem::action(tr!("menu.toggle_right_panel"), ToggleRightPanel),
                 MenuItem::action(tr!("menu.focus_composer"), FocusComposer),

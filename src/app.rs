@@ -62,8 +62,9 @@ use crate::ui::{
 use crate::{
     CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
     NavigateBack, NavigateForward, NewProject, NewSession, OpenFind, OpenFindReplace, OpenSettings,
-    ReplaceAllMatches, SaveFile, ToggleFindCaseSensitive, ToggleFindRegex, ToggleFindWholeWord,
-    ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel, ToggleSidebar, ToggleUsagePanel,
+    ReplaceAllMatches, SaveFile, ToggleCommandPalette, ToggleFindCaseSensitive, ToggleFindRegex,
+    ToggleFindWholeWord, ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel, ToggleSidebar,
+    ToggleUsagePanel,
 };
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
@@ -573,6 +574,7 @@ pub struct Waku {
     state: PersistedState,
     store: StateStore,
     composer: Entity<ComposerInput>,
+    command_palette: command_palette::CommandPaletteUi,
     model_search: Entity<ComposerInput>,
     settings_search: Entity<ComposerInput>,
     settings_focus: FocusHandle,
@@ -878,6 +880,7 @@ pub struct Waku {
 
 mod autocomplete;
 mod branches;
+mod command_palette;
 mod components;
 mod composer;
 mod file_search;
@@ -894,6 +897,7 @@ mod usage_meter;
 mod usage_page;
 
 pub use autocomplete::init as init_composer_autocomplete;
+pub use command_palette::init as init_command_palette;
 use components::*;
 pub use settings::init as init_settings_keys;
 use sidebar::SidebarRow;
@@ -1083,6 +1087,11 @@ impl Waku {
         crate::i18n::set_language(state.language);
 
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
+        let command_palette_search = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("command_palette.placeholder"))
+        });
         let model_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -1361,6 +1370,16 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
+                &command_palette_search,
+                |this: &mut Self, search, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        let query = search.read(cx).content().to_owned();
+                        this.command_palette_query_edited(&query, cx);
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
                 &branch_search,
                 |this: &mut Self, search, event: &ComposerEvent, cx| {
                     if matches!(event, ComposerEvent::Edited)
@@ -1457,6 +1476,7 @@ impl Waku {
                 state,
                 store,
                 composer,
+                command_palette: command_palette::CommandPaletteUi::new(command_palette_search),
                 model_search,
                 branch_search,
                 branch_create_input,

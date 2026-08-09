@@ -96,6 +96,7 @@ impl Waku {
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
+            .on_action(cx.listener(Self::toggle_command_palette_action))
             .on_action(cx.listener(Self::toggle_fps_counter_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
@@ -1494,6 +1495,7 @@ impl Waku {
         self.usage_project_filter.update(cx, |input, cx| {
             input.set_placeholder(tr!("input.filter_projects"), cx)
         });
+        self.refresh_command_palette_localized_text(cx);
         self.refresh_file_search_localized_text(cx);
         for browser in self.right_panel_browsers.values() {
             browser.update(cx, |browser, cx| browser.refresh_localized_text(cx));

@@ -174,9 +174,9 @@ impl<K: Clone + Eq + Hash, V> QueryCache<K, V> {
     /// Abandons a fetch that failed, so a later read retries rather than
     /// waiting on a result that will never come.
     ///
-    /// Test-gated until a fallible fetch is wired: today's two callers return a
-    /// value rather than a `Result`, so neither can leave a key stranded.
-    #[cfg(test)]
+    /// Also used by debounced queries that become irrelevant before their
+    /// fetch starts. Abandoning removes only the matching generation, so a
+    /// newer request for the same key cannot be cancelled by an older token.
     pub fn abandon(&mut self, token: FetchToken<K>) {
         if self
             .entries
@@ -193,7 +193,7 @@ impl<K: Clone + Eq + Hash, V> QueryCache<K, V> {
         self.entries.remove(key);
     }
 
-    #[cfg(test)]
+    /// Drops every cached value and invalidates all fetches in flight.
     pub fn clear(&mut self) {
         self.generation += 1;
         self.entries.clear();

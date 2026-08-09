@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -25,8 +25,8 @@ use crate::computer_use::ComputerAppGrant;
 use crate::i18n::AppLanguage;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
-    AgentSession, FavoriteModel, InteractionMode, Message, Project, ProviderKind, RuntimeMode,
-    SessionWorkspace, TranscriptBlockContent,
+    AgentSession, FavoriteModel, InteractionMode, Message, MessageRole, Project, ProviderKind,
+    RuntimeMode, SessionWorkspace, TranscriptBlockContent,
 };
 use crate::theme::ThemePreference;
 
@@ -403,6 +403,125 @@ fn to_io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
+const SESSION_SEARCH_SNIPPET_CHARS: usize = 240;
+const SESSION_SEARCH_CONTEXT_BEFORE_CHARS: usize = 72;
+
+/// One transcript hit returned to search UI without hydrating the session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionMessageMatch {
+    pub session_id: Uuid,
+    pub source: MessageRole,
+    pub snippet: String,
+}
+
+fn build_session_search_snippet(text: &str, query: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let char_count = normalized.chars().count();
+    if char_count <= SESSION_SEARCH_SNIPPET_CHARS {
+        return normalized;
+    }
+
+    // ASCII folding preserves UTF-8 byte offsets while covering the provider
+    // and source-code text people search most often. Non-ASCII queries still
+    // match exactly, including Simplified Chinese.
+    let match_byte = normalized
+        .to_ascii_lowercase()
+        .find(&query.to_ascii_lowercase())
+        .unwrap_or(0);
+    let match_char = normalized[..match_byte].chars().count();
+    let body_chars = SESSION_SEARCH_SNIPPET_CHARS.saturating_sub(4);
+    let ideal_start = match_char.saturating_sub(SESSION_SEARCH_CONTEXT_BEFORE_CHARS);
+    let start = ideal_start.min(char_count.saturating_sub(body_chars));
+    let end = (start + body_chars).min(char_count);
+    let body = normalized
+        .chars()
+        .skip(start)
+        .take(end - start)
+        .collect::<String>();
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        body,
+        if end < char_count { "…" } else { "" }
+    )
+}
+
+fn search_session_messages(
+    path: &Path,
+    query: &str,
+    limit: usize,
+) -> io::Result<Vec<SessionMessageMatch>> {
+    let query = query.trim();
+    if query.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    // The writer uses WAL, so an independent read-only connection can scan
+    // history without taking the StateStore mutex or delaying a streaming save.
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(to_io_error)?;
+    let mut statement = connection
+        .prepare(
+            "WITH ranked AS (
+                 SELECT messages.session_id,
+                        messages.role,
+                        messages.content,
+                        messages.created_at,
+                        sessions.updated_at AS session_updated_at,
+                        CASE messages.role WHEN 'user' THEN 0 ELSE 1 END AS source_rank,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY messages.session_id
+                            ORDER BY CASE messages.role WHEN 'user' THEN 0 ELSE 1 END,
+                                     messages.created_at DESC,
+                                     messages.position DESC
+                        ) AS session_match_rank
+                   FROM messages
+                   INNER JOIN sessions ON sessions.id = messages.session_id
+                  WHERE messages.streaming = 0
+                    AND messages.role IN ('user', 'assistant')
+                    AND instr(lower(messages.content), lower(?1)) > 0
+             )
+             SELECT session_id, role, content
+               FROM ranked
+              WHERE session_match_rank = 1
+              ORDER BY source_rank, session_updated_at DESC, session_id
+              LIMIT ?2",
+        )
+        .map_err(to_io_error)?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = statement
+        .query_map(params![query, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(to_io_error)?;
+
+    let mut matches = Vec::new();
+    for row in rows {
+        let (session_id, role, content) = row.map_err(to_io_error)?;
+        let Ok(session_id) = Uuid::parse_str(&session_id) else {
+            continue;
+        };
+        let source = match role.as_str() {
+            "user" => MessageRole::User,
+            "assistant" => MessageRole::Assistant,
+            _ => continue,
+        };
+        matches.push(SessionMessageMatch {
+            session_id,
+            source,
+            snippet: build_session_search_snippet(&content, query),
+        });
+    }
+    Ok(matches)
+}
+
 include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
 
 const MIGRATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS migrations (
@@ -501,6 +620,19 @@ impl StateStore {
             storage: Mutex::new(None),
             blobs,
         }
+    }
+
+    /// Builds a transcript-search job for the background executor.
+    ///
+    /// Constructing the job only clones the database path; opening SQLite and
+    /// scanning message text happen when the returned closure runs off-thread.
+    pub fn session_message_search(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> impl FnOnce() -> io::Result<Vec<SessionMessageMatch>> + Send + 'static {
+        let path = self.path.clone();
+        move || search_session_messages(&path, &query, limit)
     }
 
     #[cfg(test)]
@@ -1819,6 +1951,81 @@ mod tests {
         }
 
         fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn message_search_reads_skeleton_history_and_prefers_user_matches() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let project_id = state.projects[0].id;
+        let user_match_id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Older user needle at 100%_literal");
+        state.sessions[0].push_message(MessageRole::Assistant, "Newer assistant needle");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+
+        let mut assistant_match = AgentSession::new(project_id, ProviderKind::Codex);
+        let assistant_match_id = assistant_match.id;
+        assistant_match.begin_turn("Ordinary prompt");
+        assistant_match.push_message(MessageRole::System, "System needle is private");
+        assistant_match.push_message(MessageRole::Assistant, "Streaming needle");
+        assistant_match.messages.last_mut().unwrap().streaming = true;
+        assistant_match.push_message(MessageRole::Assistant, "Final assistant needle");
+        assistant_match.finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions.push(assistant_match);
+        store.save(&mut state).unwrap();
+
+        let reopened = store_in(&directory);
+        let skeletons = reopened.load().unwrap();
+        assert!(
+            skeletons
+                .sessions
+                .iter()
+                .all(|session| !session.detail_loaded)
+        );
+        assert!(
+            skeletons
+                .sessions
+                .iter()
+                .all(|session| session.messages.is_empty())
+        );
+
+        let matches = reopened.session_message_search("needle".into(), 50)().unwrap();
+        assert_eq!(
+            matches
+                .iter()
+                .map(|matched| (matched.session_id, matched.source))
+                .collect::<Vec<_>>(),
+            vec![
+                (user_match_id, MessageRole::User),
+                (assistant_match_id, MessageRole::Assistant),
+            ]
+        );
+        assert!(matches[0].snippet.contains("user needle"));
+        assert!(matches[1].snippet.contains("Final assistant needle"));
+        assert!(!matches[1].snippet.contains("Streaming"));
+        assert!(!matches[1].snippet.contains("System"));
+        assert_eq!(
+            reopened.session_message_search("100%_literal".into(), 50)()
+                .unwrap()
+                .iter()
+                .map(|matched| matched.session_id)
+                .collect::<Vec<_>>(),
+            vec![user_match_id],
+            "SQL wildcard characters are searched literally"
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn message_search_snippets_center_the_literal_query_and_stay_bounded() {
+        let text = format!("{}100%_needle{}", "before ".repeat(80), " after".repeat(80));
+        let snippet = build_session_search_snippet(&text, "100%_needle");
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.contains("100%_needle"));
+        assert!(snippet.chars().count() <= SESSION_SEARCH_SNIPPET_CHARS);
     }
 
     #[test]

@@ -222,6 +222,8 @@ impl Waku {
             self.create_projectless_session(cx);
         } else if let Some(project_id) = self.state.selected_project {
             self.create_session_for(project_id, self.state.last_provider, cx);
+        } else {
+            self.create_projectless_session(cx);
         }
         let focus_handle = self.composer_focus(cx);
         window.focus(&focus_handle, cx);
