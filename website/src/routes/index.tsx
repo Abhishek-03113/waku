@@ -125,7 +125,7 @@ function Home() {
               <img
                 src="/app-icon.png"
                 alt=""
-                className="size-6 rounded-[6px]"
+                className="size-8 rounded-[6px]"
               />
               <span className="text-[15px] font-semibold tracking-tight">
                 Waku
