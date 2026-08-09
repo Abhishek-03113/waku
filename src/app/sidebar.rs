@@ -97,6 +97,8 @@ fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
 /// uniform height hint so the scrollbar is correctly sized before off-screen
 /// rows have been measured.
 const SIDEBAR_SESSION_ROW_HEIGHT: f32 = 51.0;
+const SIDEBAR_ACTION_ROW_HEIGHT: f32 = 32.0;
+const SIDEBAR_SEARCH_BOTTOM_GAP: f32 = 10.0;
 
 /// The session row's trailing time: how long the live turn has been working,
 /// or how long ago the agent last replied. A session that has never replied
@@ -348,7 +350,7 @@ impl Waku {
             .id(id)
             .tab_index(0)
             .w_full()
-            .h(px(32.0))
+            .h(px(SIDEBAR_ACTION_ROW_HEIGHT))
             .flex_none()
             .px(px(4.0))
             .rounded(px(7.0))
@@ -396,22 +398,28 @@ impl Waku {
         }))
     }
 
-    fn render_sidebar_search(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        self.render_sidebar_action_row(
-            "sidebar-search",
-            "icons/search.svg",
-            tr!("sidebar.search"),
-            cx,
-        )
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
-        }))
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+    fn render_sidebar_search(&self, cx: &mut Context<Self>) -> Div {
+        let search = self
+            .render_sidebar_action_row(
+                "sidebar-search",
+                "icons/search.svg",
+                tr!("sidebar.search"),
+                cx,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
-                cx.stop_propagation();
-            }
-        }))
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
+                    cx.stop_propagation();
+                }
+            }));
+        div()
+            .w_full()
+            .h(px(SIDEBAR_ACTION_ROW_HEIGHT + SIDEBAR_SEARCH_BOTTOM_GAP))
+            .flex_none()
+            .child(search)
     }
 
     fn render_sidebar_footer(&self, cx: &mut Context<Self>) -> Div {
