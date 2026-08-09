@@ -384,7 +384,7 @@ impl Waku {
         self.render_sidebar_action_row(
             "sidebar-new-session",
             "icons/compose.svg",
-            tr!("menu.new_session"),
+            tr!("menu.new_task"),
             cx,
         )
         .on_click(cx.listener(|this, _, window, cx| {

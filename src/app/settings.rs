@@ -673,7 +673,7 @@ impl Waku {
                     parts.push(path);
                 }
                 if disabled {
-                    parts.push(tr!("providers.disabled_for_new_sessions"));
+                    parts.push(tr!("providers.disabled_for_new_tasks"));
                 } else if model_count > 0 {
                     parts.push(if model_count == 1 {
                         tr!("providers.model_count_one", count = model_count)

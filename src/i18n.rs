@@ -157,4 +157,17 @@ mod tests {
             "已回退到第 3 轮任务之前。"
         );
     }
+
+    #[test]
+    fn task_creation_copy_uses_task_terminology() {
+        assert_eq!(&*rust_i18n::t!("menu.new_task", locale = "en"), "New Task");
+        assert_eq!(
+            &*rust_i18n::t!("command_palette.new_task", locale = "en"),
+            "New task"
+        );
+        assert_eq!(
+            &*rust_i18n::t!("providers.disabled_for_new_tasks", locale = "en"),
+            "Disabled for new tasks"
+        );
+    }
 }

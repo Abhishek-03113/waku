@@ -276,7 +276,7 @@ pub(crate) fn set_app_menus(cx: &mut App, updater_available: bool) {
             name: tr!("menu.file").into(),
             disabled: false,
             items: vec![
-                MenuItem::action(tr!("menu.new_session"), NewSession),
+                MenuItem::action(tr!("menu.new_task"), NewSession),
                 MenuItem::action(tr!("menu.new_project"), NewProject),
             ],
         },

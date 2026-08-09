@@ -15,8 +15,8 @@ menu.quit:
 menu.file:
   en: File
   zh-CN: 文件
-menu.new_session:
-  en: New Session
+menu.new_task:
+  en: New Task
   zh-CN: 新建任务
 menu.new_project:
   en: New Project…
@@ -250,8 +250,8 @@ providers.coding_agents:
 providers.description:
   en: Waku drives agent CLIs installed on this Mac. Install or sign in with each agent's own CLI, then refresh.
   zh-CN: Waku 调用安装在这台 Mac 上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新。
-providers.disabled_for_new_sessions:
-  en: Disabled for new sessions
+providers.disabled_for_new_tasks:
+  en: Disabled for new tasks
   zh-CN: 已对新任务停用
 providers.model_count_one:
   en: "%{count} model"
