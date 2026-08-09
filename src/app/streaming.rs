@@ -317,9 +317,9 @@ impl Waku {
                 if busy {
                     self.enqueue_follow_up(session_id, message, cx);
                     if self.state.selected_session == Some(session_id) {
-                        self.show_toast(format!(
-                            "The agent couldn't be steered ({}); the message was queued as a follow-up.",
-                            compact_driver_error(&reason)
+                        self.show_toast(tr!(
+                            "session.steer_rejected",
+                            error = compact_driver_error(&reason)
                         ));
                     }
                 } else if settled_cleanly {
@@ -413,9 +413,9 @@ impl Waku {
                             MessageRole::Assistant,
                             summary.unwrap_or_else(|| {
                                 if success {
-                                    "Turn completed.".into()
+                                    tr!("session.turn_completed")
                                 } else {
-                                    "The agent stopped before returning a response.".into()
+                                    tr!("session.stopped_before_response")
                                 }
                             }),
                         );
@@ -484,9 +484,10 @@ impl Waku {
                 runtime.driver.cancel_computer_use();
                 runtime.computer_use_previews.clear();
                 let needs_fallback = !self.turn_has_assistant_message(session_id);
-                let failure_message = runtime.last_driver_error.take().unwrap_or_else(|| {
-                    "Codex app-server exited before returning a response.".into()
-                });
+                let failure_message = runtime
+                    .last_driver_error
+                    .take()
+                    .unwrap_or_else(|| tr!("session.codex_exited_before_response"));
                 let mut finished_turn = false;
                 if let Some(session) = self.state.session_mut(session_id)
                     && matches!(

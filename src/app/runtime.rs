@@ -51,7 +51,7 @@ fn prepare_submission(
                 .flatten()
         })
         .flatten()
-        .map(|error| format!("Could not capture the pre-turn checkpoint: {error}"));
+        .map(|error| tr!("errors.capture_pre_turn_checkpoint", error = error));
 
     // Process startup can synchronously resolve executables, bind sockets,
     // and spawn children. It belongs behind the same animated preparation
@@ -330,7 +330,7 @@ impl Waku {
     pub(super) fn save(&mut self) {
         self.last_stream_save = Instant::now();
         if let Err(error) = self.store.save(&mut self.state) {
-            self.show_toast(format!("Could not save local state: {error}"));
+            self.show_toast(tr!("errors.save_local_state", error = error));
         } else {
             self.stream_state_dirty = false;
         }
@@ -410,9 +410,7 @@ impl Waku {
                     let checkpoint = match captured {
                         Ok(checkpoint) => checkpoint,
                         Err(error) => {
-                            waku.show_toast(format!(
-                                "Could not capture the turn checkpoint: {error}"
-                            ));
+                            waku.show_toast(tr!("errors.capture_turn_checkpoint", error = error));
                             Checkpoint {
                                 turn_count,
                                 git_ref: checkpoint::checkpoint_ref(session_id, turn_count),
@@ -452,7 +450,7 @@ impl Waku {
             .find(|session| session.id == session_id)
             .cloned()
         else {
-            self.show_toast("That response is no longer available.");
+            self.show_toast(tr!("session.response_unavailable"));
             cx.notify();
             return;
         };
@@ -464,7 +462,7 @@ impl Waku {
                 .get(turn_count.saturating_sub(1))
                 .is_none_or(|turn| turn.turn_count != turn_count || !turn.provider_turn_started)
         {
-            self.show_toast("That response cannot be forked right now.");
+            self.show_toast(tr!("session.response_cannot_fork"));
             cx.notify();
             return;
         }
@@ -472,7 +470,7 @@ impl Waku {
             .workspace_path_for_session(&source)
             .map(std::path::Path::to_path_buf)
         else {
-            self.show_toast("That task's project could not be found.");
+            self.show_toast(tr!("errors.task_project_not_found"));
             cx.notify();
             return;
         };
@@ -496,9 +494,17 @@ impl Waku {
                     } = source
                         .provider_cursor
                         .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("Claude's native session is unavailable"))?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(tr!(
+                                "errors.provider_native_session_unavailable",
+                                provider = "Claude"
+                            ))
+                        })?
                     else {
-                        anyhow::bail!("Claude's native session is unavailable");
+                        anyhow::bail!(tr!(
+                            "errors.provider_native_session_unavailable",
+                            provider = "Claude"
+                        ));
                     };
                     let resume_at = source.turns[turn_count - 1]
                         .provider_resume_at
@@ -513,13 +519,13 @@ impl Waku {
                     let fork = crate::claude_session::fork_session_at(
                         native_session_id,
                         &resume_at,
-                        &format!("{} (fork)", source.display_title()),
+                        &tr!("session.fork_title", title = source.display_title()),
                     )?;
                     let fork_resume_at = fork
                         .message_ids
                         .get(&resume_at)
                         .cloned()
-                        .ok_or_else(|| anyhow::anyhow!("Claude omitted the fork checkpoint"))?;
+                        .ok_or_else(|| anyhow::anyhow!(tr!("errors.claude_fork_checkpoint_missing")))?;
                     Ok((
                         ProviderResumeCursor::Claude {
                             session_id: fork.session_id,
@@ -533,7 +539,10 @@ impl Waku {
                         source.provider_cursor.as_ref(),
                         Some(ProviderResumeCursor::Codex { .. })
                     ) {
-                        anyhow::bail!("Codex's native thread is unavailable");
+                        anyhow::bail!(tr!(
+                            "errors.provider_native_thread_unavailable",
+                            provider = "Codex"
+                        ));
                     }
                     Ok((self.ensure_driver()?.fork(turns_to_remove)?, None))
                 }
@@ -547,14 +556,19 @@ impl Waku {
                         fork_context,
                     }) = source.provider_cursor.as_ref()
                     else {
-                        anyhow::bail!("Amp's native thread is unavailable");
+                        anyhow::bail!(tr!(
+                            "errors.provider_native_thread_unavailable",
+                            provider = "Amp"
+                        ));
                     };
                     let binary = self
                         .probes
                         .iter()
                         .find(|probe| probe.provider == ProviderKind::Amp)
                         .and_then(|probe| probe.path.as_deref())
-                        .ok_or_else(|| anyhow::anyhow!("Amp is not installed"))?;
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(tr!("errors.provider_not_installed", provider = "Amp"))
+                        })?;
                     Ok((
                         crate::amp_session::fork_session_at_turn(
                             binary,
@@ -571,14 +585,22 @@ impl Waku {
                         session_id: native_session_id,
                     }) = source.provider_cursor.as_ref()
                     else {
-                        anyhow::bail!("OpenCode's native session is unavailable");
+                        anyhow::bail!(tr!(
+                            "errors.provider_native_session_unavailable",
+                            provider = "OpenCode"
+                        ));
                     };
                     let binary = self
                         .probes
                         .iter()
                         .find(|probe| probe.provider == ProviderKind::OpenCode)
                         .and_then(|probe| probe.path.as_deref())
-                        .ok_or_else(|| anyhow::anyhow!("OpenCode is not installed"))?;
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(tr!(
+                                "errors.provider_not_installed",
+                                provider = "OpenCode"
+                            ))
+                        })?;
                     Ok((
                         crate::opencode_session::fork_session_at_turn(
                             binary,
@@ -594,14 +616,22 @@ impl Waku {
                         session_id: native_session_id,
                     }) = source.provider_cursor.as_ref()
                     else {
-                        anyhow::bail!("Grok's native session is unavailable");
+                        anyhow::bail!(tr!(
+                            "errors.provider_native_session_unavailable",
+                            provider = "Grok"
+                        ));
                     };
                     let binary = self
                         .probes
                         .iter()
                         .find(|probe| probe.provider == ProviderKind::Grok)
                         .and_then(|probe| probe.path.as_deref())
-                        .ok_or_else(|| anyhow::anyhow!("Grok Build is not installed"))?;
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(tr!(
+                                "errors.provider_not_installed",
+                                provider = "Grok Build"
+                            ))
+                        })?;
                     Ok((
                         crate::grok_session::fork_session_at_turn(
                             binary,
@@ -620,7 +650,7 @@ impl Waku {
                             ..
                         })
                     ) {
-                        anyhow::bail!("Pi's native session file is unavailable");
+                        anyhow::bail!(tr!("errors.pi_session_file_unavailable"));
                     }
                     Ok((self.ensure_driver()?.fork(turns_to_remove)?, None))
                 }
@@ -635,13 +665,13 @@ impl Waku {
                     // process on that fork. Recreate it from the source cursor.
                     self.runtimes.remove(&session_id);
                 }
-                self.show_toast(format!("Could not fork the task: {error}"));
+                self.show_toast(tr!("errors.fork_task", error = error));
                 cx.notify();
                 return;
             }
         };
         let Some(mut forked) = source.fork_through_turn(turn_count, provider_cursor) else {
-            self.show_toast("That response could not be copied into a new task.");
+            self.show_toast(tr!("session.response_cannot_copy"));
             cx.notify();
             return;
         };
@@ -670,9 +700,9 @@ impl Waku {
         self.select_session(fork_id, cx);
         self.show_toast(match checkpoint_warning {
             Some(error) => {
-                format!("Forked task; some Git checkpoints could not be copied: {error}")
+                tr!("session.forked_with_checkpoint_warning", error = error)
             }
-            None => "Forked task from this response.".into(),
+            None => tr!("session.forked_from_response"),
         });
         self.save();
         cx.notify();
@@ -709,7 +739,7 @@ impl Waku {
                     })
             })
         else {
-            self.show_toast("That message is not editable right now.");
+            self.show_toast(tr!("session.message_not_editable"));
             cx.notify();
             return;
         };
@@ -769,7 +799,7 @@ impl Waku {
         };
         let prompt = edit.input.read(cx).content().trim().to_owned();
         if prompt.is_empty() {
-            self.show_toast("The edited message cannot be empty.");
+            self.show_toast(tr!("session.edited_message_empty"));
             cx.notify();
             return;
         }
@@ -828,26 +858,26 @@ impl Waku {
                     })
             })
         else {
-            self.show_toast("That message is no longer available.");
+            self.show_toast(tr!("session.message_unavailable"));
             cx.notify();
             return false;
         };
         if self.state.selected_session != Some(session_id) {
-            self.show_toast("Select the task before rewinding its conversation.");
+            self.show_toast(tr!("session.select_before_rewind"));
             cx.notify();
             return false;
         }
         if !matches!(status, SessionStatus::Idle | SessionStatus::Failed) {
-            self.show_toast("Stop the current turn before rewinding the conversation.");
+            self.show_toast(tr!("session.stop_before_rewind"));
             cx.notify();
             return false;
         }
         if !provider.supports_conversation_rollback()
             || (rollback_turns > 0 && provider_cursor.is_none())
         {
-            self.show_toast(format!(
-                "{} cannot safely roll back its native conversation yet.",
-                provider.display_name()
+            self.show_toast(tr!(
+                "session.provider_cannot_rewind",
+                provider = provider.display_name()
             ));
             cx.notify();
             return false;
@@ -860,13 +890,13 @@ impl Waku {
             .and_then(|session| self.workspace_path_for_session(session))
             .map(std::path::Path::to_path_buf)
         else {
-            self.show_toast("The task's project could not be found.");
+            self.show_toast(tr!("errors.task_project_not_found"));
             cx.notify();
             return false;
         };
         let checkpoint_ref = checkpoint::checkpoint_ref(session_id, retained_turn_count);
         if !checkpoint::has_ref(&project_path, &checkpoint_ref) {
-            self.show_toast("The message's pre-turn Git checkpoint is missing.");
+            self.show_toast(tr!("session.pre_turn_checkpoint_missing"));
             cx.notify();
             return false;
         }
@@ -884,7 +914,10 @@ impl Waku {
                     ..
                 }) = provider_cursor.as_ref()
                 else {
-                    self.show_toast("Claude's native session cursor is unavailable.");
+                    self.show_toast(tr!(
+                        "errors.provider_native_cursor_unavailable",
+                        provider = "Claude"
+                    ));
                     cx.notify();
                     return false;
                 };
@@ -896,8 +929,9 @@ impl Waku {
                     ) {
                         Ok(message_id) => message_id,
                         Err(error) => {
-                            self.show_toast(format!(
-                                "Claude's native checkpoint for that turn is unavailable: {error}"
+                            self.show_toast(tr!(
+                                "errors.claude_turn_checkpoint_unavailable",
+                                error = error
                             ));
                             cx.notify();
                             return false;
@@ -911,9 +945,7 @@ impl Waku {
 
         let safety_ref = format!("refs/waku/revert-backup-{session_id}-{}", Uuid::new_v4());
         if let Err(error) = checkpoint::capture_ref(&project_path, &safety_ref) {
-            self.show_toast(format!(
-                "Could not create a rewind safety snapshot: {error}"
-            ));
+            self.show_toast(tr!("errors.create_rewind_snapshot", error = error));
             cx.notify();
             return false;
         }
@@ -921,10 +953,13 @@ impl Waku {
             self.show_toast(match checkpoint::restore_ref(&project_path, &safety_ref) {
                 Ok(()) => {
                     let _ = checkpoint::delete_ref(&project_path, &safety_ref);
-                    format!("Could not restore the checkpoint: {error}")
+                    tr!("errors.restore_checkpoint", error = error)
                 }
-                Err(restore_error) => format!(
-                    "Checkpoint restore failed ({error}); safety restore also failed ({restore_error}). Recovery ref retained at {safety_ref}."
+                Err(restore_error) => tr!(
+                    "errors.restore_checkpoint_and_safety",
+                    error = error,
+                    restore_error = restore_error,
+                    safety_ref = safety_ref
                 ),
             });
             cx.notify();
@@ -938,7 +973,7 @@ impl Waku {
                 crate::claude_session::fork_session_at(
                     native_session_id,
                     resume_at,
-                    &format!("{session_title} (rewind)"),
+                    &tr!("session.rewind_title", title = session_title),
                 )
                 .map(|fork| {
                     claude_fork = Some((fork, resume_at.to_owned()));
@@ -948,7 +983,10 @@ impl Waku {
                     session_id: native_session_id,
                 }) = provider_cursor.as_ref()
                 else {
-                    self.show_toast("OpenCode's native session cursor is unavailable.");
+                    self.show_toast(tr!(
+                        "errors.provider_native_cursor_unavailable",
+                        provider = "OpenCode"
+                    ));
                     cx.notify();
                     return false;
                 };
@@ -958,7 +996,7 @@ impl Waku {
                     .find(|probe| probe.provider == ProviderKind::OpenCode)
                     .and_then(|probe| probe.path.as_deref())
                 else {
-                    self.show_toast("OpenCode is not installed or could not be found.");
+                    self.show_toast(tr!("errors.provider_not_found", provider = "OpenCode"));
                     cx.notify();
                     return false;
                 };
@@ -975,7 +1013,10 @@ impl Waku {
                     fork_context,
                 }) = provider_cursor.as_ref()
                 else {
-                    self.show_toast("Amp's native thread cursor is unavailable.");
+                    self.show_toast(tr!(
+                        "errors.provider_native_thread_cursor_unavailable",
+                        provider = "Amp"
+                    ));
                     cx.notify();
                     return false;
                 };
@@ -985,7 +1026,7 @@ impl Waku {
                     .find(|probe| probe.provider == ProviderKind::Amp)
                     .and_then(|probe| probe.path.as_deref())
                 else {
-                    self.show_toast("Amp is not installed or could not be found.");
+                    self.show_toast(tr!("errors.provider_not_found", provider = "Amp"));
                     cx.notify();
                     return false;
                 };
@@ -1004,7 +1045,10 @@ impl Waku {
                     .iter()
                     .find(|session| session.id == session_id)
                 else {
-                    self.show_toast("Cursor's Waku task is unavailable.");
+                    self.show_toast(tr!(
+                        "errors.provider_waku_task_unavailable",
+                        provider = "Cursor"
+                    ));
                     cx.notify();
                     return false;
                 };
@@ -1015,7 +1059,10 @@ impl Waku {
                     session_id: native_session_id,
                 }) = provider_cursor.as_ref()
                 else {
-                    self.show_toast("Grok's native session cursor is unavailable.");
+                    self.show_toast(tr!(
+                        "errors.provider_native_cursor_unavailable",
+                        provider = "Grok"
+                    ));
                     cx.notify();
                     return false;
                 };
@@ -1025,7 +1072,7 @@ impl Waku {
                     .find(|probe| probe.provider == ProviderKind::Grok)
                     .and_then(|probe| probe.path.as_deref())
                 else {
-                    self.show_toast("Grok Build is not installed or could not be found.");
+                    self.show_toast(tr!("errors.provider_not_found", provider = "Grok Build"));
                     cx.notify();
                     return false;
                 };
@@ -1046,12 +1093,13 @@ impl Waku {
                 self.show_toast(match restore_result {
                     Ok(()) => {
                         let _ = checkpoint::delete_ref(&project_path, &safety_ref);
-                        format!(
-                            "The provider rejected the rollback, so the workspace was restored: {error}"
-                        )
+                        tr!("errors.rollback_rejected_workspace_restored", error = error)
                     }
-                    Err(restore_error) => format!(
-                        "Provider rollback failed ({error}) and the safety snapshot could not be restored ({restore_error}). Recovery ref retained at {safety_ref}."
+                    Err(restore_error) => tr!(
+                        "errors.rollback_and_safety_failed",
+                        error = error,
+                        restore_error = restore_error,
+                        safety_ref = safety_ref
                     ),
                 });
                 cx.notify();
@@ -1126,10 +1174,12 @@ impl Waku {
         self.expanded_turns.clear();
         self.splice_transcript_rows_after_visibility_change(&previous_kinds);
         self.show_toast(match cleanup_result {
-            Ok(()) => format!("Rewound to before turn {turn_count}."),
-            Err(error) => {
-                format!("Rewound to before turn {turn_count}; stale refs remain: {error}")
-            }
+            Ok(()) => tr!("session.rewound", turn = turn_count),
+            Err(error) => tr!(
+                "session.rewound_with_stale_refs",
+                turn = turn_count,
+                error = error
+            ),
         });
         self.save();
         cx.notify();
@@ -1229,7 +1279,7 @@ impl Waku {
         let session_id = self
             .selected_session()
             .map(|session| session.id)
-            .ok_or_else(|| anyhow::anyhow!("No session selected"))?;
+            .ok_or_else(|| anyhow::anyhow!(tr!("errors.no_session_selected")))?;
         self.ensure_driver_for_session(session_id)
     }
 
@@ -1243,14 +1293,14 @@ impl Waku {
             .iter()
             .find(|session| session.id == session_id)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+            .ok_or_else(|| anyhow::anyhow!(tr!("errors.session_not_found")))?;
         if let Some(runtime) = self.runtimes.get(&session.id) {
             return Ok(runtime.driver.clone());
         }
         let workspace_path = self
             .workspace_path_for_session(&session)
             .map(std::path::Path::to_path_buf)
-            .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+            .ok_or_else(|| anyhow::anyhow!(tr!("errors.project_not_found")))?;
         let prepared = start_driver(
             self.driver_start_request_for_session(&session, workspace_path.clone())?,
             workspace_path,
@@ -1269,10 +1319,10 @@ impl Waku {
             .find(|probe| probe.provider == session.provider)
             .and_then(|probe| probe.path.clone())
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{} is not installed or could not be found",
-                    session.provider.display_name()
-                )
+                anyhow::anyhow!(tr!(
+                    "errors.provider_not_found",
+                    provider = session.provider.display_name()
+                ))
             })?;
         let SessionOptions {
             mode,
@@ -1488,7 +1538,7 @@ impl Waku {
             if selected {
                 self.composer
                     .update(cx, |input, cx| input.set_content(prompt, cx));
-                self.show_toast("Could not prepare the task: project not found");
+                self.show_toast(tr!("errors.prepare_task_project_not_found"));
             }
             cx.notify();
             return;
@@ -1612,7 +1662,7 @@ impl Waku {
                     self.splice_transcript_rows_after_visibility_change(&previous_kinds);
                     self.composer
                         .update(cx, |input, cx| input.set_content(prompt, cx));
-                    self.show_toast(format!("Could not create the worktree: {error}"));
+                    self.show_toast(tr!("errors.create_worktree", error = error));
                 }
                 cx.notify();
                 return;
@@ -1659,7 +1709,7 @@ impl Waku {
                 .runtimes
                 .get(&session_id)
                 .map(|runtime| runtime.driver.clone())
-                .ok_or_else(|| anyhow::anyhow!("the prepared agent runtime is unavailable")),
+                .ok_or_else(|| anyhow::anyhow!(tr!("errors.prepared_runtime_unavailable"))),
             Some(Ok(prepared)) => Ok(self.install_prepared_driver(session_id, prepared)),
             Some(Err(error)) => Err(error),
         };
@@ -1691,7 +1741,7 @@ impl Waku {
             Ok(driver) => driver.prompt(driver_prompt),
             Err(error) => {
                 failed_to_start = true;
-                let message = format!("Could not start the agent: {error}");
+                let message = tr!("errors.start_agent", error = error);
                 if let Some(session) = self.state.session_mut(session_id) {
                     session.status = SessionStatus::Failed;
                     session.push_message(MessageRole::Assistant, message);

@@ -198,13 +198,18 @@ impl AmpDriver {
                                 }),
                             );
                             if let Err(error) = written {
-                                let _ = writer_events.send(DriverEvent::Error(format!(
-                                    "Amp transport write failed: {error}"
+                                let _ = writer_events.send(DriverEvent::Error(tr!(
+                                    "errors.provider_transport_write",
+                                    provider = "Amp",
+                                    error = error
                                 )));
                                 if std::mem::take(&mut *writer_turn.lock()) {
                                     let _ = writer_events.send(DriverEvent::TurnFinished {
                                         success: false,
-                                        summary: Some("Amp could not receive the prompt.".into()),
+                                        summary: Some(tr!(
+                                            "errors.provider_receive_prompt",
+                                            provider = "Amp"
+                                        )),
                                     });
                                 }
                                 break;
@@ -220,7 +225,7 @@ impl AmpDriver {
                             if !*writer_turn.lock() {
                                 let _ = writer_events.send(DriverEvent::SteerRejected {
                                     message: text,
-                                    reason: "Amp has no active turn to steer.".into(),
+                                    reason: tr!("errors.provider_no_active_turn", provider = "Amp"),
                                 });
                                 continue;
                             }
@@ -243,17 +248,25 @@ impl AmpDriver {
                                 Err(error) => {
                                     let _ = writer_events.send(DriverEvent::SteerRejected {
                                         message: text,
-                                        reason: format!("Amp transport write failed: {error}"),
+                                        reason: tr!(
+                                            "errors.provider_transport_write",
+                                            provider = "Amp",
+                                            error = error
+                                        ),
                                     });
                                     // Stdin is gone, so the running turn cannot
                                     // settle from the CLI side either.
-                                    let _ = writer_events.send(DriverEvent::Error(
-                                        "Amp transport write failed.".into(),
-                                    ));
+                                    let _ = writer_events.send(DriverEvent::Error(tr!(
+                                        "errors.provider_transport_write_short",
+                                        provider = "Amp"
+                                    )));
                                     if std::mem::take(&mut *writer_turn.lock()) {
                                         let _ = writer_events.send(DriverEvent::TurnFinished {
                                             success: false,
-                                            summary: Some("Amp stopped receiving messages.".into()),
+                                            summary: Some(tr!(
+                                                "errors.provider_stopped_receiving",
+                                                provider = "Amp"
+                                            )),
                                         });
                                     }
                                     break;
@@ -295,7 +308,11 @@ impl AmpDriver {
                     && !status.success()
                     && last_visible_stderr.lock().is_none()
                 {
-                    let _ = events.send(DriverEvent::Error(format!("Amp exited with {status}")));
+                    let _ = events.send(DriverEvent::Error(tr!(
+                        "errors.provider_exited",
+                        provider = "Amp",
+                        status = status
+                    )));
                 }
                 let _ = events.send(DriverEvent::ProcessExited);
             })?;
@@ -422,8 +439,8 @@ fn handle_message(
                             let wire_title = block
                                 .get("name")
                                 .and_then(Value::as_str)
-                                .unwrap_or("Tool")
-                                .to_owned();
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| tr!("activity.tool"));
                             let kind = super::support::classify_tool(&wire_title);
                             let title =
                                 activity::input_title(block.get("input")).unwrap_or(wire_title);

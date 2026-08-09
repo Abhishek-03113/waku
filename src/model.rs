@@ -220,23 +220,23 @@ impl RuntimeMode {
         Self::FullAccess,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Plan => "Plan",
-            Self::Ask => "Supervised",
-            Self::AutoAcceptEdits => "Auto-accept edits",
-            Self::Auto => "Auto",
-            Self::FullAccess => "Full access",
+            Self::Plan => tr!("mode.plan"),
+            Self::Ask => tr!("mode.supervised"),
+            Self::AutoAcceptEdits => tr!("mode.auto_accept_edits"),
+            Self::Auto => tr!("mode.auto"),
+            Self::FullAccess => tr!("mode.full_access"),
         }
     }
 
-    pub fn description(self) -> &'static str {
+    pub fn description(self) -> String {
         match self {
-            Self::Plan => "Inspect and plan without making changes.",
-            Self::Ask => "Ask before commands and file changes.",
-            Self::AutoAcceptEdits => "Auto-approve edits, ask before other actions.",
-            Self::Auto => "An AI reviewer approves routine actions; risky ones still ask.",
-            Self::FullAccess => "Allow commands and edits without prompts.",
+            Self::Plan => tr!("mode.plan_description"),
+            Self::Ask => tr!("mode.supervised_description"),
+            Self::AutoAcceptEdits => tr!("mode.auto_accept_edits_description"),
+            Self::Auto => tr!("mode.auto_description"),
+            Self::FullAccess => tr!("mode.full_access_description"),
         }
     }
 
@@ -259,10 +259,10 @@ pub enum InteractionMode {
 }
 
 impl InteractionMode {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Build => "Build",
-            Self::Plan => "Plan",
+            Self::Build => tr!("mode.build"),
+            Self::Plan => tr!("mode.plan"),
         }
     }
 }
@@ -472,6 +472,14 @@ impl SessionWorkspace {
 
 impl Project {
     pub const PROJECTLESS_NAME: &'static str = "No project";
+
+    pub fn display_name(&self) -> String {
+        if self.is_projectless() {
+            tr!("project.no_project_name")
+        } else {
+            self.name.clone()
+        }
+    }
 
     pub fn from_path(path: PathBuf) -> Self {
         let name = path
@@ -794,7 +802,7 @@ impl AgentSession {
             };
             for activity in activities {
                 if activity.kind == ActivityKind::Search && activity.title.trim() == "Search for" {
-                    activity.title = "Browsed the web".into();
+                    activity.title = tr!("activity.browsed_web");
                 }
             }
         }
@@ -977,7 +985,7 @@ impl AgentSession {
             return None;
         }
 
-        let fork_title = format!("{} (fork)", self.display_title());
+        let fork_title = tr!("session.fork_title", title = self.display_title());
         let mut fork = self.clone();
         fork.truncate_after_turn(turn_count);
         let fork_id = Uuid::new_v4();

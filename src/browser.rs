@@ -426,7 +426,7 @@ impl BrowserView {
             ComposerInput::new(window, cx)
                 .search_field()
                 .select_all_on_focus_click()
-                .placeholder("Search or enter address")
+                .placeholder(tr!("input.search_or_enter_address"))
         });
 
         let submit_subscription = cx.subscribe(
@@ -519,6 +519,13 @@ impl BrowserView {
         };
         this.build_webview(window, cx);
         this
+    }
+
+    pub fn refresh_localized_text(&mut self, cx: &mut Context<Self>) {
+        self.address.update(cx, |address, cx| {
+            address.set_placeholder(tr!("input.search_or_enter_address"), cx)
+        });
+        cx.notify();
     }
 
     /// The label the right panel tab shows for this surface.
@@ -648,7 +655,7 @@ impl BrowserView {
 
     #[cfg(not(target_os = "macos"))]
     fn build_webview(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.host_error = Some("The browser surface requires macOS.".into());
+        self.host_error = Some(tr!("browser.requires_macos"));
     }
 
     fn page_load_changed(&mut self, event: PageLoad, url: String, cx: &mut Context<Self>) {
@@ -1042,7 +1049,7 @@ impl BrowserView {
         id: &'static str,
         icon_path: &'static str,
         enabled: bool,
-        tooltip: &'static str,
+        tooltip: String,
         theme: Theme,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -1062,7 +1069,7 @@ impl BrowserView {
         base.hover(|element| element.bg(theme.overlay))
             .active(|element| element.bg(theme.overlay_strong))
             .child(icon(icon_path, 14.0, theme.text_secondary))
-            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, window, cx| {
                 on_click(this, window, cx);
             }))
@@ -1089,7 +1096,7 @@ impl BrowserView {
                 "browser-back",
                 "icons/arrow-left.svg",
                 self.can_go_back,
-                "Back (⌘[)",
+                tr!("browser.back"),
                 theme,
                 |this, _, cx| this.go_back(cx),
                 cx,
@@ -1098,7 +1105,7 @@ impl BrowserView {
                 "browser-forward",
                 "icons/arrow-right.svg",
                 self.can_go_forward,
-                "Forward (⌘])",
+                tr!("browser.forward"),
                 theme,
                 |this, _, cx| this.go_forward(cx),
                 cx,
@@ -1108,7 +1115,7 @@ impl BrowserView {
                     "browser-stop",
                     "icons/x.svg",
                     true,
-                    "Stop loading (Esc)",
+                    tr!("browser.stop_loading"),
                     theme,
                     |this, _, cx| this.stop_loading(cx),
                     cx,
@@ -1118,7 +1125,7 @@ impl BrowserView {
                     "browser-reload",
                     "icons/rotate-cw.svg",
                     has_page,
-                    "Reload (⌘R)",
+                    tr!("browser.reload"),
                     theme,
                     |this, _, cx| this.reload(cx),
                     cx,
@@ -1159,7 +1166,7 @@ impl BrowserView {
                 "browser-open-external",
                 "icons/external-link.svg",
                 has_page,
-                "Open in default browser",
+                tr!("browser.open_external"),
                 theme,
                 |this, _, cx| this.open_external(cx),
                 cx,
@@ -1183,7 +1190,7 @@ impl BrowserView {
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("Browse the web"),
+                    .child(tr!("browser.browse_web")),
             )
             .child(
                 div()
@@ -1194,7 +1201,7 @@ impl BrowserView {
                     .line_height(px(17.0))
                     .text_color(theme.text_tertiary)
                     .whitespace_normal()
-                    .child("Enter a URL or search above — ⌘L focuses the address bar."),
+                    .child(tr!("browser.start_hint")),
             )
     }
 
@@ -1215,7 +1222,7 @@ impl BrowserView {
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("Browser unavailable"),
+                    .child(tr!("browser.unavailable")),
             )
             .child(
                 div()

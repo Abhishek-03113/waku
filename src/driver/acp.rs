@@ -287,8 +287,10 @@ impl AcpDriver {
                 let session_id = match session {
                     Ok(session_id) => session_id,
                     Err(error) => {
-                        let _ = writer_events.send(DriverEvent::Error(format!(
-                            "Could not open a {provider_name} session: {error}"
+                        let _ = writer_events.send(DriverEvent::Error(tr!(
+                            "errors.open_provider_session",
+                            provider = provider_name,
+                            error = error
                         )));
                         let _ = writer_events.send(DriverEvent::TurnFinished {
                             success: false,
@@ -587,8 +589,9 @@ fn apply_model(
         "session/set_model",
         json!({"sessionId": session_id, "modelId": model}),
     ) {
-        let _ = events.send(DriverEvent::Error(format!(
-            "Could not select the model: {error}"
+        let _ = events.send(DriverEvent::Error(tr!(
+            "errors.select_model",
+            error = error
         )));
         return;
     }
@@ -735,7 +738,7 @@ fn handle_message(
             let _ = events.send(DriverEvent::Activity {
                 id: Some("acp-plan".into()),
                 kind: ActivityKind::Plan,
-                title: "Plan updated".into(),
+                title: tr!("activity.plan_updated"),
                 detail: None,
                 complete: false,
             });
@@ -817,9 +820,9 @@ fn finish_turn(value: &Value, events: &Sender<DriverEvent>) {
         success: matches!(stop_reason, "end_turn" | "cancelled"),
         summary: match stop_reason {
             "end_turn" | "cancelled" => None,
-            "max_tokens" => Some("The agent ran out of context for this turn.".into()),
-            "refusal" => Some("The agent declined this turn.".into()),
-            other => Some(format!("The agent stopped: {other}.")),
+            "max_tokens" => Some(tr!("session.agent_ran_out_of_context")),
+            "refusal" => Some(tr!("session.agent_declined_turn")),
+            other => Some(tr!("session.agent_stopped_reason", reason = other)),
         },
     });
 }
@@ -877,8 +880,8 @@ fn request_permission(
     let title = params
         .pointer("/toolCall/title")
         .and_then(Value::as_str)
-        .unwrap_or("Run a tool")
-        .to_owned();
+        .map(str::to_owned)
+        .unwrap_or_else(|| tr!("permission.run_a_tool"));
     // The agent explains why it is asking — "Not in allowlist: cat, pwd" — and
     // that reason is the whole basis for the user's decision. Only fall back to
     // the tool kind when it says nothing.
@@ -886,8 +889,8 @@ fn request_permission(
         params
             .pointer("/toolCall/kind")
             .and_then(Value::as_str)
-            .map(|kind| format!("The agent wants to {kind}."))
-            .unwrap_or_else(|| "The agent is asking for permission.".to_owned())
+            .map(|kind| tr!("permission.agent_wants_to", action = kind))
+            .unwrap_or_else(|| tr!("permission.agent_asks_for_permission"))
     });
     let _ = events.send(DriverEvent::Permission {
         request_id: id.to_string(),

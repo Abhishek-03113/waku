@@ -28,6 +28,7 @@ unicode-segmentation = "1.12"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 pulldown-cmark = "0.13"
 regex = "1"
+rust-i18n = "4"
 smol = "2"
 ropey = "=2.0.0-beta.1"
 futures-lite = "2"
@@ -78,10 +79,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "NSArray",
     "NSData",
     "NSDictionary",
     "NSGeometry",
     "NSKeyValueObserving",
+    "NSLocale",
     "NSProcessInfo",
     "NSString",
     "NSURL",

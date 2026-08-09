@@ -124,9 +124,12 @@ impl Waku {
         let theme = Theme::current(cx);
         let target = &permission.target;
         let mut buttons = div().mt(px(12.0)).flex().items_center().gap(px(8.0));
-        let mut options = vec![("task", "Allow for task", true), ("deny", "Deny", false)];
+        let mut options = vec![
+            ("task", tr!("computer_use.allow_for_task"), true),
+            ("deny", tr!("common.deny"), false),
+        ];
         if target.persistable() {
-            options.insert(1, ("always", "Always allow app", false));
+            options.insert(1, ("always", tr!("computer_use.always_allow_app"), false));
         }
         for (decision, label, primary) in options {
             buttons = buttons.child(
@@ -186,7 +189,7 @@ impl Waku {
                                 .text_size(px(12.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(format!("Allow Waku to control {}?", target.app_name)),
+                                .child(tr!("computer_use.allow_control", app = &target.app_name)),
                         ),
                 )
                 .child(
@@ -195,7 +198,7 @@ impl Waku {
                         .text_size(px(10.0))
                         .line_height(px(14.0))
                         .text_color(theme.text_secondary)
-                        .child("A screenshot of this window will be shared with the active Codex model."),
+                        .child(tr!("computer_use.screenshot_shared")),
                 )
                 .child(
                     div()
@@ -224,7 +227,7 @@ impl Waku {
                                     .mt(px(5.0))
                                     .text_size(px(10.5))
                                     .text_color(theme.warning)
-                                    .child("This action can type text or press keys."),
+                                    .child(tr!("computer_use.sensitive_action")),
                             )
                         }),
                 )
@@ -234,10 +237,9 @@ impl Waku {
                         .text_size(px(10.0))
                         .text_color(theme.text_tertiary)
                         .child(if target.persistable() {
-                            format!("Bundle ID: {}", target.bundle_id)
+                            tr!("computer_use.bundle_id", id = &target.bundle_id)
                         } else {
-                            "This app has no bundle identifier, so it cannot be always allowed."
-                                .into()
+                            tr!("computer_use.no_bundle_id")
                         }),
                 )
                 .child(buttons),
@@ -284,11 +286,11 @@ impl Waku {
                     theme.accent
                 };
                 let status = if failed {
-                    "Stopped"
+                    tr!("computer_use.stopped")
                 } else if active {
-                    "Controlling"
+                    tr!("computer_use.controlling")
                 } else {
-                    "Captured"
+                    tr!("computer_use.captured")
                 };
 
                 Some(
@@ -379,7 +381,11 @@ impl Waku {
                                             })
                                             .hover(|element| element.bg(theme.overlay))
                                             .active(|element| element.opacity(0.8))
-                                            .child(if active { "Take Control" } else { "Close" })
+                                            .child(if active {
+                                                tr!("computer_use.take_control")
+                                            } else {
+                                                tr!("common.close")
+                                            })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.stop_propagation();
                                                 if active {
@@ -438,7 +444,7 @@ impl Waku {
                                                 div()
                                                     .text_size(px(10.0))
                                                     .text_color(theme.text_tertiary)
-                                                    .child("Preparing preview…"),
+                                                    .child(tr!("computer_use.preparing_preview")),
                                             ),
                                     )
                                 })
@@ -756,17 +762,17 @@ impl Waku {
                     .p(px(9.0));
                 if available_models.is_empty() {
                     let label = if searching {
-                        "No models found"
+                        tr!("models.none_found")
                     } else if selected_tab == ModelPickerTab::Favorites {
-                        "Star a model to keep it here"
+                        tr!("models.favorite_hint")
                     } else if matches!(
                         selected_tab,
                         ModelPickerTab::Provider(provider)
                             if pending_discoveries.contains(&provider)
                     ) {
-                        "Loading models…"
+                        tr!("models.loading")
                     } else {
-                        "No models reported by this provider"
+                        tr!("models.none_reported")
                     };
                     rows = rows.child(
                         div()
@@ -1106,7 +1112,7 @@ impl Waku {
             .unwrap_or("default")
             .to_owned();
         let tier_label = if selected_tier == "default" {
-            "Standard".to_owned()
+            tr!("models.standard")
         } else {
             model
                 .service_tiers
@@ -1139,7 +1145,7 @@ impl Waku {
             move |_| {
                 let mut items = Vec::new();
                 if !reasoning_efforts.is_empty() {
-                    items.push(MenuItem::Header("Reasoning".into()));
+                    items.push(MenuItem::Header(tr!("models.reasoning").into()));
                     for option in reasoning_efforts.clone() {
                         let weak = weak.clone();
                         let effort = option.id;
@@ -1159,10 +1165,10 @@ impl Waku {
                     if !reasoning_efforts.is_empty() {
                         items.push(MenuItem::Separator);
                     }
-                    items.push(MenuItem::Header("Service Tier".into()));
+                    items.push(MenuItem::Header(tr!("models.service_tier").into()));
                     let weak_standard = weak.clone();
                     items.push(
-                        traits_choice(theme, "Standard".to_owned(), default_tier == "default")
+                        traits_choice(theme, tr!("models.standard"), default_tier == "default")
                             .selected(selected_tier == "default")
                             .on_click(move |_, cx| {
                                 let _ = weak_standard.update(cx, |this, cx| {
@@ -1512,7 +1518,7 @@ impl Waku {
                     .gap(px(9.0))
                     .cursor_default()
                     .hover(|element| element.bg(theme.overlay))
-                    .tooltip(Tooltip::text("Edit in composer"))
+                    .tooltip(Tooltip::text(tr!("composer.edit_in_composer")))
                     .child(icon("icons/arrow-up.svg", 10.5, theme.text_tertiary))
                     .child(
                         div()
@@ -1567,9 +1573,9 @@ impl Waku {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.text_tertiary)
                                     .child(if busy {
-                                        "Queued follow-ups · sends when the current turn finishes"
+                                        tr!("composer.queued_followups_description")
                                     } else {
-                                        "Queued follow-ups"
+                                        tr!("composer.queued_followups")
                                     }),
                             ),
                     )
@@ -1688,7 +1694,7 @@ impl Waku {
                                             },
                                         ),
                                 )
-                                .tooltip(Tooltip::text("Preparing task…")),
+                                .tooltip(Tooltip::text(tr!("composer.preparing_task"))),
                             ComposerSubmitAction::Stop => div()
                                 .id("working-actions")
                                 .flex()
@@ -1727,7 +1733,7 @@ impl Waku {
                                             .hover(|element| element.bg(theme.overlay))
                                             .active(|element| element.opacity(0.8))
                                             .child(icon("icons/zap.svg", 13.0, theme.warning))
-                                            .tooltip(Tooltip::text("Steer the running turn (⌘↩)"))
+                                            .tooltip(Tooltip::text(tr!("composer.steer_turn")))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 let prompt =
                                                     this.composer.read(cx).content().to_owned();
@@ -1760,7 +1766,7 @@ impl Waku {
                                                 16.0,
                                                 theme.on_inverse,
                                             ))
-                                            .tooltip(Tooltip::text("Queue as follow-up (⏎)"))
+                                            .tooltip(Tooltip::text(tr!("composer.queue_followup")))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 let prompt =
                                                     this.composer.read(cx).content().to_owned();
@@ -1837,7 +1843,7 @@ impl Waku {
                 .or_else(|| Some(branch.clone()))
                 .or_else(|| snapshot.detached_head.clone()),
         }
-        .unwrap_or_else(|| "Detached HEAD".to_owned());
+        .unwrap_or_else(|| tr!("branches.detached_head"));
 
         let weak = cx.entity().downgrade();
         let search = self.branch_search.clone();
@@ -1855,10 +1861,13 @@ impl Waku {
                         this.branch_picker_highlight = None;
                         let project_name = this
                             .selected_project()
-                            .map(|project| project.name.clone())
-                            .unwrap_or_else(|| "project".to_owned());
+                            .map(Project::display_name)
+                            .unwrap_or_else(|| tr!("project.project_lower"));
                         reset_search.update(cx, |input, cx| {
-                            input.set_placeholder(format!("Search {project_name} branches"), cx);
+                            input.set_placeholder(
+                                tr!("branches.search_project", project = project_name),
+                                cx,
+                            );
                             input.clear(cx);
                         });
                         reset_create.update(cx, |input, cx| input.clear(cx));
@@ -1882,7 +1891,7 @@ impl Waku {
         let trigger = MenuChip::new("workspace-branch")
             .icon("icons/git-branch.svg", theme.text_tertiary)
             .label(if self.branch_operation_pending {
-                "Switching…".to_owned()
+                tr!("branches.switching")
             } else {
                 selected_branch.clone()
             })
@@ -1952,7 +1961,7 @@ impl Waku {
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
                                 .child(icon("icons/plus.svg", 14.0, theme.text_secondary))
-                                .child("Create and checkout new branch"),
+                                .child(tr!("branches.create_and_checkout")),
                         )
                         .child(
                             div()
@@ -1972,7 +1981,7 @@ impl Waku {
                                 .mt(px(9.0))
                                 .text_size(px(10.5))
                                 .text_color(theme.text_tertiary)
-                                .child("Press Return to create · Esc to cancel"),
+                                .child(tr!("branches.create_hint")),
                         )
                         .into_any_element()
                 } else {
@@ -1986,7 +1995,7 @@ impl Waku {
                             .justify_center()
                             .text_size(px(11.5))
                             .text_color(theme.text_ghost)
-                            .child("No branches found")
+                            .child(tr!("branches.none_found"))
                             .into_any_element()
                     } else {
                         let list_branches = visible_branches.clone();
@@ -2116,7 +2125,7 @@ impl Waku {
                                     .text_size(px(11.5))
                                     .line_height(px(15.0))
                                     .text_color(theme.text)
-                                    .child("Create and checkout new branch…"),
+                                    .child(tr!("branches.create_and_checkout_ellipsis")),
                             )
                             .on_click(move |_, window, cx| {
                                 let _ = create_weak.update(cx, |this, cx| {
@@ -2160,7 +2169,7 @@ impl Waku {
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_tertiary)
-                                .child("Branches"),
+                                .child(tr!("branches.title")),
                         )
                         .child(rows)
                         .when_some(create_row, |element, create_row| {
@@ -2218,12 +2227,12 @@ impl Waku {
             .selected_project()
             .map(|project| {
                 if project.is_projectless() {
-                    "choose a project".to_owned()
+                    tr!("project.choose_project")
                 } else {
-                    project.name.clone()
+                    project.display_name()
                 }
             })
-            .unwrap_or_else(|| "choose a project".to_owned());
+            .unwrap_or_else(|| tr!("project.choose_project"));
         let can_configure_workspace = self
             .selected_session()
             .is_some_and(|session| !session.has_started() && !session.is_busy());
@@ -2250,7 +2259,7 @@ impl Waku {
                         .filter(|project| !project.is_projectless())
                         .filter(|project| Some(project.id) != selected_project_id),
                 )
-                .map(|project| (project.id, project.name.clone()))
+                .map(|project| (project.id, project.display_name()))
                 .collect::<Vec<_>>();
             let weak = cx.entity().downgrade();
             dropdown_menu(
@@ -2279,14 +2288,14 @@ impl Waku {
                     }
                     let add_project = weak.clone();
                     items.push(
-                        MenuItem::new("New project…", move |_, cx| {
+                        MenuItem::new(tr!("project.new_project"), move |_, cx| {
                             let _ = add_project.update(cx, |this, cx| this.add_project(cx));
                         })
                         .icon("icons/folder-new.svg"),
                     );
                     let projectless = weak.clone();
                     items.push(
-                        MenuItem::new("Don't work in a project", move |_, cx| {
+                        MenuItem::new(tr!("project.no_project"), move |_, cx| {
                             let _ = projectless.update(cx, |this, cx| {
                                 if !this.selected_project().is_some_and(Project::is_projectless) {
                                     this.create_projectless_session(cx);
@@ -2308,8 +2317,10 @@ impl Waku {
             .map(|session| session.workspace.clone())
             .unwrap_or_default();
         let workspace_label = match &workspace {
-            SessionWorkspace::Local => SharedString::from("Local"),
-            SessionWorkspace::NewWorktree { .. } => SharedString::from("New worktree"),
+            SessionWorkspace::Local => SharedString::from(tr!("workspace.local")),
+            SessionWorkspace::NewWorktree { .. } => {
+                SharedString::from(tr!("workspace.new_worktree"))
+            }
             SessionWorkspace::Worktree { branch, .. } => SharedString::from(branch.clone()),
         };
         let workspace_icon = if workspace.is_local() {
@@ -2338,15 +2349,15 @@ impl Waku {
                     let local = weak.clone();
                     let worktree = weak.clone();
                     vec![
-                        MenuItem::Header("Work in".into()),
-                        MenuItem::new("Local", move |_, cx| {
+                        MenuItem::Header(tr!("workspace.work_in").into()),
+                        MenuItem::new(tr!("workspace.local"), move |_, cx| {
                             let _ = local.update(cx, |this, cx| {
                                 this.select_workspace(SessionWorkspace::Local, cx);
                             });
                         })
                         .icon("icons/laptop.svg")
                         .selected(local_selected),
-                        MenuItem::new("New worktree", move |_, cx| {
+                        MenuItem::new(tr!("workspace.new_worktree"), move |_, cx| {
                             let _ = worktree.update(cx, |this, cx| {
                                 this.select_workspace(
                                     SessionWorkspace::NewWorktree { base_branch: None },

@@ -8,8 +8,8 @@ const root = resolve(import.meta.dir, "..");
 const appName = "Waku Debug";
 const targetDir = resolve(process.env.CARGO_TARGET_DIR || 'target')
 const appPath = join(targetDir, "debug/Waku Debug.app");
-const watchedDirectories = ["src", "assets", "resources"];
-const watchedFiles = ["Cargo.toml", "Cargo.lock"];
+const watchedDirectories = ["src", "assets", "resources", "locales"];
+const watchedFiles = ["Cargo.toml", "Cargo.lock", "build.rs"];
 const rebuildDebounceMs = 1_000;
 
 $.cwd(root);

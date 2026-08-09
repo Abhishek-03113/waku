@@ -321,7 +321,7 @@ impl Waku {
                         }
                     }
                     Err(error) => {
-                        waku.show_toast(format!("Could not change branch: {error}"));
+                        waku.show_toast(tr!("errors.change_branch", error = error));
                     }
                 }
                 cx.notify();

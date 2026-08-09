@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate};
 use gpui::{PathBuilder, relative};
 
 use super::*;
@@ -251,12 +251,12 @@ impl Waku {
                 .mt(px(18.0))
                 .text_size(px(9.5))
                 .text_color(theme.text_ghost)
-                .child(SharedString::from(format!(
-                    "Scanned {} transcripts ({} outside the window) · {} usage records · {:.1}s",
-                    format_count(history.scanned_files as u64),
-                    format_count(history.skipped_files as u64),
-                    format_count(history.records),
-                    history.scan_duration.as_secs_f64(),
+                .child(SharedString::from(tr!(
+                    "usage.scan_summary",
+                    scanned = format_count(history.scanned_files as u64),
+                    skipped = format_count(history.skipped_files as u64),
+                    records = format_count(history.records),
+                    seconds = format!("{:.1}", history.scan_duration.as_secs_f64())
                 ))),
         )
         .into_any_element()
@@ -280,9 +280,9 @@ impl Waku {
             .flex()
             .overflow_hidden();
         for (view, label) in [
-            (UsageViewMode::Daily, "Daily"),
-            (UsageViewMode::Monthly, "Monthly"),
-            (UsageViewMode::Projects, "Projects"),
+            (UsageViewMode::Daily, tr!("usage.daily")),
+            (UsageViewMode::Monthly, tr!("usage.monthly")),
+            (UsageViewMode::Projects, tr!("usage.projects")),
         ] {
             let selected = self.usage_view == view;
             view_options = view_options.child(
@@ -386,9 +386,9 @@ impl Waku {
             .cursor_default()
             .hover(|element| element.bg(theme.overlay))
             .tooltip(Tooltip::text(if pending {
-                "Scanning provider transcripts…"
+                tr!("usage.scanning")
             } else {
-                "Rescan provider transcripts"
+                tr!("usage.rescan")
             }))
             .child(refresh_glyph)
             .on_click(cx.listener(|this, _, _, cx| {
@@ -396,16 +396,16 @@ impl Waku {
             }));
 
         let range_label = if monthly {
-            format!(
-                "{} to {}",
-                format_month_short(range.0),
-                format_month_short(range.1)
+            tr!(
+                "usage.range",
+                start = format_month_short(range.0),
+                end = format_month_short(range.1)
             )
         } else {
-            format!(
-                "{} to {}",
-                format_day_short(range.0),
-                format_day_short(range.1)
+            tr!(
+                "usage.range",
+                start = format_day_short(range.0),
+                end = format_day_short(range.1)
             )
         };
 
@@ -443,10 +443,10 @@ impl Waku {
             UsageMetric::Tokens => format_tokens_compact(history.total_tokens as f64),
         };
         let caption = match metric {
-            UsageMetric::Cost => "* if billed at full API rate".to_owned(),
-            UsageMetric::Tokens => format!(
-                "Input, cache reads and output across {} sessions.",
-                format_count(history.sessions)
+            UsageMetric::Cost => tr!("usage.full_api_rate_note"),
+            UsageMetric::Tokens => tr!(
+                "usage.sessions_summary",
+                count = format_count(history.sessions)
             ),
         };
 
@@ -466,8 +466,8 @@ impl Waku {
                             .text_size(px(10.0))
                             .text_color(theme.text_tertiary)
                             .child(match metric {
-                                UsageMetric::Cost => "RAW TOKEN COST",
-                                UsageMetric::Tokens => "PROCESSED TOKENS",
+                                UsageMetric::Cost => tr!("usage.raw_token_cost"),
+                                UsageMetric::Tokens => tr!("usage.processed_tokens_upper"),
                             }),
                     )
                     .child(
@@ -503,15 +503,15 @@ impl Waku {
                 UsageMetric::Tokens => format_tokens_compact(provider.total_tokens as f64),
             };
             let detail = match metric {
-                UsageMetric::Cost => format!(
-                    "{} of cost · {} tokens",
-                    format_percent(share),
-                    format_tokens_compact(provider.total_tokens as f64)
+                UsageMetric::Cost => tr!(
+                    "usage.cost_share",
+                    share = format_percent(share),
+                    tokens = format_tokens_compact(provider.total_tokens as f64)
                 ),
-                UsageMetric::Tokens => format!(
-                    "{} of tokens · {}",
-                    format_percent(share),
-                    format_usd(provider.cost_usd)
+                UsageMetric::Tokens => tr!(
+                    "usage.token_share",
+                    share = format_percent(share),
+                    cost = format_usd(provider.cost_usd)
                 ),
             };
             column = column.child(
@@ -568,7 +568,7 @@ impl Waku {
                 div()
                     .text_size(px(11.5))
                     .text_color(theme.text_tertiary)
-                    .child("No activity in this window."),
+                    .child(tr!("usage.no_activity_window")),
             );
         }
         column
@@ -589,7 +589,10 @@ impl Waku {
             .border_color(theme.border_strong)
             .flex()
             .overflow_hidden();
-        for (option, label) in [(UsageMetric::Cost, "COST"), (UsageMetric::Tokens, "TOKENS")] {
+        for (option, label) in [
+            (UsageMetric::Cost, tr!("usage.cost_upper")),
+            (UsageMetric::Tokens, tr!("usage.tokens_upper")),
+        ] {
             let selected = metric == option;
             toggle = toggle.child(
                 div()
@@ -660,8 +663,8 @@ impl Waku {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(match metric {
-                                UsageMetric::Cost => "Daily cost",
-                                UsageMetric::Tokens => "Daily processed tokens",
+                                UsageMetric::Cost => tr!("usage.daily_cost"),
+                                UsageMetric::Tokens => tr!("usage.daily_processed_tokens"),
                             }),
                     )
                     .child(toggle)
@@ -987,8 +990,8 @@ impl Waku {
             .flex()
             .overflow_hidden();
         for (option, label) in [
-            (UsageBreakdown::Model, "MODEL"),
-            (UsageBreakdown::Day, "DAY"),
+            (UsageBreakdown::Model, tr!("usage.model_upper")),
+            (UsageBreakdown::Day, tr!("usage.day_upper")),
         ] {
             let selected = breakdown == option;
             toggle = toggle.child(
@@ -1038,7 +1041,7 @@ impl Waku {
                             .text_size(px(12.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("Breakdown"),
+                            .child(tr!("usage.breakdown")),
                     )
                     .child(toggle),
             )
@@ -1097,17 +1100,17 @@ impl Waku {
         self.sync_usage_project_rows(&indices);
 
         let caption = if filter.is_empty() {
-            format!(
-                "{} · {} tokens · {}",
-                count_noun(history.projects.len() as u64, "project"),
-                format_tokens_compact(history.total_tokens as f64),
-                count_noun(history.sessions, "session")
+            tr!(
+                "usage.projects_caption",
+                projects = count_noun(history.projects.len() as u64, "project"),
+                tokens = format_tokens_compact(history.total_tokens as f64),
+                sessions = count_noun(history.sessions, "session")
             )
         } else {
-            format!(
-                "{} of {} shown",
-                indices.len(),
-                count_noun(history.projects.len() as u64, "project")
+            tr!(
+                "usage.projects_shown",
+                shown = indices.len(),
+                projects = count_noun(history.projects.len() as u64, "project")
             )
         };
 
@@ -1115,12 +1118,12 @@ impl Waku {
         let body: AnyElement = if history.projects.is_empty() {
             div()
                 .px(px(20.0))
-                .child(usage_list_empty_row(theme, "No activity in this window."))
+                .child(usage_list_empty_row(theme, tr!("usage.no_activity_window")))
                 .into_any_element()
         } else if indices.is_empty() {
             div()
                 .px(px(20.0))
-                .child(usage_list_empty_row(theme, "No projects match the filter."))
+                .child(usage_list_empty_row(theme, tr!("usage.no_projects_match")))
                 .into_any_element()
         } else {
             // The relative wrapper is full-bleed so the overlay scrollbar
@@ -1183,7 +1186,7 @@ impl Waku {
                                     .text_size(px(13.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child("By project"),
+                                    .child(tr!("usage.by_project")),
                             )
                             .child(
                                 div()
@@ -1278,15 +1281,18 @@ impl Waku {
         };
         let mut caption_parts = Vec::new();
         if by_cost && project.cost_share > 0.0 {
-            caption_parts.push(format!("{} of cost", format_percent(project.cost_share)));
+            caption_parts.push(tr!(
+                "usage.percent_of_cost",
+                share = format_percent(project.cost_share)
+            ));
         }
-        caption_parts.push(format!(
-            "{} tokens",
-            format_tokens_compact(project.total_tokens as f64)
+        caption_parts.push(tr!(
+            "usage.token_count",
+            count = format_tokens_compact(project.total_tokens as f64)
         ));
         caption_parts.push(count_noun(project.sessions, "session"));
         if let Some(last_day) = project.last_day {
-            caption_parts.push(format!("last active {}", format_day_short(last_day)));
+            caption_parts.push(tr!("usage.last_active", date = format_day_short(last_day)));
         }
         let models_control = self.usage_models_control(
             format!(
@@ -1409,9 +1415,9 @@ impl Waku {
             .focus_visible(|style| style.border_1().border_color(theme.accent))
             .when(handle.is_open(), |element| element.bg(theme.overlay_strong))
             .hover(|element| element.bg(theme.overlay))
-            .tooltip(Tooltip::text(SharedString::from(format!(
-                "Show {} with spend details",
-                count_noun(model_count, "model")
+            .tooltip(Tooltip::text(SharedString::from(tr!(
+                "usage.show_models",
+                models = count_noun(model_count, "model")
             ))))
             .child(div().min_w_0().truncate().child(SharedString::from(label)))
             .child(icon("icons/chevron-down.svg", 8.0, theme.text_ghost));
@@ -1435,7 +1441,7 @@ impl Waku {
     /// alongside its complete path, shortening only the home prefix.
     fn usage_project_identity(&self, project: &ProjectSlice) -> (String, Option<String>) {
         if project.path.is_empty() {
-            return ("Other sessions".to_owned(), None);
+            return (tr!("usage.other_sessions"), None);
         }
         let path = Path::new(&project.path);
         let name = self
@@ -1478,9 +1484,7 @@ fn usage_notices(history: &UsageHistory, theme: &Theme) -> Div {
         notice = notice.child(SharedString::from(error.clone()));
     }
     if history.pricing == PricingStatus::Unavailable {
-        notice = notice.child(
-            "Model rates are unavailable, so costs read as unpriced until the rate table loads.",
-        );
+        notice = notice.child(tr!("usage.rates_unavailable"));
     }
     notice
 }
@@ -1572,7 +1576,7 @@ fn usage_chart_readout(
                 div()
                     .flex_1()
                     .text_color(theme.text_secondary)
-                    .child("Total"),
+                    .child(tr!("usage.total")),
             )
             .child(
                 div()
@@ -1601,43 +1605,52 @@ fn usage_metric_strip(history: &UsageHistory, theme: &Theme) -> Div {
         history.totals.cached_input as f64 / observed_input as f64
     };
     let savings_detail = if history.cost_usd > 0.0 {
-        format!(
-            "{:.1}x the raw token cost",
-            history.quality.cache_savings_usd / history.cost_usd
+        tr!(
+            "usage.raw_cost_multiple",
+            multiple = format!(
+                "{:.1}",
+                history.quality.cache_savings_usd / history.cost_usd
+            )
         )
     } else {
-        "vs full input rates".to_owned()
+        tr!("usage.vs_full_input_rates")
     };
 
-    let tiles: [(&str, String, String); 5] = [
+    let tiles: [(String, String, String); 5] = [
         (
-            "Processed tokens",
+            tr!("usage.processed_tokens"),
             format_tokens_compact(history.total_tokens as f64),
-            format!("{} per active day", format_tokens_compact(daily_average)),
+            tr!(
+                "usage.per_active_day",
+                count = format_tokens_compact(daily_average)
+            ),
         ),
         (
-            "Cached input",
+            tr!("usage.cached_input"),
             format_tokens_compact(history.totals.cached_input as f64),
-            format!("{} of observed input", format_percent(cached_share)),
+            tr!(
+                "usage.observed_input_share",
+                share = format_percent(cached_share)
+            ),
         ),
         (
-            "Uncached input",
+            tr!("usage.uncached_input"),
             format_tokens_compact(history.totals.uncached_input as f64),
-            format!(
-                "{} cache writes",
-                format_tokens_compact(history.totals.cache_creation as f64)
+            tr!(
+                "usage.cache_writes",
+                count = format_tokens_compact(history.totals.cache_creation as f64)
             ),
         ),
         (
-            "Output",
+            tr!("usage.output"),
             format_tokens_compact(history.totals.output as f64),
-            format!(
-                "includes {} reasoning",
-                format_tokens_compact(history.totals.reasoning as f64)
+            tr!(
+                "usage.includes_reasoning",
+                count = format_tokens_compact(history.totals.reasoning as f64)
             ),
         ),
         (
-            "Cache savings",
+            tr!("usage.cache_savings"),
             format_usd(history.quality.cache_savings_usd),
             savings_detail,
         ),
@@ -1695,7 +1708,7 @@ fn usage_table_empty_row(theme: &Theme) -> Div {
         .justify_center()
         .text_size(px(11.5))
         .text_color(theme.text_tertiary)
-        .child("No activity in this window.")
+        .child(tr!("usage.no_activity_window"))
 }
 
 /// Right-aligned numeric cell of fixed width.
@@ -1721,10 +1734,10 @@ fn usage_model_table(history: &UsageHistory, theme: &Theme) -> Div {
             .gap(px(12.0))
             .text_size(px(10.5))
             .text_color(theme.text_tertiary)
-            .child(div().flex_1().min_w_0().child("Model"))
-            .child(usage_cell(84.0, "Cost".to_owned(), theme.text_tertiary))
-            .child(usage_cell(64.0, "Share".to_owned(), theme.text_tertiary))
-            .child(usage_cell(84.0, "Tokens".to_owned(), theme.text_tertiary)),
+            .child(div().flex_1().min_w_0().child(tr!("usage.model")))
+            .child(usage_cell(84.0, tr!("usage.cost"), theme.text_tertiary))
+            .child(usage_cell(64.0, tr!("usage.share"), theme.text_tertiary))
+            .child(usage_cell(84.0, tr!("usage.tokens"), theme.text_tertiary)),
     );
     if history.models.is_empty() {
         return table.child(usage_table_empty_row(theme));
@@ -1782,7 +1795,7 @@ fn usage_day_table(history: &UsageHistory, theme: &Theme) -> Div {
         .gap(px(12.0))
         .text_size(px(10.5))
         .text_color(theme.text_tertiary)
-        .child(div().flex_1().min_w_0().child("Day"));
+        .child(div().flex_1().min_w_0().child(tr!("usage.day")));
     for provider in UsageProvider::ALL {
         header = header.child(usage_cell(
             84.0,
@@ -1791,8 +1804,8 @@ fn usage_day_table(history: &UsageHistory, theme: &Theme) -> Div {
         ));
     }
     header = header
-        .child(usage_cell(84.0, "Total".to_owned(), theme.text_tertiary))
-        .child(usage_cell(84.0, "Tokens".to_owned(), theme.text_tertiary));
+        .child(usage_cell(84.0, tr!("usage.total"), theme.text_tertiary))
+        .child(usage_cell(84.0, tr!("usage.tokens"), theme.text_tertiary));
 
     let mut table = div().flex().flex_col().text_size(px(11.5)).child(header);
     if history.daily.is_empty() {
@@ -1835,7 +1848,7 @@ fn usage_day_table(history: &UsageHistory, theme: &Theme) -> Div {
 /// How much of the window's cost is provider-reported, table-priced, or
 /// unpriced — the reader's confidence in the headline number.
 fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
-    let row = |label: &'static str, value: String| {
+    let row = |label: String, value: String| {
         div()
             .py(px(8.0))
             .border_b_1()
@@ -1862,26 +1875,26 @@ fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
                 .text_size(px(12.5))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)
-                .child("Cost quality"),
+                .child(tr!("usage.cost_quality")),
         )
         .child(
             div()
                 .flex()
                 .flex_col()
                 .child(row(
-                    "Provider reported",
+                    tr!("usage.provider_reported"),
                     format_percent(history.quality.provider_reported_share),
                 ))
                 .child(row(
-                    "Model priced",
+                    tr!("usage.model_priced"),
                     format_percent(history.quality.model_priced_share),
                 ))
                 .child(row(
-                    "Unpriced",
+                    tr!("usage.unpriced"),
                     format_percent(history.quality.unpriced_share),
                 ))
                 .child(row(
-                    "Cache savings",
+                    tr!("usage.cache_savings"),
                     format_usd(history.quality.cache_savings_usd),
                 )),
         )
@@ -2094,7 +2107,7 @@ fn usage_value_label(cost_usd: f64, total_tokens: u64, by_cost: bool) -> String 
 /// The card's lead-in row: what the list covers on the left, the period
 /// total on the right. Carries the card's horizontal padding itself so its
 /// hairline spans the full card width.
-fn usage_list_header(theme: &Theme, title: &'static str, caption: String, total: String) -> Div {
+fn usage_list_header(theme: &Theme, title: String, caption: String, total: String) -> Div {
     div()
         .px(px(20.0))
         .py(px(13.0))
@@ -2133,7 +2146,7 @@ fn usage_list_header(theme: &Theme, title: &'static str, caption: String, total:
         )
 }
 
-fn usage_list_empty_row(theme: &Theme, message: &'static str) -> Div {
+fn usage_list_empty_row(theme: &Theme, message: String) -> Div {
     div()
         .py(px(24.0))
         .flex()
@@ -2251,7 +2264,7 @@ fn usage_top_models_label(top_models: &[(String, f64)]) -> Option<String> {
 fn usage_models_menu_items(top_models: Rc<Vec<(String, f64)>>, total_cost: f64) -> Vec<MenuItem> {
     let count = top_models.len() as u64;
     let header = if total_cost > 0.0 {
-        format!("{} · by spend", count_noun(count, "model"))
+        tr!("usage.models_by_spend", models = count_noun(count, "model"))
     } else {
         count_noun(count, "model")
     };
@@ -2453,7 +2466,7 @@ fn usage_month_list(
     } else {
         rows = rows.child(usage_list_empty_row(
             theme,
-            "No activity in the last 12 months.",
+            tr!("usage.no_activity_12_months"),
         ));
     }
 
@@ -2469,11 +2482,11 @@ fn usage_month_list(
         .child(
             usage_list_header(
                 theme,
-                "Last 12 months",
-                format!(
-                    "{} tokens · {}",
-                    format_tokens_compact(history.total_tokens as f64),
-                    count_noun(history.sessions, "session")
+                tr!("usage.last_12_months"),
+                tr!(
+                    "usage.tokens_and_sessions",
+                    tokens = format_tokens_compact(history.total_tokens as f64),
+                    sessions = count_noun(history.sessions, "session")
                 ),
                 usage_headline_value(history, by_cost),
             )
@@ -2540,7 +2553,7 @@ fn usage_month_row(
                         div()
                             .text_size(px(9.5))
                             .text_color(theme.text_ghost)
-                            .child("so far"),
+                            .child(tr!("usage.so_far")),
                     )
                 })
                 .child(div().flex_1())
@@ -2570,11 +2583,11 @@ fn usage_month_row(
                         .truncate()
                         .text_size(px(10.5))
                         .text_color(theme.text_tertiary)
-                        .child(SharedString::from(format!(
-                            "{} tokens · {} · {}",
-                            format_tokens_compact(month.total_tokens as f64),
-                            count_noun(month.sessions, "session"),
-                            count_noun(u64::from(month.active_days), "active day"),
+                        .child(SharedString::from(tr!(
+                            "usage.month_caption",
+                            tokens = format_tokens_compact(month.total_tokens as f64),
+                            sessions = count_noun(month.sessions, "session"),
+                            days = count_noun(u64::from(month.active_days), "active day")
                         ))),
                 )
                 .child(usage_month_strip(
@@ -2630,7 +2643,7 @@ fn usage_empty_month_row(theme: &Theme, first_day: NaiveDate, last: bool) -> Div
             div()
                 .text_size(px(10.0))
                 .text_color(theme.text_ghost)
-                .child("No activity"),
+                .child(tr!("usage.no_activity")),
         )
 }
 
@@ -2822,39 +2835,57 @@ fn usage_project_path(path: &Path, home: Option<&Path>) -> String {
 
 /// `2026-08-07` → `Aug 7`.
 fn format_day_short(day: NaiveDate) -> String {
-    day.format("%b %-d").to_string()
+    if crate::i18n::is_simplified_chinese() {
+        format!("{}月{}日", day.month(), day.day())
+    } else {
+        day.format("%b %-d").to_string()
+    }
 }
 
 /// `2026-08-01` → `August 2026`.
 fn format_month(first_day: NaiveDate) -> String {
-    first_day.format("%B %Y").to_string()
+    if crate::i18n::is_simplified_chinese() {
+        format!("{}年{}月", first_day.year(), first_day.month())
+    } else {
+        first_day.format("%B %Y").to_string()
+    }
 }
 
 /// `2025-09-01` → `Sep 2025`.
 fn format_month_short(day: NaiveDate) -> String {
-    day.format("%b %Y").to_string()
+    if crate::i18n::is_simplified_chinese() {
+        format!("{}年{}月", day.year(), day.month())
+    } else {
+        day.format("%b %Y").to_string()
+    }
 }
 
 /// Menu label for a selectable window.
-fn window_choice_label(window: UsageWindow) -> &'static str {
+fn window_choice_label(window: UsageWindow) -> String {
     match window {
-        UsageWindow::TrailingDays(7) => "Last 7 days",
-        UsageWindow::TrailingDays(30) => "Last 30 days",
-        UsageWindow::TrailingDays(90) => "Last 90 days",
-        UsageWindow::ThisMonth => "This month",
-        UsageWindow::LastMonth => "Last month",
+        UsageWindow::TrailingDays(7) => tr!("usage.last_7_days"),
+        UsageWindow::TrailingDays(30) => tr!("usage.last_30_days"),
+        UsageWindow::TrailingDays(90) => tr!("usage.last_90_days"),
+        UsageWindow::ThisMonth => tr!("usage.this_month"),
+        UsageWindow::LastMonth => tr!("usage.last_month"),
         // Not offered by the selector; only the statement view uses these.
-        UsageWindow::TrailingDays(_) | UsageWindow::Months(_) => "Custom",
+        UsageWindow::TrailingDays(_) | UsageWindow::Months(_) => tr!("usage.custom"),
     }
 }
 
 /// `1 session`, `214 sessions` — grouped count with a pluralized noun.
 fn count_noun(count: u64, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{} {noun}s", format_count(count))
-    }
+    let (singular, plural) = match noun {
+        "project" => ("usage.project_one", "usage.project_many"),
+        "session" => ("usage.session_one", "usage.session_many"),
+        "model" => ("usage.model_one", "usage.model_many"),
+        "active day" => ("usage.active_day_one", "usage.active_day_many"),
+        _ => return format!("{} {noun}", format_count(count)),
+    };
+    tr!(
+        if count == 1 { singular } else { plural },
+        count = format_count(count)
+    )
 }
 
 #[cfg(test)]

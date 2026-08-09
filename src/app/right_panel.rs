@@ -366,7 +366,10 @@ fn file_highlighter_language(relative_path: &str) -> &'static str {
 fn read_right_panel_file(project_path: &Path, relative_path: &str) -> (String, bool) {
     match std::fs::read_to_string(project_path.join(relative_path)) {
         Ok(content) => (content, true),
-        Err(error) => (format!("Unable to edit this file: {error}"), false),
+        Err(error) => (
+            tr!("files.unable_to_edit", error = error.to_string()),
+            false,
+        ),
     }
 }
 
@@ -393,13 +396,13 @@ impl RightPanelSurface {
         }
     }
 
-    fn label(&self) -> &str {
+    fn label(&self) -> String {
         match self {
-            Self::Browser(_) => "Browser",
-            Self::Terminal(_) => "Terminal",
-            Self::Files => "Files",
-            Self::Diff => "Diff",
-            Self::File(path) => path.rsplit('/').next().unwrap_or(path),
+            Self::Browser(_) => tr!("right_panel.browser"),
+            Self::Terminal(_) => tr!("right_panel.terminal"),
+            Self::Files => tr!("right_panel.files"),
+            Self::Diff => tr!("right_panel.diff"),
+            Self::File(path) => path.rsplit('/').next().unwrap_or(path).to_owned(),
         }
     }
 
@@ -414,16 +417,14 @@ impl RightPanelSurface {
     }
 }
 
-fn right_panel_tab_label<'a>(
-    surface: &'a RightPanelSurface,
-    files_selected_path: Option<&'a str>,
-) -> &'a str {
+fn right_panel_tab_label(surface: &RightPanelSurface, files_selected_path: Option<&str>) -> String {
     match surface {
         RightPanelSurface::Files => files_selected_path
             .and_then(|path| Path::new(path).file_name())
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
-            .unwrap_or("Files"),
+            .map(str::to_owned)
+            .unwrap_or_else(|| tr!("right_panel.files")),
         _ => surface.label(),
     }
 }
@@ -1211,7 +1212,7 @@ impl Waku {
             .hover(|element| element.bg(theme.overlay))
             .active(|element| element.bg(theme.overlay_strong))
             .child(icon("icons/panel-right.svg", 14.0, theme.text_tertiary))
-            .tooltip(|window, cx| Tooltip::new("Toggle right panel").build(window, cx))
+            .tooltip(|window, cx| Tooltip::new(tr!("right_panel.toggle")).build(window, cx))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -1255,8 +1256,8 @@ impl Waku {
                 .map(IntoElement::into_any_element)
                 .unwrap_or_else(|| {
                     self.render_right_panel_empty_message(
-                        "Terminal unavailable",
-                        "Open the Terminal surface again to start a shell.",
+                        tr!("right_panel.terminal_unavailable"),
+                        tr!("right_panel.terminal_unavailable_description"),
                         cx,
                     )
                     .into_any_element()
@@ -1438,10 +1439,9 @@ impl Waku {
                     .right_panel_browsers
                     .get(browser_id)
                     .and_then(|browser| browser.read(cx).tab_label())
-                    .unwrap_or_else(|| surface.label().to_owned()),
+                    .unwrap_or_else(|| surface.label()),
                 _ => {
                     right_panel_tab_label(&surface, self.right_panel_files_selected_path.as_deref())
-                        .to_owned()
                 }
             });
             let icon_path =
@@ -1491,7 +1491,7 @@ impl Waku {
                                 .rounded_full()
                                 .bg(theme.warning)
                                 .tooltip(|window, cx| {
-                                    Tooltip::new("Unsaved changes — ⌘S to save").build(window, cx)
+                                    Tooltip::new(tr!("files.unsaved_changes")).build(window, cx)
                                 }),
                         )
                     })
@@ -1632,14 +1632,14 @@ impl Waku {
                             .text_size(px(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("Open a surface"),
+                            .child(tr!("right_panel.open_surface")),
                     )
                     .child(
                         div()
                             .mt(px(5.0))
                             .text_size(px(11.0))
                             .text_color(theme.text_tertiary)
-                            .child("Choose what to show in the right panel."),
+                            .child(tr!("right_panel.choose_surface")),
                     )
                     .child(
                         div()
@@ -1649,12 +1649,12 @@ impl Waku {
                             .gap(px(8.0))
                             .child(self.render_right_panel_card(
                                 RightPanelSurface::new_browser(),
-                                "Open a local app or URL.",
+                                tr!("right_panel.browser_description"),
                                 cx,
                             ))
                             .child(self.render_right_panel_card(
                                 RightPanelSurface::new_terminal(),
-                                "Start a shell in this workspace.",
+                                tr!("right_panel.terminal_description"),
                                 cx,
                             )),
                     )
@@ -1666,12 +1666,12 @@ impl Waku {
                             .gap(px(8.0))
                             .child(self.render_right_panel_card(
                                 RightPanelSurface::Files,
-                                "Browse and read workspace files.",
+                                tr!("right_panel.files_description"),
                                 cx,
                             ))
                             .child(self.render_right_panel_card(
                                 RightPanelSurface::Diff,
-                                "Review current workspace changes.",
+                                tr!("right_panel.diff_description"),
                                 cx,
                             )),
                     ),
@@ -1681,12 +1681,12 @@ impl Waku {
     fn render_right_panel_card(
         &self,
         surface: RightPanelSurface,
-        description: &'static str,
+        description: String,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let theme = Theme::current(cx);
         let icon_path = surface.icon_path();
-        let label = surface.label().to_owned();
+        let label = surface.label();
         div()
             .id(SharedString::from(format!(
                 "right-panel-card-{}",
@@ -1752,12 +1752,12 @@ impl Waku {
         let theme = Theme::current(cx);
         let Some(project) = self.selected_project() else {
             return self.render_right_panel_empty_message(
-                "No project open",
-                "Open a project to browse its files.",
+                tr!("files.no_project_open"),
+                tr!("files.no_project_open_description"),
                 cx,
             );
         };
-        let project_name = project.name.clone();
+        let project_name = project.display_name();
         // Read only. The walk is filesystem I/O, so it happens in
         // `refresh_right_panel_working_tree`, never in a frame.
         let entries = self.right_panel_working_tree.clone();
@@ -2044,7 +2044,7 @@ impl Waku {
             // looking like an empty file.
             if let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) {
                 editor.reading = false;
-                editor.disk_content = "No project is open.".into();
+                editor.disk_content = tr!("files.no_project_is_open");
                 editor.writable = false;
                 let state = editor.state.clone();
                 let content = editor.disk_content.clone();
@@ -2303,9 +2303,9 @@ impl Waku {
         };
         if !editor.writable {
             self.show_toast(if editor.reading {
-                format!("Could not save {relative_path}: still opening")
+                tr!("files.could_not_save_opening", path = relative_path)
             } else {
-                format!("Could not save {relative_path}: file is not editable")
+                tr!("files.could_not_save_read_only", path = relative_path)
             });
             cx.notify();
             return;
@@ -2325,7 +2325,11 @@ impl Waku {
                 cx.notify();
             }
             Err(error) => {
-                self.show_toast(format!("Could not save {relative_path}: {error}"));
+                self.show_toast(tr!(
+                    "files.could_not_save",
+                    path = relative_path,
+                    error = error.to_string()
+                ));
                 cx.notify();
             }
         }
@@ -2335,8 +2339,8 @@ impl Waku {
         let theme = Theme::current(cx);
         if self.right_panel_diff_files.is_empty() {
             return self.render_right_panel_empty_message(
-                "No changes",
-                "The current workspace has no file changes to review.",
+                tr!("diff.no_changes"),
+                tr!("diff.no_changes_description"),
                 cx,
             );
         }
@@ -2455,8 +2459,8 @@ impl Waku {
 
     fn render_right_panel_empty_message(
         &self,
-        title: &'static str,
-        description: &'static str,
+        title: String,
+        description: String,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = Theme::current(cx);

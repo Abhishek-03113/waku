@@ -1,5 +1,24 @@
 #![recursion_limit = "256"]
 
+rust_i18n::i18n!("locales", fallback = "en");
+
+macro_rules! tr {
+    ($key:expr) => {
+        crate::i18n::translate($key)
+    };
+    ($key:expr, $($args:tt)*) => {
+        rust_i18n::t!($key, $($args)*).into_owned()
+    };
+}
+
+/// Borrow static translations on hot render paths; interpolation uses `tr!`
+/// because formatted messages necessarily allocate.
+macro_rules! tr_cow {
+    ($key:literal) => {
+        rust_i18n::t!($key)
+    };
+}
+
 mod amp_session;
 mod app;
 mod assets;
@@ -14,6 +33,7 @@ mod cursor_session;
 mod driver;
 mod git_branch;
 mod grok_session;
+mod i18n;
 mod identity;
 mod input;
 mod md;
@@ -180,66 +200,6 @@ fn main() {
                 KeyBinding::new("escape", BrowserAddressCancel, Some("BrowserAddress")),
             ]);
 
-            cx.set_menus(vec![
-                Menu {
-                    name: APP_NAME.into(),
-                    disabled: false,
-                    items: {
-                        let mut items = vec![MenuItem::action(format!("About {APP_NAME}"), About)];
-                        if updater_available {
-                            items.push(MenuItem::action("Check for Updates…", CheckForUpdates));
-                        }
-                        items.push(MenuItem::separator());
-                        items.extend([
-                            MenuItem::action("Settings…", OpenSettings),
-                            MenuItem::separator(),
-                            MenuItem::action(format!("Quit {APP_NAME}"), Quit),
-                        ]);
-                        items
-                    },
-                },
-                Menu {
-                    name: "File".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("New Session", NewSession),
-                        MenuItem::action("New Project…", NewProject),
-                    ],
-                },
-                Menu {
-                    name: "Edit".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Undo", input::Undo),
-                        MenuItem::action("Redo", input::Redo),
-                        MenuItem::separator(),
-                        MenuItem::action("Cut", input::Cut),
-                        MenuItem::action("Copy", input::Copy),
-                        MenuItem::action("Paste", input::Paste),
-                        MenuItem::action("Select All", input::SelectAll),
-                    ],
-                },
-                Menu {
-                    name: "View".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Toggle Sidebar", ToggleSidebar),
-                        MenuItem::action("Toggle Right Panel", ToggleRightPanel),
-                        MenuItem::action("Focus Composer", FocusComposer),
-                        MenuItem::action("Toggle Model Picker", ToggleModelPicker),
-                        MenuItem::action("Toggle Usage Panel", ToggleUsagePanel),
-                    ],
-                },
-                Menu {
-                    name: "Window".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Toggle FPS Counter", ToggleFpsCounter),
-                        MenuItem::action("Close Window", CloseWindow),
-                    ],
-                },
-            ]);
-
             cx.on_action(|_: &Quit, cx| cx.quit());
 
             let bounds = Bounds::centered(None, size(px(1380.0), px(880.0)), cx);
@@ -279,5 +239,75 @@ fn main() {
                     cx.activate(true);
                 })
                 .ok();
+
+            set_app_menus(cx, updater_available);
         });
+}
+
+/// Rebuild the native menu bar in the active locale. GPUI menus own their
+/// labels, so changing language must replace the model as well as redraw the
+/// window.
+pub(crate) fn set_app_menus(cx: &mut App, updater_available: bool) {
+    cx.set_menus(vec![
+        Menu {
+            name: APP_NAME.into(),
+            disabled: false,
+            items: {
+                let mut items = vec![MenuItem::action(tr!("menu.about", app = APP_NAME), About)];
+                if updater_available {
+                    items.push(MenuItem::action(
+                        tr!("menu.check_for_updates"),
+                        CheckForUpdates,
+                    ));
+                }
+                items.push(MenuItem::separator());
+                items.extend([
+                    MenuItem::action(tr!("menu.settings"), OpenSettings),
+                    MenuItem::separator(),
+                    MenuItem::action(tr!("menu.quit", app = APP_NAME), Quit),
+                ]);
+                items
+            },
+        },
+        Menu {
+            name: tr!("menu.file").into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action(tr!("menu.new_session"), NewSession),
+                MenuItem::action(tr!("menu.new_project"), NewProject),
+            ],
+        },
+        Menu {
+            name: tr!("menu.edit").into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action(tr!("menu.undo"), input::Undo),
+                MenuItem::action(tr!("menu.redo"), input::Redo),
+                MenuItem::separator(),
+                MenuItem::action(tr!("menu.cut"), input::Cut),
+                MenuItem::action(tr!("menu.copy"), input::Copy),
+                MenuItem::action(tr!("menu.paste"), input::Paste),
+                MenuItem::action(tr!("menu.select_all"), input::SelectAll),
+            ],
+        },
+        Menu {
+            name: tr!("menu.view").into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action(tr!("menu.toggle_sidebar"), ToggleSidebar),
+                MenuItem::action(tr!("menu.toggle_right_panel"), ToggleRightPanel),
+                MenuItem::action(tr!("menu.focus_composer"), FocusComposer),
+                MenuItem::action(tr!("menu.toggle_model_picker"), ToggleModelPicker),
+                MenuItem::action(tr!("menu.toggle_usage_panel"), ToggleUsagePanel),
+            ],
+        },
+        Menu {
+            name: tr!("menu.window").into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action(tr!("menu.toggle_fps_counter"), ToggleFpsCounter),
+                MenuItem::action(tr!("menu.close_window"), CloseWindow),
+            ],
+        },
+    ]);
 }

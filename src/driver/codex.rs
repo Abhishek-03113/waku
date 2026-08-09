@@ -245,9 +245,9 @@ impl CodexDriver {
                     )
                     .is_err()
                 {
-                    let _ = writer_events.send(DriverEvent::Error(
-                        "Failed to initialize Codex app-server".into(),
-                    ));
+                    let _ = writer_events.send(DriverEvent::Error(tr!(
+                        "errors.initialize_codex_app_server"
+                    )));
                     return;
                 }
 
@@ -267,9 +267,9 @@ impl CodexDriver {
                     )
                     .is_err()
                     {
-                        let _ = writer_events.send(DriverEvent::Error(
-                            "Failed to register Waku Computer Use skill with Codex".into(),
-                        ));
+                        let _ = writer_events.send(DriverEvent::Error(tr!(
+                            "errors.register_computer_use_skill"
+                        )));
                         return;
                     }
                 }
@@ -329,9 +329,9 @@ impl CodexDriver {
                     let message = match command {
                         CommandMessage::Prompt(text) => {
                             let Some(thread_id) = wait_for_thread_id(&writer_thread_id) else {
-                                let _ = writer_events.send(DriverEvent::Error(
-                                    "Codex did not finish opening its thread.".into(),
-                                ));
+                                let _ = writer_events.send(DriverEvent::Error(tr!(
+                                    "errors.codex_thread_open_incomplete"
+                                )));
                                 continue;
                             };
                             next_request_id += 1;
@@ -367,7 +367,10 @@ impl CodexDriver {
                             else {
                                 let _ = writer_events.send(DriverEvent::SteerRejected {
                                     message: text,
-                                    reason: "Codex has no active turn to steer.".into(),
+                                    reason: tr!(
+                                        "errors.provider_no_active_turn",
+                                        provider = "Codex"
+                                    ),
                                 });
                                 continue;
                             };
@@ -390,7 +393,11 @@ impl CodexDriver {
                             {
                                 let _ = writer_events.send(DriverEvent::SteerRejected {
                                     message: text,
-                                    reason: format!("Codex transport write failed: {error}"),
+                                    reason: tr!(
+                                        "errors.provider_transport_write",
+                                        provider = "Codex",
+                                        error = error
+                                    ),
                                 });
                             }
                             continue;
@@ -495,8 +502,10 @@ impl CodexDriver {
                         CommandMessage::Shutdown => break,
                     };
                     if let Err(error) = write_json_line(&mut stdin, &message) {
-                        let _ = writer_events.send(DriverEvent::Error(format!(
-                            "Codex transport write failed: {error}"
+                        let _ = writer_events.send(DriverEvent::Error(tr!(
+                            "errors.provider_transport_write",
+                            provider = "Codex",
+                            error = error
                         )));
                         break;
                     }
@@ -530,16 +539,20 @@ impl CodexDriver {
                                     &mut stream_state,
                                 ),
                                 Err(error) => {
-                                    let _ = reader_events.send(DriverEvent::Error(format!(
-                                        "Codex sent invalid JSON: {error}"
+                                    let _ = reader_events.send(DriverEvent::Error(tr!(
+                                        "errors.provider_invalid_json",
+                                        provider = "Codex",
+                                        error = error
                                     )));
                                 }
                             }
                         }
                         Ok(_) => {}
                         Err(error) => {
-                            let _ = reader_events.send(DriverEvent::Error(format!(
-                                "Codex transport read failed: {error}"
+                            let _ = reader_events.send(DriverEvent::Error(tr!(
+                                "errors.provider_transport_read",
+                                provider = "Codex",
+                                error = error
                             )));
                             break;
                         }
@@ -570,13 +583,17 @@ impl CodexDriver {
                 let _ = stderr_thread.join();
                 match status {
                     Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
-                        let _ = events.send(DriverEvent::Error(format!(
-                            "Codex app-server exited with {status}"
+                        let _ = events.send(DriverEvent::Error(tr!(
+                            "errors.provider_exited",
+                            provider = "Codex app-server",
+                            status = status
                         )));
                     }
                     Err(error) => {
-                        let _ = events.send(DriverEvent::Error(format!(
-                            "Could not read Codex app-server exit status: {error}"
+                        let _ = events.send(DriverEvent::Error(tr!(
+                            "errors.read_provider_exit_status",
+                            provider = "Codex app-server",
+                            error = error
                         )));
                     }
                     _ => {}
@@ -1081,17 +1098,17 @@ fn handle_codex_message(
                 options: vec![
                     PermissionOption {
                         id: "accept".into(),
-                        label: "Allow once".into(),
+                        label: tr!("permission.allow_once"),
                         allow: true,
                     },
                     PermissionOption {
                         id: "acceptForSession".into(),
-                        label: "Allow for session".into(),
+                        label: tr!("permission.allow_for_session"),
                         allow: true,
                     },
                     PermissionOption {
                         id: "decline".into(),
-                        label: "Deny".into(),
+                        label: tr!("common.deny"),
                         allow: false,
                     },
                 ],
@@ -1158,7 +1175,7 @@ fn codex_item_title(item: &Value) -> String {
         return command.to_owned();
     }
     if let Some(query) = non_empty_string(item.get("query")) {
-        return format!("Search for {query}");
+        return tr!("activity.search_for", query = query);
     }
     if item.get("type").and_then(Value::as_str) == Some("webSearch") {
         return codex_web_search_title(item);
@@ -1175,22 +1192,21 @@ fn codex_item_title(item: &Value) -> String {
     if let Some(name) = item.get("tool").and_then(Value::as_str) {
         return split_camel_case(name);
     }
-    let item_type = item
-        .get("type")
+    item.get("type")
         .and_then(Value::as_str)
-        .unwrap_or("Activity");
-    split_camel_case(item_type)
+        .map(split_camel_case)
+        .unwrap_or_else(|| tr!("activity.activity"))
 }
 
 fn codex_web_search_title(item: &Value) -> String {
     let Some(action) = item.get("action") else {
-        return "Searched the web".into();
+        return tr!("activity.searched_web");
     };
 
     match action.get("type").and_then(Value::as_str) {
         Some("search") => {
             if let Some(query) = non_empty_string(action.get("query")) {
-                return format!("Search for {query}");
+                return tr!("activity.search_for", query = query);
             }
             if let Some(query) =
                 action
@@ -1202,31 +1218,36 @@ fn codex_web_search_title(item: &Value) -> String {
                             .find_map(|query| non_empty_string(Some(query)))
                     })
             {
-                return format!("Search for {query}");
+                return tr!("activity.search_for", query = query);
             }
-            "Searched the web".into()
+            tr!("activity.searched_web")
         }
         Some("openPage") => non_empty_string(action.get("url"))
-            .map(|url| format!("Open {url}"))
-            .unwrap_or_else(|| "Opened a web page".into()),
+            .map(|url| tr!("activity.open_url", url = url))
+            .unwrap_or_else(|| tr!("activity.opened_web_page")),
         Some("findInPage") => match (
             non_empty_string(action.get("pattern")),
             non_empty_string(action.get("url")),
         ) {
-            (Some(pattern), Some(url)) => format!("Find {pattern} in {url}"),
-            (Some(pattern), None) => format!("Find {pattern} on the page"),
-            (None, Some(url)) => format!("Search within {url}"),
-            (None, None) => "Searched within a web page".into(),
+            (Some(pattern), Some(url)) => {
+                tr!("activity.find_in_url", pattern = pattern, url = url)
+            }
+            (Some(pattern), None) => tr!("activity.find_on_page", pattern = pattern),
+            (None, Some(url)) => tr!("activity.search_within_url", url = url),
+            (None, None) => tr!("activity.searched_within_page"),
         },
         _ => item
             .get("results")
             .and_then(Value::as_array)
             .filter(|results| !results.is_empty())
             .map(|results| {
-                let noun = if results.len() == 1 { "page" } else { "pages" };
-                format!("Browsed {} {noun}", results.len())
+                if results.len() == 1 {
+                    tr!("activity.browsed_page", count = results.len())
+                } else {
+                    tr!("activity.browsed_pages", count = results.len())
+                }
             })
-            .unwrap_or_else(|| "Browsed the web".into()),
+            .unwrap_or_else(|| tr!("activity.browsed_web")),
     }
 }
 
@@ -1315,9 +1336,13 @@ fn codex_item_output(item: &Value) -> Option<String> {
                 .unwrap_or_default();
             let exit = item.get("exitCode").and_then(Value::as_i64);
             let text = match (output.trim().is_empty(), exit) {
-                (false, Some(exit)) => format!("{}\n\nExit code: {exit}", output.trim_end()),
+                (false, Some(exit)) => tr!(
+                    "activity.output_with_exit_code",
+                    output = output.trim_end(),
+                    code = exit
+                ),
                 (false, None) => output.trim_end().to_owned(),
-                (true, Some(exit)) => format!("Exit code: {exit}"),
+                (true, Some(exit)) => tr!("activity.exit_code", code = exit),
                 (true, None) => return None,
             };
             non_empty_activity_text(text)

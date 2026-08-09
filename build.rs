@@ -1,4 +1,5 @@
-//! Embeds the drizzle-generated migrations into the binary.
+//! Embeds the drizzle-generated migrations into the binary and makes Cargo
+//! track the locale catalog read by rust-i18n's proc macro.
 //!
 //! `db/migrations/*.sql` is authored by `bun run db:generate` from
 //! `db/schema.ts`. This script collects them in filename order and emits a
@@ -11,6 +12,7 @@ use std::{env, fs};
 fn main() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("db/migrations");
     println!("cargo:rerun-if-changed=db/migrations");
+    println!("cargo:rerun-if-changed=locales");
 
     let mut migrations = fs::read_dir(&directory)
         .unwrap_or_else(|error| panic!("reading {}: {error}", directory.display()))

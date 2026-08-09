@@ -889,7 +889,7 @@ fn row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
 
 pub(super) fn turn_fold_label(session: &AgentSession, turn_id: Uuid) -> String {
     let Some(turn) = session.turns.iter().find(|turn| turn.id == turn_id) else {
-        return "Worked".into();
+        return tr!("transcript.worked");
     };
     let seconds = turn
         .completed_at
@@ -898,35 +898,47 @@ pub(super) fn turn_fold_label(session: &AgentSession, turn_id: Uuid) -> String {
         .max(1);
     let duration = format_worked_duration(seconds);
     if turn.status == TurnStatus::Interrupted {
-        format!("You stopped after {duration}")
+        tr!("transcript.you_stopped_after", duration = duration)
     } else {
-        format!("Worked for {duration}")
+        tr!("transcript.worked_for", duration = duration)
     }
 }
 
 pub(super) fn format_worked_duration(seconds: u64) -> String {
-    fn unit(value: u64, singular: &str) -> String {
-        format!("{value} {singular}{}", if value == 1 { "" } else { "s" })
+    fn unit(value: u64, singular_key: &str, plural_key: &str) -> String {
+        if value == 1 {
+            tr!(singular_key, count = value)
+        } else {
+            tr!(plural_key, count = value)
+        }
     }
 
     match seconds {
-        0..=59 => unit(seconds, "second"),
+        0..=59 => unit(seconds, "duration.second", "duration.seconds"),
         60..=3599 => {
             let minutes = seconds / 60;
             let seconds = seconds % 60;
             if seconds == 0 {
-                unit(minutes, "minute")
+                unit(minutes, "duration.minute", "duration.minutes")
             } else {
-                format!("{} {}", unit(minutes, "minute"), unit(seconds, "second"))
+                tr!(
+                    "duration.two_units",
+                    first = unit(minutes, "duration.minute", "duration.minutes"),
+                    second = unit(seconds, "duration.second", "duration.seconds")
+                )
             }
         }
         _ => {
             let hours = seconds / 3600;
             let minutes = (seconds % 3600) / 60;
             if minutes == 0 {
-                unit(hours, "hour")
+                unit(hours, "duration.hour", "duration.hours")
             } else {
-                format!("{} {}", unit(hours, "hour"), unit(minutes, "minute"))
+                tr!(
+                    "duration.two_units",
+                    first = unit(hours, "duration.hour", "duration.hours"),
+                    second = unit(minutes, "duration.minute", "duration.minutes")
+                )
             }
         }
     }
@@ -937,19 +949,27 @@ pub(super) fn format_worked_duration(seconds: u64) -> String {
 /// while this one ticks every second beside the pulsing dots.
 pub(super) fn format_working_elapsed(seconds: u64) -> String {
     match seconds {
-        0..=59 => format!("{seconds}s"),
+        0..=59 => tr!("duration.seconds_short", count = seconds),
         60..=3599 => {
             let minutes = seconds / 60;
             match seconds % 60 {
-                0 => format!("{minutes}m"),
-                seconds => format!("{minutes}m {seconds}s"),
+                0 => tr!("duration.minutes_short", count = minutes),
+                seconds => tr!(
+                    "duration.two_units",
+                    first = tr!("duration.minutes_short", count = minutes),
+                    second = tr!("duration.seconds_short", count = seconds)
+                ),
             }
         }
         _ => {
             let hours = seconds / 3600;
             match (seconds % 3600) / 60 {
-                0 => format!("{hours}h"),
-                minutes => format!("{hours}h {minutes}m"),
+                0 => tr!("duration.hours_short", count = hours),
+                minutes => tr!(
+                    "duration.two_units",
+                    first = tr!("duration.hours_short", count = hours),
+                    second = tr!("duration.minutes_short", count = minutes)
+                ),
             }
         }
     }

@@ -158,16 +158,20 @@ impl PiDriver {
                                         &mut stream_state,
                                     ),
                                     Err(error) => {
-                                        let _ = reader_events.send(DriverEvent::Error(format!(
-                                            "Pi sent invalid JSON: {error}"
+                                        let _ = reader_events.send(DriverEvent::Error(tr!(
+                                            "errors.provider_invalid_json",
+                                            provider = "Pi",
+                                            error = error
                                         )));
                                     }
                                 }
                             }
                             Ok(_) => {}
                             Err(error) => {
-                                let _ = reader_events.send(DriverEvent::Error(format!(
-                                    "Pi transport read failed: {error}"
+                                let _ = reader_events.send(DriverEvent::Error(tr!(
+                                    "errors.provider_transport_read",
+                                    provider = "Pi",
+                                    error = error
                                 )));
                                 break;
                             }
@@ -242,22 +246,29 @@ impl PiDriver {
                 let state = match initialize {
                     Ok(state) => state,
                     Err(error) => {
-                        let _ = writer_events.send(DriverEvent::Error(format!(
-                            "Could not initialize Pi: {error}"
+                        let _ = writer_events.send(DriverEvent::Error(tr!(
+                            "errors.initialize_provider",
+                            provider = "Pi",
+                            error = error
                         )));
                         let _ = writer_events.send(DriverEvent::TurnFinished {
                             success: false,
-                            summary: Some("Pi could not initialize this session.".into()),
+                            summary: Some(tr!(
+                                "errors.provider_initialize_session",
+                                provider = "Pi"
+                            )),
                         });
                         return;
                     }
                 };
                 let Some(mut cursor) = cursor_from_state(&state) else {
-                    let _ = writer_events
-                        .send(DriverEvent::Error("Pi did not report a session ID".into()));
+                    let _ = writer_events.send(DriverEvent::Error(tr!(
+                        "errors.provider_no_session_id",
+                        provider = "Pi"
+                    )));
                     let _ = writer_events.send(DriverEvent::TurnFinished {
                         success: false,
-                        summary: Some("Pi could not initialize this session.".into()),
+                        summary: Some(tr!("errors.provider_initialize_session", provider = "Pi")),
                     });
                     return;
                 };
@@ -287,12 +298,17 @@ impl PiDriver {
                                 json!({"type": "prompt", "message": prompt}),
                             );
                             if let Err(error) = result {
-                                let _ = writer_events.send(DriverEvent::Error(format!(
-                                    "Pi rejected the prompt: {error}"
+                                let _ = writer_events.send(DriverEvent::Error(tr!(
+                                    "errors.provider_rejected_prompt_detail",
+                                    provider = "Pi",
+                                    error = error
                                 )));
                                 let _ = writer_events.send(DriverEvent::TurnFinished {
                                     success: false,
-                                    summary: Some("Pi rejected the prompt before it ran.".into()),
+                                    summary: Some(tr!(
+                                        "errors.provider_rejected_prompt",
+                                        provider = "Pi"
+                                    )),
                                 });
                             }
                         }
@@ -323,8 +339,10 @@ impl PiDriver {
                                 &mut next_request_id,
                                 json!({"type": "abort"}),
                             ) {
-                                let _ = writer_events.send(DriverEvent::Error(format!(
-                                    "Could not stop Pi: {error}"
+                                let _ = writer_events.send(DriverEvent::Error(tr!(
+                                    "errors.stop_provider",
+                                    provider = "Pi",
+                                    error = error
                                 )));
                             }
                         }
@@ -342,9 +360,11 @@ impl PiDriver {
                                                 "modelId": model_id
                                             }),
                                         ) {
-                                            let _ = writer_events.send(DriverEvent::Error(
-                                                format!("Could not switch the Pi model: {error}"),
-                                            ));
+                                            let _ = writer_events.send(DriverEvent::Error(tr!(
+                                                "errors.switch_provider_model",
+                                                provider = "Pi",
+                                                error = error
+                                            )));
                                         }
                                     }
                                     Ok(None) => {}
@@ -364,8 +384,10 @@ impl PiDriver {
                                         json!({"type": "set_thinking_level", "level": level}),
                                     )
                                 {
-                                    let _ = writer_events.send(DriverEvent::Error(format!(
-                                        "Could not change Pi's thinking level: {error}"
+                                    let _ = writer_events.send(DriverEvent::Error(tr!(
+                                        "errors.change_provider_thinking",
+                                        provider = "Pi",
+                                        error = error
                                     )));
                                 }
                                 current_effort = options.reasoning_effort;
@@ -445,12 +467,17 @@ impl PiDriver {
                 let _ = stderr_thread.join();
                 match status {
                     Ok(status) if !status.success() && last_visible_stderr.lock().is_none() => {
-                        let _ =
-                            events.send(DriverEvent::Error(format!("Pi RPC exited with {status}")));
+                        let _ = events.send(DriverEvent::Error(tr!(
+                            "errors.provider_rpc_exited",
+                            provider = "Pi",
+                            status = status
+                        )));
                     }
                     Err(error) => {
-                        let _ = events.send(DriverEvent::Error(format!(
-                            "Could not read the Pi RPC exit status: {error}"
+                        let _ = events.send(DriverEvent::Error(tr!(
+                            "errors.read_provider_exit_status",
+                            provider = "Pi RPC",
+                            error = error
                         )));
                     }
                     _ => {}
@@ -813,15 +840,16 @@ fn handle_pi_message(
                 .get("toolCallId")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let tool_name = value
-                .get("toolName")
-                .and_then(Value::as_str)
-                .unwrap_or("Tool");
+            let tool_name = value.get("toolName").and_then(Value::as_str);
             let (kind, mut title) = id
                 .as_ref()
                 .and_then(|id| state.tools.get(id))
                 .cloned()
-                .unwrap_or_else(|| (classify_tool(tool_name), tool_title(tool_name)));
+                .unwrap_or_else(|| {
+                    tool_name
+                        .map(|tool_name| (classify_tool(tool_name), tool_title(tool_name)))
+                        .unwrap_or_else(|| (ActivityKind::Tool, tr!("activity.tool")))
+                });
             if event_type == "tool_execution_start"
                 && let Some(input_title) = activity::input_title(value.get("args"))
             {
@@ -874,7 +902,8 @@ fn handle_pi_message(
                 let success = !state.failed;
                 let _ = events.send(DriverEvent::TurnFinished {
                     success,
-                    summary: (!success).then(|| "Pi could not complete this turn.".into()),
+                    summary: (!success)
+                        .then(|| tr!("errors.provider_complete_turn", provider = "Pi")),
                 });
             }
             *state = PiStreamState::default();
@@ -939,8 +968,8 @@ fn pi_error_message(value: &Value) -> String {
         .and_then(Value::as_str)
         .or_else(|| value.get("errorMessage").and_then(Value::as_str))
         .or_else(|| value.get("reason").and_then(Value::as_str))
-        .unwrap_or("Pi reported an error")
-        .to_owned()
+        .map(str::to_owned)
+        .unwrap_or_else(|| tr!("errors.pi_reported_error"))
 }
 
 fn classify_tool(name: &str) -> ActivityKind {
@@ -954,13 +983,13 @@ fn classify_tool(name: &str) -> ActivityKind {
 
 fn tool_title(name: &str) -> String {
     match name.to_ascii_lowercase().as_str() {
-        "bash" => "Run command".into(),
-        "edit" => "Edit file".into(),
-        "write" => "Write file".into(),
-        "read" => "Read file".into(),
-        "grep" => "Search files".into(),
-        "find" => "Find files".into(),
-        "ls" => "List files".into(),
+        "bash" => tr!("activity.run_command"),
+        "edit" => tr!("activity.edit_file"),
+        "write" => tr!("activity.write_file"),
+        "read" => tr!("activity.read_file"),
+        "grep" => tr!("activity.search_files"),
+        "find" => tr!("activity.find_files"),
+        "ls" => tr!("activity.list_files"),
         _ => name.to_owned(),
     }
 }

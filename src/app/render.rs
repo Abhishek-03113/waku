@@ -226,7 +226,7 @@ impl Waku {
             .focus_visible(|style| style.border_1().border_color(theme.accent))
             .hover(|element| element.bg(theme.overlay))
             .active(|element| element.bg(theme.overlay_strong))
-            .tooltip(Tooltip::text("Dismiss notification"))
+            .tooltip(Tooltip::text(tr!("common.dismiss_notification")))
             .child(icon("icons/x.svg", 12.0, theme.text_tertiary))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.hide_toast();

@@ -90,14 +90,14 @@ pub fn activity_icon(kind: ActivityKind) -> &'static str {
     }
 }
 
-pub fn activity_noun(kind: ActivityKind) -> (&'static str, &'static str) {
+pub fn activity_noun(kind: ActivityKind) -> (String, String) {
     match kind {
-        ActivityKind::Reasoning => ("thought", "thoughts"),
-        ActivityKind::Command => ("command", "commands"),
-        ActivityKind::FileChange => ("file edit", "file edits"),
-        ActivityKind::Search => ("search", "searches"),
-        ActivityKind::Plan => ("plan step", "plan steps"),
-        ActivityKind::Tool => ("tool call", "tool calls"),
+        ActivityKind::Reasoning => (tr!("activity.thought"), tr!("activity.thoughts")),
+        ActivityKind::Command => (tr!("activity.command"), tr!("activity.commands")),
+        ActivityKind::FileChange => (tr!("activity.file_edit"), tr!("activity.file_edits")),
+        ActivityKind::Search => (tr!("activity.search"), tr!("activity.searches")),
+        ActivityKind::Plan => (tr!("activity.plan_step"), tr!("activity.plan_steps")),
+        ActivityKind::Tool => (tr!("activity.tool_call"), tr!("activity.tool_calls")),
     }
 }
 

@@ -33,14 +33,14 @@ impl SessionDateGroup {
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Today => "Today",
-            Self::Yesterday => "Yesterday",
-            Self::ThisWeek => "This Week",
-            Self::ThisMonth => "This Month",
-            Self::ThisYear => "This Year",
-            Self::More => "More",
+            Self::Today => tr!("sidebar.today"),
+            Self::Yesterday => tr!("sidebar.yesterday"),
+            Self::ThisWeek => tr!("sidebar.this_week"),
+            Self::ThisMonth => tr!("sidebar.this_month"),
+            Self::ThisYear => tr!("sidebar.this_year"),
+            Self::More => tr!("sidebar.more"),
         }
     }
 }
@@ -108,9 +108,9 @@ pub(super) fn session_time_label(session: &AgentSession, now: u64) -> Option<Str
             .last()
             .filter(|turn| turn.status == TurnStatus::Running)
     {
-        return Some(format!(
-            "Working {}",
-            format_working_elapsed(now.saturating_sub(turn.started_at))
+        return Some(tr!(
+            "sidebar.working",
+            elapsed = format_working_elapsed(now.saturating_sub(turn.started_at))
         ));
     }
     session
@@ -123,10 +123,10 @@ pub(super) fn session_time_label(session: &AgentSession, now: u64) -> Option<Str
 /// count rather than a date.
 pub(super) fn format_time_ago(seconds: u64) -> String {
     match seconds {
-        0..=59 => "just now".to_owned(),
-        60..=3_599 => format!("{}m", seconds / 60),
-        3_600..=86_399 => format!("{}h", seconds / 3_600),
-        _ => format!("{}d", seconds / 86_400),
+        0..=59 => tr!("sidebar.just_now"),
+        60..=3_599 => tr!("sidebar.minutes_ago", count = seconds / 60),
+        3_600..=86_399 => tr!("sidebar.hours_ago", count = seconds / 3_600),
+        _ => tr!("sidebar.days_ago", count = seconds / 86_400),
     }
 }
 
@@ -382,7 +382,7 @@ impl Waku {
                     .cursor_default()
                     .hover(|element| element.bg(theme.overlay))
                     .active(|element| element.bg(theme.overlay_strong))
-                    .tooltip(Tooltip::text("Settings"))
+                    .tooltip(Tooltip::text(tr_cow!("common.settings")))
                     .child(icon("icons/settings.svg", 14.0, theme.text_tertiary))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_settings_action(&OpenSettings, window, cx);
@@ -557,8 +557,8 @@ impl Waku {
             .projects
             .iter()
             .find(|project| project.id == session.project_id)
-            .map(|project| project.name.clone())
-            .unwrap_or_else(|| "Unknown project".to_owned());
+            .map(Project::display_name)
+            .unwrap_or_else(|| tr!("sidebar.unknown_project"));
         let waku = cx.entity().downgrade();
         let row = div()
             .id(SharedString::from(format!("session-{}", session.id)))
@@ -592,7 +592,7 @@ impl Waku {
                             .text_overflow(gpui::TextOverflow::Truncate("...".into()))
                             .text_size(px(13.5))
                             .text_color(theme.text)
-                            .child(SharedString::from(session.display_title().to_owned())),
+                            .child(SharedString::from(localized_session_title(session))),
                     )
                     .when(active, |element| {
                         element.child(pulse_dot(
@@ -645,7 +645,7 @@ impl Waku {
             &menu,
             move |_| {
                 let waku = waku.clone();
-                vec![MenuItem::new("Remove", move |_, cx| {
+                vec![MenuItem::new(tr!("common.remove"), move |_, cx| {
                     let _ = waku.update(cx, |waku, cx| waku.remove_session(session_id, cx));
                 })]
             },
@@ -724,8 +724,8 @@ impl Waku {
                         .text_color(theme.text)
                         .child(SharedString::from(
                             session
-                                .map(|session| session.display_title().to_owned())
-                                .unwrap_or_else(|| "New task".into()),
+                                .map(localized_session_title)
+                                .unwrap_or_else(|| tr!("session.new_task")),
                         )),
                     cx,
                 ),
@@ -765,7 +765,7 @@ impl Waku {
                         .text_size(px(20.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
-                        .child("Open a project to begin"),
+                        .child(tr_cow!("onboarding.open_project_to_begin")),
                 )
                 .child(
                     div()
@@ -775,9 +775,7 @@ impl Waku {
                         .text_size(px(12.5))
                         .line_height(px(19.0))
                         .text_color(theme.text_tertiary)
-                        .child(
-                            "Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this Mac.",
-                        ),
+                        .child(tr_cow!("onboarding.description")),
                 )
                 .child(
                     div()
@@ -794,9 +792,7 @@ impl Waku {
                                 .id("onboarding-add-project")
                                 .track_focus(&self.onboarding_add_project_focus)
                                 .tab_index(0)
-                                .focus_visible(|style| {
-                                    style.border_1().border_color(theme.accent)
-                                })
+                                .focus_visible(|style| style.border_1().border_color(theme.accent))
                                 .h(px(32.0))
                                 .px(px(14.0))
                                 .rounded_full()
@@ -809,7 +805,7 @@ impl Waku {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .hover(|element| element.opacity(0.9))
                                 .active(|element| element.opacity(0.8))
-                                .child("Open project folder…")
+                                .child(tr_cow!("onboarding.open_project_folder"))
                                 .on_click(cx.listener(|this, _, _, cx| this.add_project(cx)))
                                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
@@ -823,9 +819,7 @@ impl Waku {
                                 .id("onboarding-projectless")
                                 .track_focus(&self.onboarding_projectless_focus)
                                 .tab_index(1)
-                                .focus_visible(|style| {
-                                    style.border_1().border_color(theme.accent)
-                                })
+                                .focus_visible(|style| style.border_1().border_color(theme.accent))
                                 .h(px(30.0))
                                 .px(px(12.0))
                                 .rounded_full()
@@ -838,7 +832,7 @@ impl Waku {
                                 .hover(|element| element.bg(theme.overlay))
                                 .active(|element| element.bg(theme.overlay_strong))
                                 .child(icon("icons/x.svg", 11.0, theme.text_tertiary))
-                                .child("Don't work in a project")
+                                .child(tr_cow!("project.no_project"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.create_projectless_session(cx);
                                 }))
@@ -857,12 +851,12 @@ impl Waku {
             .selected_project()
             .map(|project| {
                 if project.is_projectless() {
-                    "without a project".to_owned()
+                    tr!("project.without_a_project")
                 } else {
-                    project.name.clone()
+                    project.display_name()
                 }
             })
-            .unwrap_or_else(|| "your project".to_owned());
+            .unwrap_or_else(|| tr!("project.your_project"));
         let project_options = self
             .state
             .projects
@@ -876,7 +870,7 @@ impl Waku {
                     .filter(|project| !project.is_projectless())
                     .filter(|project| Some(project.id) != selected_project_id),
             )
-            .map(|project| (project.id, project.name.clone()))
+            .map(|project| (project.id, project.display_name()))
             .collect::<Vec<_>>();
         let weak = cx.entity().downgrade();
         let handle = self.menu_handle("empty-state-project", cx);
@@ -906,14 +900,14 @@ impl Waku {
                 }
                 let add_project_weak = weak.clone();
                 items.push(
-                    MenuItem::new("New project…", move |_, cx| {
+                    MenuItem::new(tr!("project.new_project"), move |_, cx| {
                         let _ = add_project_weak.update(cx, |this, cx| this.add_project(cx));
                     })
                     .icon("icons/folder-new.svg"),
                 );
                 let projectless_weak = weak.clone();
                 items.push(
-                    MenuItem::new("Don't work in a project", move |_, cx| {
+                    MenuItem::new(tr!("project.no_project"), move |_, cx| {
                         let _ = projectless_weak.update(cx, |this, cx| {
                             if !this.selected_project().is_some_and(Project::is_projectless) {
                                 this.create_projectless_session(cx);
@@ -944,15 +938,24 @@ impl Waku {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .when(projectless_selected, |element| {
-                        element.child("What should we build?")
+                        element.child(tr_cow!("onboarding.what_should_we_build"))
                     })
                     .when(!projectless_selected, |element| {
                         element
-                            .child("What should we build in\u{00a0}")
+                            .child(tr_cow!("onboarding.what_should_we_build_in"))
                             .child(project_selector)
-                            .child("?")
+                            .child(tr_cow!("onboarding.question_mark"))
                     }),
             )
+    }
+}
+
+fn localized_session_title(session: &AgentSession) -> String {
+    let title = session.display_title();
+    if title == AgentSession::DEFAULT_TITLE {
+        tr!("session.new_task")
+    } else {
+        title.to_owned()
     }
 }
 

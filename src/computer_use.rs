@@ -190,7 +190,7 @@ pub fn probe_permissions(prompt: bool) -> anyhow::Result<ComputerPermissions> {
             "{}",
             response
                 .error
-                .unwrap_or_else(|| "Could not check computer-use permissions".into())
+                .unwrap_or_else(|| tr!("computer_use.permission_check_failed"))
         );
     }
     Ok(response.permissions.unwrap_or_default())

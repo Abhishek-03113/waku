@@ -1001,7 +1001,7 @@ impl Waku {
         let label = self
             .selected_session()
             .map(|session| turn_fold_label(session, turn_id))
-            .unwrap_or_else(|| "Worked".into());
+            .unwrap_or_else(|| tr!("transcript.worked"));
         div()
             .w_full()
             .h(px(24.0))
@@ -1064,9 +1064,9 @@ impl Waku {
                     .line_height(px(16.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_tertiary)
-                    .child(SharedString::from(format!(
-                        "Working for {}",
-                        format_working_elapsed(elapsed)
+                    .child(SharedString::from(tr!(
+                        "transcript.working_for",
+                        duration = format_working_elapsed(elapsed)
                     ))),
             )
             .into_any_element()
@@ -1093,15 +1093,17 @@ impl Waku {
             .copied()
             .unwrap_or(live);
         let label = if live {
-            "Thinking".to_owned()
+            tr!("transcript.thinking")
         } else {
-            format!(
-                "Thought for {}s",
-                reasoning
-                    .finished_at_ms
-                    .saturating_sub(reasoning.started_at_ms)
-                    .div_ceil(1000)
-                    .max(1)
+            tr!(
+                "transcript.thought_for",
+                duration = format_worked_duration(
+                    reasoning
+                        .finished_at_ms
+                        .saturating_sub(reasoning.started_at_ms)
+                        .div_ceil(1000)
+                        .max(1)
+                )
             )
         };
         div()
@@ -1377,9 +1379,9 @@ impl Waku {
                             .contains_key(&(id, section_kind));
                         let copy_waku = cx.entity().downgrade();
                         let copy_tooltip = SharedString::from(if copied {
-                            "Copied".to_owned()
+                            tr!("common.copied")
                         } else {
-                            format!("Copy {}", label.to_ascii_lowercase())
+                            tr!("common.copy_named", name = label.to_lowercase())
                         });
                         section_view = section_view.child(
                             div()

@@ -94,12 +94,12 @@ pub enum CommandScope {
 }
 
 impl CommandScope {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Project => "project",
-            Self::User => "user",
-            Self::Skill => "skill",
-            Self::Builtin => "built-in",
+            Self::Project => tr!("command_scope.project"),
+            Self::User => tr!("command_scope.user"),
+            Self::Skill => tr!("command_scope.skill"),
+            Self::Builtin => tr!("command_scope.builtin"),
         }
     }
 }
@@ -130,7 +130,10 @@ fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
     [
         (
             "init",
-            format!("Create or update {instructions_file} for this project"),
+            tr!(
+                "commands.init_description",
+                instructions_file = instructions_file
+            ),
             format!(
                 "Analyze this repository and write {instructions_file} for coding agents \
                  working in it: build, test and lint commands, architecture overview, code \
@@ -140,7 +143,7 @@ fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
         ),
         (
             "review",
-            "Review the pending changes on this branch".to_owned(),
+            tr!("commands.review_description"),
             "Review the pending changes in this working tree: uncommitted work plus commits \
              not on the default branch. Look for bugs, regressions, and risky patterns; \
              report findings ordered by severity with file and line references."
@@ -148,7 +151,7 @@ fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
         ),
         (
             "commit",
-            "Stage and commit the current changes".to_owned(),
+            tr!("commands.commit_description"),
             "Look at the current working tree, stage the appropriate files, and create a git \
              commit with a clear message that describes the change and why it was made."
                 .to_owned(),
@@ -170,20 +173,20 @@ fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
 /// before any turn has started.
 fn builtin_claude_commands() -> Vec<SlashCommand> {
     const BUILTINS: [(&str, &str); 8] = [
-        ("compact", "Free up context by summarizing the conversation"),
-        ("context", "Show what is occupying the context window"),
-        ("cost", "Show token usage and cost for this session"),
-        ("init", "Analyze the project and write CLAUDE.md"),
-        ("pr-comments", "Fetch review comments for the current PR"),
-        ("review", "Review a pull request"),
-        ("security-review", "Security review of the pending changes"),
-        ("todos", "List the current todo items"),
+        ("compact", "commands.claude_compact"),
+        ("context", "commands.claude_context"),
+        ("cost", "commands.claude_cost"),
+        ("init", "commands.claude_init"),
+        ("pr-comments", "commands.claude_pr_comments"),
+        ("review", "commands.claude_review"),
+        ("security-review", "commands.claude_security_review"),
+        ("todos", "commands.claude_todos"),
     ];
     BUILTINS
         .into_iter()
-        .map(|(name, description)| SlashCommand {
+        .map(|(name, description_key)| SlashCommand {
             name: name.to_owned(),
-            description: description.to_owned(),
+            description: crate::i18n::translate(description_key),
             scope: CommandScope::Builtin,
             argument_hint: None,
             template: None,

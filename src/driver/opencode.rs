@@ -180,8 +180,10 @@ impl OpenCodeDriver {
                         }
                     }
                     Err(error) => {
-                        let _ = stream_events.send(DriverEvent::Error(format!(
-                            "Could not read the OpenCode event stream: {error}"
+                        let _ = stream_events.send(DriverEvent::Error(tr!(
+                            "errors.read_provider_event_stream",
+                            provider = "OpenCode",
+                            error = error
                         )));
                     }
                 }
@@ -212,8 +214,10 @@ impl OpenCodeDriver {
                             );
                             let body = prompt_body(&text, model.as_deref());
                             if let Err(error) = worker_server.request("POST", &path, Some(&body)) {
-                                let _ = worker_events.send(DriverEvent::Error(format!(
-                                    "OpenCode rejected the prompt: {error}"
+                                let _ = worker_events.send(DriverEvent::Error(tr!(
+                                    "errors.provider_rejected_prompt_detail",
+                                    provider = "OpenCode",
+                                    error = error
                                 )));
                                 // `session.idle` never arrives for a turn that
                                 // failed to start, so settle it here instead of
@@ -221,7 +225,10 @@ impl OpenCodeDriver {
                                 if std::mem::take(&mut *worker_turn.lock()) {
                                     let _ = worker_events.send(DriverEvent::TurnFinished {
                                         success: false,
-                                        summary: Some("OpenCode could not start the turn.".into()),
+                                        summary: Some(tr!(
+                                            "errors.provider_start_turn",
+                                            provider = "OpenCode"
+                                        )),
                                     });
                                 }
                             }
@@ -239,7 +246,10 @@ impl OpenCodeDriver {
                             if !*worker_turn.lock() {
                                 let _ = worker_events.send(DriverEvent::SteerRejected {
                                     message: text,
-                                    reason: "OpenCode has no active turn to steer.".into(),
+                                    reason: tr!(
+                                        "errors.provider_no_active_turn",
+                                        provider = "OpenCode"
+                                    ),
                                 });
                                 continue;
                             }
@@ -256,7 +266,11 @@ impl OpenCodeDriver {
                                 Err(error) => {
                                     let _ = worker_events.send(DriverEvent::SteerRejected {
                                         message: text,
-                                        reason: format!("OpenCode rejected the steer: {error}"),
+                                        reason: tr!(
+                                            "errors.provider_rejected_steer",
+                                            provider = "OpenCode",
+                                            error = error
+                                        ),
                                     });
                                 }
                             }
@@ -265,8 +279,10 @@ impl OpenCodeDriver {
                             let path =
                                 format!("/session/{}/abort", encode_path_segment(&worker_session));
                             if let Err(error) = worker_server.request("POST", &path, None) {
-                                let _ = worker_events.send(DriverEvent::Error(format!(
-                                    "Could not stop OpenCode: {error}"
+                                let _ = worker_events.send(DriverEvent::Error(tr!(
+                                    "errors.stop_provider",
+                                    provider = "OpenCode",
+                                    error = error
                                 )));
                             }
                         }
@@ -284,8 +300,10 @@ impl OpenCodeDriver {
                                 &path,
                                 Some(&json!({"reply": option_id})),
                             ) {
-                                let _ = worker_events.send(DriverEvent::Error(format!(
-                                    "Could not answer OpenCode's permission request: {error}"
+                                let _ = worker_events.send(DriverEvent::Error(tr!(
+                                    "errors.answer_provider_permission",
+                                    provider = "OpenCode",
+                                    error = error
                                 )));
                             }
                         }
@@ -493,7 +511,8 @@ fn request_permission(
     let permission = request
         .get("permission")
         .and_then(Value::as_str)
-        .unwrap_or("run a tool");
+        .map(str::to_owned)
+        .unwrap_or_else(|| tr!("permission.run_a_tool_lower"));
     let patterns = request
         .get("patterns")
         .and_then(Value::as_array)
@@ -507,27 +526,33 @@ fn request_permission(
         .filter(|patterns| !patterns.is_empty());
     let _ = events.send(DriverEvent::Permission {
         request_id: request_id.to_owned(),
-        title: patterns
-            .clone()
-            .unwrap_or_else(|| format!("Allow {permission}?")),
+        title: patterns.clone().unwrap_or_else(|| {
+            tr!(
+                "permission.allow_named_permission",
+                permission = permission.as_str()
+            )
+        }),
         detail: match patterns {
-            Some(_) => format!("The agent is asking for the {permission} permission."),
-            None => "The agent is asking for permission.".into(),
+            Some(_) => tr!(
+                "permission.agent_asks_for_named_permission",
+                permission = permission.as_str()
+            ),
+            None => tr!("permission.agent_asks_for_permission"),
         },
         options: vec![
             PermissionOption {
                 id: "once".into(),
-                label: "Allow once".into(),
+                label: tr!("permission.allow_once"),
                 allow: true,
             },
             PermissionOption {
                 id: "always".into(),
-                label: "Always allow".into(),
+                label: tr!("permission.always_allow"),
                 allow: true,
             },
             PermissionOption {
                 id: "reject".into(),
-                label: "Deny".into(),
+                label: tr!("common.deny"),
                 allow: false,
             },
         ],
@@ -538,8 +563,8 @@ fn tool_activity(part: &Value, events: &Sender<DriverEvent>, state: &mut OpenCod
     let wire_title = part
         .get("tool")
         .and_then(Value::as_str)
-        .unwrap_or("Tool")
-        .to_owned();
+        .map(str::to_owned)
+        .unwrap_or_else(|| tr!("activity.tool"));
     let id = part
         .get("callID")
         .or_else(|| part.get("id"))

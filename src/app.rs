@@ -483,7 +483,7 @@ fn traits_choice(theme: Theme, label: String, is_default: bool) -> MenuItem {
                         .text_size(px(9.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text_tertiary)
-                        .child("Default"),
+                        .child(tr!("common.default")),
                 )
             })
             .into_any_element()
@@ -1077,51 +1077,51 @@ impl Waku {
     }
 
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let store = StateStore::new(StateStore::default_path());
+        let mut state = store.load_or_fresh(cwd);
+        crate::i18n::set_language(state.language);
+
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
         let model_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
-                .placeholder("Search models...")
+                .placeholder(tr!("input.search_models"))
         });
         let branch_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
-                .placeholder("Search branches")
+                .placeholder(tr!("input.search_branches"))
         });
         let branch_create_input = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
-                .placeholder("New branch name")
+                .placeholder(tr!("input.new_branch_name"))
         });
         let settings_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
-                .placeholder("Search Settings")
+                .placeholder(tr!("settings.search"))
         });
         let provider_path_input = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
                 .select_all_on_focus_click()
-                .placeholder("Detected automatically")
+                .placeholder(tr!("input.detected_automatically"))
         });
         let usage_project_filter = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
-                .placeholder("Filter projects")
+                .placeholder(tr!("input.filter_projects"))
         });
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let store = StateStore::new(StateStore::default_path());
-        let mut state = store.load_or_fresh(cwd);
         let startup_toast = match migrate_legacy_projectless_projects(&mut state) {
             Ok(false) => None,
             Ok(true) => store
                 .save(&mut state)
                 .err()
-                .map(|error| format!("Could not save the projectless task migration: {error}")),
-            Err(error) => Some(format!(
-                "Could not move the old root-level projectless task beneath ~/.waku: {error}"
-            )),
+                .map(|error| tr!("errors.save_projectless_migration", error = error)),
+            Err(error) => Some(tr!("errors.move_projectless_task", error = error)),
         };
         let sidebar_visible = state.sidebar_visible;
         let right_panel_visible = state.right_panel_visible;

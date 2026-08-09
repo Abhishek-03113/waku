@@ -42,7 +42,7 @@ impl Waku {
             return;
         };
         if let Err(error) = self.store.hydrate(session) {
-            self.show_toast(format!("Could not open that session: {error}"));
+            self.show_toast(tr!("errors.open_session", error = error));
         }
     }
 
@@ -774,7 +774,7 @@ impl Waku {
             if let Some(session) = self.state.session_mut(session_id) {
                 session.status = SessionStatus::Idle;
                 if needs_fallback {
-                    session.push_message(MessageRole::Assistant, "Stopped.");
+                    session.push_message(MessageRole::Assistant, tr!("session.stopped"));
                 }
                 session.finish_active_turn(TurnStatus::Interrupted);
             }
@@ -904,7 +904,7 @@ impl Waku {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Add project".into()),
+            prompt: Some(tr!("project.add_project").into()),
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = receiver.await
@@ -947,7 +947,7 @@ impl Waku {
         let workspace = match crate::projectless::create_workspace(None) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.show_toast(format!("Could not create a task beneath ~/.waku: {error}"));
+                self.show_toast(tr!("errors.create_projectless_task", error = error));
                 cx.notify();
                 return;
             }

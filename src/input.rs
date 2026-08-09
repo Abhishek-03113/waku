@@ -530,7 +530,7 @@ impl ComposerInput {
             search_matches: Vec::new(),
             active_search_match: None,
             content: "".into(),
-            placeholder: "Do anything…".into(),
+            placeholder: tr!("input.do_anything").into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -2019,21 +2019,21 @@ impl Render for ComposerInput {
 
                 vec![
                     MenuItem::new(
-                        "Cut",
+                        tr!("menu.cut"),
                         run(&context_menu_input, |input, window, cx| {
                             input.cut(&Cut, window, cx)
                         }),
                     )
                     .disabled(!has_selection),
                     MenuItem::new(
-                        "Copy",
+                        tr!("menu.copy"),
                         run(&context_menu_input, |input, window, cx| {
                             input.copy(&Copy, window, cx)
                         }),
                     )
                     .disabled(!has_selection),
                     MenuItem::new(
-                        "Paste",
+                        tr!("menu.paste"),
                         run(&context_menu_input, |input, window, cx| {
                             input.paste(&Paste, window, cx)
                         }),
@@ -2041,7 +2041,7 @@ impl Render for ComposerInput {
                     .disabled(!can_paste),
                     MenuItem::Separator,
                     MenuItem::new(
-                        "Select All",
+                        tr!("menu.select_all"),
                         run(&context_menu_input, |input, window, cx| {
                             input.select_all(&SelectAll, window, cx)
                         }),

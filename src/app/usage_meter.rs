@@ -221,11 +221,11 @@ impl Waku {
             _ => theme.gauge,
         };
         let tooltip = match (&error, percent) {
-            (Some(error), _) => SharedString::from(format!("Usage refresh failed: {error}")),
+            (Some(error), _) => SharedString::from(tr!("usage.refresh_failed", error = error)),
             (None, Some(percent)) => {
-                SharedString::from(format!("Context window {percent:.0}% used (⌘U)"))
+                SharedString::from(tr!("usage.context_used", percent = format!("{percent:.0}")))
             }
-            (None, None) => SharedString::from("Usage (⌘U)"),
+            (None, None) => SharedString::from(tr!("usage.shortcut")),
         };
 
         let trigger = div()
@@ -391,7 +391,11 @@ fn usage_panel(
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(div().text_color(theme.text).child("Context window"))
+                    .child(
+                        div()
+                            .text_color(theme.text)
+                            .child(tr!("usage.context_window")),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
@@ -408,8 +412,8 @@ fn usage_panel(
 
     if let Some(plan) = plan {
         let header = match &plan.plan_label {
-            Some(label) => format!("Plan usage limits · {label}"),
-            None => "Plan usage limits".to_owned(),
+            Some(label) => tr!("usage.plan_limits_named", plan = label),
+            None => tr!("usage.plan_limits"),
         };
         let usage_url = match provider {
             ProviderKind::Claude => Some("https://claude.ai/settings/usage"),
@@ -430,7 +434,7 @@ fn usage_panel(
                 .id("plan-usage-link")
                 .cursor_default()
                 .hover(|element| element.opacity(0.8))
-                .tooltip(Tooltip::text("Open the account's usage settings"))
+                .tooltip(Tooltip::text(tr!("usage.open_account_settings")))
                 .on_click(move |_, _, cx| cx.open_url(url))
                 .child(icon("icons/arrow-right.svg", 10.0, theme.text_tertiary))
                 .into_any_element(),
@@ -488,13 +492,13 @@ fn usage_panel(
                     div()
                         .text_size(px(11.0))
                         .text_color(theme.text_tertiary)
-                        .child("Plan usage limits"),
+                        .child(tr!("usage.plan_limits")),
                 )
                 .child(
                     div()
                         .text_size(px(11.0))
                         .text_color(theme.text_secondary)
-                        .child(SharedString::from(format!("Unavailable — {error}"))),
+                        .child(SharedString::from(tr!("usage.unavailable", error = error))),
                 ),
         );
     }

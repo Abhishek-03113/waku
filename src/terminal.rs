@@ -581,7 +581,7 @@ impl TerminalView {
             session: None,
             error: None,
             focus_handle: cx.focus_handle(),
-            title: "Terminal".into(),
+            title: tr!("right_panel.terminal"),
             working_directory,
             exited: false,
             scroll_accumulator: 0.0,
@@ -603,6 +603,13 @@ impl TerminalView {
         self.panel_width = width;
     }
 
+    pub fn refresh_localized_text(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.title.as_str(), "Terminal" | "终端") {
+            self.title = tr!("right_panel.terminal");
+            cx.notify();
+        }
+    }
+
     fn poll(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(session) = &self.session else {
             return false;
@@ -612,7 +619,7 @@ impl TerminalView {
             changed = true;
             match event {
                 TerminalUiEvent::Title(title) => self.title = title,
-                TerminalUiEvent::ResetTitle => self.title = "Terminal".into(),
+                TerminalUiEvent::ResetTitle => self.title = tr!("right_panel.terminal"),
                 TerminalUiEvent::ClipboardStore(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
@@ -875,16 +882,16 @@ impl Render for TerminalView {
             session.snapshot(theme, selection_color, cursor_style)
         });
         let title = if self.title.trim().is_empty() {
-            "Terminal"
+            tr!("right_panel.terminal")
         } else {
-            &self.title
+            self.title.clone()
         };
         let directory = self
             .working_directory
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("workspace")
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| tr!("workspace.workspace"));
 
         let mut screen = div()
             .flex_1()
@@ -972,7 +979,7 @@ impl Render for TerminalView {
                     .child(
                         self.error
                             .clone()
-                            .unwrap_or_else(|| "Starting terminal…".into()),
+                            .unwrap_or_else(|| tr!("terminal.starting")),
                     ),
             );
         }
@@ -1004,14 +1011,14 @@ impl Render for TerminalView {
                 let paste_terminal = context_terminal.clone();
                 let select_all_terminal = context_terminal.clone();
                 vec![
-                    MenuItem::new("Copy", move |_, cx| {
+                    MenuItem::new(tr!("menu.copy"), move |_, cx| {
                         let selected_text = { copy_terminal.read(cx).selected_text() };
                         if let Some(text) = selected_text {
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
                         }
                     })
                     .disabled(!has_selection),
-                    MenuItem::new("Paste", move |_, cx| {
+                    MenuItem::new(tr!("menu.paste"), move |_, cx| {
                         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
                         else {
                             return;
@@ -1020,7 +1027,7 @@ impl Render for TerminalView {
                     })
                     .disabled(!can_paste),
                     MenuItem::Separator,
-                    MenuItem::new("Select All", move |_, cx| {
+                    MenuItem::new(tr!("menu.select_all"), move |_, cx| {
                         select_all_terminal.update(cx, |terminal, cx| terminal.select_all(cx));
                     })
                     .disabled(!has_session),

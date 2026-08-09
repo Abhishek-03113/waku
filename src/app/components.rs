@@ -63,6 +63,45 @@ fn format_message_time_at(created_at: u64, now: DateTime<Local>) -> String {
             let timestamp = timestamp.with_timezone(&Local);
             let message_date = timestamp.date_naive();
             let today = now.date_naive();
+            if crate::i18n::is_simplified_chinese() {
+                let time = timestamp.format("%H:%M").to_string();
+                if message_date >= today {
+                    return time;
+                }
+                if today.pred_opt() == Some(message_date) {
+                    return tr!("time.yesterday_at", time = time);
+                }
+                let week_start = today
+                    .checked_sub_days(Days::new(today.weekday().num_days_from_monday().into()))
+                    .unwrap_or(today);
+                if message_date >= week_start {
+                    let weekday = match timestamp.weekday() {
+                        chrono::Weekday::Mon => tr!("time.monday"),
+                        chrono::Weekday::Tue => tr!("time.tuesday"),
+                        chrono::Weekday::Wed => tr!("time.wednesday"),
+                        chrono::Weekday::Thu => tr!("time.thursday"),
+                        chrono::Weekday::Fri => tr!("time.friday"),
+                        chrono::Weekday::Sat => tr!("time.saturday"),
+                        chrono::Weekday::Sun => tr!("time.sunday"),
+                    };
+                    return tr!("time.weekday_at", weekday = weekday, time = time);
+                }
+                if message_date.year() == today.year() {
+                    return tr!(
+                        "time.date_at",
+                        month = timestamp.month(),
+                        day = timestamp.day(),
+                        time = time
+                    );
+                }
+                return tr!(
+                    "time.full_date_at",
+                    year = timestamp.year(),
+                    month = timestamp.month(),
+                    day = timestamp.day(),
+                    time = time
+                );
+            }
             let time = timestamp
                 .format("%I:%M %p")
                 .to_string()
@@ -74,7 +113,7 @@ fn format_message_time_at(created_at: u64, now: DateTime<Local>) -> String {
             }
 
             if today.pred_opt() == Some(message_date) {
-                return format!("Yesterday {time}");
+                return tr!("time.yesterday_at", time = time);
             }
 
             let week_start = today
@@ -177,9 +216,9 @@ fn render_message_footer(
             footer_color,
         ))
         .tooltip(Tooltip::text(if copied {
-            "Copied"
+            tr!("common.copied")
         } else {
-            "Copy message"
+            tr!("common.copy_message")
         }))
         .on_click(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
@@ -216,7 +255,7 @@ fn render_message_footer(
                     .cursor_default()
                     .hover(|element| element.bg(theme.overlay_strong))
                     .child(icon("icons/fork.svg", 14.0, footer_color))
-                    .tooltip(Tooltip::text("Fork task"))
+                    .tooltip(Tooltip::text(tr_cow!("session.fork_task")))
                     .on_click(move |_, _, cx| {
                         let _ = fork_waku.update(cx, |this, cx| {
                             this.fork_session_from_response(
@@ -247,7 +286,7 @@ fn render_message_footer(
                 .cursor_default()
                 .hover(|element| element.bg(theme.overlay_strong))
                 .child(icon("icons/rewind.svg", 14.0, footer_color))
-                .tooltip(Tooltip::text("Revert to here"))
+                .tooltip(Tooltip::text(tr_cow!("session.revert_to_here")))
                 .on_click(move |_, window, cx| {
                     let _ = edit_waku.update(cx, |this, cx| {
                         this.begin_message_edit(action.session_id, action.turn_count, window, cx);
@@ -353,7 +392,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                         .text_color(theme.text_secondary)
                                         .cursor_default()
                                         .hover(|element| element.bg(theme.overlay_strong))
-                                        .child("Cancel")
+                                        .child(tr_cow!("common.cancel"))
                                         .on_click(move |_, window, cx| {
                                             let _ = cancel_waku.update(cx, |this, cx| {
                                                 this.cancel_message_edit(window, cx);
@@ -387,7 +426,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                                                 .cursor_default()
                                                 .hover(|element| element.opacity(0.9))
                                         })
-                                        .child("Send")
+                                        .child(tr_cow!("common.send"))
                                         .on_click(move |_, _, cx| {
                                             if can_submit {
                                                 let _ = submit_waku.update(cx, |this, cx| {
@@ -532,30 +571,36 @@ fn message_menu_items(
     let mut items = Vec::new();
 
     if let Some(selected) = selection.selection.borrow().selected_text() {
-        items.push(MenuItem::new("Copy Selection", move |_, cx| {
+        items.push(MenuItem::new(tr!("common.copy_selection"), move |_, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(selected.clone()));
         }));
     }
 
     let copy_content = content.to_owned();
-    items.push(MenuItem::new("Copy Message", move |_, cx| {
-        cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
-    }));
+    items.push(MenuItem::new(
+        tr!("common.copy_message_title"),
+        move |_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
+        },
+    ));
 
     if role == MessageRole::User && user_message_action.is_none() {
         let composer = composer.clone();
         let edit_content = content.to_owned();
-        items.push(MenuItem::new("Copy to Composer", move |window, cx| {
-            composer.update(cx, |composer, cx| {
-                composer.set_content(edit_content.clone(), cx);
-            });
-            let focus_handle = composer.read(cx).focus();
-            window.focus(&focus_handle, cx);
-        }));
+        items.push(MenuItem::new(
+            tr!("common.copy_to_composer"),
+            move |window, cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.set_content(edit_content.clone(), cx);
+                });
+                let focus_handle = composer.read(cx).focus();
+                window.focus(&focus_handle, cx);
+            },
+        ));
     }
 
     if let Some(code) = fenced_code(content) {
-        items.push(MenuItem::new("Copy Code", move |_, cx| {
+        items.push(MenuItem::new(tr!("common.copy_code"), move |_, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
         }));
     }
@@ -564,7 +609,7 @@ fn message_menu_items(
         let waku = waku.clone();
         items.push(MenuItem::Separator);
         items.push(
-            MenuItem::new("Revert to Here", move |window, cx| {
+            MenuItem::new(tr!("session.revert_to_here_title"), move |window, cx| {
                 let _ = waku.update(cx, |this, cx| {
                     this.begin_message_edit(action.session_id, action.turn_count, window, cx);
                 });
@@ -577,7 +622,7 @@ fn message_menu_items(
         let waku = waku.clone();
         items.push(MenuItem::Separator);
         items.push(
-            MenuItem::new("Fork Task", move |_, cx| {
+            MenuItem::new(tr!("session.fork_task_title"), move |_, cx| {
                 let _ = waku.update(cx, |this, cx| {
                     this.fork_session_from_response(action.session_id, action.turn_count, cx);
                 });
@@ -624,15 +669,19 @@ pub(super) fn activity_summary(activities: &[ActivityItem]) -> String {
         .into_iter()
         .map(|(kind, count)| {
             let (singular, plural) = activity_noun(kind);
-            format!("{count} {}", if count == 1 { singular } else { plural })
+            tr!(
+                "activity.count",
+                count = count,
+                activity = if count == 1 { singular } else { plural }
+            )
         })
         .collect::<Vec<_>>();
     let running = activities.iter().any(|activity| !activity.complete);
-    format!(
-        "{} {}",
-        if running { "Running" } else { "Ran" },
-        parts.join(" · ")
-    )
+    if running {
+        tr!("activity.running", activities = parts.join(" · "))
+    } else {
+        tr!("activity.ran", activities = parts.join(" · "))
+    }
 }
 
 pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
@@ -666,10 +715,10 @@ impl ActivityDisclosureSectionKind {
         }
     }
 
-    pub(super) fn label(self) -> Option<&'static str> {
+    pub(super) fn label(self) -> Option<String> {
         match self {
-            Self::Arguments => Some("Arguments"),
-            Self::Output => Some("Output"),
+            Self::Arguments => Some(tr!("activity.arguments")),
+            Self::Output => Some(tr!("activity.output")),
             Self::Detail => None,
         }
     }
@@ -738,7 +787,7 @@ pub(super) fn activity_preview(activity: &ActivityItem) -> String {
     if (detail.is_empty() || detail.eq_ignore_ascii_case("failed"))
         && !activity.image_urls.is_empty()
     {
-        return "Image output".to_owned();
+        return tr!("activity.image_output");
     }
     detail.to_owned()
 }

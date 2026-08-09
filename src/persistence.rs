@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::blob_store::BlobStore;
 use crate::computer_use::ComputerAppGrant;
+use crate::i18n::AppLanguage;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
     AgentSession, FavoriteModel, InteractionMode, Message, Project, ProviderKind, RuntimeMode,
@@ -69,6 +70,8 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     #[serde(default)]
     pub theme: ThemePreference,
+    #[serde(default)]
+    pub language: AppLanguage,
     #[serde(default = "default_panel_visibility")]
     pub sidebar_visible: bool,
     #[serde(default = "default_panel_visibility")]
@@ -109,6 +112,8 @@ pub struct PersistedState {
     pub favorite_models: Vec<FavoriteModel>,
     #[serde(default)]
     pub theme: ThemePreference,
+    #[serde(default)]
+    pub language: AppLanguage,
     #[serde(default = "default_panel_visibility")]
     pub sidebar_visible: bool,
     #[serde(default = "default_panel_visibility")]
@@ -171,6 +176,7 @@ impl PersistedState {
             last_service_tier: None,
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
+            language: AppLanguage::default(),
             sidebar_visible: true,
             right_panel_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -218,6 +224,7 @@ impl PersistedState {
             last_service_tier: self.last_service_tier.clone(),
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
+            language: self.language,
             sidebar_visible: self.sidebar_visible,
             right_panel_visible: self.right_panel_visible,
             sidebar_width: self.sidebar_width,
@@ -239,6 +246,7 @@ impl PersistedState {
         self.last_service_tier = settings.last_service_tier;
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
+        self.language = settings.language;
         self.sidebar_visible = settings.sidebar_visible;
         self.right_panel_visible = settings.right_panel_visible;
         self.sidebar_width = settings.sidebar_width;
@@ -1458,6 +1466,7 @@ mod tests {
             model: "gpt-5.6-luna".into(),
         });
         state.theme = ThemePreference::Light;
+        state.language = AppLanguage::SimplifiedChinese;
         state.sidebar_visible = false;
         state.right_panel_visible = false;
         state.sidebar_width = 318.0;
@@ -1511,6 +1520,7 @@ mod tests {
         );
         assert_eq!(restored.favorite_models, state.favorite_models);
         assert_eq!(restored.theme, ThemePreference::Light);
+        assert_eq!(restored.language, AppLanguage::SimplifiedChinese);
         assert!(!restored.sidebar_visible);
         assert!(!restored.right_panel_visible);
         assert_eq!(restored.sidebar_width, 318.0);
@@ -1633,6 +1643,7 @@ mod tests {
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.theme = ThemePreference::Light;
+        state.language = AppLanguage::SimplifiedChinese;
         state.sidebar_width = 301.0;
         store.save(&mut state).unwrap();
 
@@ -1644,6 +1655,7 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["sidebar_width"], 301.0);
+        assert_eq!(value["language"], "simplified-chinese");
         // Session history stays in the database, not in the settings file.
         assert!(value.get("sessions").is_none());
         assert!(value.get("projects").is_none());

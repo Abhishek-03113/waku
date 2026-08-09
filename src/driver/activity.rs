@@ -200,6 +200,6 @@ fn non_empty_text(value: String) -> Option<String> {
         return Some(value);
     }
     let mut truncated = value.chars().take(MAX_ACTIVITY_CHARS).collect::<String>();
-    truncated.push_str("\n\n… output truncated");
+    truncated.push_str(&tr!("activity.output_truncated"));
     Some(truncated)
 }

@@ -26,33 +26,33 @@ const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > ComposerInput";
 const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 5] = [
     (
         SettingsPage::General,
-        "General",
+        "settings.general",
         "icons/settings.svg",
-        "general local projects conversations privacy updates automatic sparkle version",
+        "settings.general_keywords",
     ),
     (
         SettingsPage::Appearance,
-        "Appearance",
+        "settings.appearance",
         "icons/appearance.svg",
-        "appearance theme system light dark",
+        "settings.appearance_keywords",
     ),
     (
         SettingsPage::Providers,
-        "Providers",
+        "settings.providers",
         "icons/bot.svg",
-        "providers agents models cli version install detect claude codex cursor opencode amp grok pi",
+        "settings.providers_keywords",
     ),
     (
         SettingsPage::Usage,
-        "Usage",
+        "settings.usage",
         "icons/chart-column.svg",
-        "usage tokens cost spend cache daily chart model breakdown history claude codex",
+        "settings.usage_keywords",
     ),
     (
         SettingsPage::ComputerUse,
-        "Computer Use",
+        "settings.computer_use",
         "icons/cursor-spark.svg",
-        "computer use screen recording accessibility apps control codex",
+        "settings.computer_use_keywords",
     ),
 ];
 
@@ -73,10 +73,14 @@ pub fn init(cx: &mut App) {
 /// already be trimmed and lowercased; when it is empty every page matches.
 pub(super) fn visible_settings_pages(
     query: &str,
-) -> impl Iterator<Item = (SettingsPage, &'static str, &'static str, &'static str)> + '_ {
+) -> impl Iterator<Item = (SettingsPage, String, &'static str)> + '_ {
     SETTINGS_PAGES
         .into_iter()
-        .filter(move |(_, _, _, keywords)| query.is_empty() || keywords.contains(query))
+        .filter_map(move |(page, label_key, icon, keywords_key)| {
+            let label = crate::i18n::translate(label_key);
+            let keywords = crate::i18n::translate(keywords_key).to_lowercase();
+            (query.is_empty() || keywords.contains(query)).then_some((page, label, icon))
+        })
 }
 
 impl Waku {
@@ -114,13 +118,13 @@ impl Waku {
         let query = self.settings_search_query(cx);
         let mut navigation = div().flex().flex_col().gap(px(3.0));
 
-        for (page, label, icon_path, _keywords) in visible_settings_pages(&query) {
+        for (page, label, icon_path) in visible_settings_pages(&query) {
             let selected = current_page == page;
             navigation = navigation.child(
                 div()
                     .id(SharedString::from(format!(
                         "settings-tab-{}",
-                        label.to_ascii_lowercase()
+                        label.to_lowercase()
                     )))
                     .h(px(36.0))
                     .px(px(11.0))
@@ -196,7 +200,7 @@ impl Waku {
                         .hover(|element| element.bg(theme.overlay))
                         .active(|element| element.bg(theme.overlay_strong))
                         .child(icon("icons/arrow-left.svg", 15.0, theme.text_tertiary))
-                        .child("Back")
+                        .child(tr!("settings.back"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.settings_page = None;
                             let focus_handle = this.composer_focus(cx);
@@ -221,7 +225,7 @@ impl Waku {
             .read(cx)
             .content()
             .trim()
-            .to_ascii_lowercase()
+            .to_lowercase()
     }
 
     /// Step the selected page through the rows the search leaves visible,
@@ -299,11 +303,11 @@ impl Waku {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(match page {
-                        SettingsPage::General => "General",
-                        SettingsPage::Providers => "Providers",
-                        SettingsPage::Usage => "Usage",
-                        SettingsPage::ComputerUse => "Computer Use",
-                        SettingsPage::Appearance => "Appearance",
+                        SettingsPage::General => tr!("settings.general"),
+                        SettingsPage::Providers => tr!("settings.providers"),
+                        SettingsPage::Usage => tr!("settings.usage"),
+                        SettingsPage::ComputerUse => tr!("settings.computer_use"),
+                        SettingsPage::Appearance => tr!("settings.appearance"),
                     }),
             )
             .child(match page {
@@ -378,7 +382,7 @@ impl Waku {
                             .text_size(px(13.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("Local by default"),
+                            .child(tr!("settings.local_by_default")),
                     )
                     .child(
                         div()
@@ -386,7 +390,7 @@ impl Waku {
                             .text_size(px(12.5))
                             .line_height(px(18.0))
                             .text_color(theme.text_secondary)
-                            .child("Projects, conversations, and settings are stored on this Mac."),
+                            .child(tr!("settings.local_by_default_description")),
                     ),
             )
             .when(updater_available, |column| {
@@ -440,7 +444,7 @@ impl Waku {
                                         .text_size(px(13.5))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(theme.text)
-                                        .child("Automatic updates"),
+                                        .child(tr!("settings.automatic_updates")),
                                 )
                                 .child(
                                     div()
@@ -448,10 +452,7 @@ impl Waku {
                                         .text_size(px(12.5))
                                         .line_height(px(18.0))
                                         .text_color(theme.text_secondary)
-                                        .child(
-                                            "Check for new versions in the background and \
-                                             offer to install them.",
-                                        ),
+                                        .child(tr!("settings.automatic_updates_description")),
                                 ),
                         )
                         .child(toggle),
@@ -473,18 +474,19 @@ impl Waku {
 
     fn render_appearance_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
-        let selected = self.state.theme;
+        let selected_theme = self.state.theme;
+        let selected_language = self.state.language;
         let weak = cx.entity().downgrade();
-        let handle = self.menu_handle("theme-selector", cx);
-        let selector = dropdown_menu(
+        let theme_handle = self.menu_handle("theme-selector", cx);
+        let theme_selector = dropdown_menu(
             MenuChip::new("theme-selector")
-                .label(selected.label())
+                .label(selected_theme.label())
                 .outlined()
-                .selected(handle.is_open())
+                .selected(theme_handle.is_open())
                 .w(px(116.0))
                 .justify_between(),
             "theme-selector-menu",
-            &handle,
+            &theme_handle,
             MenuAlign::BelowRight,
             move |_| {
                 ThemePreference::ALL
@@ -496,7 +498,35 @@ impl Waku {
                                 this.set_theme_preference(preference, window, cx);
                             });
                         })
-                        .selected(preference == selected)
+                        .selected(preference == selected_theme)
+                    })
+                    .collect()
+            },
+        );
+
+        let weak = cx.entity().downgrade();
+        let language_handle = self.menu_handle("language-selector", cx);
+        let language_selector = dropdown_menu(
+            MenuChip::new("language-selector")
+                .label(selected_language.label())
+                .outlined()
+                .selected(language_handle.is_open())
+                .w(px(116.0))
+                .justify_between(),
+            "language-selector-menu",
+            &language_handle,
+            MenuAlign::BelowRight,
+            move |_| {
+                crate::i18n::AppLanguage::ALL
+                    .into_iter()
+                    .map(|language| {
+                        let weak = weak.clone();
+                        MenuItem::new(language.label(), move |window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_language(language, window, cx);
+                            });
+                        })
+                        .selected(language == selected_language)
                     })
                     .collect()
             },
@@ -505,35 +535,74 @@ impl Waku {
         div()
             .mt(px(15.0))
             .w_full()
-            .min_h(px(60.0))
-            .px(px(20.0))
-            .py(px(12.0))
-            .rounded(px(13.0))
-            .bg(theme.raised)
             .flex()
-            .items_center()
-            .gap(px(24.0))
+            .flex_col()
+            .rounded(px(13.0))
+            .overflow_hidden()
+            .bg(theme.raised)
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
                     .child(
                         div()
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("Theme"),
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("settings.theme")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("settings.theme_description")),
+                            ),
                     )
+                    .child(theme_selector),
+            )
+            .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
                     .child(
                         div()
-                            .mt(px(5.0))
-                            .text_size(px(12.5))
-                            .line_height(px(18.0))
-                            .text_color(theme.text_secondary)
-                            .child("Choose between system, light, or dark themes."),
-                    ),
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("language.title")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("language.description")),
+                            ),
+                    )
+                    .child(language_selector),
             )
-            .child(selector)
             .into_any_element()
     }
 
@@ -563,7 +632,11 @@ impl Waku {
             .opacity(if checking { 0.6 } else { 1.0 })
             .hover(|element| element.bg(theme.overlay))
             .child(icon("icons/rotate-cw.svg", 11.0, theme.text_tertiary))
-            .child(if checking { "Checking…" } else { "Refresh" })
+            .child(if checking {
+                tr!("common.checking")
+            } else {
+                tr!("common.refresh")
+            })
             .on_click(cx.listener(|this, _, _, cx| {
                 this.refresh_provider_detection(None);
                 cx.notify();
@@ -599,12 +672,13 @@ impl Waku {
                     parts.push(path);
                 }
                 if disabled {
-                    parts.push("Disabled for new sessions".to_owned());
+                    parts.push(tr!("providers.disabled_for_new_sessions"));
                 } else if model_count > 0 {
-                    parts.push(format!(
-                        "{model_count} {}",
-                        if model_count == 1 { "model" } else { "models" }
-                    ));
+                    parts.push(if model_count == 1 {
+                        tr!("providers.model_count_one", count = model_count)
+                    } else {
+                        tr!("providers.model_count_many", count = model_count)
+                    });
                 }
                 div()
                     .truncate()
@@ -614,14 +688,10 @@ impl Waku {
                 div()
                     .flex()
                     .items_baseline()
-                    .child("Not detected on PATH as ")
-                    .child(
-                        div()
-                            .font_family(crate::md::render::MONO_FAMILY)
-                            .text_color(theme.text_secondary)
-                            .child(kind.command()),
-                    )
-                    .child(".")
+                    .child(SharedString::from(tr!(
+                        "providers.not_detected_as",
+                        command = kind.command()
+                    )))
                     .into_any_element()
             };
 
@@ -794,7 +864,7 @@ impl Waku {
                                     .text_size(px(13.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child("Coding agents"),
+                                    .child(tr!("providers.coding_agents")),
                             )
                             .child(
                                 div()
@@ -802,11 +872,7 @@ impl Waku {
                                     .text_size(px(12.0))
                                     .line_height(px(18.0))
                                     .text_color(theme.text_secondary)
-                                    .child(
-                                        "Waku drives agent CLIs installed on this Mac. \
-                                         Install or sign in with each agent's own CLI, \
-                                         then refresh.",
-                                    ),
+                                    .child(tr!("providers.description")),
                             ),
                     )
                     .child(
@@ -847,12 +913,10 @@ impl Waku {
             .map(|path| path.display().to_string());
 
         let caption = match (&override_value, full_path) {
-            (Some(_), Some(path)) => format!("Using {path} instead of PATH detection."),
-            (Some(_), None) => {
-                "Nothing runnable at this path. Clear it to detect from PATH.".to_owned()
-            }
-            (None, Some(path)) => format!("Detected at {path}."),
-            (None, None) => format!("Not detected. Waku searches PATH for {}.", kind.command()),
+            (Some(_), Some(path)) => tr!("providers.using_override", path = path),
+            (Some(_), None) => tr!("providers.invalid_override"),
+            (None, Some(path)) => tr!("providers.detected_at", path = path),
+            (None, None) => tr!("providers.searches_path", command = kind.command()),
         };
 
         let reset = div()
@@ -874,7 +938,7 @@ impl Waku {
             .text_size(px(10.5))
             .text_color(theme.text_secondary)
             .hover(|element| element.bg(theme.overlay))
-            .child("Reset")
+            .child(tr!("common.reset"))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.provider_path_input
                     .update(cx, |input, cx| input.clear(cx));
@@ -892,17 +956,16 @@ impl Waku {
                     .text_size(px(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("Binary path"),
+                    .child(tr!("providers.binary_path")),
             )
             .child(
                 div()
                     .text_size(px(10.5))
                     .line_height(px(15.0))
                     .text_color(theme.text_tertiary)
-                    .child(SharedString::from(format!(
-                        "The executable Waku launches for {}. Press enter to apply; \
-                         leave empty to detect from PATH.",
-                        kind.short_name()
+                    .child(SharedString::from(tr!(
+                        "providers.binary_path_description",
+                        provider = kind.short_name()
                     ))),
             )
             .child(
@@ -1051,7 +1114,7 @@ impl Waku {
                     .py(px(12.0))
                     .text_size(px(11.5))
                     .text_color(theme.text_tertiary)
-                    .child("No apps are always allowed. Task-scoped grants stay in memory only."),
+                    .child(tr!("computer_use.no_always_allowed_apps")),
             );
         } else {
             for (index, grant) in self.state.computer_use_allowed_apps.iter().enumerate() {
@@ -1111,7 +1174,7 @@ impl Waku {
                                 .text_size(px(10.5))
                                 .text_color(theme.text_secondary)
                                 .hover(|element| element.bg(theme.overlay).text_color(theme.danger))
-                                .child("Revoke")
+                                .child(tr!("common.revoke"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.revoke_computer_app(&key, cx);
                                 })),
@@ -1144,7 +1207,7 @@ impl Waku {
                                     .text_size(px(13.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child("Let Waku use apps"),
+                                    .child(tr!("computer_use.allow_apps")),
                             )
                             .child(
                                 div()
@@ -1152,9 +1215,7 @@ impl Waku {
                                     .text_size(px(12.0))
                                     .line_height(px(18.0))
                                     .text_color(theme.text_secondary)
-                                    .child(
-                                        "Computer Use is available with Codex, OpenCode, Grok, and Pi.",
-                                    ),
+                                    .child(tr!("computer_use.availability")),
                             ),
                     )
                     .child(
@@ -1167,17 +1228,19 @@ impl Waku {
                             .cursor_default()
                             .bg(if enabled { theme.inverse } else { theme.inset })
                             .border_1()
-                            .border_color(if enabled { theme.inverse } else { theme.border_strong })
+                            .border_color(if enabled {
+                                theme.inverse
+                            } else {
+                                theme.border_strong
+                            })
                             .flex()
                             .items_center()
                             .when(enabled, |element| element.justify_end())
-                            .child(
-                                div()
-                                    .w(px(14.0))
-                                    .h(px(14.0))
-                                    .rounded_full()
-                                    .bg(if enabled { theme.on_inverse } else { theme.text_tertiary }),
-                            )
+                            .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if enabled {
+                                theme.on_inverse
+                            } else {
+                                theme.text_tertiary
+                            }))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set_computer_use_enabled(!enabled, cx);
                             })),
@@ -1194,58 +1257,58 @@ impl Waku {
                             .text_size(px(13.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("macOS access"),
+                            .child(tr!("computer_use.macos_access")),
                     )
                     .child(
                         div()
                             .mt(px(4.0))
                             .text_size(px(11.5))
                             .text_color(theme.text_secondary)
-                            .child(SharedString::from(format!(
-                                "Grant access to {helper_name}, Waku's isolated control helper."
+                            .child(SharedString::from(tr!(
+                                "computer_use.helper_access",
+                                helper = helper_name
                             ))),
                     )
                     .child(permission_status_row(
-                        "Screen Recording",
-                        "Captures only the approved app window.",
+                        tr!("computer_use.screen_recording"),
+                        tr!("computer_use.screen_recording_description"),
                         permissions.screen_recording,
                         "screen-recording-settings",
                         theme,
                         cx,
                     ))
                     .child(permission_status_row(
-                        "Accessibility",
-                        "Posts pointer and keyboard events after approval.",
+                        tr!("computer_use.accessibility"),
+                        tr!("computer_use.accessibility_description"),
                         permissions.accessibility,
                         "accessibility-settings",
                         theme,
                         cx,
                     ))
                     .child(
-                        div()
-                            .mt(px(11.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .id("recheck-computer-permissions")
-                                    .h(px(28.0))
-                                    .px(px(11.0))
-                                    .rounded(px(7.0))
-                                    .border_1()
-                                    .border_color(theme.border_strong)
-                                    .text_color(theme.text_secondary)
-                                    .flex()
-                                    .items_center()
-                                    .cursor_default()
-                                    .text_size(px(10.5))
-                                    .opacity(if pending { 0.6 } else { 1.0 })
-                                    .child(if pending { "Checking…" } else { "Recheck" })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.request_computer_permissions(false, cx);
-                                    })),
-                            ),
+                        div().mt(px(11.0)).flex().items_center().gap(px(8.0)).child(
+                            div()
+                                .id("recheck-computer-permissions")
+                                .h(px(28.0))
+                                .px(px(11.0))
+                                .rounded(px(7.0))
+                                .border_1()
+                                .border_color(theme.border_strong)
+                                .text_color(theme.text_secondary)
+                                .flex()
+                                .items_center()
+                                .cursor_default()
+                                .text_size(px(10.5))
+                                .opacity(if pending { 0.6 } else { 1.0 })
+                                .child(if pending {
+                                    tr!("common.checking")
+                                } else {
+                                    tr!("common.recheck")
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.request_computer_permissions(false, cx);
+                                })),
+                        ),
                     ),
             )
             .child(
@@ -1259,14 +1322,14 @@ impl Waku {
                             .text_size(px(13.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("Always allowed apps"),
+                            .child(tr!("computer_use.always_allowed_apps")),
                     )
                     .child(
                         div()
                             .mt(px(4.0))
                             .text_size(px(11.5))
                             .text_color(theme.text_secondary)
-                            .child("Waku pins these grants to the app's bundle ID and signing team."),
+                            .child(tr!("computer_use.always_allowed_apps_description")),
                     )
                     .child(allowed_apps),
             )
@@ -1396,6 +1459,63 @@ impl Waku {
         self.save();
         cx.notify();
     }
+
+    fn set_language(
+        &mut self,
+        language: crate::i18n::AppLanguage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.language == language {
+            return;
+        }
+
+        self.state.language = language;
+        crate::i18n::set_language(language);
+
+        self.composer.update(cx, |input, cx| {
+            input.set_placeholder(tr!("input.do_anything"), cx)
+        });
+        self.model_search.update(cx, |input, cx| {
+            input.set_placeholder(tr!("input.search_models"), cx)
+        });
+        self.branch_search.update(cx, |input, cx| {
+            input.set_placeholder(tr!("input.search_branches"), cx)
+        });
+        self.branch_create_input.update(cx, |input, cx| {
+            input.set_placeholder(tr!("input.new_branch_name"), cx)
+        });
+        self.settings_search.update(cx, |input, cx| {
+            input.set_placeholder(tr!("settings.search"), cx)
+        });
+        self.provider_path_input.update(cx, |input, cx| {
+            input.set_placeholder(tr!("input.detected_automatically"), cx)
+        });
+        self.usage_project_filter.update(cx, |input, cx| {
+            input.set_placeholder(tr!("input.filter_projects"), cx)
+        });
+        self.refresh_file_search_localized_text(cx);
+        for browser in self.right_panel_browsers.values() {
+            browser.update(cx, |browser, cx| browser.refresh_localized_text(cx));
+        }
+        for terminal in self.right_panel_terminals.values() {
+            terminal.update(cx, |terminal, cx| terminal.refresh_localized_text(cx));
+        }
+        for probe in &mut self.probes {
+            probe.models = crate::model_catalog::fallback_models(probe.provider);
+        }
+        self.refresh_provider_detection(None);
+        self.invalidate_composer_sources(cx);
+
+        let updater_available = cx
+            .try_global::<crate::updater::UpdaterState>()
+            .and_then(|updater| updater.0.as_ref())
+            .is_some();
+        crate::set_app_menus(cx, updater_available);
+        self.save();
+        window.refresh();
+        cx.notify();
+    }
 }
 
 /// "Checked …" caption for the Providers page. Recomputed whenever the page
@@ -1403,17 +1523,17 @@ impl Waku {
 fn detection_checked_label(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
     if seconds < 90 {
-        "Checked just now".to_owned()
+        tr!("providers.checked_just_now")
     } else if seconds < 3600 {
-        format!("Checked {}m ago", seconds / 60)
+        tr!("providers.checked_minutes_ago", count = seconds / 60)
     } else {
-        format!("Checked {}h ago", seconds / 3600)
+        tr!("providers.checked_hours_ago", count = seconds / 3600)
     }
 }
 
 fn permission_status_row(
-    name: &'static str,
-    description: &'static str,
+    name: String,
+    description: String,
     granted: bool,
     id: &'static str,
     theme: Theme,
@@ -1432,7 +1552,7 @@ fn permission_status_row(
             .text_size(px(10.0))
             .text_color(theme.success)
             .child(icon("icons/check.svg", 12.0, theme.success))
-            .child("Access Granted")
+            .child(tr!("computer_use.access_granted"))
     } else {
         div()
             .id(id)
@@ -1447,7 +1567,7 @@ fn permission_status_row(
             .text_size(px(10.0))
             .text_color(theme.text_secondary)
             .hover(|element| element.bg(theme.overlay).text_color(theme.text))
-            .child("Grant Access")
+            .child(tr!("computer_use.grant_access"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.request_computer_permissions(true, cx);
             }))

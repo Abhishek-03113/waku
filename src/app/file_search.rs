@@ -213,6 +213,18 @@ fn revealed_scroll_offset(
 }
 
 impl Waku {
+    pub(super) fn refresh_file_search_localized_text(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &self.file_search else {
+            return;
+        };
+        search
+            .query
+            .update(cx, |input, cx| input.set_placeholder(tr!("input.find"), cx));
+        search.replace.update(cx, |input, cx| {
+            input.set_placeholder(tr!("input.replace"), cx)
+        });
+    }
+
     fn file_search_open(&self) -> bool {
         self.file_search.as_ref().is_some_and(|search| search.open)
     }
@@ -232,7 +244,7 @@ impl Waku {
         let query = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
-                .placeholder("Find")
+                .placeholder(tr!("input.find"))
         });
         cx.subscribe(
             &query,
@@ -248,7 +260,7 @@ impl Waku {
         let replace = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
-                .placeholder("Replace")
+                .placeholder(tr!("input.replace"))
         });
         cx.subscribe(&replace, |this: &mut Self, _, event: &ComposerEvent, cx| {
             if matches!(event, ComposerEvent::Submit(_)) {
@@ -771,14 +783,18 @@ impl Waku {
         let count_label: Option<SharedString> = if query_empty {
             None
         } else if search.invalid {
-            Some("Bad pattern".into())
+            Some(tr!("find.bad_pattern").into())
         } else if !has_matches {
-            Some("No results".into())
+            Some(tr!("find.no_results").into())
         } else {
             let current = search.current.map(|index| index + 1).unwrap_or(0);
             let total = search.matches.len();
             let suffix = if search.limited { "+" } else { "" };
-            Some(SharedString::from(format!("{current} of {total}{suffix}")))
+            Some(SharedString::from(tr!(
+                "find.result_count",
+                current = current,
+                total = format!("{total}{suffix}")
+            )))
         };
         let count_is_bad = !query_empty && (search.invalid || !has_matches);
 
@@ -798,7 +814,7 @@ impl Waku {
                 .child(find_toggle(
                     "find-toggle-case",
                     "icons/case-sensitive.svg",
-                    "Match case (⌥⌘C)",
+                    tr!("find.match_case"),
                     search.case_sensitive,
                     theme,
                     cx.listener(|this, _, _, cx| {
@@ -808,7 +824,7 @@ impl Waku {
                 .child(find_toggle(
                     "find-toggle-word",
                     "icons/whole-word.svg",
-                    "Match whole word (⌥⌘W)",
+                    tr!("find.match_whole_word"),
                     search.whole_word,
                     theme,
                     cx.listener(|this, _, _, cx| {
@@ -818,7 +834,7 @@ impl Waku {
                 .child(find_toggle(
                     "find-toggle-regex",
                     "icons/regex.svg",
-                    "Use regular expression (⌥⌘R)",
+                    tr!("find.use_regex"),
                     search.use_regex,
                     theme,
                     cx.listener(|this, _, _, cx| {
@@ -849,7 +865,7 @@ impl Waku {
             .child(find_bar_button(
                 "find-previous",
                 "icons/arrow-up.svg",
-                "Previous match (⇧Enter)",
+                tr!("find.previous_match"),
                 has_matches,
                 theme,
                 cx.listener(|this, _, _, cx| this.file_search_navigate(true, cx)),
@@ -857,7 +873,7 @@ impl Waku {
             .child(find_bar_button(
                 "find-next",
                 "icons/arrow-down.svg",
-                "Next match (Enter)",
+                tr!("find.next_match"),
                 has_matches,
                 theme,
                 cx.listener(|this, _, _, cx| this.file_search_navigate(false, cx)),
@@ -866,7 +882,7 @@ impl Waku {
             .child(find_bar_button(
                 "find-close",
                 "icons/x.svg",
-                "Close (Esc)",
+                tr!("find.close"),
                 true,
                 theme,
                 cx.listener(|this, _, window, cx| this.close_file_search(window, cx)),
@@ -888,7 +904,7 @@ impl Waku {
                 .child(find_bar_button(
                     "replace-one",
                     "icons/replace.svg",
-                    "Replace (Enter)",
+                    tr!("find.replace"),
                     has_matches,
                     theme,
                     cx.listener(|this, _, _, cx| this.file_search_replace_current(cx)),
@@ -896,7 +912,7 @@ impl Waku {
                 .child(find_bar_button(
                     "replace-all",
                     "icons/replace-all.svg",
-                    "Replace all (⌥⌘Enter)",
+                    tr!("find.replace_all"),
                     has_matches,
                     theme,
                     cx.listener(|this, _, _, cx| this.file_search_replace_all(cx)),
@@ -943,7 +959,7 @@ impl Waku {
                                     }
                                 }))
                                 .tooltip(|window, cx| {
-                                    Tooltip::new("Toggle replace").build(window, cx)
+                                    Tooltip::new(tr!("find.toggle_replace")).build(window, cx)
                                 })
                         })
                         .child(icon(
@@ -1026,7 +1042,7 @@ enum SearchFlagKind {
 fn find_toggle(
     id: &'static str,
     icon_path: &'static str,
-    tooltip_label: &'static str,
+    tooltip_label: String,
     active: bool,
     theme: Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -1060,7 +1076,7 @@ fn find_toggle(
                 theme.text_tertiary
             },
         ))
-        .tooltip(move |window, cx| Tooltip::new(tooltip_label).build(window, cx))
+        .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
         .on_click(move |event, window, cx| {
             cx.stop_propagation();
             on_click(event, window, cx);
@@ -1071,7 +1087,7 @@ fn find_toggle(
 fn find_bar_button(
     id: &'static str,
     icon_path: &'static str,
-    tooltip_label: &'static str,
+    tooltip_label: String,
     enabled: bool,
     theme: Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -1094,7 +1110,7 @@ fn find_bar_button(
                 theme.text_ghost
             },
         ))
-        .tooltip(move |window, cx| Tooltip::new(tooltip_label).build(window, cx))
+        .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
         .when(enabled, |element| {
             element
                 .hover(|element| element.bg(theme.overlay))

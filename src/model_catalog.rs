@@ -14,16 +14,16 @@ const PI_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     match provider {
         ProviderKind::Amp => [
-            ProviderModel::new("low", "Low"),
-            ProviderModel::new("medium", "Medium").default(),
-            ProviderModel::new("high", "High"),
-            ProviderModel::new("ultra", "Ultra"),
+            ProviderModel::new("low", tr!("model_option.low")),
+            ProviderModel::new("medium", tr!("model_option.medium")).default(),
+            ProviderModel::new("high", tr!("model_option.high")),
+            ProviderModel::new("ultra", tr!("model_option.ultra")),
         ]
         .into_iter()
         .map(|model| {
             model.service_tiers(
-                [ProviderModelOption::new("fast", "Fast")
-                    .description("Use Amp's faster serving tier at a higher usage rate.")],
+                [ProviderModelOption::new("fast", tr!("model_option.fast"))
+                    .description(tr!("model_option.amp_fast_description"))],
                 "default",
             )
         })
@@ -43,8 +43,8 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
                     "medium",
                 )
                 .service_tiers(
-                    [ProviderModelOption::new("fast", "Fast")
-                        .description("Faster responses at a higher usage rate.")],
+                    [ProviderModelOption::new("fast", tr!("model_option.fast"))
+                        .description(tr!("model_option.fast_description"))],
                     "default",
                 )
         })
@@ -63,7 +63,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         // Cursor's full catalog is account-specific and exposed by the
         // installed CLI. Auto remains the provider-owned default and keeps
         // older CLIs selectable if model discovery is unavailable.
-        ProviderKind::Cursor => vec![ProviderModel::new("auto", "Auto").default()],
+        ProviderKind::Cursor => {
+            vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
+        }
         ProviderKind::OpenCode => Vec::new(),
         ProviderKind::Grok => {
             vec![ProviderModel::new("grok-build", "Grok Build").default()]
@@ -585,17 +587,16 @@ fn parse_codex_model_response(response: &Value) -> Vec<ProviderModel> {
 
 fn reasoning_effort_label(effort: &str) -> String {
     match effort {
-        "none" => "None",
-        "minimal" => "Minimal",
-        "low" => "Low",
-        "medium" => "Medium",
-        "high" => "High",
-        "xhigh" => "Extra High",
-        "max" => "Max",
-        "ultra" => "Ultra",
-        other => return display_name_from_slug(other),
+        "none" => tr!("model_option.none"),
+        "minimal" => tr!("model_option.minimal"),
+        "low" => tr!("model_option.low"),
+        "medium" => tr!("model_option.medium"),
+        "high" => tr!("model_option.high"),
+        "xhigh" => tr!("model_option.extra_high"),
+        "max" => tr!("model_option.max"),
+        "ultra" => tr!("model_option.ultra"),
+        other => display_name_from_slug(other),
     }
-    .to_owned()
 }
 
 fn reasoning_options<const N: usize>(efforts: [&str; N]) -> Vec<ProviderModelOption> {

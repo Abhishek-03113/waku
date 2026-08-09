@@ -226,7 +226,10 @@ impl ClaudeDriver {
                             if !*writer_turn.lock() {
                                 let _ = writer_events.send(DriverEvent::SteerRejected {
                                     message: text,
-                                    reason: "Claude has no active turn to steer.".into(),
+                                    reason: tr!(
+                                        "errors.provider_no_active_turn",
+                                        provider = "Claude"
+                                    ),
                                 });
                                 continue;
                             }
@@ -241,7 +244,11 @@ impl ClaudeDriver {
                                 Err(error) => {
                                     let _ = writer_events.send(DriverEvent::SteerRejected {
                                         message: text,
-                                        reason: format!("Claude transport write failed: {error}"),
+                                        reason: tr!(
+                                            "errors.provider_transport_write",
+                                            provider = "Claude",
+                                            error = error
+                                        ),
                                     });
                                 }
                             }
@@ -306,14 +313,19 @@ impl ClaudeDriver {
                         CommandMessage::Shutdown => break,
                     };
                     if let Err(error) = written {
-                        let _ = writer_events.send(DriverEvent::Error(format!(
-                            "Claude transport write failed: {error}"
+                        let _ = writer_events.send(DriverEvent::Error(tr!(
+                            "errors.provider_transport_write",
+                            provider = "Claude",
+                            error = error
                         )));
                         // Nothing will settle a turn whose prompt never landed.
                         if std::mem::take(&mut *writer_turn.lock()) {
                             let _ = writer_events.send(DriverEvent::TurnFinished {
                                 success: false,
-                                summary: Some("Claude could not receive the prompt.".into()),
+                                summary: Some(tr!(
+                                    "errors.provider_receive_prompt",
+                                    provider = "Claude"
+                                )),
                             });
                         }
                         break;
@@ -349,8 +361,10 @@ impl ClaudeDriver {
                     && !status.success()
                     && last_visible_stderr.lock().is_none()
                 {
-                    let _ = events.send(DriverEvent::Error(format!(
-                        "Claude Code exited with {status}"
+                    let _ = events.send(DriverEvent::Error(tr!(
+                        "errors.provider_exited",
+                        provider = "Claude Code",
+                        status = status
                     )));
                 }
                 let _ = events.send(DriverEvent::ProcessExited);
@@ -556,8 +570,8 @@ fn handle_message(
                         let wire_title = block
                             .get("name")
                             .and_then(Value::as_str)
-                            .unwrap_or("Tool")
-                            .to_owned();
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| tr!("activity.tool"));
                         let kind = super::support::classify_tool(&wire_title);
                         let title = activity::input_title(block.get("input")).unwrap_or(wire_title);
                         if let Some(id) = &id {
@@ -672,7 +686,8 @@ fn request_permission(
         .get("display_name")
         .or_else(|| request.get("tool_name"))
         .and_then(Value::as_str)
-        .unwrap_or("a tool");
+        .map(str::to_owned)
+        .unwrap_or_else(|| tr!("permission.a_tool"));
     // The agent says why it is asking; that reason is what the answer rests on.
     let detail = request
         .get("description")
@@ -682,23 +697,23 @@ fn request_permission(
             request
                 .get("blocked_path")
                 .and_then(Value::as_str)
-                .map(|path| format!("Blocked path: {path}"))
+                .map(|path| tr!("permission.blocked_path", path = path))
         })
-        .unwrap_or_else(|| format!("The agent wants to run {tool}."));
+        .unwrap_or_else(|| tr!("permission.agent_wants_to_run", tool = tool.as_str()));
     let _ = events.send(DriverEvent::Permission {
         request_id: request_id.to_owned(),
         title: activity::input_title(request.get("input"))
-            .unwrap_or_else(|| format!("Run {tool}?")),
+            .unwrap_or_else(|| tr!("permission.run_tool", tool = tool.as_str())),
         detail,
         options: vec![
             PermissionOption {
                 id: "allow".into(),
-                label: "Allow once".into(),
+                label: tr!("permission.allow_once"),
                 allow: true,
             },
             PermissionOption {
                 id: "deny".into(),
-                label: "Deny".into(),
+                label: tr!("common.deny"),
                 allow: false,
             },
         ],
