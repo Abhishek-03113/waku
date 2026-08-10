@@ -383,6 +383,7 @@ impl Waku {
                 }
             }
             DriverEvent::TurnFinished { success, summary } => {
+                let previous_kinds = self.snapshot_selected_transcript_rows(session_id);
                 runtime.last_driver_error = None;
                 // A settled turn moved the account's rate-limit needles; ask
                 // that provider's plan meter to refresh once its backoff
@@ -451,6 +452,9 @@ impl Waku {
                     // been re-inserted so the same process is reused.
                     self.pending_queue_drains.push(session_id);
                 }
+                if let Some(previous_kinds) = previous_kinds.as_deref() {
+                    self.splice_active_transcript_rows_after_visibility_change(previous_kinds);
+                }
             }
             DriverEvent::Error(error) => {
                 let error = compact_driver_error(&error);
@@ -485,6 +489,7 @@ impl Waku {
                 }
             }
             DriverEvent::ProcessExited => {
+                let previous_kinds = self.snapshot_selected_transcript_rows(session_id);
                 self.finish_streaming_assistant(session_id);
                 self.complete_turn_blocks(session_id);
                 runtime.stream_phase = None;
@@ -513,6 +518,9 @@ impl Waku {
                 }
                 if finished_turn {
                     self.capture_latest_turn_checkpoint_for(session_id);
+                }
+                if let Some(previous_kinds) = previous_kinds.as_deref() {
+                    self.splice_active_transcript_rows_after_visibility_change(previous_kinds);
                 }
                 return false;
             }

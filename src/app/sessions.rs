@@ -770,6 +770,9 @@ impl Waku {
             .find(|session| session.id == session_id)
             .and_then(AgentSession::active_turn_id)
             .is_some();
+        let previous_kinds = has_active_turn
+            .then(|| self.snapshot_selected_transcript_rows(session_id))
+            .flatten();
         self.finish_streaming_assistant(session_id);
         self.complete_turn_blocks(session_id);
         if let Some(runtime) = runtime.as_mut() {
@@ -791,6 +794,9 @@ impl Waku {
         if has_active_turn {
             self.capture_latest_turn_checkpoint_for(session_id);
             self.start_pending_checkpoint_captures(cx);
+        }
+        if let Some(previous_kinds) = previous_kinds.as_deref() {
+            self.splice_active_transcript_rows_after_visibility_change(previous_kinds);
         }
         // A provider runtime owns its Waku JavaScript REPL and Computer Use descendants.
         // Stopping the turn must close that whole process tree so capture,

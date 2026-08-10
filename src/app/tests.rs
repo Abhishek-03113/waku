@@ -421,6 +421,57 @@ fn pending_expansion_reasserts_the_user_message_anchor() {
 }
 
 #[test]
+fn settling_an_anchored_turn_splices_without_resetting_its_prompt() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("hi");
+    session.push_message(MessageRole::Assistant, "Hello.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    let turn_id = session.begin_turn("give me a quick overview");
+    session.status = SessionStatus::Working;
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: session.messages.len(),
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
+            content: "Inspecting the project".into(),
+            started_at_ms: 1_000,
+            finished_at_ms: 2_000,
+        }),
+    });
+    session.push_message(MessageRole::Assistant, "Here is the overview.");
+
+    let running = folded_transcript_row_kinds(&session, &HashSet::new());
+    let anchor_row = running
+        .iter()
+        .position(|kind| *kind == Message(2))
+        .expect("the second prompt is visible");
+    let rows = ListState::new(running.len(), ListAlignment::Top, px(2048.0));
+    rows.scroll_to(gpui::ListOffset {
+        item_ix: anchor_row,
+        offset_in_item: Pixels::ZERO,
+    });
+
+    session.status = SessionStatus::Idle;
+    session.finish_active_turn(TurnStatus::Completed);
+    let settled = folded_transcript_row_kinds(&session, &HashSet::new());
+    let (range, new_count) = transcript_row_splice(&running, &settled)
+        .expect("settlement folds the live work and removes its working row");
+
+    assert!(
+        range.start > anchor_row,
+        "only rows after the anchored prompt should be folded"
+    );
+    rows.splice(range, new_count);
+    assert_eq!(rows.item_count(), settled.len());
+    let retained_anchor = rows.logical_scroll_top();
+    assert_eq!(
+        retained_anchor.item_ix, anchor_row,
+        "an exact settlement splice must retain the sent-row anchor"
+    );
+    assert_eq!(retained_anchor.offset_in_item, Pixels::ZERO);
+}
+
+#[test]
 fn only_later_user_messages_start_followup_turns() {
     let messages = vec![
         Message::new(MessageRole::User, "first"),

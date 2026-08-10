@@ -144,6 +144,43 @@ impl Waku {
         self.splice_transcript_rows(splice);
     }
 
+    /// Snapshot the rows currently shown for `session_id` before a local state
+    /// transition changes their visibility. Synchronizing first makes the
+    /// snapshot describe the active list even when several provider events
+    /// arrived in the same drain pass.
+    pub(super) fn snapshot_selected_transcript_rows(
+        &self,
+        session_id: Uuid,
+    ) -> Option<Vec<TranscriptRowKind>> {
+        if self.state.selected_session != Some(session_id) {
+            return None;
+        }
+        self.sync_transcript_rows();
+        Some(self.transcript_row_kinds.borrow().clone())
+    }
+
+    /// Reconcile a visibility change against only the list on screen.
+    ///
+    /// Settling a turn folds its live work and removes the working indicator,
+    /// so the visible row count usually shrinks. The generic count-based sync
+    /// handles a shrink with `ListState::reset`, which clears the logical
+    /// scroll position and exposes row zero for one frame before the sent-row
+    /// anchor is restored. An exact splice retains the unchanged measurements
+    /// and GPUI's logical scroll anchor throughout the fold.
+    pub(super) fn splice_active_transcript_rows_after_visibility_change(
+        &self,
+        previous_kinds: &[TranscriptRowKind],
+    ) {
+        self.refresh_transcript_row_kinds();
+        let splice = {
+            let next_kinds = self.transcript_row_kinds.borrow();
+            transcript_row_splice(previous_kinds, &next_kinds)
+        };
+        if let Some((range, new_count)) = splice {
+            self.active_transcript_rows().splice(range, new_count);
+        }
+    }
+
     pub(super) fn selected_transcript_anchor_row(&self) -> Option<usize> {
         let anchor = self.transcript_anchor.get()?;
         let session = self.selected_session()?;
