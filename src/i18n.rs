@@ -154,7 +154,7 @@ mod tests {
         );
         assert_eq!(
             &*rust_i18n::t!("session.rewound", locale = "zh-CN", turn = 3),
-            "已回退到第 3 轮任务之前。"
+            "已回退到第 3 轮任务之前"
         );
     }
 

@@ -945,8 +945,19 @@ impl StateStore {
         {
             live.insert(session.id);
             // A skeleton's empty transcript means "not fetched", not "empty".
-            // Writing one would erase the stored history.
+            // Its promoted list columns may still have changed (for example,
+            // an inactive sidebar row was renamed), so update only those and
+            // leave the detail and message rows untouched.
             if !session.detail_loaded {
+                if state.dirty_sessions.contains(&session.id) {
+                    transaction
+                        .execute(
+                            UPSERT_SESSION,
+                            rusqlite::params_from_iter(session_params(session)),
+                        )
+                        .map_err(to_io_error)?;
+                    storage.persisted_sessions.insert(session.id);
+                }
                 continue;
             }
             if !state.dirty_sessions.contains(&session.id)
@@ -1753,6 +1764,35 @@ mod tests {
         assert_eq!(
             store_in(&directory).load().unwrap().sessions[0].title,
             "marked"
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn renaming_a_skeleton_updates_metadata_without_erasing_its_transcript() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Keep this transcript");
+        state.sessions[0].push_message(MessageRole::Assistant, "still here");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        assert!(!restored.sessions[0].detail_loaded);
+        assert!(restored.session_mut(id).unwrap().set_title("Renamed task"));
+        reopened.save(&mut restored).unwrap();
+
+        let checked = load_hydrated(&store_in(&directory));
+        assert_eq!(checked.sessions[0].title, "Renamed task");
+        assert!(
+            checked.sessions[0]
+                .messages
+                .iter()
+                .any(|message| message.content == "still here")
         );
 
         fs::remove_dir_all(directory).ok();

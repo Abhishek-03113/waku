@@ -122,8 +122,8 @@ command_palette.no_results:
   en: No matching tasks or commands
   zh-CN: 未找到匹配的任务或命令
 command_palette.no_results_hint:
-  en: Try a task title, message, project, setting, or command.
-  zh-CN: 可尝试搜索任务标题、消息、项目、设置或命令。
+  en: Try a task title, message, project, setting, or command
+  zh-CN: 可尝试搜索任务标题、消息、项目、设置或命令
 
 language.title:
   en: Language
@@ -132,8 +132,8 @@ language.system:
   en: System
   zh-CN: 跟随系统
 language.description:
-  en: Choose the language used throughout Waku.
-  zh-CN: 选择 Waku 的界面语言。
+  en: Choose the language used throughout Waku
+  zh-CN: 选择 Waku 的界面语言
 
 settings.general:
   en: General
@@ -175,8 +175,8 @@ settings.theme:
   en: Theme
   zh-CN: 主题
 settings.theme_description:
-  en: Choose between system, light, or dark themes.
-  zh-CN: 选择跟随系统、浅色或深色主题。
+  en: Choose between system, light, or dark themes
+  zh-CN: 选择跟随系统、浅色或深色主题
 settings.theme_system:
   en: System
   zh-CN: 跟随系统
@@ -235,21 +235,21 @@ settings.local_by_default:
   en: Local by default
   zh-CN: 默认存储在本地
 settings.local_by_default_description:
-  en: Projects, conversations, and settings are stored on this Mac.
-  zh-CN: 项目、对话和设置均存储在这台 Mac 上。
+  en: Projects, conversations, and settings are stored on this Mac
+  zh-CN: 项目、对话和设置均存储在这台 Mac 上
 settings.automatic_updates:
   en: Automatic updates
   zh-CN: 自动更新
 settings.automatic_updates_description:
-  en: Check for new versions in the background and offer to install them.
-  zh-CN: 在后台检查新版本，并在发现更新时提示安装。
+  en: Check for new versions in the background and offer to install them
+  zh-CN: 在后台检查新版本，并在发现更新时提示安装
 
 providers.coding_agents:
   en: Coding agents
   zh-CN: 编程智能体
 providers.description:
-  en: Waku drives agent CLIs installed on this Mac. Install or sign in with each agent's own CLI, then refresh.
-  zh-CN: Waku 调用安装在这台 Mac 上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新。
+  en: Waku drives agent CLIs installed on this Mac. Install or sign in with each agent's own CLI, then refresh
+  zh-CN: Waku 调用安装在这台 Mac 上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
 providers.disabled_for_new_tasks:
   en: Disabled for new tasks
   zh-CN: 已对新任务停用
@@ -260,26 +260,26 @@ providers.model_count_many:
   en: "%{count} models"
   zh-CN: "%{count} 个模型"
 providers.not_detected_as:
-  en: Not detected on PATH as %{command}.
-  zh-CN: 未在 PATH 中找到 %{command}。
+  en: Not detected on PATH as %{command}
+  zh-CN: 未在 PATH 中找到 %{command}
 providers.using_override:
-  en: Using %{path} instead of PATH detection.
-  zh-CN: 正在使用 %{path}，不再从 PATH 自动检测。
+  en: Using %{path} instead of PATH detection
+  zh-CN: 正在使用 %{path}，不再从 PATH 自动检测
 providers.invalid_override:
-  en: Nothing runnable at this path. Clear it to detect from PATH.
-  zh-CN: 此路径下没有可执行文件。清空后可恢复从 PATH 自动检测。
+  en: Nothing runnable at this path. Clear it to detect from PATH
+  zh-CN: 此路径下没有可执行文件。清空后可恢复从 PATH 自动检测
 providers.detected_at:
-  en: Detected at %{path}.
-  zh-CN: 已在 %{path} 检测到。
+  en: Detected at %{path}
+  zh-CN: 已在 %{path} 检测到
 providers.searches_path:
-  en: Waku did not detect %{command} in PATH.
-  zh-CN: Waku 未在 PATH 中找到 %{command}。
+  en: Waku did not detect %{command} in PATH
+  zh-CN: Waku 未在 PATH 中找到 %{command}
 providers.binary_path:
   en: Binary path
   zh-CN: 可执行文件路径
 providers.binary_path_description:
-  en: The executable Waku launches for %{provider}. Press Return to apply; leave empty to detect from PATH.
-  zh-CN: Waku 用于启动 %{provider} 的可执行文件。按 Return 应用；留空则从 PATH 自动检测。
+  en: The executable Waku launches for %{provider}. Press Return to apply; leave empty to detect from PATH
+  zh-CN: Waku 用于启动 %{provider} 的可执行文件。按 Return 应用；留空则从 PATH 自动检测
 providers.checked_just_now:
   en: Checked just now
   zh-CN: 刚刚检查过
@@ -294,35 +294,35 @@ computer_use.allow_apps:
   en: Let Waku use apps
   zh-CN: 允许 Waku 操作其他应用
 computer_use.availability:
-  en: Computer Use is available with Codex, OpenCode, Grok, and Pi.
-  zh-CN: Codex、OpenCode、Grok 和 Pi 支持电脑操作功能。
+  en: Computer Use is available with Codex, OpenCode, Grok, and Pi
+  zh-CN: Codex、OpenCode、Grok 和 Pi 支持电脑操作功能
 computer_use.macos_access:
   en: macOS access
   zh-CN: macOS 权限
 computer_use.helper_access:
-  en: Grant access to %{helper}, Waku's isolated control helper.
-  zh-CN: 请向 Waku 的独立控制助手 %{helper} 授予权限。
+  en: Grant access to %{helper}, Waku's isolated control helper
+  zh-CN: 请向 Waku 的独立控制助手 %{helper} 授予权限
 computer_use.screen_recording:
   en: Screen Recording
   zh-CN: 屏幕录制
 computer_use.screen_recording_description:
-  en: Captures only the approved app window.
-  zh-CN: 仅捕捉获准操作的应用窗口。
+  en: Captures only the approved app window
+  zh-CN: 仅捕捉获准操作的应用窗口
 computer_use.accessibility:
   en: Accessibility
   zh-CN: 辅助功能
 computer_use.accessibility_description:
-  en: Posts pointer and keyboard events after approval.
-  zh-CN: 获得批准后发送鼠标与键盘操作。
+  en: Posts pointer and keyboard events after approval
+  zh-CN: 获得批准后发送鼠标与键盘操作
 computer_use.always_allowed_apps:
   en: Always allowed apps
   zh-CN: 始终允许的应用
 computer_use.always_allowed_apps_description:
-  en: Waku pins these grants to the app's bundle ID and signing team.
-  zh-CN: Waku 会将授权绑定到应用的 Bundle ID 和签名团队。
+  en: Waku pins these grants to the app's bundle ID and signing team
+  zh-CN: Waku 会将授权绑定到应用的 Bundle ID 和签名团队
 computer_use.no_always_allowed_apps:
-  en: No apps are always allowed. Task-scoped grants stay in memory only.
-  zh-CN: 尚未始终允许任何应用。仅限当前任务的授权只会保存在内存中。
+  en: No apps are always allowed. Task-scoped grants stay in memory only
+  zh-CN: 尚未始终允许任何应用。仅限当前任务的授权只会保存在内存中
 computer_use.access_granted:
   en: Access Granted
   zh-CN: 已授权
@@ -339,6 +339,9 @@ common.settings:
 common.remove:
   en: Remove
   zh-CN: 移除
+common.rename:
+  en: Rename
+  zh-CN: 重命名
 
 session.new_task:
   en: New task
@@ -410,8 +413,8 @@ onboarding.open_project_to_begin:
   en: Open a project to begin
   zh-CN: 打开一个项目即可开始
 onboarding.description:
-  en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this Mac.
-  zh-CN: Waku 会在你选择的文件夹中运行编程智能体。代码、任务和历史记录都保留在这台 Mac 上。
+  en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this Mac
+  zh-CN: Waku 会在你选择的文件夹中运行编程智能体。代码、任务和历史记录都保留在这台 Mac 上
 onboarding.open_project_folder:
   en: Open project folder…
   zh-CN: 打开项目文件夹…
@@ -787,20 +790,20 @@ mode.full_access:
   en: Full access
   zh-CN: 完全访问
 mode.plan_description:
-  en: Inspect and plan without making changes.
-  zh-CN: 仅检查并制定计划，不进行任何修改。
+  en: Inspect and plan without making changes
+  zh-CN: 仅检查并制定计划，不进行任何修改
 mode.supervised_description:
-  en: Ask before commands and file changes.
-  zh-CN: 执行命令或修改文件前先征求许可。
+  en: Ask before commands and file changes
+  zh-CN: 执行命令或修改文件前先征求许可
 mode.auto_accept_edits_description:
-  en: Auto-approve edits, ask before other actions.
-  zh-CN: 自动批准文件修改，执行其他操作前先询问。
+  en: Auto-approve edits, ask before other actions
+  zh-CN: 自动批准文件修改，执行其他操作前先询问
 mode.auto_description:
-  en: An AI reviewer approves routine actions; risky ones still ask.
-  zh-CN: 由 AI 审核并批准常规操作；高风险操作仍会询问。
+  en: An AI reviewer approves routine actions; risky ones still ask
+  zh-CN: 由 AI 审核并批准常规操作；高风险操作仍会询问
 mode.full_access_description:
-  en: Allow commands and edits without prompts.
-  zh-CN: 无需确认即可执行命令和修改文件。
+  en: Allow commands and edits without prompts
+  zh-CN: 无需确认即可执行命令和修改文件
 
 computer_use.allow_for_task:
   en: Allow for task
@@ -812,17 +815,17 @@ computer_use.allow_control:
   en: Allow Waku to control %{app}?
   zh-CN: 允许 Waku 控制“%{app}”吗？
 computer_use.screenshot_shared:
-  en: A screenshot of this window will be shared with the active Codex model.
-  zh-CN: 此窗口的截图将发送给当前使用的 Codex 模型。
+  en: A screenshot of this window will be shared with the active Codex model
+  zh-CN: 此窗口的截图将发送给当前使用的 Codex 模型
 computer_use.sensitive_action:
-  en: This action can type text or press keys.
-  zh-CN: 此操作可以输入文字或按下按键。
+  en: This action can type text or press keys
+  zh-CN: 此操作可以输入文字或按下按键
 computer_use.bundle_id:
   en: "Bundle ID: %{id}"
   zh-CN: "Bundle ID：%{id}"
 computer_use.no_bundle_id:
-  en: This app has no bundle identifier, so it cannot be always allowed.
-  zh-CN: 此应用没有 Bundle ID，因此无法设为始终允许。
+  en: This app has no bundle identifier, so it cannot be always allowed
+  zh-CN: 此应用没有 Bundle ID，因此无法设为始终允许
 computer_use.stopped:
   en: Stopped
   zh-CN: 已停止
@@ -864,8 +867,8 @@ permission.blocked_path:
   en: "Blocked path: %{path}"
   zh-CN: "路径已被阻止：%{path}"
 permission.agent_wants_to_run:
-  en: The agent wants to run %{tool}.
-  zh-CN: 智能体想要运行 %{tool}。
+  en: The agent wants to run %{tool}
+  zh-CN: 智能体想要运行 %{tool}
 permission.run_tool:
   en: Run %{tool}?
   zh-CN: 是否运行 %{tool}？
@@ -873,14 +876,14 @@ permission.allow_named_permission:
   en: Allow %{permission}?
   zh-CN: 是否授予“%{permission}”权限？
 permission.agent_asks_for_named_permission:
-  en: The agent is asking for the %{permission} permission.
-  zh-CN: 智能体正在请求“%{permission}”权限。
+  en: The agent is asking for the %{permission} permission
+  zh-CN: 智能体正在请求“%{permission}”权限
 permission.agent_asks_for_permission:
-  en: The agent is asking for permission.
-  zh-CN: 智能体正在请求权限。
+  en: The agent is asking for permission
+  zh-CN: 智能体正在请求权限
 permission.agent_wants_to:
-  en: The agent wants to %{action}.
-  zh-CN: 智能体想要执行“%{action}”。
+  en: The agent wants to %{action}
+  zh-CN: 智能体想要执行“%{action}”
 common.close:
   en: Close
   zh-CN: 关闭
@@ -941,11 +944,11 @@ model_option.fast:
   en: Fast
   zh-CN: 快速
 model_option.amp_fast_description:
-  en: Use Amp's faster serving tier at a higher usage rate.
-  zh-CN: 使用 Amp 的快速服务等级，但会消耗更多用量。
+  en: Use Amp's faster serving tier at a higher usage rate
+  zh-CN: 使用 Amp 的快速服务等级，但会消耗更多用量
 model_option.fast_description:
-  en: Faster responses at a higher usage rate.
-  zh-CN: 更快获得回复，但会消耗更多用量。
+  en: Faster responses at a higher usage rate
+  zh-CN: 更快获得回复，但会消耗更多用量
 
 command_scope.project:
   en: project
@@ -1060,29 +1063,29 @@ project.add_project:
   zh-CN: 添加项目
 
 session.stopped:
-  en: Stopped.
-  zh-CN: 已停止。
+  en: Stopped
+  zh-CN: 已停止
 session.turn_completed:
-  en: Turn completed.
-  zh-CN: 任务已完成。
+  en: Turn completed
+  zh-CN: 任务已完成
 session.stopped_before_response:
-  en: The agent stopped before returning a response.
-  zh-CN: 智能体在返回回复前停止了。
+  en: The agent stopped before returning a response
+  zh-CN: 智能体在返回回复前停止了
 session.codex_exited_before_response:
-  en: Codex app-server exited before returning a response.
-  zh-CN: Codex app-server 在返回回复前退出了。
+  en: Codex app-server exited before returning a response
+  zh-CN: Codex app-server 在返回回复前退出了
 session.steer_rejected:
-  en: The agent couldn't be steered (%{error}); the message was queued as a follow-up.
-  zh-CN: 无法向智能体补充指示（%{error}）；消息已排队，将作为后续消息发送。
+  en: The agent couldn't be steered (%{error}); the message was queued as a follow-up
+  zh-CN: 无法向智能体补充指示（%{error}）；消息已排队，将作为后续消息发送
 session.agent_ran_out_of_context:
-  en: The agent ran out of context for this turn.
-  zh-CN: 智能体在本轮任务中耗尽了上下文空间。
+  en: The agent ran out of context for this turn
+  zh-CN: 智能体在本轮任务中耗尽了上下文空间
 session.agent_declined_turn:
-  en: The agent declined this turn.
-  zh-CN: 智能体拒绝执行本轮任务。
+  en: The agent declined this turn
+  zh-CN: 智能体拒绝执行本轮任务
 session.agent_stopped_reason:
-  en: "The agent stopped: %{reason}."
-  zh-CN: "智能体已停止：%{reason}。"
+  en: "The agent stopped: %{reason}"
+  zh-CN: "智能体已停止：%{reason}"
 
 errors.open_session:
   en: "Could not open that session: %{error}"
@@ -1109,8 +1112,8 @@ errors.save_local_state:
   en: "Could not save local state: %{error}"
   zh-CN: "无法保存本地状态：%{error}"
 errors.task_project_not_found:
-  en: The task's project could not be found.
-  zh-CN: 找不到该任务所属的项目。
+  en: The task's project could not be found
+  zh-CN: 找不到该任务所属的项目
 errors.provider_native_session_unavailable:
   en: "%{provider}'s native session is unavailable"
   zh-CN: "%{provider} 的原生会话不可用"
@@ -1118,14 +1121,14 @@ errors.provider_native_thread_unavailable:
   en: "%{provider}'s native thread is unavailable"
   zh-CN: "%{provider} 的原生线程不可用"
 errors.provider_native_cursor_unavailable:
-  en: "%{provider}'s native session cursor is unavailable."
-  zh-CN: "%{provider} 的原生会话位置不可用。"
+  en: "%{provider}'s native session cursor is unavailable"
+  zh-CN: "%{provider} 的原生会话位置不可用"
 errors.provider_native_thread_cursor_unavailable:
-  en: "%{provider}'s native thread cursor is unavailable."
-  zh-CN: "%{provider} 的原生线程位置不可用。"
+  en: "%{provider}'s native thread cursor is unavailable"
+  zh-CN: "%{provider} 的原生线程位置不可用"
 errors.provider_waku_task_unavailable:
-  en: "%{provider}'s Waku task is unavailable."
-  zh-CN: "%{provider} 对应的 Waku 任务不可用。"
+  en: "%{provider}'s Waku task is unavailable"
+  zh-CN: "%{provider} 对应的 Waku 任务不可用"
 errors.provider_not_installed:
   en: "%{provider} is not installed"
   zh-CN: "尚未安装 %{provider}"
@@ -1151,14 +1154,14 @@ errors.restore_checkpoint:
   en: "Could not restore the checkpoint: %{error}"
   zh-CN: "无法恢复检查点：%{error}"
 errors.restore_checkpoint_and_safety:
-  en: "Checkpoint restore failed (%{error}); safety restore also failed (%{restore_error}). Recovery ref retained at %{safety_ref}."
-  zh-CN: "检查点恢复失败（%{error}），安全快照也未能恢复（%{restore_error}）。恢复引用已保留在 %{safety_ref}。"
+  en: "Checkpoint restore failed (%{error}); safety restore also failed (%{restore_error}). Recovery ref retained at %{safety_ref}"
+  zh-CN: "检查点恢复失败（%{error}），安全快照也未能恢复（%{restore_error}）。恢复引用已保留在 %{safety_ref}"
 errors.rollback_rejected_workspace_restored:
   en: "The provider rejected the rollback, so the workspace was restored: %{error}"
   zh-CN: "服务商拒绝回退，工作区已恢复：%{error}"
 errors.rollback_and_safety_failed:
-  en: "Provider rollback failed (%{error}) and the safety snapshot could not be restored (%{restore_error}). Recovery ref retained at %{safety_ref}."
-  zh-CN: "服务商回退失败（%{error}），安全快照也未能恢复（%{restore_error}）。恢复引用已保留在 %{safety_ref}。"
+  en: "Provider rollback failed (%{error}) and the safety snapshot could not be restored (%{restore_error}). Recovery ref retained at %{safety_ref}"
+  zh-CN: "服务商回退失败（%{error}），安全快照也未能恢复（%{restore_error}）。恢复引用已保留在 %{safety_ref}"
 errors.no_session_selected:
   en: No session selected
   zh-CN: 尚未选择任务
@@ -1181,14 +1184,14 @@ errors.start_agent:
   en: "Could not start the agent: %{error}"
   zh-CN: "无法启动智能体：%{error}"
 errors.provider_no_active_turn:
-  en: "%{provider} has no active turn to steer."
-  zh-CN: "%{provider} 当前没有可补充指示的任务。"
+  en: "%{provider} has no active turn to steer"
+  zh-CN: "%{provider} 当前没有可补充指示的任务"
 errors.provider_transport_write:
   en: "%{provider} transport write failed: %{error}"
   zh-CN: "%{provider} 通信写入失败：%{error}"
 errors.provider_transport_write_short:
-  en: "%{provider} transport write failed."
-  zh-CN: "%{provider} 通信写入失败。"
+  en: "%{provider} transport write failed"
+  zh-CN: "%{provider} 通信写入失败"
 errors.provider_transport_read:
   en: "%{provider} transport read failed: %{error}"
   zh-CN: "%{provider} 通信读取失败：%{error}"
@@ -1241,69 +1244,69 @@ errors.register_computer_use_skill:
   en: Failed to register Waku Computer Use skill with Codex
   zh-CN: 无法向 Codex 注册 Waku 电脑操作技能
 errors.codex_thread_open_incomplete:
-  en: Codex did not finish opening its thread.
-  zh-CN: Codex 未能完成线程打开操作。
+  en: Codex did not finish opening its thread
+  zh-CN: Codex 未能完成线程打开操作
 errors.provider_receive_prompt:
-  en: "%{provider} could not receive the prompt."
-  zh-CN: "%{provider} 未能接收消息。"
+  en: "%{provider} could not receive the prompt"
+  zh-CN: "%{provider} 未能接收消息"
 errors.provider_start_turn:
-  en: "%{provider} could not start the turn."
-  zh-CN: "%{provider} 未能开始任务。"
+  en: "%{provider} could not start the turn"
+  zh-CN: "%{provider} 未能开始任务"
 errors.provider_rejected_steer:
   en: "%{provider} rejected the steer: %{error}"
   zh-CN: "%{provider} 拒绝了补充指示：%{error}"
 errors.provider_stopped_receiving:
-  en: "%{provider} stopped receiving messages."
-  zh-CN: "%{provider} 已停止接收消息。"
+  en: "%{provider} stopped receiving messages"
+  zh-CN: "%{provider} 已停止接收消息"
 errors.provider_initialize_session:
-  en: "%{provider} could not initialize this session."
-  zh-CN: "%{provider} 未能初始化此任务。"
+  en: "%{provider} could not initialize this session"
+  zh-CN: "%{provider} 未能初始化此任务"
 errors.provider_rejected_prompt:
-  en: "%{provider} rejected the prompt before it ran."
-  zh-CN: "%{provider} 在开始处理前拒绝了消息。"
+  en: "%{provider} rejected the prompt before it ran"
+  zh-CN: "%{provider} 在开始处理前拒绝了消息"
 errors.provider_complete_turn:
-  en: "%{provider} could not complete this turn."
-  zh-CN: "%{provider} 未能完成本轮任务。"
+  en: "%{provider} could not complete this turn"
+  zh-CN: "%{provider} 未能完成本轮任务"
 errors.pi_reported_error:
   en: Pi reported an error
   zh-CN: Pi 报告了错误
 
 session.response_unavailable:
-  en: That response is no longer available.
-  zh-CN: 该回复已不可用。
+  en: That response is no longer available
+  zh-CN: 该回复已不可用
 session.response_cannot_fork:
-  en: That response cannot be forked right now.
-  zh-CN: 目前无法从该回复派生任务。
+  en: That response cannot be forked right now
+  zh-CN: 目前无法从该回复派生任务
 session.response_fork_in_progress:
-  en: Wait for the task fork to finish before removing its source task.
-  zh-CN: 请等待任务派生完成后再移除原任务。
+  en: Wait for the task fork to finish before removing its source task
+  zh-CN: 请等待任务派生完成后再移除原任务
 session.response_cannot_copy:
-  en: That response could not be copied into a new task.
-  zh-CN: 无法将该回复复制到新任务中。
+  en: That response could not be copied into a new task
+  zh-CN: 无法将该回复复制到新任务中
 session.forked_with_checkpoint_warning:
   en: "Forked task; some Git checkpoints could not be copied: %{error}"
   zh-CN: "任务已派生，但部分 Git 检查点未能复制：%{error}"
 session.forked_from_response:
-  en: Forked task from this response.
-  zh-CN: 已从该回复派生新任务。
+  en: Forked task from this response
+  zh-CN: 已从该回复派生新任务
 session.message_not_editable:
-  en: That message is not editable right now.
-  zh-CN: 目前无法编辑该消息。
+  en: That message is not editable right now
+  zh-CN: 目前无法编辑该消息
 session.edited_message_empty:
-  en: The edited message cannot be empty.
-  zh-CN: 编辑后的消息不能为空。
+  en: The edited message cannot be empty
+  zh-CN: 编辑后的消息不能为空
 session.message_unavailable:
-  en: That message is no longer available.
-  zh-CN: 该消息已不可用。
+  en: That message is no longer available
+  zh-CN: 该消息已不可用
 session.select_before_rewind:
-  en: Select the task before rewinding its conversation.
-  zh-CN: 请先选择该任务，再回退对话。
+  en: Select the task before rewinding its conversation
+  zh-CN: 请先选择该任务，再回退对话
 session.stop_before_rewind:
-  en: Stop the current turn before rewinding the conversation.
-  zh-CN: 请先停止当前任务，再回退对话。
+  en: Stop the current turn before rewinding the conversation
+  zh-CN: 请先停止当前任务，再回退对话
 session.provider_cannot_rewind:
-  en: "%{provider} cannot safely roll back its native conversation yet."
-  zh-CN: "%{provider} 目前还无法安全回退原生会话。"
+  en: "%{provider} cannot safely roll back its native conversation yet"
+  zh-CN: "%{provider} 目前还无法安全回退原生会话"
 session.pre_turn_checkpoint_missing:
   en: The message's pre-turn Git checkpoint is missing
   zh-CN: 缺少该消息发送前的 Git 检查点
@@ -1367,7 +1370,7 @@ files.no_project_open_description:
   en: Open a project to browse its files
   zh-CN: 打开一个项目即可浏览其中的文件
 files.no_project_is_open:
-  en: No project is open.
+  en: No project is open
   zh-CN: 尚未打开项目
 files.unable_to_edit:
   en: "Unable to edit this file: %{error}"
@@ -1386,8 +1389,8 @@ diff.no_changes:
   en: No changes
   zh-CN: 没有更改
 diff.no_changes_description:
-  en: This source has no file changes to review.
-  zh-CN: 此来源没有可审阅的文件更改。
+  en: This source has no file changes to review
+  zh-CN: 此来源没有可审阅的文件更改
 diff.filter_files:
   en: Filter files…
   zh-CN: 筛选文件…
@@ -1416,8 +1419,8 @@ diff.loading:
   en: Loading changes…
   zh-CN: 正在加载更改…
 diff.loading_description:
-  en: Capturing a consistent Git snapshot for review.
-  zh-CN: 正在捕获一致的 Git 快照以供审阅。
+  en: Capturing a consistent Git snapshot for review
+  zh-CN: 正在捕获一致的 Git 快照以供审阅
 diff.unavailable:
   en: Changes unavailable
   zh-CN: 无法查看更改
@@ -1465,14 +1468,14 @@ browser.browse_web:
   en: Browse the web
   zh-CN: 浏览网页
 browser.start_hint:
-  en: Enter a URL or search above — ⌘L focuses the address bar.
-  zh-CN: 在上方输入网址或搜索内容 — 按 ⌘L 聚焦地址栏。
+  en: Enter a URL or search above — ⌘L focuses the address bar
+  zh-CN: 在上方输入网址或搜索内容 — 按 ⌘L 聚焦地址栏
 browser.unavailable:
   en: Browser unavailable
   zh-CN: 浏览器不可用
 browser.requires_macos:
-  en: The browser surface requires macOS.
-  zh-CN: 浏览器面板仅支持 macOS。
+  en: The browser surface requires macOS
+  zh-CN: 浏览器面板仅支持 macOS
 
 find.bad_pattern:
   en: Bad pattern
@@ -1612,8 +1615,8 @@ usage.full_api_rate_note:
   en: "* if billed at full API rate"
   zh-CN: "* 按完整 API 费率估算"
 usage.sessions_summary:
-  en: Input, cache reads and output across %{count} sessions.
-  zh-CN: 汇总 %{count} 个任务的输入、缓存读取和输出。
+  en: Input, cache reads and output across %{count} sessions
+  zh-CN: 汇总 %{count} 个任务的输入、缓存读取和输出
 usage.raw_token_cost:
   en: RAW TOKEN COST
   zh-CN: 原始令牌费用
@@ -1627,8 +1630,8 @@ usage.token_share:
   en: "%{share} of tokens · %{cost}"
   zh-CN: 占令牌的 %{share} · %{cost}
 usage.no_activity_window:
-  en: No activity in this window.
-  zh-CN: 所选时段内没有活动。
+  en: No activity in this window
+  zh-CN: 所选时段内没有活动
 usage.cost_upper:
   en: COST
   zh-CN: 费用
@@ -1651,8 +1654,8 @@ usage.breakdown:
   en: Breakdown
   zh-CN: 明细
 usage.no_projects_match:
-  en: No projects match the filter.
-  zh-CN: 没有符合筛选条件的项目。
+  en: No projects match the filter
+  zh-CN: 没有符合筛选条件的项目
 usage.by_project:
   en: By project
   zh-CN: 按项目
@@ -1678,8 +1681,8 @@ usage.other_sessions:
   en: Other sessions
   zh-CN: 其他任务
 usage.rates_unavailable:
-  en: Model rates are unavailable, so costs read as unpriced until the rate table loads.
-  zh-CN: 模型费率暂不可用；费率表加载完成前，相关费用会显示为未定价。
+  en: Model rates are unavailable, so costs read as unpriced until the rate table loads
+  zh-CN: 模型费率暂不可用；费率表加载完成前，相关费用会显示为未定价
 usage.total:
   en: Total
   zh-CN: 总计
@@ -1744,8 +1747,8 @@ usage.unpriced:
   en: Unpriced
   zh-CN: 未定价
 usage.no_activity_12_months:
-  en: No activity in the last 12 months.
-  zh-CN: 过去 12 个月内没有活动。
+  en: No activity in the last 12 months
+  zh-CN: 过去 12 个月内没有活动
 usage.last_12_months:
   en: Last 12 months
   zh-CN: 过去 12 个月
@@ -1878,14 +1881,14 @@ usage.resets_date:
   zh-CN: 将于 %{date} 重置
 
 usage_error.signin_cannot_read:
-  en: "%{provider} sign-in can't read usage (HTTP %{status}). Running a %{provider} turn refreshes it."
-  zh-CN: "%{provider} 登录状态无法读取用量（HTTP %{status}）。运行一次 %{provider} 任务后即可刷新。"
+  en: "%{provider} sign-in can't read usage (HTTP %{status}). Running a %{provider} turn refreshes it"
+  zh-CN: "%{provider} 登录状态无法读取用量（HTTP %{status}）。运行一次 %{provider} 任务后即可刷新"
 usage_error.rate_limited:
-  en: The usage endpoint is rate limited right now.
-  zh-CN: 用量接口当前受到速率限制，请稍后再试。
+  en: The usage endpoint is rate limited right now
+  zh-CN: 用量接口当前受到速率限制，请稍后再试
 usage_error.http_status:
-  en: The usage endpoint answered HTTP %{status}.
-  zh-CN: 用量接口返回了 HTTP %{status}。
+  en: The usage endpoint answered HTTP %{status}
+  zh-CN: 用量接口返回了 HTTP %{status}
 usage_error.invalid_json:
   en: The usage endpoint returned invalid JSON
   zh-CN: 用量接口返回了无效的 JSON

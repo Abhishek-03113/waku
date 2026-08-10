@@ -769,6 +769,11 @@ pub struct Waku {
     /// focus whenever GPUI re-renders the list.
     transcript_control_focuses: RefCell<HashMap<String, FocusHandle>>,
     session_navigation: SessionNavigation,
+    /// Sidebar task currently showing its inline rename field.
+    session_rename: Option<Uuid>,
+    /// One stable field reused across sidebar rows so virtualization never
+    /// replaces the focused editor while a rename is in progress.
+    session_rename_input: Entity<ComposerInput>,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -948,6 +953,7 @@ pub use command_palette::init as init_command_palette;
 use components::*;
 pub use settings::init as init_settings_keys;
 use sidebar::SidebarRow;
+pub use sidebar::init as init_sidebar_keys;
 use streaming::*;
 use transcript::*;
 use transcript_view::ConversationNavigationRail;
@@ -1168,6 +1174,7 @@ impl Waku {
                 .search_field()
                 .placeholder(tr!("settings.search"))
         });
+        let session_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
         let provider_path_input = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -1488,6 +1495,15 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
+                &session_rename_input,
+                |this: &mut Self, _, event: &ComposerEvent, cx| match event {
+                    ComposerEvent::Submit(_) => this.commit_session_rename(cx),
+                    ComposerEvent::Edited if this.session_rename.is_some() => cx.notify(),
+                    _ => {}
+                },
+            )
+            .detach();
+            cx.subscribe(
                 &usage_project_filter,
                 |_: &mut Self, _, event: &ComposerEvent, cx| {
                     if matches!(event, ComposerEvent::Edited) {
@@ -1657,6 +1673,8 @@ impl Waku {
                 expanded_changed_files: HashSet::new(),
                 transcript_control_focuses: RefCell::new(HashMap::new()),
                 session_navigation: SessionNavigation::default(),
+                session_rename: None,
+                session_rename_input,
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,
