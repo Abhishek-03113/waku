@@ -524,13 +524,6 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 .gap(px(3.0))
                 .group(group_name.clone())
                 .child(body);
-            if message.streaming {
-                column = column.child(pulse_dot(
-                    format!("stream-{}", message.id),
-                    6.0,
-                    theme.accent,
-                ));
-            }
             if let Some(before_footer) = assistant_before_footer {
                 column = column.child(div().w_full().mt(px(12.0)).mb(px(3.0)).child(before_footer));
             }
