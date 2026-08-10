@@ -11,6 +11,7 @@
 - After an edit, wait for the watcher to finish its successful rebuild and
   validate the freshly relaunched debug app. Only start or recover the watcher
   manually when it is confirmed unavailable.
+- No visual test unless requested.
 
 ## Performance
 

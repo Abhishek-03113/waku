@@ -93,10 +93,12 @@ fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
         .child(group.label())
 }
 
-/// Height of a session row in the virtualized sidebar list, used as the
-/// uniform height hint so the scrollbar is correctly sized before off-screen
-/// rows have been measured.
-const SIDEBAR_SESSION_ROW_HEIGHT: f32 = 51.0;
+/// Height of a session card plus the separation reserved beneath it in the
+/// virtualized sidebar list. Keep the gap inside the list row so measured and
+/// estimated heights stay identical for off-screen sessions.
+const SIDEBAR_SESSION_CARD_HEIGHT: f32 = 51.0;
+const SIDEBAR_SESSION_ROW_GAP: f32 = 1.0;
+const SIDEBAR_SESSION_ROW_HEIGHT: f32 = SIDEBAR_SESSION_CARD_HEIGHT + SIDEBAR_SESSION_ROW_GAP;
 const SIDEBAR_ACTION_ROW_HEIGHT: f32 = 32.0;
 const SIDEBAR_SEARCH_BOTTOM_GAP: f32 = 10.0;
 
@@ -722,7 +724,7 @@ impl Waku {
             }))
             .into_any_element();
         let menu = self.menu_handle(format!("session-{session_id}"), cx);
-        context_menu(
+        let row = context_menu(
             div().w_full().child(row),
             SharedString::from(format!("session-menu-{session_id}")),
             &menu,
@@ -732,7 +734,13 @@ impl Waku {
                     let _ = waku.update(cx, |waku, cx| waku.remove_session(session_id, cx));
                 })]
             },
-        )
+        );
+
+        div()
+            .w_full()
+            .pb(px(SIDEBAR_SESSION_ROW_GAP))
+            .child(row)
+            .into_any_element()
     }
 
     // ── Header ─────────────────────────────────────────────────────────────
