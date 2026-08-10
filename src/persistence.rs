@@ -150,6 +150,24 @@ impl ComposerDrafts {
             ComposerDraftKey::Session(session_id) => self.sessions.remove(&session_id).is_some(),
         }
     }
+
+    /// Move a draft when a composer picker changes the context of the same
+    /// unsent task. An existing destination draft wins so this can never
+    /// discard text that was already parked under another project.
+    pub fn move_to_empty(
+        &mut self,
+        source: ComposerDraftKey,
+        destination: ComposerDraftKey,
+    ) -> bool {
+        if source == destination || self.get(destination).is_some_and(|draft| !draft.is_empty()) {
+            return false;
+        }
+        let Some(draft) = self.get(source).cloned() else {
+            return false;
+        };
+        self.remove(source);
+        self.set(destination, draft)
+    }
 }
 
 /// Small, independently persisted composer state.
@@ -1560,6 +1578,26 @@ mod tests {
 
         assert_eq!(drafts.get_for(&first), Some(&first_draft));
         assert_eq!(drafts.get_for(&second), Some(&second_draft));
+    }
+
+    #[test]
+    fn composer_project_change_moves_a_draft_only_to_an_empty_destination() {
+        let source = ComposerDraftKey::NewSession(Uuid::new_v4());
+        let destination = ComposerDraftKey::NewSession(Uuid::new_v4());
+        let draft = text_draft("keep this prompt");
+        let mut drafts = ComposerDrafts::default();
+        drafts.set(source, draft.clone());
+
+        assert!(drafts.move_to_empty(source, destination));
+        assert!(drafts.get(source).is_none());
+        assert_eq!(drafts.get(destination), Some(&draft));
+
+        let occupied = ComposerDraftKey::NewSession(Uuid::new_v4());
+        let parked = text_draft("already parked here");
+        drafts.set(occupied, parked.clone());
+        assert!(!drafts.move_to_empty(destination, occupied));
+        assert_eq!(drafts.get(destination), Some(&draft));
+        assert_eq!(drafts.get(occupied), Some(&parked));
     }
 
     #[test]

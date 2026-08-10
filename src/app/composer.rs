@@ -2289,7 +2289,7 @@ impl Waku {
                             MenuItem::new(project_name, move |_, cx| {
                                 if Some(project_id) != selected_project_id {
                                     let _ = weak.update(cx, |this, cx| {
-                                        this.select_project(project_id, cx);
+                                        this.select_project_from_composer(project_id, cx);
                                     });
                                 }
                             })
@@ -2311,7 +2311,7 @@ impl Waku {
                         MenuItem::new(tr!("project.no_project"), move |_, cx| {
                             let _ = projectless.update(cx, |this, cx| {
                                 if !this.selected_project().is_some_and(Project::is_projectless) {
-                                    this.create_projectless_session(cx);
+                                    this.create_projectless_session_from_composer(cx);
                                 }
                             });
                         })

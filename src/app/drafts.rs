@@ -66,6 +66,42 @@ impl Waku {
         }
     }
 
+    /// A project choice in the composer changes where the current unsent task
+    /// will run; it is not ordinary task navigation. Carry its draft into a
+    /// blank destination instead of letting session activation clear it.
+    fn move_composer_draft_after_project_change(
+        &mut self,
+        source: Option<crate::persistence::ComposerDraftKey>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = source else {
+            return;
+        };
+        let Some(destination) = self.selected_composer_draft_key() else {
+            return;
+        };
+        if self.composer_drafts.move_to_empty(source, destination) {
+            self.restore_selected_composer_draft(cx);
+            self.schedule_composer_draft_save(cx);
+        }
+    }
+
+    pub(super) fn select_project_from_composer(
+        &mut self,
+        project_id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        let source = self.selected_composer_draft_key();
+        self.select_project(project_id, cx);
+        self.move_composer_draft_after_project_change(source, cx);
+    }
+
+    pub(super) fn create_projectless_session_from_composer(&mut self, cx: &mut Context<Self>) {
+        let source = self.selected_composer_draft_key();
+        self.create_projectless_session(cx);
+        self.move_composer_draft_after_project_change(source, cx);
+    }
+
     /// Submission consumes the active draft before a blank session gains a
     /// durable session identity, so its project-scoped text cannot reappear
     /// the next time the user opens New Task.

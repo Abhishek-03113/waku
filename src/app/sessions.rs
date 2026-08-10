@@ -71,6 +71,12 @@ impl Waku {
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
         }
+        if self
+            .selected_session()
+            .is_some_and(|session| !session.has_started())
+        {
+            self.session_navigation.remember_new_task(session_id);
+        }
         if session_changed {
             self.restore_selected_composer_draft(cx);
             self.restore_right_panel_state(session_id, cx);
@@ -232,7 +238,12 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         self.settings_page = None;
-        if self.selected_project().is_some_and(Project::is_projectless) {
+        if let Some(session_id) = self
+            .session_navigation
+            .remembered_new_task(&self.state.sessions)
+        {
+            self.select_session(session_id, cx);
+        } else if self.selected_project().is_some_and(Project::is_projectless) {
             self.create_projectless_session(cx);
         } else if let Some(project_id) = self.state.selected_project {
             self.create_session_for(project_id, self.state.last_provider, cx);
@@ -986,6 +997,37 @@ impl Waku {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_task_navigation_keeps_the_selected_project_after_visiting_history() {
+        let project_id = Uuid::new_v4();
+        let draft = AgentSession::new(project_id, ProviderKind::Codex);
+        let mut started = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        started.begin_turn("Existing task");
+        let mut navigation = SessionNavigation::default();
+
+        navigation.remember_new_task(draft.id);
+        navigation.visit(Some(draft.id), started.id);
+
+        assert_eq!(
+            navigation.remembered_new_task(&[draft.clone(), started]),
+            Some(draft.id)
+        );
+    }
+
+    #[test]
+    fn new_task_navigation_does_not_reopen_a_started_or_removed_draft() {
+        let project_id = Uuid::new_v4();
+        let mut draft = AgentSession::new(project_id, ProviderKind::Codex);
+        let mut navigation = SessionNavigation::default();
+        navigation.remember_new_task(draft.id);
+
+        draft.begin_turn("Start it");
+        assert_eq!(navigation.remembered_new_task(&[draft.clone()]), None);
+
+        navigation.remove(draft.id);
+        assert_eq!(navigation.new_task, None);
+    }
 
     #[test]
     fn stopping_releases_the_runtimes_that_cannot_be_interrupted_in_place() {

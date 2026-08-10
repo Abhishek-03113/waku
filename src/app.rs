@@ -572,6 +572,9 @@ struct SessionRuntime {
 struct SessionNavigation {
     back: Vec<Uuid>,
     forward: Vec<Uuid>,
+    /// The unstarted task behind the global New Task entry. Viewing another
+    /// session must not make that entry forget the project chosen for it.
+    new_task: Option<Uuid>,
 }
 
 impl SessionNavigation {
@@ -597,6 +600,21 @@ impl SessionNavigation {
     fn remove(&mut self, session_id: Uuid) {
         self.back.retain(|entry| *entry != session_id);
         self.forward.retain(|entry| *entry != session_id);
+        if self.new_task == Some(session_id) {
+            self.new_task = None;
+        }
+    }
+
+    fn remember_new_task(&mut self, session_id: Uuid) {
+        self.new_task = Some(session_id);
+    }
+
+    fn remembered_new_task(&self, sessions: &[AgentSession]) -> Option<Uuid> {
+        self.new_task.filter(|session_id| {
+            sessions
+                .iter()
+                .any(|session| session.id == *session_id && !session.has_started())
+        })
     }
 }
 
@@ -1387,6 +1405,15 @@ impl Waku {
                 .map(|session| session.provider)
                 .unwrap_or(state.last_provider),
         );
+        let mut session_navigation = SessionNavigation::default();
+        if let Some(session_id) = state.selected_session.filter(|session_id| {
+            state
+                .sessions
+                .iter()
+                .any(|session| session.id == *session_id && !session.has_started())
+        }) {
+            session_navigation.remember_new_task(session_id);
+        }
         // Measure visible rows only, with a generous overdraw — the same shape
         // Zed's own agent chat uses. `measure_all` lays out every row in the
         // session on the first frame and again after any structural splice,
@@ -1783,7 +1810,7 @@ impl Waku {
                 expanded_turns: HashSet::new(),
                 expanded_changed_files: HashSet::new(),
                 transcript_control_focuses: RefCell::new(HashMap::new()),
-                session_navigation: SessionNavigation::default(),
+                session_navigation,
                 session_rename: None,
                 session_rename_input,
                 sidebar_collapsed_groups: HashSet::new(),
