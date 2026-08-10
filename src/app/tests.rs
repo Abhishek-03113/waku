@@ -7,15 +7,16 @@ use super::{
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
     TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
     assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
-    compact_driver_error, disclosure_leading_space, fenced_code, fitted_file_tree_width,
-    fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
-    format_working_elapsed, maintain_transcript_anchor, message_starts_followup_turn,
-    navigation_preview_snippet, navigation_rail_height, navigation_rail_scale,
-    navigation_rail_tick_count, navigation_rail_tick_turn, navigation_rail_turn_tick,
-    paused_toast_duration, pop_stream_chunk, session_is_reapable, should_show_navigation_rail,
-    take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
-    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
-    widened_panel_width_for_file_editor, widened_panel_width_for_review,
+    changed_files_inline_message_index, compact_driver_error, disclosure_leading_space,
+    fenced_code, fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
+    format_worked_duration, format_working_elapsed, maintain_transcript_anchor,
+    message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
+    navigation_rail_scale, navigation_rail_tick_count, navigation_rail_tick_turn,
+    navigation_rail_turn_tick, paused_toast_duration, pop_stream_chunk, session_is_reapable,
+    should_show_navigation_rail, take_stream_prefix, transcript_anchor_end_space,
+    transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
+    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
+    widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -691,7 +692,7 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
 }
 
 #[test]
-fn changed_files_close_the_response_and_stay_before_the_next_prompt() {
+fn changed_files_attach_to_the_terminal_response_before_its_footer() {
     let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
     let first_turn = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
@@ -710,14 +711,12 @@ fn changed_files_close_the_response_and_stay_before_the_next_prompt() {
 
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
-        vec![
-            Message(0),
-            Message(1),
-            ChangedFiles(first_turn),
-            Message(2),
-            WorkingIndicator,
-        ],
-        "the immutable turn summary belongs to the answer above it, never the next prompt"
+        vec![Message(0), Message(1), Message(2), WorkingIndicator],
+        "an inline card must not add a second transcript row before the next prompt"
+    );
+    assert_eq!(
+        changed_files_inline_message_index(&session, first_turn),
+        Some(1)
     );
 }
 
@@ -761,10 +760,11 @@ fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
             ChangedFiles(turn_id),
         ]
     );
+    assert_eq!(changed_files_inline_message_index(&session, turn_id), None);
 }
 
 #[test]
-fn changed_files_row_appears_only_for_a_ready_nonempty_checkpoint() {
+fn changed_files_surface_appears_only_for_a_ready_nonempty_checkpoint() {
     let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
@@ -783,6 +783,14 @@ fn changed_files_row_appears_only_for_a_ready_nonempty_checkpoint() {
             deletions: 1,
         }],
     );
+    assert_eq!(
+        changed_files_inline_message_index(&session, turn_id),
+        Some(1)
+    );
+    assert!(
+        !folded_transcript_row_kinds(&session, &HashSet::new()).contains(&ChangedFiles(turn_id)),
+        "a response with visible text hosts the card inside its terminal message"
+    );
     session.turns[0]
         .checkpoint
         .as_mut()
@@ -791,6 +799,7 @@ fn changed_files_row_appears_only_for_a_ready_nonempty_checkpoint() {
     assert!(
         !folded_transcript_row_kinds(&session, &HashSet::new()).contains(&ChangedFiles(turn_id))
     );
+    assert_eq!(changed_files_inline_message_index(&session, turn_id), None);
 }
 
 #[test]
@@ -814,27 +823,25 @@ fn checkpoint_completion_invalidates_the_cached_transcript_rows() {
         transcript_rows_fingerprint(&session, &HashSet::new()),
         before
     );
+    assert_eq!(
+        changed_files_inline_message_index(&session, turn_id),
+        Some(1)
+    );
     assert!(
-        folded_transcript_row_kinds(&session, &HashSet::new()).contains(&ChangedFiles(turn_id))
+        !folded_transcript_row_kinds(&session, &HashSet::new()).contains(&ChangedFiles(turn_id)),
+        "checkpoint completion changes the existing terminal message's height"
     );
 }
 
 #[test]
-fn a_late_checkpoint_is_spliced_before_the_followup_prompt() {
-    let first_turn = Uuid::new_v4();
+fn an_inline_checkpoint_keeps_followup_row_identity() {
     let previous = vec![Message(0), Message(1), Message(2), WorkingIndicator];
-    let with_checkpoint = vec![
-        Message(0),
-        Message(1),
-        ChangedFiles(first_turn),
-        Message(2),
-        WorkingIndicator,
-    ];
+    let with_checkpoint = vec![Message(0), Message(1), Message(2), WorkingIndicator];
 
     assert_eq!(
         transcript_row_splice(&previous, &with_checkpoint),
-        Some((2..2, 1)),
-        "the following prompt keeps its measured row instead of being replaced in place"
+        None,
+        "the card remeasures its terminal message instead of shifting the following prompt"
     );
 }
 

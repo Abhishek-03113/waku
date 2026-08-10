@@ -304,7 +304,12 @@ impl Waku {
     }
 
     pub(super) fn remeasure_changed_files(&self, turn_id: Uuid) {
-        self.remeasure_transcript_row(TranscriptRowKind::ChangedFiles(turn_id));
+        let target = self
+            .selected_session()
+            .and_then(|session| changed_files_inline_message_index(session, turn_id))
+            .map(TranscriptRowKind::Message)
+            .unwrap_or(TranscriptRowKind::ChangedFiles(turn_id));
+        self.remeasure_transcript_row(target);
     }
 
     fn remeasure_transcript_row(&self, target: TranscriptRowKind) {
@@ -328,8 +333,9 @@ pub(super) enum TranscriptRowKind {
     TurnBlock(usize),
     TurnFold(Uuid),
     /// Immutable file stats captured between this turn's pre- and post-turn
-    /// checkpoints. This is a first-class row so expanding a large summary
-    /// remeasures only the card, not the assistant response above it.
+    /// checkpoints. Responses with a visible answer render this inside their
+    /// terminal message; the row remains for interrupted/tool-only turns whose
+    /// entire assistant output folds away.
     ChangedFiles(Uuid),
     /// The live turn's footer — pulsing dots plus "Working for Ns". Present
     /// from the moment the prompt lands until the turn settles, so a provider
@@ -597,6 +603,31 @@ pub(super) fn assistant_response_footer_time(
     Some(completed_at.unwrap_or(message.created_at))
 }
 
+/// The visible terminal answer row that owns both the changed-files card and
+/// the response footer. A turn with no visible answer returns `None`, leaving
+/// its card as a standalone row after the collapsed work disclosure.
+pub(super) fn changed_files_inline_message_index(
+    session: &AgentSession,
+    turn_id: Uuid,
+) -> Option<usize> {
+    let turn = session.turns.iter().find(|turn| turn.id == turn_id)?;
+    if turn.status == TurnStatus::Running
+        || !turn.checkpoint.as_ref().is_some_and(|checkpoint| {
+            checkpoint.status == CheckpointStatus::Ready && !checkpoint.files.is_empty()
+        })
+    {
+        return None;
+    }
+
+    let message_index = session.messages.iter().rposition(|message| {
+        message.role == MessageRole::Assistant && message.turn_id == Some(turn_id)
+    })?;
+    let message = &session.messages[message_index];
+    (!message.content.trim().is_empty()
+        && assistant_response_footer_index(session, message_index) == Some(message_index))
+    .then_some(message_index)
+}
+
 pub(super) fn transcript_row_splice(
     previous: &[TranscriptRowKind],
     next: &[TranscriptRowKind],
@@ -829,12 +860,11 @@ pub(super) fn folded_transcript_row_kinds(
         rows.push(TranscriptRowKind::WorkingIndicator);
     }
 
-    // A file summary closes the response it belongs to. Derive its insertion
-    // point from the already-folded rows: ordinary turns land after their
-    // trailing assistant answer, while an interrupted turn with no answer
-    // still lands after its visible `Worked for …` disclosure. This also keeps
-    // the card before the next user prompt without teaching the raw provider
-    // transcript about a Waku-only presentation row.
+    // A normal response renders its file summary inside the terminal answer,
+    // immediately before that message's footer actions. Only turns without a
+    // visible answer need a standalone row; derive its insertion point from
+    // the already-folded rows so it lands after the visible `Worked for …`
+    // disclosure and before the next user prompt.
     let changed_turns = session
         .turns
         .iter()
@@ -843,6 +873,7 @@ pub(super) fn folded_transcript_row_kinds(
                 && turn.checkpoint.as_ref().is_some_and(|checkpoint| {
                     checkpoint.status == CheckpointStatus::Ready && !checkpoint.files.is_empty()
                 })
+                && changed_files_inline_message_index(session, turn.id).is_none()
         })
         .map(|turn| turn.id)
         .collect::<HashSet<_>>();

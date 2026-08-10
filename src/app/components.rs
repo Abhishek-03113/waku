@@ -332,6 +332,7 @@ pub(super) struct MessageRender<'a> {
     pub(super) message: &'a Message,
     pub(super) assistant_footer_copy_content: Option<String>,
     pub(super) assistant_footer_time: Option<u64>,
+    pub(super) assistant_before_footer: Option<AnyElement>,
     pub(super) copied: bool,
     pub(super) assistant_message_action: Option<AssistantMessageAction>,
     pub(super) user_message_action: Option<UserMessageAction>,
@@ -351,6 +352,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         message,
         assistant_footer_copy_content,
         assistant_footer_time,
+        assistant_before_footer,
         copied,
         assistant_message_action,
         user_message_action,
@@ -527,6 +529,9 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                     6.0,
                     theme.accent,
                 ));
+            }
+            if let Some(before_footer) = assistant_before_footer {
+                column = column.child(div().w_full().mt(px(12.0)).mb(px(3.0)).child(before_footer));
             }
             if let Some(copy_content) = assistant_footer_copy_content {
                 column = column.child(render_message_footer(

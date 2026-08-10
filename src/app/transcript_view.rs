@@ -937,6 +937,11 @@ impl Waku {
                     let assistant_footer_time = self
                         .selected_session()
                         .and_then(|session| assistant_response_footer_time(session, message_index));
+                    let assistant_before_footer = assistant_footer_copy_content
+                        .as_ref()
+                        .and(message.turn_id)
+                        .filter(|_| !message.content.trim().is_empty())
+                        .and_then(|turn_id| self.render_changed_files_row(turn_id, &theme, cx));
                     let assistant_message_action =
                         self.assistant_message_action_for_message(message_index);
                     let user_message_action = self.user_message_action_for_message(message_index);
@@ -970,6 +975,7 @@ impl Waku {
                             message: &message,
                             assistant_footer_copy_content,
                             assistant_footer_time,
+                            assistant_before_footer,
                             copied,
                             assistant_message_action,
                             user_message_action,
@@ -997,9 +1003,9 @@ impl Waku {
                 })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
-            TranscriptRowKind::ChangedFiles(turn_id) => {
-                self.render_changed_files_row(turn_id, &theme, cx)
-            }
+            TranscriptRowKind::ChangedFiles(turn_id) => self
+                .render_changed_files_row(turn_id, &theme, cx)
+                .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::WorkingIndicator => self.render_working_indicator_row(&theme),
         };
         div()
@@ -1047,7 +1053,7 @@ impl Waku {
         turn_id: Uuid,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
         let Some(checkpoint) = self
             .selected_session()
             .and_then(|session| session.turns.iter().find(|turn| turn.id == turn_id))
@@ -1055,7 +1061,7 @@ impl Waku {
             .filter(|checkpoint| checkpoint.status == CheckpointStatus::Ready)
             .filter(|checkpoint| !checkpoint.files.is_empty())
         else {
-            return div().into_any_element();
+            return None;
         };
 
         let files = checkpoint.files.as_slice();
@@ -1295,7 +1301,7 @@ impl Waku {
             );
         }
 
-        card.into_any_element()
+        Some(card.into_any_element())
     }
 
     /// Settled reasoning, tool activity, and interim assistant commentary are

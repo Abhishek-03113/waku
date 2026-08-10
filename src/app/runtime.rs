@@ -985,7 +985,7 @@ impl Waku {
                         }
                     };
                     waku.invalidate_checkpoint_refs();
-                    let mut attached = false;
+                    let mut attached_turn_id = None;
                     if let Some(session) = waku.state.session_mut(session_id)
                         && let Some(turn) = session
                             .turns
@@ -993,17 +993,20 @@ impl Waku {
                             .find(|turn| turn.turn_count == turn_count)
                     {
                         turn.checkpoint = Some(checkpoint);
-                        attached = true;
+                        attached_turn_id = Some(turn.id);
                     }
-                    if attached && selected {
+                    if let Some(turn_id) = attached_turn_id
+                        && selected
+                    {
                         // The next queued prompt can already be visible when
-                        // capture lands. Reconcile by row identity so inserting
-                        // this response's card in the middle does not reuse the
-                        // following prompt's measured height.
+                        // capture lands. Reconcile a standalone card by row
+                        // identity, then remeasure the terminal response when
+                        // the card is hosted inline before its footer.
                         waku.splice_transcript_rows_after_visibility_change(&previous_kinds);
+                        waku.remeasure_changed_files(turn_id);
                     }
                     cx.notify();
-                    if attached {
+                    if attached_turn_id.is_some() {
                         // Let the new transcript row paint before SQLite work.
                         // Without this save, a checkpoint that lands after the
                         // turn's final stream save can disappear on relaunch.
