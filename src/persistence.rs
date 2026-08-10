@@ -32,6 +32,7 @@ use crate::theme::ThemePreference;
 
 const STATE_VERSION: u32 = 5;
 const OLDEST_SUPPORTED_STATE_VERSION: u32 = 1;
+const COMPOSER_DRAFTS_FILENAME: &str = "composer-drafts.json";
 
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
 pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
@@ -50,6 +51,152 @@ fn default_sidebar_width() -> f32 {
 
 fn default_right_panel_width() -> f32 {
     DEFAULT_RIGHT_PANEL_WIDTH
+}
+
+/// One file or directory staged in the composer.
+///
+/// The presentation metadata is stored with the path so restoring a draft
+/// never has to touch the filesystem from a render or session-switch path.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComposerDraftAttachment {
+    pub path: PathBuf,
+    pub mention: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub is_image: bool,
+}
+
+/// Text and staged attachments waiting in one composer.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComposerDraft {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ComposerDraftAttachment>,
+}
+
+impl ComposerDraft {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.attachments.is_empty()
+    }
+}
+
+/// All composer drafts, split by the identity users expect.
+///
+/// A materialized task owns a draft by session id. A still-blank New Task has
+/// no durable session row or stable session id across launches, so it owns a
+/// draft by project id instead.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComposerDrafts {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    new_sessions: HashMap<Uuid, ComposerDraft>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    sessions: HashMap<Uuid, ComposerDraft>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComposerDraftKey {
+    NewSession(Uuid),
+    Session(Uuid),
+}
+
+impl ComposerDraftKey {
+    pub fn for_session(session: &AgentSession) -> Self {
+        if session.has_started() {
+            Self::Session(session.id)
+        } else {
+            Self::NewSession(session.project_id)
+        }
+    }
+}
+
+impl ComposerDrafts {
+    pub fn get_for(&self, session: &AgentSession) -> Option<&ComposerDraft> {
+        self.get(ComposerDraftKey::for_session(session))
+    }
+
+    pub fn get(&self, key: ComposerDraftKey) -> Option<&ComposerDraft> {
+        match key {
+            ComposerDraftKey::NewSession(project_id) => self.new_sessions.get(&project_id),
+            ComposerDraftKey::Session(session_id) => self.sessions.get(&session_id),
+        }
+    }
+
+    /// Install or remove a draft. Returns whether storage changed.
+    pub fn set(&mut self, key: ComposerDraftKey, draft: ComposerDraft) -> bool {
+        let (drafts, id) = match key {
+            ComposerDraftKey::NewSession(project_id) => (&mut self.new_sessions, project_id),
+            ComposerDraftKey::Session(session_id) => (&mut self.sessions, session_id),
+        };
+        if draft.is_empty() {
+            drafts.remove(&id).is_some()
+        } else if drafts.get(&id) == Some(&draft) {
+            false
+        } else {
+            drafts.insert(id, draft);
+            true
+        }
+    }
+
+    pub fn remove(&mut self, key: ComposerDraftKey) -> bool {
+        match key {
+            ComposerDraftKey::NewSession(project_id) => {
+                self.new_sessions.remove(&project_id).is_some()
+            }
+            ComposerDraftKey::Session(session_id) => self.sessions.remove(&session_id).is_some(),
+        }
+    }
+}
+
+/// Small, independently persisted composer state.
+///
+/// Session storage intentionally excludes blank sessions. Keeping drafts in a
+/// separate atomic JSON document preserves that lifecycle and also lets the
+/// app debounce writes onto the background executor without cloning the
+/// transcript database state.
+#[derive(Clone)]
+pub struct ComposerDraftStore {
+    path: PathBuf,
+    latest_write: Arc<Mutex<u64>>,
+}
+
+impl ComposerDraftStore {
+    pub fn for_state_path(state_path: &Path) -> Self {
+        let directory = state_path.parent().unwrap_or_else(|| Path::new("."));
+        Self {
+            path: directory.join(COMPOSER_DRAFTS_FILENAME),
+            latest_write: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    pub fn load(&self) -> io::Result<ComposerDrafts> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ComposerDrafts::default());
+            }
+            Err(error) => return Err(error),
+        };
+        serde_json::from_slice(&bytes).map_err(to_io_error)
+    }
+
+    /// Write a complete snapshot atomically. Older background jobs become
+    /// no-ops if a newer generation reached the store first.
+    pub fn save(&self, drafts: ComposerDrafts, generation: u64) -> io::Result<()> {
+        let data = serde_json::to_vec_pretty(&drafts).map_err(to_io_error)?;
+        let mut latest_write = self.latest_write.lock();
+        if generation < *latest_write {
+            return Ok(());
+        }
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = self.path.with_extension("json.tmp");
+        fs::write(&temporary, data)?;
+        fs::rename(temporary, &self.path)?;
+        *latest_write = generation;
+        Ok(())
+    }
 }
 
 /// Everything except projects and sessions. Small enough to rewrite wholesale
@@ -1333,6 +1480,99 @@ mod tests {
             store.hydrate(session).unwrap();
         }
         state
+    }
+
+    fn text_draft(text: &str) -> ComposerDraft {
+        ComposerDraft {
+            text: text.to_owned(),
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn new_session_drafts_follow_the_project_across_runtime_session_ids() {
+        let project_id = Uuid::new_v4();
+        let first_runtime_session = AgentSession::new(project_id, ProviderKind::Codex);
+        let relaunched_runtime_session = AgentSession::new(project_id, ProviderKind::Codex);
+        assert_ne!(first_runtime_session.id, relaunched_runtime_session.id);
+
+        let mut drafts = ComposerDrafts::default();
+        let draft = text_draft("unfinished new task");
+        assert!(drafts.set(
+            ComposerDraftKey::for_session(&first_runtime_session),
+            draft.clone()
+        ));
+        assert_eq!(
+            drafts.get_for(&relaunched_runtime_session),
+            Some(&draft),
+            "the blank session's transient UUID must not own its draft"
+        );
+    }
+
+    #[test]
+    fn existing_session_drafts_are_isolated_by_session_id() {
+        let project_id = Uuid::new_v4();
+        let mut first = AgentSession::new(project_id, ProviderKind::Codex);
+        let mut second = AgentSession::new(project_id, ProviderKind::Codex);
+        first.begin_turn("first task");
+        second.begin_turn("second task");
+
+        let mut drafts = ComposerDrafts::default();
+        let first_draft = text_draft("follow up one");
+        let second_draft = text_draft("follow up two");
+        drafts.set(ComposerDraftKey::for_session(&first), first_draft.clone());
+        drafts.set(ComposerDraftKey::for_session(&second), second_draft.clone());
+
+        assert_eq!(drafts.get_for(&first), Some(&first_draft));
+        assert_eq!(drafts.get_for(&second), Some(&second_draft));
+    }
+
+    #[test]
+    fn composer_drafts_round_trip_text_and_attachment_metadata() {
+        let directory = temporary_directory();
+        let store = ComposerDraftStore::for_state_path(&directory.join("app.db"));
+        let project_id = Uuid::new_v4();
+        let draft = ComposerDraft {
+            text: "compare these".to_owned(),
+            attachments: vec![ComposerDraftAttachment {
+                path: PathBuf::from("/tmp/reference image.png"),
+                mention: "/tmp/reference image.png".to_owned(),
+                name: "reference image.png".to_owned(),
+                is_dir: false,
+                is_image: true,
+            }],
+        };
+        let mut drafts = ComposerDrafts::default();
+        drafts.set(ComposerDraftKey::NewSession(project_id), draft.clone());
+
+        store.save(drafts, 1).unwrap();
+        let restored = store.load().unwrap();
+        assert_eq!(
+            restored.get(ComposerDraftKey::NewSession(project_id)),
+            Some(&draft)
+        );
+    }
+
+    #[test]
+    fn empty_and_older_composer_drafts_cannot_resurface() {
+        let directory = temporary_directory();
+        let store = ComposerDraftStore::for_state_path(&directory.join("app.db"));
+        let session_id = Uuid::new_v4();
+        let key = ComposerDraftKey::Session(session_id);
+        let mut latest = ComposerDrafts::default();
+        latest.set(key, text_draft("latest"));
+        store.save(latest, 2).unwrap();
+
+        let mut stale = ComposerDrafts::default();
+        stale.set(key, text_draft("stale"));
+        store.save(stale, 1).unwrap();
+        assert_eq!(store.load().unwrap().get(key), Some(&text_draft("latest")));
+
+        let mut removed = store.load().unwrap();
+        assert!(removed.set(key, ComposerDraft::default()));
+        assert!(!removed.set(key, ComposerDraft::default()));
+        store.save(removed, 3).unwrap();
+        assert!(store.load().unwrap().get(key).is_none());
     }
 
     #[test]

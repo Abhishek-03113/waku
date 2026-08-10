@@ -49,7 +49,8 @@ use crate::ui::tooltip::Tooltip;
 
 use crate::browser::BrowserView;
 use crate::persistence::{
-    DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH, PersistedState, StateStore,
+    ComposerDraftStore, ComposerDrafts, DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH,
+    PersistedState, StateStore,
 };
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
@@ -594,6 +595,11 @@ pub struct Waku {
     state: PersistedState,
     store: StateStore,
     composer: Entity<ComposerInput>,
+    /// Drafts are independent of transcript persistence: started tasks key by
+    /// session id, while blank New Task pages key by project id.
+    composer_drafts: ComposerDrafts,
+    composer_draft_store: ComposerDraftStore,
+    composer_draft_save_generation: u64,
     command_palette: command_palette::CommandPaletteUi,
     model_search: Entity<ComposerInput>,
     settings_search: Entity<ComposerInput>,
@@ -972,6 +978,7 @@ mod branches;
 mod command_palette;
 mod components;
 mod composer;
+mod drafts;
 mod file_search;
 mod render;
 mod right_panel;
@@ -1183,7 +1190,10 @@ impl Waku {
 
     pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let store = StateStore::new(StateStore::default_path());
+        let state_path = StateStore::default_path();
+        let store = StateStore::new(state_path.clone());
+        let composer_draft_store = ComposerDraftStore::for_state_path(&state_path);
+        let composer_drafts = composer_draft_store.load().unwrap_or_default();
         let mut state = store.load_or_fresh(cwd);
         crate::i18n::set_language(state.language);
 
@@ -1319,6 +1329,23 @@ impl Waku {
                 }
             }
         }
+        let initial_composer_draft = state
+            .selected_session
+            .and_then(|selected| state.sessions.iter().find(|session| session.id == selected))
+            .and_then(|session| composer_drafts.get_for(session))
+            .cloned()
+            .unwrap_or_default();
+        let crate::persistence::ComposerDraft {
+            text: initial_composer_text,
+            attachments: initial_composer_attachments,
+        } = initial_composer_draft;
+        if !initial_composer_text.is_empty() {
+            composer.update(cx, |input, cx| input.set_content(initial_composer_text, cx));
+        }
+        let composer_attachments = initial_composer_attachments
+            .into_iter()
+            .map(ComposerAttachment::from)
+            .collect();
         let probes = ProviderKind::ALL
             .into_iter()
             .map(
@@ -1442,7 +1469,7 @@ impl Waku {
                                 .then_some(session.id)
                         }) {
                             this.defer_restore_composer_after_fork(session_id, prompt.clone(), cx);
-                        } else if let Some(prompt) = this.submission_with_attachments(prompt) {
+                        } else if let Some(prompt) = this.submission_with_attachments(prompt, cx) {
                             this.submit_prompt(prompt, cx);
                         }
                     }
@@ -1453,19 +1480,42 @@ impl Waku {
                                 .then_some(session.id)
                         }) {
                             this.defer_restore_composer_after_fork(session_id, prompt.clone(), cx);
-                        } else if let Some(prompt) = this.submission_with_attachments(prompt) {
+                        } else if let Some(prompt) = this.submission_with_attachments(prompt, cx) {
                             this.steer_prompt(prompt, cx);
                         }
                     }
-                    ComposerEvent::Edited => cx.notify(),
+                    ComposerEvent::Edited => {
+                        this.schedule_composer_draft_save(cx);
+                        cx.notify();
+                    }
                     ComposerEvent::Focus => {}
                     ComposerEvent::BackspaceOnEmpty => {
                         if this.composer_attachments.pop().is_some() {
+                            this.schedule_composer_draft_save(cx);
                             cx.notify();
                         }
                     }
                 },
             )
+            .detach();
+
+            // A normal Cmd-Q waits briefly for this future, so even an edit
+            // made inside the debounce window is durable before the process
+            // exits. Filesystem work still stays off the UI thread.
+            cx.on_app_quit(|this, cx| {
+                this.capture_current_composer_draft(cx);
+                this.composer_draft_save_generation =
+                    this.composer_draft_save_generation.saturating_add(1);
+                let generation = this.composer_draft_save_generation;
+                let store = this.composer_draft_store.clone();
+                let drafts = this.composer_drafts.clone();
+                let save = cx
+                    .background_executor()
+                    .spawn(async move { store.save(drafts, generation) });
+                async move {
+                    let _ = save.await;
+                }
+            })
             .detach();
 
             // A changed query re-filters the picker rows and renumbers them,
@@ -1624,6 +1674,9 @@ impl Waku {
                 state,
                 store,
                 composer,
+                composer_drafts,
+                composer_draft_store,
+                composer_draft_save_generation: 0,
                 command_palette: command_palette::CommandPaletteUi::new(command_palette_search),
                 model_search,
                 branch_search,
@@ -1708,7 +1761,7 @@ impl Waku {
                 mention_file_index_path: None,
                 composer_sources_stale: false,
                 composer_autocomplete: autocomplete::AutocompleteUi::new(),
-                composer_attachments: Vec::new(),
+                composer_attachments,
                 runtimes: HashMap::new(),
                 submission_preparations: HashSet::new(),
                 response_fork_preparations: HashMap::new(),

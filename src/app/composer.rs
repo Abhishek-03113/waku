@@ -1382,6 +1382,7 @@ impl Waku {
         if !staged {
             return;
         }
+        self.schedule_composer_draft_save(cx);
         let focus = self.composer.read(cx).focus();
         window.focus(&focus, cx);
         cx.notify();
@@ -1389,13 +1390,21 @@ impl Waku {
 
     /// The text a submission sends, with staged chips drained into it —
     /// submitting consumes them. `None` means there is nothing to send.
-    pub(super) fn submission_with_attachments(&mut self, prompt: &str) -> Option<String> {
+    pub(super) fn submission_with_attachments(
+        &mut self,
+        prompt: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
         let mentions = self
             .composer_attachments
             .drain(..)
             .map(|attachment| attachment.mention)
             .collect::<Vec<_>>();
-        merged_submission(prompt, &mentions)
+        let submission = merged_submission(prompt, &mentions);
+        if submission.is_some() {
+            self.discard_current_composer_draft(cx);
+        }
+        submission
     }
 
     /// The staged-attachment chips above the input: a thumbnail tile per
@@ -1480,6 +1489,7 @@ impl Waku {
                             cx.stop_propagation();
                             if index < this.composer_attachments.len() {
                                 this.composer_attachments.remove(index);
+                                this.schedule_composer_draft_save(cx);
                                 cx.notify();
                             }
                         })),
@@ -1740,7 +1750,7 @@ impl Waku {
                                                 let prompt =
                                                     this.composer.read(cx).content().to_owned();
                                                 if let Some(prompt) =
-                                                    this.submission_with_attachments(&prompt)
+                                                    this.submission_with_attachments(&prompt, cx)
                                                 {
                                                     this.composer
                                                         .update(cx, |input, cx| input.clear(cx));
@@ -1773,7 +1783,7 @@ impl Waku {
                                                 let prompt =
                                                     this.composer.read(cx).content().to_owned();
                                                 if let Some(prompt) =
-                                                    this.submission_with_attachments(&prompt)
+                                                    this.submission_with_attachments(&prompt, cx)
                                                 {
                                                     this.composer
                                                         .update(cx, |input, cx| input.clear(cx));
@@ -1812,7 +1822,8 @@ impl Waku {
                                 ))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let prompt = this.composer.read(cx).content().to_owned();
-                                    if let Some(prompt) = this.submission_with_attachments(&prompt)
+                                    if let Some(prompt) =
+                                        this.submission_with_attachments(&prompt, cx)
                                     {
                                         this.composer.update(cx, |input, cx| input.clear(cx));
                                         this.submit_prompt(prompt, cx);

@@ -50,6 +50,7 @@ impl Waku {
         self.ensure_session_loaded(session_id);
         let session_changed = self.state.selected_session != Some(session_id);
         if session_changed {
+            self.capture_and_save_current_composer_draft(cx);
             self.store_selected_right_panel_state();
         }
         self.state.selected_session = Some(session_id);
@@ -71,6 +72,7 @@ impl Waku {
             self.state.last_service_tier = service_tier;
         }
         if session_changed {
+            self.restore_selected_composer_draft(cx);
             self.restore_right_panel_state(session_id, cx);
         } else {
             self.ensure_right_panel_terminals(cx);
@@ -152,6 +154,8 @@ impl Waku {
             return;
         };
         let project_id = self.state.sessions[index].project_id;
+        let composer_draft_key =
+            crate::persistence::ComposerDraftKey::for_session(&self.state.sessions[index]);
         let projectless = self
             .state
             .projects
@@ -166,6 +170,7 @@ impl Waku {
         self.submission_preparations.remove(&session_id);
         self.reset_session_runtime(session_id);
         self.remove_right_panel_session_state(session_id);
+        self.remove_composer_draft(composer_draft_key, cx);
         self.state.sessions.remove(index);
         self.session_navigation.remove(session_id);
         let project_still_used = self
@@ -174,6 +179,10 @@ impl Waku {
             .iter()
             .any(|session| session.project_id == project_id);
         if projectless && !project_still_used {
+            self.remove_composer_draft(
+                crate::persistence::ComposerDraftKey::NewSession(project_id),
+                cx,
+            );
             self.state
                 .projects
                 .retain(|project| project.id != project_id);
