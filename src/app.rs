@@ -717,9 +717,10 @@ pub struct Waku {
     /// drained into the next submission.
     composer_attachments: Vec<ComposerAttachment>,
     runtimes: HashMap<Uuid, SessionRuntime>,
-    /// Accepted submissions still creating their workspace/checkpoint. The
+    /// Accepted submissions still creating their workspace/checkpoint, or an
+    /// edited past message still rewinding its workspace and provider. The
     /// session is busy immediately, while the composer draws a spinner until
-    /// the provider runtime exists and cancellation is wired.
+    /// the non-cancellable preparation is complete.
     submission_preparations: HashSet<Uuid>,
     /// Sessions whose just-settled turn should start the next queued
     /// follow-up. Processed at the end of the driver-event drain so the

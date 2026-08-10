@@ -68,6 +68,274 @@ fn prepare_submission(
     })
 }
 
+/// Everything a past-message resend needs after the UI accepts it.
+///
+/// The request owns only thread-safe snapshots. Git, provider RPCs, process
+/// startup, and native transcript reads all happen in
+/// [`perform_message_rewind`] on the background executor.
+struct MessageRewindRequest {
+    session_id: Uuid,
+    provider: ProviderKind,
+    provider_cursor: Option<ProviderResumeCursor>,
+    session_title: String,
+    /// Cursor has no native branch API, so its background helper needs the
+    /// retained visible transcript. Other providers avoid cloning a long task
+    /// on the click path entirely.
+    cursor_source: Option<AgentSession>,
+    project_path: PathBuf,
+    retained_turn_count: usize,
+    previous_turn_count: usize,
+    rollback_turns: usize,
+    provider_turn_count: usize,
+    provider_resume_at: Option<String>,
+    binary: Option<PathBuf>,
+    driver: Option<DriverHandle>,
+    driver_start: Option<DriverStartRequest>,
+}
+
+struct PreparedMessageRewind {
+    provider_rewind_cursor: Option<ProviderResumeCursor>,
+    claude_fork: Option<(crate::claude_session::ForkedClaudeSession, String)>,
+    prepared_driver: Option<PreparedDriver>,
+    reset_native_session: bool,
+    cleanup_error: Option<String>,
+}
+
+fn perform_message_rewind(
+    mut request: MessageRewindRequest,
+) -> Result<PreparedMessageRewind, String> {
+    let session_id = request.session_id;
+    let checkpoint_ref = checkpoint::checkpoint_ref(session_id, request.retained_turn_count);
+    if !checkpoint::has_ref(&request.project_path, &checkpoint_ref) {
+        return Err(tr!("session.pre_turn_checkpoint_missing"));
+    }
+
+    let safety_ref = format!("refs/waku/revert-backup-{session_id}-{}", Uuid::new_v4());
+    checkpoint::capture_ref(&request.project_path, &safety_ref)
+        .map_err(|error| tr!("errors.create_rewind_snapshot", error = error))?;
+    if let Err(error) = checkpoint::restore_ref(&request.project_path, &checkpoint_ref) {
+        return Err(
+            match checkpoint::restore_ref(&request.project_path, &safety_ref) {
+                Ok(()) => {
+                    let _ = checkpoint::delete_ref(&request.project_path, &safety_ref);
+                    tr!("errors.restore_checkpoint", error = error)
+                }
+                Err(restore_error) => tr!(
+                    "errors.restore_checkpoint_and_safety",
+                    error = error,
+                    restore_error = restore_error,
+                    safety_ref = safety_ref
+                ),
+            },
+        );
+    }
+
+    let provider_rewind = perform_provider_rewind(&mut request);
+    let (provider_rewind_cursor, claude_fork, prepared_driver) = match provider_rewind {
+        Ok(rewind) => rewind,
+        Err(error) => {
+            return Err(
+                match checkpoint::restore_ref(&request.project_path, &safety_ref) {
+                    Ok(()) => {
+                        let _ = checkpoint::delete_ref(&request.project_path, &safety_ref);
+                        tr!("errors.rollback_rejected_workspace_restored", error = error)
+                    }
+                    Err(restore_error) => tr!(
+                        "errors.rollback_and_safety_failed",
+                        error = error,
+                        restore_error = restore_error,
+                        safety_ref = safety_ref
+                    ),
+                },
+            );
+        }
+    };
+
+    let _ = checkpoint::delete_ref(&request.project_path, &safety_ref);
+    let cleanup_error = checkpoint::delete_turn_refs_after(
+        &request.project_path,
+        session_id,
+        request.retained_turn_count,
+        request.previous_turn_count,
+    )
+    .err()
+    .map(|error| error.to_string());
+
+    Ok(PreparedMessageRewind {
+        provider_rewind_cursor,
+        claude_fork,
+        prepared_driver,
+        reset_native_session: request.rollback_turns > 0
+            && request.retained_turn_count == 0
+            && matches!(
+                request.provider,
+                ProviderKind::Claude | ProviderKind::Cursor | ProviderKind::Grok
+            ),
+        cleanup_error,
+    })
+}
+
+type ProviderRewindResult = (
+    Option<ProviderResumeCursor>,
+    Option<(crate::claude_session::ForkedClaudeSession, String)>,
+    Option<PreparedDriver>,
+);
+
+fn perform_provider_rewind(
+    request: &mut MessageRewindRequest,
+) -> anyhow::Result<ProviderRewindResult> {
+    let provider = request.provider;
+    let reset_native_session = request.rollback_turns > 0
+        && request.retained_turn_count == 0
+        && matches!(
+            provider,
+            ProviderKind::Claude | ProviderKind::Cursor | ProviderKind::Grok
+        );
+    if request.rollback_turns == 0 || reset_native_session {
+        return Ok((None, None, None));
+    }
+
+    match provider {
+        ProviderKind::Claude => {
+            let Some(ProviderResumeCursor::Claude {
+                session_id: native_session_id,
+                ..
+            }) = request.provider_cursor.as_ref()
+            else {
+                anyhow::bail!(tr!(
+                    "errors.provider_native_cursor_unavailable",
+                    provider = "Claude"
+                ));
+            };
+            let resume_at = request
+                .provider_resume_at
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    crate::claude_session::message_id_for_turn(
+                        native_session_id,
+                        request.provider_turn_count,
+                    )
+                })?;
+            let fork = crate::claude_session::fork_session_at(
+                native_session_id,
+                &resume_at,
+                &tr!(
+                    "session.rewind_title",
+                    title = request.session_title.as_str()
+                ),
+            )?;
+            Ok((None, Some((fork, resume_at)), None))
+        }
+        ProviderKind::OpenCode => {
+            let cursor = if let Some(driver) = request.driver.as_ref() {
+                driver.rollback(request.rollback_turns)?.ok_or_else(|| {
+                    anyhow::anyhow!("OpenCode returned no cursor for the rewound session")
+                })?
+            } else {
+                let Some(ProviderResumeCursor::OpenCode {
+                    session_id: native_session_id,
+                }) = request.provider_cursor.as_ref()
+                else {
+                    anyhow::bail!(tr!(
+                        "errors.provider_native_cursor_unavailable",
+                        provider = "OpenCode"
+                    ));
+                };
+                let binary = request.binary.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(tr!("errors.provider_not_found", provider = "OpenCode"))
+                })?;
+                crate::opencode_session::fork_session_at_turn(
+                    binary,
+                    &request.project_path,
+                    native_session_id,
+                    request.provider_turn_count,
+                )?
+            };
+            Ok((Some(cursor), None, None))
+        }
+        ProviderKind::Amp => {
+            let Some(ProviderResumeCursor::Amp {
+                thread_id: native_thread_id,
+                fork_context,
+            }) = request.provider_cursor.as_ref()
+            else {
+                anyhow::bail!(tr!(
+                    "errors.provider_native_thread_cursor_unavailable",
+                    provider = "Amp"
+                ));
+            };
+            let binary = request.binary.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(tr!("errors.provider_not_found", provider = "Amp"))
+            })?;
+            let cursor = crate::amp_session::fork_session_at_turn(
+                binary,
+                &request.project_path,
+                native_thread_id,
+                fork_context.as_deref(),
+                request.provider_turn_count,
+            )?;
+            Ok((Some(cursor), None, None))
+        }
+        ProviderKind::Cursor => {
+            let source = request.cursor_source.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(tr!(
+                    "errors.provider_waku_task_unavailable",
+                    provider = "Cursor"
+                ))
+            })?;
+            Ok((
+                Some(crate::cursor_session::fork_session_at_turn(
+                    source,
+                    request.retained_turn_count,
+                )?),
+                None,
+                None,
+            ))
+        }
+        ProviderKind::Grok => {
+            let Some(ProviderResumeCursor::Grok {
+                session_id: native_session_id,
+            }) = request.provider_cursor.as_ref()
+            else {
+                anyhow::bail!(tr!(
+                    "errors.provider_native_cursor_unavailable",
+                    provider = "Grok"
+                ));
+            };
+            let binary = request.binary.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(tr!("errors.provider_not_found", provider = "Grok Build"))
+            })?;
+            let cursor = crate::grok_session::fork_session_at_turn(
+                binary,
+                &request.project_path,
+                native_session_id,
+                request.provider_turn_count,
+            )?;
+            Ok((Some(cursor), None, None))
+        }
+        ProviderKind::Codex | ProviderKind::Pi => {
+            let mut prepared_driver = None;
+            let driver = if let Some(driver) = request.driver.as_ref() {
+                driver.clone()
+            } else {
+                let start = request.driver_start.take().ok_or_else(|| {
+                    anyhow::anyhow!(tr!(
+                        "errors.provider_not_found",
+                        provider = provider.display_name()
+                    ))
+                })?;
+                let prepared = start_driver(start, request.project_path.clone())?;
+                let driver = prepared.handle.clone();
+                prepared_driver = Some(prepared);
+                driver
+            };
+            let cursor = driver.rollback(request.rollback_turns)?;
+            Ok((cursor, None, prepared_driver))
+        }
+    }
+}
+
 impl Waku {
     pub fn composer_focus(&self, cx: &App) -> FocusHandle {
         self.composer.read(cx).focus()
@@ -749,10 +1017,14 @@ impl Waku {
         cx.subscribe(
             &input,
             |this: &mut Self, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::Submit(_) => this.submit_message_edit(cx),
+                ComposerEvent::Submit(prompt) => {
+                    this.submit_message_edit_prompt(prompt.clone(), cx)
+                }
                 // An edited past message resubmits from that point; there is
                 // no running turn for it to steer.
-                ComposerEvent::SubmitSteer(_) => this.submit_message_edit(cx),
+                ComposerEvent::SubmitSteer(prompt) => {
+                    this.submit_message_edit_prompt(prompt.clone(), cx)
+                }
                 ComposerEvent::Edited => cx.notify(),
                 ComposerEvent::Focus => {}
                 ComposerEvent::BackspaceOnEmpty => {}
@@ -772,6 +1044,13 @@ impl Waku {
     }
 
     pub(super) fn cancel_message_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .message_edit
+            .as_ref()
+            .is_some_and(|edit| self.submission_preparations.contains(&edit.session_id))
+        {
+            return;
+        }
         let Some(edit) = self.message_edit.take() else {
             return;
         };
@@ -794,329 +1073,296 @@ impl Waku {
     }
 
     pub(super) fn submit_message_edit(&mut self, cx: &mut Context<Self>) {
+        let prompt = self
+            .message_edit
+            .as_ref()
+            .map(|edit| edit.input.read(cx).content().to_owned())
+            .unwrap_or_default();
+        self.submit_message_edit_prompt(prompt, cx);
+    }
+
+    fn submit_message_edit_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
         let Some(edit) = self.message_edit.clone() else {
             return;
         };
-        let prompt = edit.input.read(cx).content().trim().to_owned();
+        if self.submission_preparations.contains(&edit.session_id) {
+            return;
+        }
+        // Keyboard submission clears ComposerInput after emitting its event.
+        // Use the event's captured value rather than rereading the field; the
+        // button path enters here with its own pre-clear content as well.
+        let prompt = prompt.trim().to_owned();
         if prompt.is_empty() {
             self.show_toast(tr!("session.edited_message_empty"));
             cx.notify();
             return;
         }
-        if !self.rewind_before_turn(edit.session_id, edit.turn_count, cx) {
-            return;
-        }
-        self.message_edit = None;
-        self.submit_prompt(prompt, cx);
+        self.start_message_rewind(edit, prompt, cx);
     }
 
-    fn rewind_before_turn(
-        &mut self,
-        session_id: Uuid,
-        turn_count: usize,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn start_message_rewind(&mut self, edit: MessageEdit, prompt: String, cx: &mut Context<Self>) {
+        let session_id = edit.session_id;
+        let turn_count = edit.turn_count;
         let retained_turn_count = turn_count.saturating_sub(1);
-        let Some((
-            provider,
-            status,
-            provider_cursor,
-            previous_turn_count,
-            rollback_turns,
-            provider_turn_count,
-            provider_resume_at,
-            session_title,
-        )) = self
+        let Some(source) = self
             .state
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .and_then(|session| {
+            .filter(|session| {
                 session
                     .turns
                     .iter()
-                    .find(|turn| turn.turn_count == turn_count)
-                    .map(|_| {
-                        (
-                            session.provider,
-                            session.status,
-                            session.provider_cursor.clone(),
-                            session.turns.len(),
-                            session.provider_turns_after(retained_turn_count),
-                            session
-                                .turns
-                                .iter()
-                                .take(retained_turn_count)
-                                .filter(|turn| turn.provider_turn_started)
-                                .count(),
-                            retained_turn_count
-                                .checked_sub(1)
-                                .and_then(|index| session.turns.get(index))
-                                .and_then(|turn| turn.provider_resume_at.clone()),
-                            session.display_title().to_owned(),
-                        )
+                    .any(|turn| turn.turn_count == turn_count)
+            })
+        else {
+            self.show_toast(tr!("session.message_unavailable"));
+            cx.notify();
+            return;
+        };
+        if self.state.selected_session != Some(session_id) {
+            self.show_toast(tr!("session.select_before_rewind"));
+            cx.notify();
+            return;
+        }
+        if !matches!(source.status, SessionStatus::Idle | SessionStatus::Failed) {
+            self.show_toast(tr!("session.stop_before_rewind"));
+            cx.notify();
+            return;
+        }
+        let rollback_turns = source.provider_turns_after(retained_turn_count);
+        if !source.provider.supports_conversation_rollback()
+            || (rollback_turns > 0 && source.provider_cursor.is_none())
+        {
+            self.show_toast(tr!(
+                "session.provider_cannot_rewind",
+                provider = source.provider.display_name()
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(project_path) = self
+            .workspace_path_for_session(&source)
+            .map(std::path::Path::to_path_buf)
+        else {
+            self.show_toast(tr!("errors.task_project_not_found"));
+            cx.notify();
+            return;
+        };
+        let provider_turn_count = source
+            .turns
+            .iter()
+            .take(retained_turn_count)
+            .filter(|turn| turn.provider_turn_started)
+            .count();
+        let provider_resume_at = retained_turn_count
+            .checked_sub(1)
+            .and_then(|index| source.turns.get(index))
+            .and_then(|turn| turn.provider_resume_at.clone());
+        let driver = self
+            .runtimes
+            .get(&session_id)
+            .map(|runtime| runtime.driver.clone());
+        let needs_binary = rollback_turns > 0
+            && (matches!(source.provider, ProviderKind::Amp)
+                || (source.provider == ProviderKind::OpenCode && driver.is_none())
+                || (source.provider == ProviderKind::Grok && retained_turn_count > 0));
+        let binary = needs_binary
+            .then(|| {
+                self.probes
+                    .iter()
+                    .find(|probe| probe.provider == source.provider)
+                    .and_then(|probe| probe.path.clone())
+            })
+            .flatten();
+        if needs_binary && binary.is_none() {
+            self.show_toast(tr!(
+                "errors.provider_not_found",
+                provider = source.provider.display_name()
+            ));
+            cx.notify();
+            return;
+        }
+        let driver_start = if rollback_turns > 0
+            && matches!(source.provider, ProviderKind::Codex | ProviderKind::Pi)
+            && driver.is_none()
+        {
+            match self.driver_start_request_for_session(&source, project_path.clone()) {
+                Ok(request) => Some(request),
+                Err(error) => {
+                    self.show_toast(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let previous_status = source.status;
+        let previous_turn_count = source.turns.len();
+        let provider = source.provider;
+        let provider_cursor = source.provider_cursor.clone();
+        let session_title = source.display_title().to_owned();
+        let cursor_source = (provider == ProviderKind::Cursor).then(|| source.clone());
+        let Some((edited_message_index, edited_message_id)) = source
+            .turns
+            .iter()
+            .find(|turn| turn.turn_count == turn_count)
+            .and_then(|turn| {
+                source
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, message)| {
+                        (message.turn_id == Some(turn.id) && message.role == MessageRole::User)
+                            .then_some((index, message.id))
                     })
             })
         else {
             self.show_toast(tr!("session.message_unavailable"));
             cx.notify();
-            return false;
+            return;
         };
-        if self.state.selected_session != Some(session_id) {
-            self.show_toast(tr!("session.select_before_rewind"));
+        let request = MessageRewindRequest {
+            session_id,
+            provider,
+            provider_cursor,
+            session_title,
+            cursor_source,
+            previous_turn_count,
+            project_path,
+            retained_turn_count,
+            rollback_turns,
+            provider_turn_count,
+            provider_resume_at,
+            binary,
+            driver,
+            driver_start,
+        };
+
+        // Optimistically leave edit mode and show the replacement bubble at
+        // accept time. The main composer switches to its non-cancellable
+        // spinner while every Git, process, native transcript, and provider
+        // operation runs off the UI thread. Failure restores both the original
+        // bubble and this edit input.
+        let original_message_content = self.state.session_mut(session_id).and_then(|session| {
+            let message = session
+                .messages
+                .iter_mut()
+                .find(|message| message.id == edited_message_id)?;
+            let original = std::mem::replace(&mut message.content, prompt.clone());
+            session.status = SessionStatus::Connecting;
+            session.updated_at = unix_time();
+            Some(original)
+        });
+        let Some(original_message_content) = original_message_content else {
+            self.show_toast(tr!("session.message_unavailable"));
             cx.notify();
-            return false;
+            return;
+        };
+        self.message_edit = None;
+        self.submission_preparations.insert(session_id);
+        self.hide_toast();
+        self.remeasure_transcript_message(edited_message_index);
+        cx.notify();
+
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { perform_message_rewind(request) })
+                .await;
+            let _ = waku.update(cx, move |waku, cx| {
+                waku.finish_message_rewind(
+                    edit,
+                    prompt,
+                    edited_message_id,
+                    original_message_content,
+                    previous_status,
+                    result,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    fn finish_message_rewind(
+        &mut self,
+        edit: MessageEdit,
+        prompt: String,
+        edited_message_id: Uuid,
+        original_message_content: String,
+        previous_status: SessionStatus,
+        result: Result<PreparedMessageRewind, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let session_id = edit.session_id;
+        let turn_count = edit.turn_count;
+        if !self.submission_preparations.remove(&session_id) {
+            return;
         }
-        if !matches!(status, SessionStatus::Idle | SessionStatus::Failed) {
-            self.show_toast(tr!("session.stop_before_rewind"));
-            cx.notify();
-            return false;
-        }
-        if !provider.supports_conversation_rollback()
-            || (rollback_turns > 0 && provider_cursor.is_none())
-        {
-            self.show_toast(tr!(
-                "session.provider_cannot_rewind",
-                provider = provider.display_name()
-            ));
-            cx.notify();
-            return false;
-        }
-        let Some(project_path) = self
+        let selected = self.state.selected_session == Some(session_id);
+        let prepared = match result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(session) = self.state.session_mut(session_id) {
+                    if let Some(message) = session
+                        .messages
+                        .iter_mut()
+                        .find(|message| message.id == edited_message_id)
+                    {
+                        message.content = original_message_content;
+                    }
+                    if session.status == SessionStatus::Connecting {
+                        session.status = previous_status;
+                    }
+                }
+                if selected && self.message_edit.is_none() {
+                    self.message_edit = Some(edit.clone());
+                }
+                if selected
+                    && let Some(message_index) = self.selected_session().and_then(|session| {
+                        let turn = session
+                            .turns
+                            .iter()
+                            .find(|turn| turn.turn_count == turn_count)?;
+                        session.messages.iter().position(|message| {
+                            message.turn_id == Some(turn.id) && message.role == MessageRole::User
+                        })
+                    })
+                {
+                    self.remeasure_transcript_message(message_index);
+                }
+                self.show_toast(error);
+                cx.notify();
+                return;
+            }
+        };
+        let PreparedMessageRewind {
+            provider_rewind_cursor,
+            claude_fork,
+            mut prepared_driver,
+            reset_native_session,
+            cleanup_error,
+        } = prepared;
+        let provider = self
             .state
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .and_then(|session| self.workspace_path_for_session(session))
-            .map(std::path::Path::to_path_buf)
-        else {
-            self.show_toast(tr!("errors.task_project_not_found"));
-            cx.notify();
-            return false;
+            .map(|session| session.provider);
+        let Some(provider) = provider else {
+            return;
         };
-        let checkpoint_ref = checkpoint::checkpoint_ref(session_id, retained_turn_count);
-        if !checkpoint::has_ref(&project_path, &checkpoint_ref) {
-            self.show_toast(tr!("session.pre_turn_checkpoint_missing"));
-            cx.notify();
-            return false;
+        let retained_turn_count = turn_count.saturating_sub(1);
+        if selected {
+            self.sync_transcript_rows();
         }
-
-        let claude_reset =
-            provider == ProviderKind::Claude && rollback_turns > 0 && retained_turn_count == 0;
-        let cursor_reset =
-            provider == ProviderKind::Cursor && rollback_turns > 0 && retained_turn_count == 0;
-        let grok_reset =
-            provider == ProviderKind::Grok && rollback_turns > 0 && retained_turn_count == 0;
-        let claude_rollback =
-            if provider == ProviderKind::Claude && rollback_turns > 0 && retained_turn_count > 0 {
-                let Some(ProviderResumeCursor::Claude {
-                    session_id: native_session_id,
-                    ..
-                }) = provider_cursor.as_ref()
-                else {
-                    self.show_toast(tr!(
-                        "errors.provider_native_cursor_unavailable",
-                        provider = "Claude"
-                    ));
-                    cx.notify();
-                    return false;
-                };
-                let resume_at = match provider_resume_at {
-                    Some(message_id) => message_id,
-                    None => match crate::claude_session::message_id_for_turn(
-                        native_session_id,
-                        provider_turn_count,
-                    ) {
-                        Ok(message_id) => message_id,
-                        Err(error) => {
-                            self.show_toast(tr!(
-                                "errors.claude_turn_checkpoint_unavailable",
-                                error = error
-                            ));
-                            cx.notify();
-                            return false;
-                        }
-                    },
-                };
-                Some((native_session_id.clone(), resume_at))
-            } else {
-                None
-            };
-
-        let safety_ref = format!("refs/waku/revert-backup-{session_id}-{}", Uuid::new_v4());
-        if let Err(error) = checkpoint::capture_ref(&project_path, &safety_ref) {
-            self.show_toast(tr!("errors.create_rewind_snapshot", error = error));
-            cx.notify();
-            return false;
-        }
-        if let Err(error) = checkpoint::restore_ref(&project_path, &checkpoint_ref) {
-            self.show_toast(match checkpoint::restore_ref(&project_path, &safety_ref) {
-                Ok(()) => {
-                    let _ = checkpoint::delete_ref(&project_path, &safety_ref);
-                    tr!("errors.restore_checkpoint", error = error)
-                }
-                Err(restore_error) => tr!(
-                    "errors.restore_checkpoint_and_safety",
-                    error = error,
-                    restore_error = restore_error,
-                    safety_ref = safety_ref
-                ),
-            });
-            cx.notify();
-            return false;
-        }
-
-        let mut claude_fork = None;
-        let mut provider_rewind_cursor = None;
-        if rollback_turns > 0 && !claude_reset && !cursor_reset && !grok_reset {
-            let rollback_result = if let Some((native_session_id, resume_at)) = &claude_rollback {
-                crate::claude_session::fork_session_at(
-                    native_session_id,
-                    resume_at,
-                    &tr!("session.rewind_title", title = session_title),
-                )
-                .map(|fork| {
-                    claude_fork = Some((fork, resume_at.to_owned()));
-                })
-            } else if provider == ProviderKind::OpenCode {
-                let Some(ProviderResumeCursor::OpenCode {
-                    session_id: native_session_id,
-                }) = provider_cursor.as_ref()
-                else {
-                    self.show_toast(tr!(
-                        "errors.provider_native_cursor_unavailable",
-                        provider = "OpenCode"
-                    ));
-                    cx.notify();
-                    return false;
-                };
-                let Some(binary) = self
-                    .probes
-                    .iter()
-                    .find(|probe| probe.provider == ProviderKind::OpenCode)
-                    .and_then(|probe| probe.path.as_deref())
-                else {
-                    self.show_toast(tr!("errors.provider_not_found", provider = "OpenCode"));
-                    cx.notify();
-                    return false;
-                };
-                crate::opencode_session::fork_session_at_turn(
-                    binary,
-                    &project_path,
-                    native_session_id,
-                    provider_turn_count,
-                )
-                .map(|cursor| provider_rewind_cursor = Some(cursor))
-            } else if provider == ProviderKind::Amp {
-                let Some(ProviderResumeCursor::Amp {
-                    thread_id: native_thread_id,
-                    fork_context,
-                }) = provider_cursor.as_ref()
-                else {
-                    self.show_toast(tr!(
-                        "errors.provider_native_thread_cursor_unavailable",
-                        provider = "Amp"
-                    ));
-                    cx.notify();
-                    return false;
-                };
-                let Some(binary) = self
-                    .probes
-                    .iter()
-                    .find(|probe| probe.provider == ProviderKind::Amp)
-                    .and_then(|probe| probe.path.as_deref())
-                else {
-                    self.show_toast(tr!("errors.provider_not_found", provider = "Amp"));
-                    cx.notify();
-                    return false;
-                };
-                crate::amp_session::fork_session_at_turn(
-                    binary,
-                    &project_path,
-                    native_thread_id,
-                    fork_context.as_deref(),
-                    provider_turn_count,
-                )
-                .map(|cursor| provider_rewind_cursor = Some(cursor))
-            } else if provider == ProviderKind::Cursor {
-                let Some(source) = self
-                    .state
-                    .sessions
-                    .iter()
-                    .find(|session| session.id == session_id)
-                else {
-                    self.show_toast(tr!(
-                        "errors.provider_waku_task_unavailable",
-                        provider = "Cursor"
-                    ));
-                    cx.notify();
-                    return false;
-                };
-                crate::cursor_session::fork_session_at_turn(source, retained_turn_count)
-                    .map(|cursor| provider_rewind_cursor = Some(cursor))
-            } else if provider == ProviderKind::Grok {
-                let Some(ProviderResumeCursor::Grok {
-                    session_id: native_session_id,
-                }) = provider_cursor.as_ref()
-                else {
-                    self.show_toast(tr!(
-                        "errors.provider_native_cursor_unavailable",
-                        provider = "Grok"
-                    ));
-                    cx.notify();
-                    return false;
-                };
-                let Some(binary) = self
-                    .probes
-                    .iter()
-                    .find(|probe| probe.provider == ProviderKind::Grok)
-                    .and_then(|probe| probe.path.as_deref())
-                else {
-                    self.show_toast(tr!("errors.provider_not_found", provider = "Grok Build"));
-                    cx.notify();
-                    return false;
-                };
-                crate::grok_session::fork_session_at_turn(
-                    binary,
-                    &project_path,
-                    native_session_id,
-                    provider_turn_count,
-                )
-                .map(|cursor| provider_rewind_cursor = Some(cursor))
-            } else {
-                self.ensure_driver()
-                    .and_then(|driver| driver.rollback(rollback_turns))
-                    .map(|cursor| provider_rewind_cursor = cursor)
-            };
-            if let Err(error) = rollback_result {
-                let restore_result = checkpoint::restore_ref(&project_path, &safety_ref);
-                self.show_toast(match restore_result {
-                    Ok(()) => {
-                        let _ = checkpoint::delete_ref(&project_path, &safety_ref);
-                        tr!("errors.rollback_rejected_workspace_restored", error = error)
-                    }
-                    Err(restore_error) => tr!(
-                        "errors.rollback_and_safety_failed",
-                        error = error,
-                        restore_error = restore_error,
-                        safety_ref = safety_ref
-                    ),
-                });
-                cx.notify();
-                return false;
-            }
-        }
-
-        let _ = checkpoint::delete_ref(&project_path, &safety_ref);
-        let cleanup_result = checkpoint::delete_turn_refs_after(
-            &project_path,
-            session_id,
-            retained_turn_count,
-            previous_turn_count,
-        );
-        self.invalidate_checkpoint_refs();
-        self.sync_transcript_rows();
-        let previous_kinds = self.transcript_row_kinds.borrow().clone();
+        let previous_kinds = if selected {
+            self.transcript_row_kinds.borrow().clone()
+        } else {
+            Vec::new()
+        };
         if let Some(session) = self.state.session_mut(session_id) {
             if let Some((fork, source_resume_at)) = &claude_fork {
                 for turn in session.turns.iter_mut().take(retained_turn_count) {
@@ -1138,7 +1384,7 @@ impl Waku {
                     session_id: fork.session_id.clone(),
                     resume_at: Some(remapped_resume_at),
                 });
-            } else if claude_reset || cursor_reset || grok_reset {
+            } else if reset_native_session {
                 session.provider_cursor = None;
             } else if let Some(cursor) = provider_rewind_cursor.clone() {
                 session.provider_cursor = Some(cursor);
@@ -1146,10 +1392,18 @@ impl Waku {
             session.truncate_after_turn(retained_turn_count);
             session.status = SessionStatus::Idle;
         }
+
+        if let Some(prepared) = prepared_driver.as_mut() {
+            // Startup announces the source cursor before a cold Codex/Pi
+            // rollback finishes. It is stale now; do not let it overwrite the
+            // rewound cursor after this driver is installed.
+            while prepared.events.try_recv().is_ok() {}
+        }
+        if let Some(prepared) = prepared_driver {
+            self.install_prepared_driver(session_id, prepared);
+        }
         if claude_fork.is_some()
-            || claude_reset
-            || cursor_reset
-            || grok_reset
+            || reset_native_session
             || (matches!(
                 provider,
                 ProviderKind::Amp
@@ -1168,22 +1422,31 @@ impl Waku {
             runtime.pending_permission = None;
             runtime.pending_computer_approval = None;
         }
-        self.reasoning_expanded.clear();
-        self.activities_expanded.clear();
-        self.expanded_activity_items.clear();
-        self.expanded_turns.clear();
-        self.splice_transcript_rows_after_visibility_change(&previous_kinds);
-        self.show_toast(match cleanup_result {
-            Ok(()) => tr!("session.rewound", turn = turn_count),
-            Err(error) => tr!(
-                "session.rewound_with_stale_refs",
-                turn = turn_count,
-                error = error
-            ),
-        });
-        self.save();
+        self.invalidate_checkpoint_refs();
+        if self
+            .message_edit
+            .as_ref()
+            .is_some_and(|current| current.session_id == session_id)
+        {
+            self.message_edit = None;
+        }
+        if selected {
+            self.reasoning_expanded.clear();
+            self.activities_expanded.clear();
+            self.expanded_activity_items.clear();
+            self.expanded_turns.clear();
+            self.splice_transcript_rows_after_visibility_change(&previous_kinds);
+            self.show_toast(match cleanup_error {
+                None => tr!("session.rewound", turn = turn_count),
+                Some(error) => tr!(
+                    "session.rewound_with_stale_refs",
+                    turn = turn_count,
+                    error = error
+                ),
+            });
+        }
         cx.notify();
-        true
+        self.submit_prompt_for_session(session_id, prompt, cx);
     }
 
     /// Resolves the turn options a driver should run with, dropping a reasoning

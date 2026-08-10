@@ -16,6 +16,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, unbounded};
@@ -27,7 +28,9 @@ use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
 use crate::model::{
     ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
 };
-use crate::opencode_session::{OpenCodeServer, encode_path_segment};
+use crate::opencode_session::{
+    OpenCodeServer, encode_path_segment, fork_session_removing_turns_on_server,
+};
 
 enum CommandMessage {
     Prompt(String),
@@ -54,6 +57,7 @@ fn prompt_body(text: &str, model: Option<&str>) -> Value {
 
 pub struct OpenCodeDriver {
     server: Arc<OpenCodeServer>,
+    session_id: String,
     commands: Sender<CommandMessage>,
     mode: RuntimeMode,
     interaction_mode: InteractionMode,
@@ -136,6 +140,59 @@ impl OpenCodeDriver {
             Some(&json!({"agent": agent})),
         );
 
+        let usage_metadata = Arc::new(OpenCodeUsageMetadata::default());
+        let previous_usage_path = format!(
+            "/session/{}/message?limit=20",
+            encode_path_segment(&session_id)
+        );
+        let previous_info = server
+            .request("GET", &previous_usage_path, None)
+            .ok()
+            .and_then(|messages| latest_opencode_usage_info(&messages).cloned());
+        if let Some(info) = previous_info.as_ref() {
+            if let Some(model) = opencode_model_key(info) {
+                *usage_metadata.last_model.lock() = Some(model);
+            }
+            if let Some(tokens) = opencode_context_tokens(info) {
+                let _ = events.send(DriverEvent::UsageUpdated {
+                    context_tokens: Some(tokens),
+                    context_window: None,
+                });
+            }
+        } else if let Some(model) = model.as_ref() {
+            *usage_metadata.last_model.lock() = Some(model.clone());
+        }
+
+        // `/api/model` can be cold on the first server in a directory. Resolve
+        // it off the driver-start path so a slow catalog never delays the
+        // transcript or turns an otherwise healthy provider into a 0% meter.
+        // The stream records the actual provider/model key in parallel; when
+        // the catalog lands, publish the matching window as a separate merge.
+        let metadata_server = server.clone();
+        let metadata_events = events.clone();
+        let background_usage_metadata = usage_metadata.clone();
+        thread::Builder::new()
+            .name("waku-opencode-usage-metadata".into())
+            .spawn(move || {
+                let Ok(response) = metadata_server.request_with_timeout(
+                    "GET",
+                    "/api/model",
+                    None,
+                    Duration::from_secs(30),
+                ) else {
+                    return;
+                };
+                let windows = opencode_model_context_windows(&response);
+                *background_usage_metadata.model_context_windows.lock() = windows;
+                let window = background_usage_metadata.current_context_window();
+                if let Some(window) = window {
+                    let _ = metadata_events.send(DriverEvent::UsageUpdated {
+                        context_tokens: None,
+                        context_window: Some(window),
+                    });
+                }
+            })?;
+
         let auto_approve = mode != RuntimeMode::Ask;
         let (commands, command_rx) = unbounded();
         let turn_active = Arc::new(Mutex::new(false));
@@ -145,10 +202,14 @@ impl OpenCodeDriver {
         let stream_events = events.clone();
         let stream_commands = commands.clone();
         let stream_turn = turn_active.clone();
+        let stream_usage_metadata = usage_metadata;
         thread::Builder::new()
             .name("waku-opencode-events".into())
             .spawn(move || {
-                let mut state = OpenCodeStreamState::default();
+                let mut state = OpenCodeStreamState {
+                    usage_metadata: stream_usage_metadata,
+                    ..OpenCodeStreamState::default()
+                };
                 // The server-wide stream, not a per-session one: the scoped
                 // route exists only under `/api`, and this server is Waku's
                 // alone, so filtering by session id here is enough.
@@ -191,7 +252,7 @@ impl OpenCodeDriver {
             })?;
 
         let worker_server = server.clone();
-        let worker_session = session_id;
+        let worker_session = session_id.clone();
         let worker_events = events;
         let worker_turn = turn_active;
         thread::Builder::new()
@@ -314,6 +375,7 @@ impl OpenCodeDriver {
 
         Ok(Self {
             server,
+            session_id,
             commands,
             mode,
             interaction_mode,
@@ -358,10 +420,15 @@ impl DriverControl for OpenCodeDriver {
         options.mode == self.mode && options.interaction_mode == self.interaction_mode
     }
 
-    fn rollback(&self, _turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
-        Err(anyhow!(
-            "conversation rollback is not supported by this provider transport"
-        ))
+    fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
+        if turns == 0 {
+            return Ok(None);
+        }
+        self.fork(turns).map(Some)
+    }
+
+    fn fork(&self, turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
+        fork_session_removing_turns_on_server(&self.server, &self.session_id, turns_to_remove)
     }
 }
 
@@ -407,6 +474,105 @@ fn open_event_stream(port: u16, path: &str) -> anyhow::Result<TcpStream> {
 #[derive(Default)]
 struct OpenCodeStreamState {
     tools: HashMap<String, (ActivityKind, String)>,
+    usage_metadata: Arc<OpenCodeUsageMetadata>,
+}
+
+#[derive(Default)]
+struct OpenCodeUsageMetadata {
+    model_context_windows: Mutex<HashMap<String, u64>>,
+    last_model: Mutex<Option<String>>,
+}
+
+impl OpenCodeUsageMetadata {
+    fn current_context_window(&self) -> Option<u64> {
+        let model = self.last_model.lock().clone()?;
+        self.model_context_windows.lock().get(&model).copied()
+    }
+}
+
+fn opencode_model_context_windows(response: &Value) -> HashMap<String, u64> {
+    response
+        .pointer("/data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            let provider = model.get("providerID").and_then(Value::as_str)?;
+            let id = model.get("id").and_then(Value::as_str)?;
+            let window = model
+                .pointer("/limit/context")
+                .and_then(Value::as_u64)
+                .filter(|window| *window > 0)?;
+            Some((format!("{provider}/{id}"), window))
+        })
+        .collect()
+}
+
+fn opencode_context_tokens(info: &Value) -> Option<u64> {
+    let tokens = info.get("tokens")?;
+    tokens
+        .get("total")
+        .and_then(Value::as_u64)
+        .filter(|tokens| *tokens > 0)
+        .or_else(|| {
+            let total = [
+                tokens.get("input"),
+                tokens.get("output"),
+                tokens.pointer("/cache/read"),
+                tokens.pointer("/cache/write"),
+            ]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_u64)
+            .fold(0_u64, u64::saturating_add);
+            (total > 0).then_some(total)
+        })
+}
+
+fn opencode_model_key(info: &Value) -> Option<String> {
+    info.get("providerID")
+        .and_then(Value::as_str)
+        .zip(info.get("modelID").and_then(Value::as_str))
+        .map(|(provider, model)| format!("{provider}/{model}"))
+}
+
+fn opencode_context_usage(
+    info: &Value,
+    model_context_windows: &HashMap<String, u64>,
+) -> Option<(Option<u64>, Option<u64>)> {
+    if info.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let tokens = opencode_context_tokens(info);
+    let window = opencode_model_key(info)
+        .as_ref()
+        .and_then(|model| model_context_windows.get(model).copied());
+    (tokens.is_some() || window.is_some()).then_some((tokens, window))
+}
+
+fn latest_opencode_usage_info(messages: &Value) -> Option<&Value> {
+    let mut assistant = None;
+    for message in messages.as_array()?.iter().rev() {
+        let Some(info) = message
+            .get("info")
+            .filter(|info| info.get("role").and_then(Value::as_str) == Some("assistant"))
+        else {
+            continue;
+        };
+        if opencode_context_tokens(info).is_some() {
+            return Some(info);
+        }
+        assistant.get_or_insert(info);
+    }
+    assistant
+}
+
+fn latest_opencode_context_usage(
+    messages: &Value,
+    model_context_windows: &HashMap<String, u64>,
+) -> Option<(Option<u64>, Option<u64>)> {
+    latest_opencode_usage_info(messages)
+        .and_then(|info| opencode_context_usage(info, model_context_windows))
 }
 
 fn handle_event(
@@ -447,6 +613,23 @@ fn handle_event(
                 tool_activity(part, events, state);
             }
         }
+        "message.updated" => {
+            if let Some(info) = properties.get("info") {
+                if let Some(model) = opencode_model_key(info) {
+                    *state.usage_metadata.last_model.lock() = Some(model);
+                }
+                let usage = {
+                    let windows = state.usage_metadata.model_context_windows.lock();
+                    opencode_context_usage(info, &windows)
+                };
+                if let Some((context_tokens, context_window)) = usage {
+                    let _ = events.send(DriverEvent::UsageUpdated {
+                        context_tokens,
+                        context_window,
+                    });
+                }
+            }
+        }
         "session.idle" => {
             if std::mem::take(&mut *turn_active.lock()) {
                 let _ = events.send(DriverEvent::TurnFinished {
@@ -476,8 +659,8 @@ fn handle_event(
         _ if kind.starts_with("permission.") => {
             request_permission(properties, events, commands, auto_approve);
         }
-        // `session.created`, `session.diff`, `message.updated`, and the
-        // plugin/catalog/reference chatter are not transcript content.
+        // `session.created`, `session.diff`, and the plugin/catalog/reference
+        // chatter are not transcript content.
         _ => {}
     }
 }
@@ -668,25 +851,43 @@ mod tests {
         let connected = event_rx
             .recv_timeout(std::time::Duration::from_secs(90))
             .expect("the server should report its session");
-        assert!(matches!(
-            connected,
+        let source_session_id = match connected {
             DriverEvent::Connected {
-                provider_cursor: Some(ProviderResumeCursor::OpenCode { .. })
-            }
-        ));
+                provider_cursor: Some(ProviderResumeCursor::OpenCode { session_id }),
+            } => session_id,
+            event => panic!("expected an OpenCode cursor, got {event:?}"),
+        };
 
         driver.prompt("Reply with exactly: OK. Do not use any tools.".into());
         let mut text = String::new();
         let mut finished = None;
-        while let Ok(event) = event_rx.recv_timeout(std::time::Duration::from_secs(180)) {
+        let mut context_tokens = None;
+        let mut context_window = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while std::time::Instant::now() < deadline {
+            let Ok(event) = event_rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+                continue;
+            };
             match event {
                 DriverEvent::TextDelta(delta) => text.push_str(&delta),
+                DriverEvent::UsageUpdated {
+                    context_tokens: tokens,
+                    context_window: window,
+                } => {
+                    context_tokens = tokens.or(context_tokens);
+                    context_window = window.or(context_window);
+                }
                 DriverEvent::TurnFinished { success, .. } => {
                     finished = Some(success);
-                    break;
                 }
                 DriverEvent::Error(error) => panic!("the server reported: {error}"),
                 _ => {}
+            }
+            if finished.is_some()
+                && context_tokens.is_some_and(|tokens| tokens > 0)
+                && context_window.is_some_and(|window| window > 0)
+            {
+                break;
             }
         }
         assert_eq!(finished, Some(true), "the turn should settle successfully");
@@ -694,6 +895,18 @@ mod tests {
             text.contains("OK"),
             "expected the reply to stream through, got {text:?}"
         );
+        assert!(context_tokens.is_some_and(|tokens| tokens > 0));
+        assert!(context_window.is_some_and(|window| window > 0));
+
+        let ProviderResumeCursor::OpenCode {
+            session_id: fork_session_id,
+        } = driver
+            .fork(1)
+            .expect("the resident server should fork away the completed turn")
+        else {
+            panic!("expected an OpenCode fork cursor");
+        };
+        assert_ne!(fork_session_id, source_session_id);
     }
 
     /// Proves steering through the actual driver: the message injected while
@@ -814,6 +1027,83 @@ mod tests {
         ));
         assert_eq!(seen.len(), 5, "non-transcript events leaked");
         assert!(!*turn.lock(), "the turn should be settled exactly once");
+    }
+
+    #[test]
+    fn assistant_updates_feed_opencode_context_usage() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        state
+            .usage_metadata
+            .model_context_windows
+            .lock()
+            .insert("opencode/deepseek-v4-flash-free".into(), 200_000);
+
+        handle_event(
+            &json!({
+                "type": "message.updated",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "info": {
+                        "role": "assistant",
+                        "providerID": "opencode",
+                        "modelID": "deepseek-v4-flash-free",
+                        "tokens": {
+                            "total": 0,
+                            "input": 13_399,
+                            "output": 10,
+                            "reasoning": 0,
+                            "cache": {"read": 1792, "write": 0}
+                        }
+                    }
+                }
+            }),
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::UsageUpdated {
+                context_tokens: Some(15_201),
+                context_window: Some(200_000)
+            }
+        ));
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn model_metadata_and_last_message_restore_opencode_usage() {
+        let models = json!({
+            "data": [{
+                "providerID": "opencode-go",
+                "id": "deepseek-v4-flash",
+                "limit": {"context": 1_000_000, "output": 384_000}
+            }]
+        });
+        let windows = opencode_model_context_windows(&models);
+        let messages = json!([
+            {"info": {"role": "user"}},
+            {"info": {
+                "role": "assistant",
+                "providerID": "opencode-go",
+                "modelID": "deepseek-v4-flash",
+                "tokens": {
+                    "total": 15_467,
+                    "input": 15_450,
+                    "output": 17,
+                    "reasoning": 0,
+                    "cache": {"read": 0, "write": 0}
+                }
+            }}
+        ]);
+
+        assert_eq!(
+            latest_opencode_context_usage(&messages, &windows),
+            Some((Some(15_467), Some(1_000_000)))
+        );
     }
 
     #[test]

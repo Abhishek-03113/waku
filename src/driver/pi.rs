@@ -272,9 +272,24 @@ impl PiDriver {
                     });
                     return;
                 };
+                let initial_usage = send_request(
+                    &mut stdin,
+                    &writer_pending,
+                    &mut next_request_id,
+                    json!({"type": "get_session_stats"}),
+                )
+                .ok()
+                .and_then(|stats| pi_context_usage(&state, Some(&stats)))
+                .or_else(|| pi_context_usage(&state, None));
                 let _ = writer_events.send(DriverEvent::Connected {
                     provider_cursor: Some(cursor.clone()),
                 });
+                if let Some((context_tokens, context_window)) = initial_usage {
+                    let _ = writer_events.send(DriverEvent::UsageUpdated {
+                        context_tokens,
+                        context_window,
+                    });
+                }
                 if let Some(title) = state
                     .pointer("/data/sessionName")
                     .and_then(Value::as_str)
@@ -350,7 +365,7 @@ impl PiDriver {
                             if options.model != current_model {
                                 match options.model.as_deref().map(parse_model_slug).transpose() {
                                     Ok(Some((provider, model_id))) => {
-                                        if let Err(error) = send_request(
+                                        match send_request(
                                             &mut stdin,
                                             &writer_pending,
                                             &mut next_request_id,
@@ -360,11 +375,28 @@ impl PiDriver {
                                                 "modelId": model_id
                                             }),
                                         ) {
-                                            let _ = writer_events.send(DriverEvent::Error(tr!(
-                                                "errors.switch_provider_model",
-                                                provider = "Pi",
-                                                error = error
-                                            )));
+                                            Ok(response) => {
+                                                if let Some(window) = response
+                                                    .pointer("/data/contextWindow")
+                                                    .and_then(Value::as_u64)
+                                                    .filter(|window| *window > 0)
+                                                {
+                                                    let _ = writer_events.send(
+                                                        DriverEvent::UsageUpdated {
+                                                            context_tokens: None,
+                                                            context_window: Some(window),
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                            Err(error) => {
+                                                let _ =
+                                                    writer_events.send(DriverEvent::Error(tr!(
+                                                        "errors.switch_provider_model",
+                                                        provider = "Pi",
+                                                        error = error
+                                                    )));
+                                            }
                                         }
                                     }
                                     Ok(None) => {}
@@ -637,6 +669,44 @@ fn cursor_from_state(response: &Value) -> Option<ProviderResumeCursor> {
     })
 }
 
+/// Pi already computes context occupancy for its own footer. Prefer that
+/// native value when session stats are available, and use the active model in
+/// `get_state` for the window before the first assistant message arrives.
+fn pi_context_usage(state: &Value, stats: Option<&Value>) -> Option<(Option<u64>, Option<u64>)> {
+    let context = stats.and_then(|stats| stats.pointer("/data/contextUsage"));
+    let tokens = context
+        .and_then(|context| context.get("tokens"))
+        .and_then(Value::as_u64);
+    let window = context
+        .and_then(|context| context.get("contextWindow"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            state
+                .pointer("/data/model/contextWindow")
+                .and_then(Value::as_u64)
+        })
+        .filter(|window| *window > 0);
+    (tokens.is_some() || window.is_some()).then_some((tokens, window))
+}
+
+/// Pi's providers normally fill `totalTokens`, but Pi itself deliberately
+/// falls back to the four component counters when a provider leaves it zero.
+/// Keep Waku's meter aligned with that provider-native calculation.
+fn pi_message_context_tokens(message: &Value) -> Option<u64> {
+    let usage = message.get("usage")?;
+    usage
+        .get("totalTokens")
+        .and_then(Value::as_u64)
+        .filter(|tokens| *tokens > 0)
+        .or_else(|| {
+            let total = ["input", "output", "cacheRead", "cacheWrite"]
+                .into_iter()
+                .filter_map(|field| usage.get(field).and_then(Value::as_u64))
+                .fold(0_u64, u64::saturating_add);
+            (total > 0).then_some(total)
+        })
+}
+
 fn fork_pi_session(
     stdin: &mut impl Write,
     pending: &PendingResponses,
@@ -820,13 +890,9 @@ fn handle_pi_message(
         }
         "message_end" => {
             if value.pointer("/message/role").and_then(Value::as_str) == Some("assistant") {
-                // Pi's `totalTokens` already sums prompt, cache, and output —
-                // the context the next call starts from.
-                if let Some(tokens) = value
-                    .pointer("/message/usage/totalTokens")
-                    .and_then(Value::as_u64)
-                    .filter(|tokens| *tokens > 0)
-                {
+                // This is the context the next call starts from, not the
+                // cumulative billed total for the whole session.
+                if let Some(tokens) = value.get("message").and_then(pi_message_context_tokens) {
                     let _ = events.send(DriverEvent::UsageUpdated {
                         context_tokens: Some(tokens),
                         context_window: None,
@@ -1012,6 +1078,70 @@ mod tests {
             receiver,
             PiStreamState::default(),
         )
+    }
+
+    /// Drives the installed Pi RPC through one real provider turn. Ignored by
+    /// default because it needs the CLI, credentials, and network access.
+    #[test]
+    #[ignore = "requires an installed, authenticated pi"]
+    fn pi_context_usage_against_the_real_rpc() {
+        let binary = crate::command_env::find_executable("pi").expect("pi is not installed");
+        let (events, event_rx) = unbounded();
+        let driver = PiDriver::start(
+            DriverStartOptions {
+                binary,
+                cwd: std::env::temp_dir(),
+                mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Build,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+            },
+            events,
+        )
+        .expect("the Pi RPC session should start");
+
+        let mut connected = false;
+        let mut context_tokens = None;
+        let mut context_window = None;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(30)) {
+            match event {
+                DriverEvent::Connected { .. } => {
+                    connected = true;
+                    break;
+                }
+                DriverEvent::Error(error) => panic!("Pi failed to initialize: {error}"),
+                _ => {}
+            }
+        }
+        assert!(connected, "Pi never reported its native session");
+
+        driver.prompt("Reply with exactly: OK. Do not use any tools.".into());
+        let mut finished = false;
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_secs(180)) {
+            match event {
+                DriverEvent::UsageUpdated {
+                    context_tokens: tokens,
+                    context_window: window,
+                } => {
+                    context_tokens = tokens.or(context_tokens);
+                    context_window = window.or(context_window);
+                }
+                DriverEvent::TurnFinished { success, .. } => {
+                    assert!(success, "Pi should finish the probe turn");
+                    finished = true;
+                    break;
+                }
+                DriverEvent::Error(error) => panic!("Pi reported: {error}"),
+                _ => {}
+            }
+        }
+
+        assert!(finished, "Pi never settled the probe turn");
+        assert!(context_tokens.is_some_and(|tokens| tokens > 0));
+        assert!(context_window.is_some_and(|window| window > 0));
     }
 
     #[test]
@@ -1266,6 +1396,61 @@ mod tests {
             event_rx.recv().unwrap(),
             DriverEvent::TextDelta(value) if value == "answer"
         ));
+    }
+
+    #[test]
+    fn context_usage_uses_pi_components_when_total_is_zero() {
+        let (pending, commands, _command_rx, mut state) = harness();
+        let (events, event_rx) = unbounded();
+        handle_pi_message(
+            json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                        "input": 33,
+                        "output": 27,
+                        "cacheRead": 5888,
+                        "cacheWrite": 4,
+                        "totalTokens": 0
+                    }
+                }
+            }),
+            &pending,
+            &commands,
+            &events,
+            &mut state,
+        );
+
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            DriverEvent::UsageUpdated {
+                context_tokens: Some(5952),
+                context_window: None
+            }
+        ));
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn session_stats_supply_pi_context_tokens_and_window() {
+        let state = json!({"data": {"model": {"contextWindow": 200_000}}});
+        let stats = json!({
+            "data": {
+                "contextUsage": {
+                    "tokens": 6109,
+                    "contextWindow": 1_000_000,
+                    "percent": 0.6109
+                }
+            }
+        });
+
+        assert_eq!(
+            pi_context_usage(&state, Some(&stats)),
+            Some((Some(6109), Some(1_000_000)))
+        );
+        assert_eq!(pi_context_usage(&state, None), Some((None, Some(200_000))));
     }
 
     #[test]

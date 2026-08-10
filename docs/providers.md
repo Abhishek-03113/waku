@@ -473,10 +473,11 @@ reach another's transcript.
 | `message.part.delta`, `field: "text"` | `TextDelta` |
 | `message.part.delta`, `field: "reasoning"` | `ReasoningDelta` |
 | `message.part.updated` with a `tool` part | `RichActivity`, read off `/state/status`, `/state/input`, `/state/output` |
+| `message.updated` with assistant token counters | `UsageUpdated`, paired with `/api/model`'s context limit for the reported provider/model |
 | `session.idle` | `TurnFinished` |
 | `session.error` | `Error` |
 | `permission.*` | `Permission` |
-| `session.created`, `session.updated`, `session.diff`, `message.updated`, plugin/catalog chatter | ignored |
+| `session.created`, `session.updated`, `session.diff`, plugin/catalog chatter | ignored |
 
 **Approvals** — `POST /session/{id}/permission/{requestID}/reply` with
 `{reply: "once" | "always" | "reject"}`. Supervised surfaces the request with the
@@ -485,8 +486,10 @@ agent stops asking about the same permission.
 
 **Cancel** — `POST /session/{id}/abort`.
 
-**Rewind and branch** — unchanged: `POST /session/{id}/fork` against the same
-server ([src/opencode_session.rs](../src/opencode_session.rs)).
+**Rewind and branch** — `POST /session/{id}/fork`. A live task sends the fork
+through its resident server, avoiding a second OpenCode process contending for
+the same local resources; a cold task may use a short-lived server
+([src/opencode_session.rs](../src/opencode_session.rs)).
 
 **Computer Use** — `OPENCODE_CONFIG_CONTENT` and the helper paths are handed to
 the resident server through its environment, exactly as the one-shot invocation

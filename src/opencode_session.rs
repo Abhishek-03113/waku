@@ -12,6 +12,10 @@ use crate::model::ProviderResumeCursor;
 
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Forking copies every retained message and part into a new native session.
+/// A long task can legitimately take longer than the ordinary request budget;
+/// this operation already runs off the UI thread.
+const FORK_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 /// The server binds its port about a second before the app behind it starts
 /// answering, and a request accepted in that window is never answered at all.
 /// A startup probe caught there must give up quickly and retry — at the full
@@ -25,9 +29,49 @@ pub fn fork_session_at_turn(
     retained_turns: usize,
 ) -> anyhow::Result<ProviderResumeCursor> {
     let server = OpenCodeServer::start(binary, cwd)?;
+    fork_session_at_turn_on_server(&server, session_id, retained_turns)
+}
+
+/// Forks through the task's resident OpenCode server.
+///
+/// Starting a second `opencode serve` against the same workspace can contend
+/// with the live process for OpenCode's local resources. Rewinds with a live
+/// driver use this path instead, while cold sessions still use the standalone
+/// helper above.
+pub(crate) fn fork_session_at_turn_on_server(
+    server: &OpenCodeServer,
+    session_id: &str,
+    retained_turns: usize,
+) -> anyhow::Result<ProviderResumeCursor> {
+    let message_ids = native_user_message_ids(server, session_id)?;
+    fork_session_with_message_ids(server, session_id, &message_ids, retained_turns)
+}
+
+pub(crate) fn fork_session_removing_turns_on_server(
+    server: &OpenCodeServer,
+    session_id: &str,
+    turns_to_remove: usize,
+) -> anyhow::Result<ProviderResumeCursor> {
+    let message_ids = native_user_message_ids(server, session_id)?;
+    let retained_turns = retained_turn_count(message_ids.len(), turns_to_remove)?;
+    fork_session_with_message_ids(server, session_id, &message_ids, retained_turns)
+}
+
+fn retained_turn_count(total_turns: usize, turns_to_remove: usize) -> anyhow::Result<usize> {
+    total_turns.checked_sub(turns_to_remove).ok_or_else(|| {
+        anyhow!(
+            "OpenCode has only {total_turns} native turns, but Waku needs to remove {turns_to_remove}"
+        )
+    })
+}
+
+fn native_user_message_ids(
+    server: &OpenCodeServer,
+    session_id: &str,
+) -> anyhow::Result<Vec<String>> {
     let session_path = format!("/session/{}/message", encode_path_segment(session_id));
-    let messages = server.request("GET", &session_path, None)?;
-    let message_ids = messages
+    let messages = server.request_with_timeout("GET", &session_path, None, FORK_HTTP_TIMEOUT)?;
+    Ok(messages
         .as_array()
         .ok_or_else(|| anyhow!("OpenCode returned an invalid message list"))?
         .iter()
@@ -37,11 +81,19 @@ pub fn fork_session_at_turn(
                 .flatten()
                 .map(str::to_owned)
         })
-        .collect::<Vec<_>>();
+        .collect())
+}
+
+fn fork_session_with_message_ids(
+    server: &OpenCodeServer,
+    session_id: &str,
+    message_ids: &[String],
+    retained_turns: usize,
+) -> anyhow::Result<ProviderResumeCursor> {
     let fork_at = fork_message_id(&message_ids, retained_turns)?;
     let body = fork_at.map_or_else(|| json!({}), |message_id| json!({"messageID": message_id}));
     let fork_path = format!("/session/{}/fork", encode_path_segment(session_id));
-    let fork = server.request("POST", &fork_path, Some(&body))?;
+    let fork = server.request_with_timeout("POST", &fork_path, Some(&body), FORK_HTTP_TIMEOUT)?;
     let fork_id = fork
         .get("id")
         .and_then(Value::as_str)
@@ -215,8 +267,85 @@ fn http_request(
     stream.flush()?;
 
     let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        // HTTP/1.1 connections are allowed to stay alive after a complete
+        // response, even when the client asks to close. Waiting for EOF made a
+        // valid OpenCode response end as macOS EAGAIN once the socket timeout
+        // elapsed. Stop at the protocol's own body boundary instead.
+        if http_response_is_complete(&response)? {
+            break;
+        }
+        let read = stream
+            .read(&mut buffer)
+            .with_context(|| format!("failed reading OpenCode response for {method} {path}"))?;
+        if read == 0 {
+            break;
+        }
+        response.extend_from_slice(&buffer[..read]);
+    }
     parse_http_response(&response)
+}
+
+fn http_response_is_complete(response: &[u8]) -> anyhow::Result<bool> {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Ok(false);
+    };
+    let headers = std::str::from_utf8(&response[..header_end])?;
+    let body = &response[header_end + 4..];
+    if header_value(headers, "transfer-encoding").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+    }) {
+        return chunked_body_is_complete(body);
+    }
+    if let Some(length) = header_value(headers, "content-length") {
+        let length = length
+            .trim()
+            .parse::<usize>()
+            .context("OpenCode returned an invalid HTTP content length")?;
+        return Ok(body.len() >= length);
+    }
+
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok());
+    Ok(status.is_some_and(|status| matches!(status, 204 | 205 | 304)))
+}
+
+fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    headers.lines().skip(1).find_map(|line| {
+        let (header, value) = line.split_once(':')?;
+        header.eq_ignore_ascii_case(name).then_some(value.trim())
+    })
+}
+
+fn chunked_body_is_complete(mut input: &[u8]) -> anyhow::Result<bool> {
+    loop {
+        let Some(line_end) = input.windows(2).position(|window| window == b"\r\n") else {
+            return Ok(false);
+        };
+        let size_text = std::str::from_utf8(&input[..line_end])?
+            .split(';')
+            .next()
+            .unwrap_or_default();
+        let size = usize::from_str_radix(size_text.trim(), 16)
+            .context("OpenCode returned an invalid HTTP chunk size")?;
+        input = &input[line_end + 2..];
+        if size == 0 {
+            return Ok(true);
+        }
+        if input.len() < size + 2 {
+            return Ok(false);
+        }
+        if &input[size..size + 2] != b"\r\n" {
+            bail!("OpenCode returned an invalid chunked response");
+        }
+        input = &input[size + 2..];
+    }
 }
 
 fn parse_http_response(response: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -299,6 +428,13 @@ mod tests {
     }
 
     #[test]
+    fn rollback_count_is_converted_to_the_retained_native_prefix() {
+        assert_eq!(retained_turn_count(4, 1).unwrap(), 3);
+        assert_eq!(retained_turn_count(4, 4).unwrap(), 0);
+        assert!(retained_turn_count(4, 5).is_err());
+    }
+
+    #[test]
     fn native_turn_filter_ignores_compaction_and_synthetic_user_messages() {
         assert!(is_native_user_turn(&json!({
             "info": {"role": "user"},
@@ -327,5 +463,68 @@ mod tests {
             .unwrap(),
             b"{\"id\":1}"
         );
+    }
+
+    #[test]
+    fn detects_complete_http_bodies_without_waiting_for_connection_close() {
+        assert!(
+            !http_response_is_complete(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{").unwrap()
+        );
+        assert!(
+            http_response_is_complete(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap()
+        );
+        assert!(
+            !http_response_is_complete(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{}"
+            )
+            .unwrap()
+        );
+        assert!(
+            http_response_is_complete(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+            )
+            .unwrap()
+        );
+        assert!(
+            http_response_is_complete(b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n")
+                .unwrap()
+        );
+    }
+
+    /// Exercises the same cold-session path used when an edited message is
+    /// submitted after Waku has relaunched. The source session is supplied by
+    /// the caller so this never creates provider traffic; it only forks the
+    /// already-completed native transcript and removes the test fork again.
+    #[test]
+    #[ignore = "requires an installed opencode and WAKU_OPENCODE_TEST_SESSION_ID"]
+    fn forks_away_a_real_single_turn_session() {
+        let binary =
+            crate::command_env::find_executable("opencode").expect("opencode is not installed");
+        let session_id = std::env::var("WAKU_OPENCODE_TEST_SESSION_ID")
+            .expect("set WAKU_OPENCODE_TEST_SESSION_ID to a completed one-turn session");
+        let cwd = std::env::current_dir().expect("the test working directory should exist");
+        let server = OpenCodeServer::start(&binary, &cwd).expect("the server should start");
+        let ProviderResumeCursor::OpenCode {
+            session_id: fork_id,
+        } = fork_session_at_turn_on_server(&server, &session_id, 0)
+            .expect("the first turn should be excluded from the fork")
+        else {
+            panic!("expected an OpenCode cursor");
+        };
+        let messages = server
+            .request(
+                "GET",
+                &format!("/session/{}/message", encode_path_segment(&fork_id)),
+                None,
+            )
+            .expect("the fork should be readable");
+        assert_eq!(messages.as_array().map(Vec::len), Some(0));
+        server
+            .request(
+                "DELETE",
+                &format!("/session/{}", encode_path_segment(&fork_id)),
+                None,
+            )
+            .expect("the test fork should be removed");
     }
 }
