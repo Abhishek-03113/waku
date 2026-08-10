@@ -46,7 +46,7 @@ fn default_right_panel_visibility() -> bool {
 }
 
 fn default_computer_use_enabled() -> bool {
-    true
+    false
 }
 
 fn default_sidebar_width() -> f32 {
@@ -332,7 +332,7 @@ impl PersistedState {
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
-            computer_use_enabled: true,
+            computer_use_enabled: false,
             computer_use_allowed_apps: Vec::new(),
             disabled_providers: Vec::new(),
             provider_binary_overrides: HashMap::new(),
@@ -1507,6 +1507,21 @@ mod tests {
 
         assert!(restored.sidebar_visible);
         assert!(!restored.right_panel_visible);
+    }
+
+    #[test]
+    fn computer_use_defaults_to_disabled() {
+        let state = PersistedState::empty();
+        assert!(!state.computer_use_enabled);
+
+        let mut settings = serde_json::to_value(state.settings()).unwrap();
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("computer_use_enabled");
+        let restored: AppSettings = serde_json::from_value(settings).unwrap();
+
+        assert!(!restored.computer_use_enabled);
     }
 
     #[test]

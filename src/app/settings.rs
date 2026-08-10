@@ -82,6 +82,7 @@ pub(super) fn visible_settings_pages(
 ) -> impl Iterator<Item = (SettingsPage, String, &'static str)> + '_ {
     SETTINGS_PAGES
         .into_iter()
+        .filter(|(page, ..)| page.is_visible_in_navigation())
         .filter_map(move |(page, label_key, icon, keywords_key)| {
             let label = crate::i18n::translate(label_key);
             let keywords = crate::i18n::translate(keywords_key).to_lowercase();

@@ -648,6 +648,9 @@ impl Waku {
                 "settings preferences computer use accessibility screen recording",
             ),
         ] {
+            if !page.is_visible_in_navigation() {
+                continue;
+            }
             commands.push(CommandPaletteItem::command(
                 PaletteSection::Settings,
                 crate::i18n::translate(label_key),

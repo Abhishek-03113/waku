@@ -170,6 +170,15 @@ enum SettingsPage {
     Appearance,
 }
 
+impl SettingsPage {
+    /// Computer Use is still experimental, so only development builds expose
+    /// its navigation entry points. Keeping this decision on the page itself
+    /// makes the Settings sidebar and command palette use the same gate.
+    fn is_visible_in_navigation(self) -> bool {
+        self != Self::ComputerUse || cfg!(debug_assertions)
+    }
+}
+
 /// Which presentation the Usage page shows: the daily dashboard, the monthly
 /// statement, or the per-project ranking.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
