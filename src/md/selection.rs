@@ -142,14 +142,16 @@ impl Selection {
     /// The full selected text, spans joined in document order.
     pub fn text(&self) -> String {
         let mut out = String::new();
-        for span in self.spans.iter().filter(|span| !span.range.is_empty()) {
-            if !out.is_empty() {
+        let mut has_span = false;
+        for span in &self.spans {
+            if has_span {
                 out.push('\n');
                 if span.block_break {
                     out.push('\n');
                 }
             }
             out.push_str(&span.text[span.range.clone()]);
+            has_span = true;
         }
         out
     }
@@ -225,7 +227,10 @@ impl<G> SelectionRegistry<G> {
             };
             let from = clamp_boundary(&entry.text, from);
             let to = clamp_boundary(&entry.text, to);
-            if from < to {
+            // A fully crossed empty code line carries no glyph range to wash,
+            // but keeping its span preserves the blank line when copying.
+            let crossed_empty = entry.text.is_empty() && index > start.0 && index < end.0;
+            if from < to || crossed_empty {
                 spans.push(Span {
                     key: entry.key.clone(),
                     range: from..to,
@@ -269,6 +274,14 @@ impl<G> Default for SelectionState<G> {
             selection: Rc::default(),
             registry: Rc::default(),
         }
+    }
+}
+
+impl<G> SelectionState<G> {
+    /// Drop both the persisted spans and this frame's hit-test geometry.
+    pub fn clear(&self) {
+        self.selection.borrow_mut().clear();
+        self.registry.borrow_mut().clear();
     }
 }
 
@@ -414,6 +427,20 @@ mod tests {
         selection.clear();
         assert!(selection.is_empty());
         assert_eq!(selection.anchor(), None);
+    }
+
+    #[test]
+    fn line_oriented_copy_uses_single_newlines_and_preserves_blank_rows() {
+        let registry = registry(&[("line-1", "one"), ("line-2", ""), ("line-3", "two")]);
+        let mut selection = Selection::default();
+        selection.set_spans(registry.resolve((0, 0), (2, 3)));
+
+        // The fixture marks later elements as block starts; Review overrides
+        // that flag because every registered element is one logical code line.
+        for span in &mut selection.spans {
+            span.block_break = false;
+        }
+        assert_eq!(selection.text(), "one\n\ntwo");
     }
 
     #[test]

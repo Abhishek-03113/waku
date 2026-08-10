@@ -303,6 +303,10 @@ impl Waku {
         self.remeasure_transcript_row(TranscriptRowKind::Message(message_index));
     }
 
+    pub(super) fn remeasure_changed_files(&self, turn_id: Uuid) {
+        self.remeasure_transcript_row(TranscriptRowKind::ChangedFiles(turn_id));
+    }
+
     fn remeasure_transcript_row(&self, target: TranscriptRowKind) {
         self.sync_transcript_rows();
         let row = self
@@ -323,6 +327,10 @@ pub(super) enum TranscriptRowKind {
     Message(usize),
     TurnBlock(usize),
     TurnFold(Uuid),
+    /// Immutable file stats captured between this turn's pre- and post-turn
+    /// checkpoints. This is a first-class row so expanding a large summary
+    /// remeasures only the card, not the assistant response above it.
+    ChangedFiles(Uuid),
     /// The live turn's footer — pulsing dots plus "Working for Ns". Present
     /// from the moment the prompt lands until the turn settles, so a provider
     /// that has not produced a chunk yet still shows visible progress, and a
@@ -561,6 +569,7 @@ pub(super) fn assistant_response_footer(
                 TranscriptRowKind::Message(index) => session.messages.get(index),
                 TranscriptRowKind::TurnBlock(_)
                 | TranscriptRowKind::TurnFold(_)
+                | TranscriptRowKind::ChangedFiles(_)
                 | TranscriptRowKind::WorkingIndicator => None,
             })
             .filter(|part| !part.content.trim().is_empty())
@@ -726,6 +735,12 @@ pub(super) fn transcript_rows_fingerprint(
     for turn in &session.turns {
         hash = mix_uuid(hash, turn.id);
         hash = mix(hash, turn.status as u64);
+        hash = mix(
+            hash,
+            turn.checkpoint.as_ref().is_some_and(|checkpoint| {
+                checkpoint.status == CheckpointStatus::Ready && !checkpoint.files.is_empty()
+            }) as u64,
+        );
     }
 
     // A set has no stable iteration order, so combine its members with an
@@ -813,7 +828,48 @@ pub(super) fn folded_transcript_row_kinds(
     if session.status.is_busy() && session.active_turn_id().is_some() {
         rows.push(TranscriptRowKind::WorkingIndicator);
     }
-    rows
+
+    // A file summary closes the response it belongs to. Derive its insertion
+    // point from the already-folded rows: ordinary turns land after their
+    // trailing assistant answer, while an interrupted turn with no answer
+    // still lands after its visible `Worked for …` disclosure. This also keeps
+    // the card before the next user prompt without teaching the raw provider
+    // transcript about a Waku-only presentation row.
+    let changed_turns = session
+        .turns
+        .iter()
+        .filter(|turn| {
+            turn.status != TurnStatus::Running
+                && turn.checkpoint.as_ref().is_some_and(|checkpoint| {
+                    checkpoint.status == CheckpointStatus::Ready && !checkpoint.files.is_empty()
+                })
+        })
+        .map(|turn| turn.id)
+        .collect::<HashSet<_>>();
+    if changed_turns.is_empty() {
+        return rows;
+    }
+
+    let mut last_row_by_turn = HashMap::new();
+    for (index, row) in rows.iter().copied().enumerate() {
+        if let Some(turn_id) = row_turn_id(session, row)
+            && changed_turns.contains(&turn_id)
+        {
+            last_row_by_turn.insert(turn_id, index);
+        }
+    }
+    let changed_after_row = last_row_by_turn
+        .into_iter()
+        .map(|(turn_id, index)| (index, turn_id))
+        .collect::<HashMap<_, _>>();
+    let mut with_changes = Vec::with_capacity(rows.len() + changed_after_row.len());
+    for (index, row) in rows.into_iter().enumerate() {
+        with_changes.push(row);
+        if let Some(turn_id) = changed_after_row.get(&index).copied() {
+            with_changes.push(TranscriptRowKind::ChangedFiles(turn_id));
+        }
+    }
+    with_changes
 }
 
 /// The rows the turn *produced*, in transcript order: its assistant text parts
@@ -867,6 +923,7 @@ fn turn_answer_start(session: &AgentSession, turn_rows: &[TranscriptRowKind]) ->
             .is_some_and(|message| !message.content.trim().is_empty()),
         TranscriptRowKind::TurnBlock(_)
         | TranscriptRowKind::TurnFold(_)
+        | TranscriptRowKind::ChangedFiles(_)
         | TranscriptRowKind::WorkingIndicator => false,
     };
     let Some(last_text) = turn_rows.iter().rposition(is_answer_text) else {
@@ -883,6 +940,7 @@ fn row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
         TranscriptRowKind::Message(index) => session.messages.get(index)?.turn_id,
         TranscriptRowKind::TurnBlock(index) => session.transcript_blocks.get(index)?.turn_id,
         TranscriptRowKind::TurnFold(turn_id) => Some(turn_id),
+        TranscriptRowKind::ChangedFiles(turn_id) => Some(turn_id),
         TranscriptRowKind::WorkingIndicator => None,
     }
 }

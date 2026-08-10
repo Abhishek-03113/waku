@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -16,6 +16,20 @@ pub(super) struct WorkingTreeEntry {
     depth: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum ReviewDiffTreeRow {
+    Directory {
+        path: String,
+        name: String,
+        depth: usize,
+        expanded: bool,
+    },
+    File {
+        file_index: usize,
+        depth: usize,
+    },
+}
+
 /// Select from a compact, embedded subset of Material Icon Theme rather than
 /// shipping its entire icon catalog. The SVG path is resolved once per entry
 /// during the directory scan, not on every row paint.
@@ -25,6 +39,147 @@ pub(super) fn file_icon_for_path(path: &str) -> &'static str {
         .and_then(|name| name.to_str())
         .unwrap_or(path);
     file_icon_for_name(name)
+}
+
+fn review_diff_gap_icon_path(direction: crate::review_diff::ExpansionDirection) -> &'static str {
+    match direction {
+        // Pierre's direction attributes and rendered chevrons are inverted by
+        // CSS. Waku names the data operation directly, so encode the resulting
+        // visual here: reveal-from-start points down; reveal-from-end points up.
+        crate::review_diff::ExpansionDirection::Start => "icons/chevron-down.svg",
+        crate::review_diff::ExpansionDirection::End => "icons/chevron-up.svg",
+        crate::review_diff::ExpansionDirection::Both
+        | crate::review_diff::ExpansionDirection::All => "icons/chevrons-up-down.svg",
+    }
+}
+
+fn review_diff_gap_tooltip(direction: crate::review_diff::ExpansionDirection) -> String {
+    match direction {
+        crate::review_diff::ExpansionDirection::Start => tr!("diff.expand_context_below"),
+        crate::review_diff::ExpansionDirection::End => tr!("diff.expand_context_above"),
+        crate::review_diff::ExpansionDirection::Both => tr!("diff.expand_context"),
+        crate::review_diff::ExpansionDirection::All => tr!("diff.expand_all_context"),
+    }
+}
+
+fn review_diff_gap_directions(
+    position: crate::review_diff::GapPosition,
+    chunked: bool,
+) -> &'static [crate::review_diff::ExpansionDirection] {
+    use crate::review_diff::{ExpansionDirection, GapPosition};
+
+    match (position, chunked) {
+        (GapPosition::Leading, _) => &[ExpansionDirection::End],
+        (GapPosition::Trailing, _) => &[ExpansionDirection::Start],
+        (GapPosition::Between, false) => &[ExpansionDirection::Both],
+        (GapPosition::Between, true) => &[ExpansionDirection::Start, ExpansionDirection::End],
+    }
+}
+
+fn review_diff_directory_paths(files: &[crate::review_diff::File]) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    for file in files {
+        let parts = file.path.split('/').collect::<Vec<_>>();
+        let mut path = String::new();
+        for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(part);
+            paths.insert(path.clone());
+        }
+    }
+    paths
+}
+
+fn review_diff_tree_rows(
+    files: &[crate::review_diff::File],
+    expanded_paths: &HashSet<String>,
+    filter: &str,
+) -> Vec<ReviewDiffTreeRow> {
+    let filter = filter.trim().to_ascii_lowercase();
+    let filtering = !filter.is_empty();
+    let mut indexes = files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| {
+            filtering
+                .then(|| file.path.to_ascii_lowercase().contains(&filter))
+                .unwrap_or(true)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    indexes.sort_by_key(|index| files[*index].path.to_ascii_lowercase());
+
+    let mut rows = Vec::new();
+    let mut emitted_directories = HashSet::new();
+    for file_index in indexes {
+        let parts = files[file_index].path.split('/').collect::<Vec<_>>();
+        let mut directory = String::new();
+        let mut visible = true;
+        for (depth, part) in parts.iter().take(parts.len().saturating_sub(1)).enumerate() {
+            if !directory.is_empty() {
+                directory.push('/');
+            }
+            directory.push_str(part);
+            let expanded = filtering || expanded_paths.contains(&directory);
+            if emitted_directories.insert(directory.clone()) && visible {
+                rows.push(ReviewDiffTreeRow::Directory {
+                    path: directory.clone(),
+                    name: (*part).to_owned(),
+                    depth,
+                    expanded,
+                });
+            }
+            if !expanded {
+                visible = false;
+                break;
+            }
+        }
+        if visible {
+            rows.push(ReviewDiffTreeRow::File {
+                file_index,
+                depth: parts.len().saturating_sub(1),
+            });
+        }
+    }
+    rows
+}
+
+fn review_diff_flat_text(line: &crate::review_diff::Line, theme: &Theme) -> md::render::FlatText {
+    let text = line.content.clone();
+    let palette = MarkdownPalette::from_theme(theme);
+    let code_font = font(md::render::MONO_FAMILY);
+    let mut runs = Vec::with_capacity(line.tokens.len() * 2 + 1);
+    let mut offset = 0;
+    let mut push = |len: usize, color: Hsla| {
+        if len > 0 {
+            runs.push(TextRun {
+                len,
+                font: code_font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+    };
+    for token in &line.tokens {
+        if token.range.start > offset {
+            push(token.range.start - offset, theme.text_secondary);
+        }
+        push(token.range.len(), palette.token(token.class));
+        offset = token.range.end;
+    }
+    if offset < text.len() {
+        push(text.len() - offset, theme.text_secondary);
+    }
+    md::render::FlatText {
+        text: text.into(),
+        runs,
+        links: Vec::new(),
+        code_ranges: Vec::new(),
+    }
 }
 
 fn file_icon_for_name(name: &str) -> &'static str {
@@ -576,6 +731,188 @@ fn tab_scroll_fade(
 mod tests {
     use super::*;
 
+    fn review_file(path: &str) -> crate::review_diff::File {
+        crate::review_diff::File {
+            path: path.into(),
+            additions: 1,
+            deletions: 0,
+            status: crate::review_diff::FileStatus::Modified,
+            diff_line: None,
+        }
+    }
+
+    fn review_files() -> Vec<crate::review_diff::File> {
+        [
+            "README.md",
+            "src/app/runtime.rs",
+            "src/app/view.rs",
+            "src/lib.rs",
+            "tests/review.rs",
+        ]
+        .into_iter()
+        .map(review_file)
+        .collect()
+    }
+
+    #[test]
+    fn review_gap_expansion_icons_match_pierre_visual_directions() {
+        use crate::review_diff::{ExpansionDirection, GapPosition};
+
+        assert_eq!(
+            review_diff_gap_directions(GapPosition::Leading, true),
+            &[ExpansionDirection::End]
+        );
+        assert_eq!(
+            review_diff_gap_directions(GapPosition::Trailing, true),
+            &[ExpansionDirection::Start]
+        );
+        assert_eq!(
+            review_diff_gap_directions(GapPosition::Between, false),
+            &[ExpansionDirection::Both]
+        );
+        assert_eq!(
+            review_diff_gap_directions(GapPosition::Between, true),
+            &[ExpansionDirection::Start, ExpansionDirection::End]
+        );
+
+        assert_eq!(
+            review_diff_gap_icon_path(ExpansionDirection::Start),
+            "icons/chevron-down.svg"
+        );
+        assert_eq!(
+            review_diff_gap_icon_path(ExpansionDirection::End),
+            "icons/chevron-up.svg"
+        );
+        assert_eq!(
+            review_diff_gap_icon_path(ExpansionDirection::Both),
+            "icons/chevrons-up-down.svg"
+        );
+    }
+
+    #[test]
+    fn review_tree_builds_shared_directories_once() {
+        let files = review_files();
+        let expanded = review_diff_directory_paths(&files);
+        assert_eq!(
+            review_diff_tree_rows(&files, &expanded, ""),
+            vec![
+                ReviewDiffTreeRow::File {
+                    file_index: 0,
+                    depth: 0,
+                },
+                ReviewDiffTreeRow::Directory {
+                    path: "src".into(),
+                    name: "src".into(),
+                    depth: 0,
+                    expanded: true,
+                },
+                ReviewDiffTreeRow::Directory {
+                    path: "src/app".into(),
+                    name: "app".into(),
+                    depth: 1,
+                    expanded: true,
+                },
+                ReviewDiffTreeRow::File {
+                    file_index: 1,
+                    depth: 2,
+                },
+                ReviewDiffTreeRow::File {
+                    file_index: 2,
+                    depth: 2,
+                },
+                ReviewDiffTreeRow::File {
+                    file_index: 3,
+                    depth: 1,
+                },
+                ReviewDiffTreeRow::Directory {
+                    path: "tests".into(),
+                    name: "tests".into(),
+                    depth: 0,
+                    expanded: true,
+                },
+                ReviewDiffTreeRow::File {
+                    file_index: 4,
+                    depth: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn review_tree_collapse_hides_only_descendants() {
+        let files = review_files();
+        let expanded = HashSet::from(["src".to_owned()]);
+        let rows = review_diff_tree_rows(&files, &expanded, "");
+
+        assert!(rows.contains(&ReviewDiffTreeRow::Directory {
+            path: "src/app".into(),
+            name: "app".into(),
+            depth: 1,
+            expanded: false,
+        }));
+        assert!(rows.contains(&ReviewDiffTreeRow::File {
+            file_index: 3,
+            depth: 1,
+        }));
+        assert!(!rows.iter().any(|row| {
+            matches!(
+                row,
+                ReviewDiffTreeRow::File { file_index, .. } if *file_index == 1 || *file_index == 2
+            )
+        }));
+    }
+
+    #[test]
+    fn review_tree_filter_reveals_matching_path_and_ancestors() {
+        let rows = review_diff_tree_rows(&review_files(), &HashSet::new(), "RUNTIME");
+        assert_eq!(
+            rows,
+            vec![
+                ReviewDiffTreeRow::Directory {
+                    path: "src".into(),
+                    name: "src".into(),
+                    depth: 0,
+                    expanded: true,
+                },
+                ReviewDiffTreeRow::Directory {
+                    path: "src/app".into(),
+                    name: "app".into(),
+                    depth: 1,
+                    expanded: true,
+                },
+                ReviewDiffTreeRow::File {
+                    file_index: 1,
+                    depth: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn review_render_path_only_reads_the_in_memory_snapshot() {
+        let source = include_str!("right_panel.rs");
+        let start = source
+            .find("\n    fn render_right_panel_diff(")
+            .expect("review render fn");
+        let body = &source[start + 1..];
+        let end = body
+            .find("\n    fn render_right_panel_empty_message(")
+            .expect("review render end");
+        let body = &body[..end];
+
+        for forbidden in [
+            "Command::new",
+            "std::fs::",
+            "review_diff::collect",
+            "capture_worktree_commit",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "Review rendering must not call `{forbidden}`; prepare it in refresh_right_panel_diff"
+            );
+        }
+    }
+
     /// The render path must never reach the filesystem. This reads the source
     /// rather than the behaviour, because the cost of a regression here is a
     /// syscall per directory entry on every frame — invisible until a project
@@ -919,6 +1256,7 @@ impl Waku {
             session_id,
         );
         self.replace_active_right_panel_state(state);
+        self.sync_right_panel_diff_tree_rows(cx);
         // A read in flight when this session was switched away from had its
         // result dropped, and the flag it left behind would stop the editor
         // ever asking again. Clear it and read afresh, which also picks up
@@ -983,7 +1321,10 @@ impl Waku {
             files_selected_path: self.right_panel_files_selected_path.take(),
             file_tree_width: self.right_panel_file_tree_width,
             file_editors: std::mem::take(&mut self.right_panel_file_editors),
-            diff_files: std::mem::take(&mut self.right_panel_diff_files),
+            diff_source: self.right_panel_diff_source,
+            diff_snapshot: self.right_panel_diff_snapshot.take(),
+            diff_selected_file: self.right_panel_diff_selected_file.take(),
+            diff_expanded_paths: std::mem::take(&mut self.right_panel_diff_expanded_paths),
         }
     }
 
@@ -997,7 +1338,22 @@ impl Waku {
         self.right_panel_files_selected_path = state.files_selected_path;
         self.right_panel_file_tree_width = state.file_tree_width;
         self.right_panel_file_editors = state.file_editors;
-        self.right_panel_diff_files = state.diff_files;
+        self.right_panel_diff_generation = self.right_panel_diff_generation.wrapping_add(1);
+        self.right_panel_diff_selection.clear();
+        self.right_panel_diff_source = state.diff_source;
+        self.right_panel_diff_snapshot = state.diff_snapshot;
+        self.right_panel_diff_loading = false;
+        self.right_panel_diff_error = None;
+        self.right_panel_diff_selected_file = state.diff_selected_file;
+        self.right_panel_diff_expanded_paths = state.diff_expanded_paths;
+        self.right_panel_diff_tree_cursor = None;
+        self.right_panel_diff_tree_rows.borrow_mut().clear();
+        self.right_panel_diff_tree_list_state.reset(0);
+        let line_count = self
+            .right_panel_diff_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.lines.len());
+        self.right_panel_diff_list_state.reset(line_count);
     }
 
     fn reveal_right_panel_tab(&mut self, index: usize) {
@@ -1061,10 +1417,14 @@ impl Waku {
     }
 
     fn open_right_panel_surface(&mut self, surface: RightPanelSurface, cx: &mut Context<Self>) {
+        let reusable_index = reusable_surface_index(&self.right_panel_surfaces, &surface);
         if matches!(&surface, RightPanelSurface::File(_)) {
             self.ensure_initial_right_panel_file_editor_width();
         }
         if surface == RightPanelSurface::Diff {
+            if reusable_index.is_none() {
+                self.right_panel_width = widened_panel_width_for_review(self.right_panel_width);
+            }
             self.refresh_right_panel_diff(cx);
         }
         if matches!(
@@ -1078,17 +1438,40 @@ impl Waku {
         }
         // Browser views are created on the surface's first render, which has
         // the `Window` their webview must attach to.
-        let index =
-            reusable_surface_index(&self.right_panel_surfaces, &surface).unwrap_or_else(|| {
+        let index = match reusable_index {
+            Some(index) => index,
+            None => {
                 self.right_panel_surfaces.push(surface);
                 self.right_panel_surfaces.len() - 1
-            });
+            }
+        };
         self.right_panel_active_surface = Some(index);
         self.reveal_right_panel_tab(index);
         self.request_active_terminal_focus();
         self.request_active_browser_focus();
         self.set_right_panel_visible(true, cx);
         cx.notify();
+    }
+
+    pub(super) fn open_turn_diff(&mut self, turn_id: Uuid, cx: &mut Context<Self>) {
+        let Some((session_id, turn_count)) = self.selected_session().and_then(|session| {
+            session
+                .turns
+                .iter()
+                .find(|turn| turn.id == turn_id)
+                .map(|turn| (session.id, turn.turn_count))
+        }) else {
+            return;
+        };
+        self.right_panel_diff_source = ReviewDiffSource::LastTurn {
+            session_id,
+            turn_id,
+            turn_count,
+        };
+        self.right_panel_diff_selection.clear();
+        self.right_panel_diff_snapshot = None;
+        self.right_panel_diff_selected_file = None;
+        self.open_right_panel_surface(RightPanelSurface::Diff, cx);
     }
 
     fn open_right_panel_file(&mut self, relative_path: String, cx: &mut Context<Self>) {
@@ -1245,7 +1628,9 @@ impl Waku {
             Some(RightPanelSurface::Files) => self
                 .render_right_panel_files(width, window, cx)
                 .into_any_element(),
-            Some(RightPanelSurface::Diff) => self.render_right_panel_diff(cx).into_any_element(),
+            Some(RightPanelSurface::Diff) => self
+                .render_right_panel_diff(width, window, cx)
+                .into_any_element(),
             Some(RightPanelSurface::Terminal(terminal_id)) => self
                 .right_panel_terminals
                 .get(&terminal_id)
@@ -2336,126 +2721,892 @@ impl Waku {
         }
     }
 
-    fn render_right_panel_diff(&self, cx: &mut Context<Self>) -> Div {
+    fn render_right_panel_diff(
+        &mut self,
+        panel_width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = Theme::current(cx);
-        if self.right_panel_diff_files.is_empty() {
-            return self.render_right_panel_empty_message(
-                tr!("diff.no_changes"),
-                tr!("diff.no_changes_description"),
-                cx,
-            );
-        }
-
-        let additions = self
-            .right_panel_diff_files
-            .iter()
-            .map(|file| file.additions)
-            .sum::<u64>();
-        let deletions = self
-            .right_panel_diff_files
-            .iter()
-            .map(|file| file.deletions)
-            .sum::<u64>();
-        let count = self.right_panel_diff_files.len();
-        let mut rows = div().flex().flex_col().py(px(6.0));
-        for file in self.right_panel_diff_files.clone() {
-            let path = file.path.clone();
-            rows = rows.child(
+        let toolbar = self.render_right_panel_diff_toolbar(cx);
+        let content = match self.right_panel_diff_snapshot.clone() {
+            Some(snapshot) => {
+                let tree_width = fitted_file_tree_width(
+                    panel_width,
+                    self.right_panel_file_tree_width.max(220.0),
+                );
                 div()
-                    .id(SharedString::from(format!("right-panel-diff-{path}")))
-                    .h(px(32.0))
-                    .mx(px(8.0))
-                    .px(px(8.0))
-                    .rounded(px(6.0))
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .cursor_default()
-                    .hover(|element| element.bg(theme.overlay))
-                    .child(icon("icons/list.svg", 13.0, theme.text_tertiary))
+                    .child(self.render_right_panel_unified_diff(snapshot.clone(), cx))
                     .child(
                         div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_secondary)
-                            .child(file.path),
-                    )
-                    .child(
-                        div()
+                            .w(px(tree_width))
+                            .min_w(px(FILE_TREE_MIN_WIDTH))
+                            .h_full()
                             .flex_none()
-                            .text_size(px(10.5))
-                            .text_color(theme.warning)
-                            .child(format!("+{}", file.additions)),
+                            .relative()
+                            .border_l_1()
+                            .border_color(theme.border_strong)
+                            .child(self.render_right_panel_diff_tree(window, cx))
+                            .child(self.render_panel_resize_handle(
+                                "right-panel-diff-tree-resize-handle",
+                                PanelResizeTarget::FileTree,
+                                cx,
+                            )),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(10.5))
-                            .text_color(theme.danger)
-                            .child(format!("-{}", file.deletions)),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_right_panel_surface(RightPanelSurface::File(path.clone()), cx);
-                    })),
-            );
-        }
+                    .into_any_element()
+            }
+            None if self.right_panel_diff_loading => self
+                .render_right_panel_empty_message(
+                    tr!("diff.loading"),
+                    tr!("diff.loading_description"),
+                    cx,
+                )
+                .into_any_element(),
+            None if self.right_panel_diff_error.is_some() => self
+                .render_right_panel_empty_message(
+                    tr!("diff.unavailable"),
+                    self.right_panel_diff_error.clone().unwrap_or_default(),
+                    cx,
+                )
+                .into_any_element(),
+            None => self
+                .render_right_panel_empty_message(
+                    tr!("diff.no_changes"),
+                    tr!("diff.no_changes_description"),
+                    cx,
+                )
+                .into_any_element(),
+        };
 
         div()
             .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(md::render::frame_reset(
+                self.right_panel_diff_selection.clone(),
+            ))
+            .child(toolbar)
+            .child(content)
+            .child(self.right_panel_diff_selection_input())
+    }
+
+    fn render_right_panel_diff_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::current(cx);
+        let selected = self.right_panel_diff_source;
+        let latest_turn = self.latest_review_turn_source();
+        let source_label = self.review_diff_source_label(selected);
+        let weak = cx.entity().downgrade();
+        let handle = self.menu_handle("right-panel-diff-source", cx);
+        let source = dropdown_menu(
+            MenuChip::new("right-panel-diff-source")
+                .label(source_label)
+                .height(px(28.0))
+                .background(theme.surface)
+                .selected(handle.is_open()),
+            "right-panel-diff-source-menu",
+            &handle,
+            MenuAlign::BelowLeft,
+            move |_| {
+                let mut items = Vec::new();
+                let last_turn_source = latest_turn.unwrap_or_default();
+                let last_turn_weak = weak.clone();
+                items.push(
+                    MenuItem::new(tr!("diff.source_last_turn"), move |_, cx| {
+                        let _ = last_turn_weak.update(cx, |this, cx| {
+                            this.set_right_panel_diff_source(last_turn_source, cx)
+                        });
+                    })
+                    .selected(latest_turn == Some(selected))
+                    .disabled(latest_turn.is_none()),
+                );
+                items.push(MenuItem::Separator);
+                for (choice, label) in [
+                    (
+                        ReviewDiffSource::Uncommitted,
+                        tr!("diff.source_uncommitted"),
+                    ),
+                    (ReviewDiffSource::Unstaged, tr!("diff.source_unstaged")),
+                    (ReviewDiffSource::Staged, tr!("diff.source_staged")),
+                ] {
+                    let choice_weak = weak.clone();
+                    items.push(
+                        MenuItem::new(label, move |_, cx| {
+                            let _ = choice_weak.update(cx, |this, cx| {
+                                this.set_right_panel_diff_source(choice, cx)
+                            });
+                        })
+                        .selected(choice == selected),
+                    );
+                }
+                items.push(MenuItem::Separator);
+                for (choice, label) in [
+                    (ReviewDiffSource::Committed, tr!("diff.source_committed")),
+                    (ReviewDiffSource::Branch, tr!("diff.source_branch")),
+                ] {
+                    let choice_weak = weak.clone();
+                    items.push(
+                        MenuItem::new(label, move |_, cx| {
+                            let _ = choice_weak.update(cx, |this, cx| {
+                                this.set_right_panel_diff_source(choice, cx)
+                            });
+                        })
+                        .selected(choice == selected),
+                    );
+                }
+                items
+            },
+        );
+
+        let (additions, deletions, truncated) = self
+            .right_panel_diff_snapshot
+            .as_ref()
+            .map_or((0, 0, false), |snapshot| {
+                (snapshot.additions, snapshot.deletions, snapshot.truncated)
+            });
+        let refresh_focus = self.transcript_control_focus("right-panel-diff-refresh", cx);
+        let refresh_icon: AnyElement = if self.right_panel_diff_loading {
+            icon("icons/loader-circle.svg", 12.0, theme.text_tertiary)
+                .with_animation(
+                    "right-panel-diff-refresh-spinner",
+                    Animation::new(Duration::from_millis(900))
+                        .repeat()
+                        .with_easing(gpui::linear),
+                    |icon, delta| {
+                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(
+                            delta,
+                        )))
+                    },
+                )
+                .into_any_element()
+        } else {
+            icon("icons/rotate-cw.svg", 12.0, theme.text_tertiary).into_any_element()
+        };
+        let refresh = div()
+            .id("right-panel-diff-refresh")
+            .track_focus(&refresh_focus)
+            .tab_index(0)
+            .size(px(28.0))
+            .rounded(px(7.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .hover(|style| style.bg(theme.overlay))
+            .child(refresh_icon)
+            .tooltip(|window, cx| Tooltip::new(tr!("diff.refresh")).build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| this.refresh_right_panel_diff(cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.refresh_right_panel_diff(cx);
+                    cx.stop_propagation();
+                }
+            }));
+
+        div()
+            .h(px(44.0))
+            .flex_none()
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(source)
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.success)
+                    .child(format!("+{additions}")),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.danger)
+                    .child(format!("-{deletions}")),
+            )
+            .when(truncated, |row| {
+                row.child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.warning)
+                        .child(tr!("diff.truncated")),
+                )
+            })
+            .child(div().flex_1())
+            .child(refresh)
+            .into_any_element()
+    }
+
+    fn render_right_panel_unified_diff(
+        &self,
+        snapshot: Arc<ReviewDiffSnapshot>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if snapshot.files.is_empty() {
+            return self
+                .render_right_panel_empty_message(
+                    tr!("diff.no_changes"),
+                    tr!("diff.no_changes_description"),
+                    cx,
+                )
+                .into_any_element();
+        }
+        let entity = cx.entity().downgrade();
+        div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .relative()
+            .child(
+                list(
+                    self.right_panel_diff_list_state.clone(),
+                    move |index, _window, cx| {
+                        entity
+                            .upgrade()
+                            .map(|entity| {
+                                entity.update(cx, |this, cx| {
+                                    this.render_right_panel_diff_line(index, cx)
+                                })
+                            })
+                            .unwrap_or_else(|| div().into_any_element())
+                    },
+                )
+                .size_full(),
+            )
+            .child(scrollbar::vertical(
+                &self.right_panel_diff_list_state,
+                &self.right_panel_diff_scrollbar,
+            ))
+            .into_any_element()
+    }
+
+    fn render_right_panel_diff_line(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(snapshot) = self.right_panel_diff_snapshot.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(line) = snapshot.lines.get(index) else {
+            return div().into_any_element();
+        };
+        let Some(file) = snapshot.files.get(line.file_index) else {
+            return div().into_any_element();
+        };
+        let theme = Theme::current(cx);
+
+        match &line.kind {
+            crate::review_diff::LineKind::FileHeader => div()
+                .id(SharedString::from(format!("review-diff-file-{index}")))
+                .w_full()
+                .min_w_0()
+                .h(px(36.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.surface)
+                .child(icon(
+                    file_icon_for_path(&file.path),
+                    14.0,
+                    theme.text_tertiary,
+                ))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("review-diff-file-path-{index}")))
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_secondary)
+                        .tooltip(Tooltip::text(file.path.clone()))
+                        .child(file.path.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.success)
+                        .child(format!("+{}", file.additions)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.danger)
+                        .child(format!("-{}", file.deletions)),
+                )
+                .into_any_element(),
+            crate::review_diff::LineKind::Gap(gap) => {
+                let expandable = gap.is_expandable();
+                let chunked = gap.count() > crate::review_diff::DEFAULT_EXPANSION_LINE_COUNT as u32;
+                let directions = review_diff_gap_directions(gap.position, chunked);
+                let two_directions = directions.len() > 1;
+                let gutter = div()
+                    .w(px(52.0))
+                    .h_full()
+                    .flex_none()
+                    .flex()
+                    .when(two_directions, |gutter| gutter.flex_col())
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .bg(theme.overlay)
+                    .when(expandable, |mut gutter| {
+                        for (button_index, direction) in directions.iter().copied().enumerate() {
+                            gutter = gutter.child(self.render_right_panel_diff_gap_action(
+                                index,
+                                gap.id,
+                                direction,
+                                review_diff_gap_icon_path(direction),
+                                review_diff_gap_tooltip(direction),
+                                two_directions,
+                                two_directions && button_index == 0,
+                                cx,
+                            ));
+                        }
+                        gutter
+                    });
+                let label_focus = self
+                    .transcript_control_focus(format!("right-panel-diff-gap-{}-label", gap.id), cx);
+                let label = div()
+                    .id(SharedString::from(format!(
+                        "right-panel-diff-gap-{}-label",
+                        gap.id
+                    )))
+                    .track_focus(&label_focus)
+                    .h_full()
+                    .min_w_0()
+                    .flex_1()
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .bg(theme.overlay)
+                    .child(tr!("diff.unmodified_lines", count = gap.count()))
+                    .when(expandable, |label| {
+                        label
+                            .tab_index(0)
+                            .cursor_default()
+                            .focus_visible(|style| style.border_1().border_color(theme.accent))
+                            .hover(|style| {
+                                style
+                                    .bg(theme.overlay_strong)
+                                    .text_color(theme.text_secondary)
+                            })
+                            .active(|style| style.bg(theme.overlay))
+                            .tooltip(Tooltip::text(tr!("diff.expand_context")))
+                            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                                let direction = if event.modifiers().shift {
+                                    crate::review_diff::ExpansionDirection::All
+                                } else {
+                                    crate::review_diff::ExpansionDirection::Both
+                                };
+                                this.expand_right_panel_diff_gap(index, direction, cx);
+                                cx.stop_propagation();
+                            }))
+                            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    let direction = if event.keystroke.modifiers.shift {
+                                        crate::review_diff::ExpansionDirection::All
+                                    } else {
+                                        crate::review_diff::ExpansionDirection::Both
+                                    };
+                                    this.expand_right_panel_diff_gap(index, direction, cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                    });
+                div()
+                    .h(px(32.0))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .text_size(px(10.5))
+                    .text_color(theme.text_tertiary)
+                    .child(gutter)
+                    .child(label)
+                    .into_any_element()
+            }
+            crate::review_diff::LineKind::HunkHeader => div()
+                .h(px(24.0))
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .font_family(md::render::MONO_FAMILY)
+                .text_size(px(10.0))
+                .text_color(theme.text_tertiary)
+                .child(
+                    div()
+                        .w(px(52.0))
+                        .h_full()
+                        .flex_none()
+                        .border_r_1()
+                        .border_color(theme.border)
+                        .bg(theme.overlay),
+                )
+                .child(
+                    div()
+                        .h_full()
+                        .min_w_0()
+                        .flex_1()
+                        .px(px(12.0))
+                        .flex()
+                        .items_center()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .bg(theme.overlay)
+                        .child(line.content.clone()),
+                )
+                .into_any_element(),
+            crate::review_diff::LineKind::Meta => div()
+                .h(px(24.0))
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .font_family(md::render::MONO_FAMILY)
+                .text_size(px(10.5))
+                .text_color(theme.text_tertiary)
+                .child(div().w(px(52.0)).h_full().flex_none())
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .pr(px(10.0))
+                        .child(line.content.clone()),
+                )
+                .into_any_element(),
+            crate::review_diff::LineKind::Context
+            | crate::review_diff::LineKind::Addition
+            | crate::review_diff::LineKind::Deletion => {
+                let semantic_body_opacity = if theme.is_dark { 0.20 } else { 0.12 };
+                let semantic_gutter_opacity = if theme.is_dark { 0.15 } else { 0.09 };
+                let (body_background, gutter_background, edge, number_color) = match &line.kind {
+                    crate::review_diff::LineKind::Addition => (
+                        Some(theme.success.opacity(semantic_body_opacity)),
+                        Some(theme.success.opacity(semantic_gutter_opacity)),
+                        Some(theme.success),
+                        theme.success,
+                    ),
+                    crate::review_diff::LineKind::Deletion => (
+                        Some(theme.danger.opacity(semantic_body_opacity)),
+                        Some(theme.danger.opacity(semantic_gutter_opacity)),
+                        Some(theme.danger),
+                        theme.danger,
+                    ),
+                    _ => (None, None, None, theme.text_tertiary),
+                };
+                let shown_line = line.new_line.or(line.old_line);
+                let flat = review_diff_flat_text(line, &theme);
+                let selectable = md::render::selectable_flat_text(
+                    &flat,
+                    crate::md::selection::TextKey::new(
+                        format!(
+                            "review-diff-line-{}-{}-{}-{}",
+                            line.file_index,
+                            match &line.kind {
+                                crate::review_diff::LineKind::Context => "context",
+                                crate::review_diff::LineKind::Addition => "addition",
+                                crate::review_diff::LineKind::Deletion => "deletion",
+                                _ => "other",
+                            },
+                            line.old_line.unwrap_or(0),
+                            line.new_line.unwrap_or(0),
+                        ),
+                        0,
+                    ),
+                    self.right_panel_diff_selection.clone(),
+                    theme.code_wash,
+                    theme.selection,
+                    false,
+                );
+                let gutter = div()
+                    .w(px(52.0))
+                    .h_full()
+                    .flex_none()
+                    .pr(px(9.0))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .text_color(number_color)
+                    .when_some(gutter_background, |gutter, background| {
+                        gutter.bg(background)
+                    })
+                    .child(shown_line.map(|line| line.to_string()).unwrap_or_default());
+                let body = div()
+                    .h_full()
+                    .min_w_0()
+                    .flex_1()
+                    .pl(px(12.0))
+                    .flex()
+                    .items_center()
+                    .when_some(body_background, |body, background| body.bg(background))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "review-diff-line-content-{index}"
+                            )))
+                            .h_full()
+                            .min_w_0()
+                            .flex_1()
+                            .pr(px(10.0))
+                            .flex()
+                            .items_center()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(selectable),
+                    );
+                div()
+                    .id(SharedString::from(format!("review-diff-row-{index}")))
+                    .w_full()
+                    .min_w_0()
+                    .h(px(20.0))
+                    .flex()
+                    .items_center()
+                    .font_family(md::render::MONO_FAMILY)
+                    .text_size(px(10.5))
+                    .line_height(px(20.0))
+                    .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
+                    .child(gutter)
+                    .child(body)
+                    .into_any_element()
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_right_panel_diff_gap_action(
+        &self,
+        line_index: usize,
+        gap_id: u64,
+        direction: crate::review_diff::ExpansionDirection,
+        icon_path: &'static str,
+        tooltip: String,
+        compact_half: bool,
+        border_bottom: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = Theme::current(cx);
+        let direction_name = match direction {
+            crate::review_diff::ExpansionDirection::Start => "start",
+            crate::review_diff::ExpansionDirection::End => "end",
+            crate::review_diff::ExpansionDirection::Both => "both",
+            crate::review_diff::ExpansionDirection::All => "all",
+        };
+        let focus = self.transcript_control_focus(
+            format!("right-panel-diff-gap-{gap_id}-button-{direction_name}"),
+            cx,
+        );
+        div()
+            .id(SharedString::from(format!(
+                "right-panel-diff-gap-{gap_id}-button-{direction_name}"
+            )))
+            .track_focus(&focus)
+            .tab_index(0)
+            .w_full()
+            .h_full()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .when(compact_half, |button| button.h(px(16.0)).flex_none())
+            .when(border_bottom, |button| {
+                button.border_b_1().border_color(theme.border)
+            })
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .hover(|style| style.bg(theme.overlay_strong))
+            .active(|style| style.bg(theme.overlay))
+            .tooltip(Tooltip::text(tooltip))
+            .child(icon(icon_path, 11.0, theme.text_tertiary))
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                let direction = if event.modifiers().shift {
+                    crate::review_diff::ExpansionDirection::All
+                } else {
+                    direction
+                };
+                this.expand_right_panel_diff_gap(line_index, direction, cx);
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    let direction = if event.keystroke.modifiers.shift {
+                        crate::review_diff::ExpansionDirection::All
+                    } else {
+                        direction
+                    };
+                    this.expand_right_panel_diff_gap(line_index, direction, cx);
+                    cx.stop_propagation();
+                }
+            }))
+    }
+
+    fn expand_right_panel_diff_gap(
+        &mut self,
+        line_index: usize,
+        direction: crate::review_diff::ExpansionDirection,
+        cx: &mut Context<Self>,
+    ) {
+        let expansion = self
+            .right_panel_diff_snapshot
+            .as_mut()
+            .and_then(|snapshot| Arc::make_mut(snapshot).expand_gap(line_index, direction));
+        let Some(expansion) = expansion else {
+            return;
+        };
+        self.right_panel_diff_list_state
+            .splice(line_index..line_index + 1, expansion.replacement_count);
+        cx.notify();
+    }
+
+    /// One listener set covers every selectable code line registered while
+    /// the virtualized Review list paints this frame.
+    fn right_panel_diff_selection_input(&self) -> impl IntoElement {
+        let selection = self.right_panel_diff_selection.clone();
+        canvas(
+            |_, _, _| (),
+            move |_, _, window, _| md::render::install_selection_input(window, &selection),
+        )
+        .absolute()
+        .w(px(0.0))
+        .h(px(0.0))
+    }
+
+    fn render_right_panel_diff_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let focus = self.transcript_control_focus("right-panel-diff-tree", cx);
+        let tree_focused = focus.is_focused(window);
+        let entity = cx.entity().downgrade();
+        div()
+            .size_full()
             .min_h_0()
             .flex()
             .flex_col()
             .child(
                 div()
-                    .h(px(42.0))
+                    .h(px(44.0))
                     .flex_none()
-                    .px(px(16.0))
+                    .px(px(8.0))
                     .flex()
                     .items_center()
                     .border_b_1()
                     .border_color(theme.border)
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text_secondary)
-                    .child(format!(
-                        "{count} changed {}",
-                        if count == 1 { "file" } else { "files" }
-                    ))
-                    .child(div().flex_1())
                     .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(theme.warning)
-                            .child(format!("+{additions}")),
-                    )
-                    .child(
-                        div()
-                            .ml(px(6.0))
-                            .text_size(px(10.5))
-                            .text_color(theme.danger)
-                            .child(format!("-{deletions}")),
+                        TextField::new(
+                            "right-panel-diff-filter",
+                            self.right_panel_diff_filter.clone(),
+                        )
+                        .icon("icons/search.svg", 13.0)
+                        .w_full(),
                     ),
             )
             .child(
                 div()
+                    .id("right-panel-diff-tree")
+                    .track_focus(&focus)
+                    .tab_index(0)
+                    .key_context("ReviewDiffTree")
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        this.right_panel_diff_tree_key_down(event, window, cx)
+                    }))
                     .child(
-                        div()
-                            .id("right-panel-diff-scroll")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.right_panel_diff_scroll_handle)
-                            .child(rows),
+                        list(
+                            self.right_panel_diff_tree_list_state.clone(),
+                            move |index, _window, cx| {
+                                entity
+                                    .upgrade()
+                                    .map(|entity| {
+                                        entity.update(cx, |this, cx| {
+                                            this.render_right_panel_diff_tree_row(
+                                                index,
+                                                tree_focused,
+                                                cx,
+                                            )
+                                        })
+                                    })
+                                    .unwrap_or_else(|| div().into_any_element())
+                            },
+                        )
+                        .size_full()
+                        .py(px(4.0)),
                     )
                     .child(scrollbar::vertical(
-                        &self.right_panel_diff_scroll_handle,
-                        &self.right_panel_diff_scrollbar,
+                        &self.right_panel_diff_tree_list_state,
+                        &self.right_panel_diff_tree_scrollbar,
                     )),
             )
+    }
+
+    fn render_right_panel_diff_tree_row(
+        &self,
+        index: usize,
+        tree_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(row) = self.right_panel_diff_tree_rows.borrow().get(index).cloned() else {
+            return div().h(px(30.0)).into_any_element();
+        };
+        let theme = Theme::current(cx);
+        let cursor = tree_focused && self.right_panel_diff_tree_cursor == Some(index);
+        match row {
+            ReviewDiffTreeRow::Directory {
+                path,
+                name,
+                depth,
+                expanded,
+            } => div()
+                .w_full()
+                .h(px(30.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("review-diff-directory-{path}")))
+                        .h(px(26.0))
+                        .flex_1()
+                        .min_w_0()
+                        .pl(px(7.0 + depth as f32 * 14.0))
+                        .pr(px(7.0))
+                        .rounded(px(5.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .cursor_default()
+                        .when(cursor, |row| row.bg(theme.overlay_strong))
+                        .when(!cursor, |row| row.hover(|row| row.bg(theme.overlay)))
+                        .child(icon(
+                            if expanded {
+                                "icons/chevron-down.svg"
+                            } else {
+                                "icons/chevron-right.svg"
+                            },
+                            10.0,
+                            theme.text_ghost,
+                        ))
+                        .child(icon("icons/folder.svg", 13.0, theme.text_tertiary))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_secondary)
+                                .child(name),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let focus = this.transcript_control_focus("right-panel-diff-tree", cx);
+                            focus.focus(window, cx);
+                            this.right_panel_diff_tree_cursor = Some(index);
+                            this.toggle_right_panel_diff_directory(path.clone(), cx);
+                        })),
+                )
+                .into_any_element(),
+            ReviewDiffTreeRow::File { file_index, depth } => {
+                let Some(snapshot) = self.right_panel_diff_snapshot.as_ref() else {
+                    return div().h(px(30.0)).into_any_element();
+                };
+                let Some(file) = snapshot.files.get(file_index) else {
+                    return div().h(px(30.0)).into_any_element();
+                };
+                let path = file.path.clone();
+                let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
+                let selected = self.right_panel_diff_selected_file == Some(file_index);
+                let (status, status_color) = match file.status {
+                    crate::review_diff::FileStatus::Added => ("A", theme.success),
+                    crate::review_diff::FileStatus::Deleted => ("D", theme.danger),
+                    crate::review_diff::FileStatus::Binary => ("B", theme.warning),
+                    crate::review_diff::FileStatus::Modified => ("M", theme.warning),
+                };
+                div()
+                    .w_full()
+                    .h(px(30.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("review-diff-tree-file-{path}")))
+                            .h(px(26.0))
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(23.0 + depth as f32 * 14.0))
+                            .pr(px(7.0))
+                            .rounded(px(5.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .cursor_default()
+                            .when(selected && cursor, |row| row.bg(theme.overlay_strong))
+                            .when(selected ^ cursor, |row| row.bg(theme.overlay))
+                            .when(!selected && !cursor, |row| {
+                                row.hover(|row| row.bg(theme.overlay))
+                            })
+                            .child(icon(file_icon_for_path(&path), 13.0, theme.text_tertiary))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "review-diff-tree-file-path-{file_index}"
+                                    )))
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(if selected {
+                                        theme.text
+                                    } else {
+                                        theme.text_secondary
+                                    })
+                                    .tooltip(Tooltip::text(path.clone()))
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .w(px(16.0))
+                                    .h(px(16.0))
+                                    .flex_none()
+                                    .rounded(px(4.0))
+                                    .border_1()
+                                    .border_color(status_color.opacity(0.65))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(9.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(status_color)
+                                    .child(status),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let focus =
+                                    this.transcript_control_focus("right-panel-diff-tree", cx);
+                                focus.focus(window, cx);
+                                this.right_panel_diff_tree_cursor = Some(index);
+                                this.select_right_panel_diff_file(file_index, cx);
+                            })),
+                    )
+                    .into_any_element()
+            }
+        }
     }
 
     fn render_right_panel_empty_message(
@@ -2550,103 +3701,320 @@ impl Waku {
         }
     }
 
-    /// Refreshes the diff surface's file list.
-    ///
-    /// Two `git` invocations plus a read per untracked file — upwards of 25ms,
-    /// several frames at 120Hz — so it is a query keyed by project path. The
-    /// panel keeps showing its previous list until the result lands.
+    fn latest_review_turn_source(&self) -> Option<ReviewDiffSource> {
+        let session = self.selected_session()?;
+        session
+            .turns
+            .iter()
+            .rev()
+            .find(|turn| {
+                turn.turn_count > 0
+                    && turn
+                        .checkpoint
+                        .as_ref()
+                        .is_some_and(|checkpoint| checkpoint.status == CheckpointStatus::Ready)
+            })
+            .map(|turn| ReviewDiffSource::LastTurn {
+                session_id: session.id,
+                turn_id: turn.id,
+                turn_count: turn.turn_count,
+            })
+    }
+
+    fn review_diff_source_label(&self, source: ReviewDiffSource) -> String {
+        match source {
+            ReviewDiffSource::LastTurn { .. }
+                if self.latest_review_turn_source() == Some(source) =>
+            {
+                tr!("diff.source_last_turn")
+            }
+            ReviewDiffSource::LastTurn { turn_count, .. } => {
+                tr!("diff.source_turn", turn = turn_count)
+            }
+            ReviewDiffSource::Uncommitted => tr!("diff.source_uncommitted"),
+            ReviewDiffSource::Unstaged => tr!("diff.source_unstaged"),
+            ReviewDiffSource::Staged => tr!("diff.source_staged"),
+            ReviewDiffSource::Committed => tr!("diff.source_committed"),
+            ReviewDiffSource::Branch => tr!("diff.source_branch"),
+        }
+    }
+
+    fn set_right_panel_diff_source(&mut self, source: ReviewDiffSource, cx: &mut Context<Self>) {
+        if self.right_panel_diff_source != source {
+            self.right_panel_diff_selection.clear();
+            self.right_panel_diff_source = source;
+            self.right_panel_diff_snapshot = None;
+            self.right_panel_diff_error = None;
+            self.right_panel_diff_selected_file = None;
+            self.right_panel_diff_expanded_paths.clear();
+            self.right_panel_diff_tree_cursor = None;
+            self.right_panel_diff_tree_rows.borrow_mut().clear();
+            self.right_panel_diff_tree_list_state.reset(0);
+            self.right_panel_diff_list_state.reset(0);
+        }
+        self.refresh_right_panel_diff(cx);
+    }
+
+    /// Captures one stable Git range and turns it into render-ready rows. Git,
+    /// patch parsing, and syntax tokenization all stay off the UI thread; the
+    /// generation check prevents an old source or session from landing late.
     fn refresh_right_panel_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.state.selected_session else {
+            self.right_panel_diff_selection.clear();
+            self.right_panel_diff_snapshot = None;
+            self.right_panel_diff_loading = false;
+            self.right_panel_diff_error = Some(tr!("diff.unavailable"));
+            return;
+        };
         let Some(project_path) = self
             .selected_workspace_path()
             .map(std::path::Path::to_path_buf)
         else {
-            self.right_panel_diff_files.clear();
+            self.right_panel_diff_selection.clear();
+            self.right_panel_diff_snapshot = None;
+            self.right_panel_diff_loading = false;
+            self.right_panel_diff_error = Some(tr!("diff.unavailable"));
             return;
         };
-        // The working tree moves under us, so a cached list is only good until
-        // something asks for it again.
-        self.right_panel_diffs.invalidate(&project_path);
-        match self.right_panel_diffs.read(&project_path) {
-            Query::Ready(files) => self.right_panel_diff_files = (*files).clone(),
-            Query::Pending => {}
-            Query::Missing(token) => {
-                cx.spawn(async move |waku, cx| {
-                    let files = cx
-                        .background_executor()
-                        .spawn({
-                            let path = project_path.clone();
-                            async move { collect_diff_files(&path) }
-                        })
-                        .await;
-                    waku.update(cx, |waku, cx| {
-                        if waku.right_panel_diffs.fulfill(token, files.clone())
-                            && waku
-                                .selected_workspace_path()
-                                .is_some_and(|path| path == project_path)
-                        {
-                            waku.right_panel_diff_files = files;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
+
+        self.right_panel_diff_generation = self.right_panel_diff_generation.wrapping_add(1);
+        let generation = self.right_panel_diff_generation;
+        let source = self.right_panel_diff_source;
+        let had_snapshot = self.right_panel_diff_snapshot.is_some();
+        let previous_directories = self
+            .right_panel_diff_snapshot
+            .as_ref()
+            .map_or_else(HashSet::new, |snapshot| {
+                review_diff_directory_paths(&snapshot.files)
+            });
+        let selected_path = self.right_panel_diff_selected_file.and_then(|index| {
+            self.right_panel_diff_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.files.get(index))
+                .map(|file| file.path.clone())
+        });
+        self.right_panel_diff_loading = true;
+        self.right_panel_diff_error = None;
+        cx.notify();
+
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let project_path = project_path.clone();
+                    async move { crate::review_diff::collect(&project_path, source) }
                 })
-                .detach();
+                .await;
+            waku.update(cx, |waku, cx| {
+                let still_current = waku.state.selected_session == Some(session_id)
+                    && waku.right_panel_diff_generation == generation
+                    && waku.right_panel_diff_source == source
+                    && waku
+                        .selected_workspace_path()
+                        .is_some_and(|path| path == project_path);
+                if !still_current {
+                    return;
+                }
+
+                waku.right_panel_diff_loading = false;
+                match result {
+                    Ok(snapshot) => {
+                        waku.right_panel_diff_selection.clear();
+                        let directories = review_diff_directory_paths(&snapshot.files);
+                        if had_snapshot {
+                            waku.right_panel_diff_expanded_paths
+                                .retain(|path| directories.contains(path));
+                            waku.right_panel_diff_expanded_paths
+                                .extend(directories.difference(&previous_directories).cloned());
+                        } else {
+                            waku.right_panel_diff_expanded_paths = directories;
+                        }
+                        waku.right_panel_diff_selected_file = selected_path
+                            .as_deref()
+                            .and_then(|path| {
+                                snapshot.files.iter().position(|file| file.path == path)
+                            })
+                            .or_else(|| (!snapshot.files.is_empty()).then_some(0));
+                        let line_count = snapshot.lines.len();
+                        waku.right_panel_diff_snapshot = Some(Arc::new(snapshot));
+                        waku.right_panel_diff_error = None;
+                        waku.right_panel_diff_list_state.reset(line_count);
+                        waku.sync_right_panel_diff_tree_rows(cx);
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if waku.right_panel_diff_snapshot.is_some() {
+                            waku.show_toast(tr!("diff.refresh_failed", error = message));
+                        } else {
+                            waku.right_panel_diff_error = Some(message);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(super) fn sync_right_panel_diff_tree_rows(&mut self, cx: &mut Context<Self>) {
+        let filter = self.right_panel_diff_filter.read(cx).content().to_owned();
+        let previous_cursor_row = self
+            .right_panel_diff_tree_cursor
+            .and_then(|index| self.right_panel_diff_tree_rows.borrow().get(index).cloned());
+        let rows = self
+            .right_panel_diff_snapshot
+            .as_ref()
+            .map_or_else(Vec::new, |snapshot| {
+                review_diff_tree_rows(
+                    &snapshot.files,
+                    &self.right_panel_diff_expanded_paths,
+                    &filter,
+                )
+            });
+        let cursor = previous_cursor_row
+            .as_ref()
+            .and_then(|previous| {
+                rows.iter().position(|row| match (previous, row) {
+                    (
+                        ReviewDiffTreeRow::Directory { path: left, .. },
+                        ReviewDiffTreeRow::Directory { path: right, .. },
+                    ) => left == right,
+                    (
+                        ReviewDiffTreeRow::File {
+                            file_index: left, ..
+                        },
+                        ReviewDiffTreeRow::File {
+                            file_index: right, ..
+                        },
+                    ) => left == right,
+                    _ => false,
+                })
+            })
+            .or_else(|| {
+                self.right_panel_diff_selected_file.and_then(|selected| {
+                    rows.iter().position(|row| {
+                        matches!(
+                            row,
+                            ReviewDiffTreeRow::File { file_index, .. }
+                                if *file_index == selected
+                        )
+                    })
+                })
+            })
+            .or_else(|| (!rows.is_empty()).then_some(0));
+        let row_count = rows.len();
+        *self.right_panel_diff_tree_rows.borrow_mut() = rows;
+        self.right_panel_diff_tree_cursor = cursor;
+        self.right_panel_diff_tree_list_state
+            .reset_with_uniform_height(row_count, px(30.0));
+    }
+
+    fn toggle_right_panel_diff_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.right_panel_diff_expanded_paths.remove(&path) {
+            self.right_panel_diff_expanded_paths.insert(path);
+        }
+        self.sync_right_panel_diff_tree_rows(cx);
+        cx.notify();
+    }
+
+    fn select_right_panel_diff_file(&mut self, file_index: usize, cx: &mut Context<Self>) {
+        self.right_panel_diff_selected_file = Some(file_index);
+        if let Some(line) = self
+            .right_panel_diff_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.files.get(file_index))
+            .and_then(|file| file.diff_line)
+        {
+            self.right_panel_diff_list_state.scroll_to_reveal_item(line);
+        }
+        cx.notify();
+    }
+
+    fn right_panel_diff_tree_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.right_panel_diff_tree_rows.borrow().clone();
+        if rows.is_empty() {
+            return;
+        }
+        let current = self
+            .right_panel_diff_tree_cursor
+            .filter(|index| *index < rows.len())
+            .unwrap_or(0);
+        let key = event.keystroke.key.as_str();
+        let target = match key {
+            "up" => Some(current.saturating_sub(1)),
+            "down" => Some((current + 1).min(rows.len() - 1)),
+            "home" => Some(0),
+            "end" => Some(rows.len() - 1),
+            "left" => match &rows[current] {
+                ReviewDiffTreeRow::Directory {
+                    path,
+                    expanded: true,
+                    ..
+                } => {
+                    self.toggle_right_panel_diff_directory(path.clone(), cx);
+                    None
+                }
+                ReviewDiffTreeRow::Directory { depth, .. }
+                | ReviewDiffTreeRow::File { depth, .. } => {
+                    rows[..current].iter().rposition(|row| {
+                        matches!(
+                            row,
+                            ReviewDiffTreeRow::Directory {
+                                depth: parent_depth,
+                                ..
+                            } if *parent_depth < *depth
+                        )
+                    })
+                }
+            },
+            "right" => match &rows[current] {
+                ReviewDiffTreeRow::Directory {
+                    path,
+                    expanded: false,
+                    ..
+                } => {
+                    self.toggle_right_panel_diff_directory(path.clone(), cx);
+                    None
+                }
+                ReviewDiffTreeRow::Directory { depth, .. }
+                    if rows.get(current + 1).is_some_and(|row| match row {
+                        ReviewDiffTreeRow::Directory {
+                            depth: child_depth, ..
+                        }
+                        | ReviewDiffTreeRow::File {
+                            depth: child_depth, ..
+                        } => child_depth > depth,
+                    }) =>
+                {
+                    Some(current + 1)
+                }
+                _ => None,
+            },
+            "enter" | "space" => {
+                match &rows[current] {
+                    ReviewDiffTreeRow::Directory { path, .. } => {
+                        self.toggle_right_panel_diff_directory(path.clone(), cx)
+                    }
+                    ReviewDiffTreeRow::File { file_index, .. } => {
+                        self.select_right_panel_diff_file(*file_index, cx)
+                    }
+                }
+                None
             }
+            _ => return,
+        };
+        if let Some(target) = target {
+            self.right_panel_diff_tree_cursor = Some(target);
+            self.right_panel_diff_tree_list_state
+                .scroll_to_reveal_item(target);
+            cx.notify();
         }
+        cx.stop_propagation();
     }
-}
-
-/// Working-tree changes for the diff surface. Pure filesystem and `git`
-/// work, so it can run anywhere; callers keep it off the UI thread.
-fn collect_diff_files(project_path: &std::path::Path) -> Vec<RightPanelDiffFile> {
-    let mut files = BTreeMap::<String, RightPanelDiffFile>::new();
-
-    if let Ok(output) = Command::new("git")
-        .args(["diff", "--numstat", "HEAD", "--", "."])
-        .current_dir(project_path)
-        .output()
-        && output.status.success()
-    {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let mut columns = line.splitn(3, '\t');
-            let additions = columns.next().unwrap_or("0").parse().unwrap_or(0);
-            let deletions = columns.next().unwrap_or("0").parse().unwrap_or(0);
-            let Some(path) = columns.next() else {
-                continue;
-            };
-            files.insert(
-                path.to_owned(),
-                RightPanelDiffFile {
-                    path: path.to_owned(),
-                    additions,
-                    deletions,
-                },
-            );
-        }
-    }
-
-    if let Ok(output) = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard", "--", "."])
-        .current_dir(project_path)
-        .output()
-        && output.status.success()
-    {
-        for path in String::from_utf8_lossy(&output.stdout).lines() {
-            if path.is_empty() || files.contains_key(path) {
-                continue;
-            }
-            let additions = std::fs::read_to_string(project_path.join(path))
-                .map(|content| content.lines().count() as u64)
-                .unwrap_or(0);
-            files.insert(
-                path.to_owned(),
-                RightPanelDiffFile {
-                    path: path.to_owned(),
-                    additions,
-                    deletions: 0,
-                },
-            );
-        }
-    }
-    files.into_values().collect()
 }

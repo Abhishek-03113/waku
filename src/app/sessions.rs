@@ -522,6 +522,8 @@ impl Waku {
         self.activities_expanded.clear();
         self.expanded_activity_items.clear();
         self.expanded_turns.clear();
+        self.expanded_changed_files.clear();
+        self.transcript_control_focuses.borrow_mut().clear();
         // Selection belongs to the session being left.
         self.transcript_selection.selection.borrow_mut().clear();
         self.transcript_selection.registry.borrow_mut().clear();

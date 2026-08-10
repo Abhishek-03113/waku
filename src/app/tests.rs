@@ -15,12 +15,13 @@ use super::{
     paused_toast_duration, pop_stream_chunk, session_is_reapable, should_show_navigation_rail,
     take_stream_prefix, transcript_anchor_end_space, transcript_navigation_turns,
     transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
-    widened_panel_width_for_file_editor,
+    widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
-    ActivityItem, ActivityKind, AgentSession, DriverEvent, Message, MessageRole, ProviderKind,
-    ReasoningBlock, SessionStatus, TranscriptBlock, TranscriptBlockContent, TurnStatus,
+    ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointFile, CheckpointStatus,
+    DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, SessionStatus,
+    TranscriptBlock, TranscriptBlockContent, TurnStatus,
 };
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
@@ -28,6 +29,23 @@ use std::{
     time::Duration,
 };
 use uuid::Uuid;
+
+fn attach_changed_files(session: &mut AgentSession, files: Vec<CheckpointFile>) {
+    let turn = session.turns.last_mut().expect("the test has a turn");
+    turn.checkpoint = Some(Checkpoint {
+        turn_count: turn.turn_count,
+        git_ref: format!("refs/waku/test-turn-{}", turn.turn_count),
+        status: CheckpointStatus::Ready,
+        files,
+        additions: 0,
+        deletions: 0,
+        created_at: 1,
+    });
+    turn.checkpoint
+        .as_mut()
+        .expect("checkpoint was just attached")
+        .refresh_totals();
+}
 
 #[test]
 fn composer_only_offers_stop_after_submission_preparation() {
@@ -364,6 +382,12 @@ fn first_file_editor_opening_reserves_500_pixels() {
 }
 
 #[test]
+fn first_review_opening_reserves_diff_and_tree_space() {
+    assert_eq!(widened_panel_width_for_review(460.0), 820.0);
+    assert_eq!(widened_panel_width_for_review(920.0), 920.0);
+}
+
+#[test]
 fn anchor_end_space_keeps_a_short_new_turn_at_the_viewport_top() {
     assert_eq!(
         transcript_anchor_end_space(gpui::px(700.0), gpui::px(180.0)),
@@ -663,6 +687,154 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
         vec![Message(0), TurnFold(turn_id), Message(1)]
+    );
+}
+
+#[test]
+fn changed_files_close_the_response_and_stay_before_the_next_prompt() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let first_turn = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "Done.");
+    session.finish_active_turn(TurnStatus::Completed);
+    attach_changed_files(
+        &mut session,
+        vec![CheckpointFile {
+            path: "src/app.rs".into(),
+            additions: 12,
+            deletions: 3,
+        }],
+    );
+
+    session.begin_turn("One more thing");
+    session.status = SessionStatus::Connecting;
+
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![
+            Message(0),
+            Message(1),
+            ChangedFiles(first_turn),
+            Message(2),
+            WorkingIndicator,
+        ],
+        "the immutable turn summary belongs to the answer above it, never the next prompt"
+    );
+}
+
+#[test]
+fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Make the change");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Edited a file",
+            None,
+            true,
+        )]),
+    });
+    session.push_message(MessageRole::Assistant, "");
+    session.finish_active_turn(TurnStatus::Interrupted);
+    attach_changed_files(
+        &mut session,
+        vec![CheckpointFile {
+            path: "src/lib.rs".into(),
+            additions: 1,
+            deletions: 0,
+        }],
+    );
+
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::new()),
+        vec![Message(0), TurnFold(turn_id), ChangedFiles(turn_id)]
+    );
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
+        vec![
+            Message(0),
+            TurnFold(turn_id),
+            TurnBlock(0),
+            Message(1),
+            ChangedFiles(turn_id),
+        ]
+    );
+}
+
+#[test]
+fn changed_files_row_appears_only_for_a_ready_nonempty_checkpoint() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "Done.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    attach_changed_files(&mut session, Vec::new());
+    assert!(
+        !folded_transcript_row_kinds(&session, &HashSet::new()).contains(&ChangedFiles(turn_id))
+    );
+
+    attach_changed_files(
+        &mut session,
+        vec![CheckpointFile {
+            path: "src/main.rs".into(),
+            additions: 2,
+            deletions: 1,
+        }],
+    );
+    session.turns[0]
+        .checkpoint
+        .as_mut()
+        .expect("checkpoint")
+        .status = CheckpointStatus::Unavailable;
+    assert!(
+        !folded_transcript_row_kinds(&session, &HashSet::new()).contains(&ChangedFiles(turn_id))
+    );
+}
+
+#[test]
+fn checkpoint_completion_invalidates_the_cached_transcript_rows() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "Done.");
+    session.finish_active_turn(TurnStatus::Completed);
+    let before = transcript_rows_fingerprint(&session, &HashSet::new());
+
+    attach_changed_files(
+        &mut session,
+        vec![CheckpointFile {
+            path: "src/main.rs".into(),
+            additions: 2,
+            deletions: 1,
+        }],
+    );
+
+    assert_ne!(
+        transcript_rows_fingerprint(&session, &HashSet::new()),
+        before
+    );
+    assert!(
+        folded_transcript_row_kinds(&session, &HashSet::new()).contains(&ChangedFiles(turn_id))
+    );
+}
+
+#[test]
+fn a_late_checkpoint_is_spliced_before_the_followup_prompt() {
+    let first_turn = Uuid::new_v4();
+    let previous = vec![Message(0), Message(1), Message(2), WorkingIndicator];
+    let with_checkpoint = vec![
+        Message(0),
+        Message(1),
+        ChangedFiles(first_turn),
+        Message(2),
+        WorkingIndicator,
+    ];
+
+    assert_eq!(
+        transcript_row_splice(&previous, &with_checkpoint),
+        Some((2..2, 1)),
+        "the following prompt keeps its measured row instead of being replaced in place"
     );
 }
 

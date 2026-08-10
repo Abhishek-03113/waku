@@ -291,6 +291,11 @@ impl PersistedState {
 
     fn migrate_loaded(&mut self) {
         for session in &mut self.sessions {
+            let checkpoint_totals_current = session.turns.iter().all(|turn| {
+                turn.checkpoint
+                    .as_ref()
+                    .is_none_or(crate::model::Checkpoint::totals_are_current)
+            });
             let before = (
                 session.turns.len(),
                 session.last_reply_at,
@@ -299,12 +304,13 @@ impl PersistedState {
             session.migrate_legacy_state();
             session.backfill_last_reply_at();
             // Migration rewrote this session, so the stored row is stale.
-            if before
-                != (
-                    session.turns.len(),
-                    session.last_reply_at,
-                    session.provider_cursor.is_some(),
-                )
+            if !checkpoint_totals_current
+                || before
+                    != (
+                        session.turns.len(),
+                        session.last_reply_at,
+                        session.provider_cursor.is_some(),
+                    )
             {
                 self.dirty_sessions.insert(session.id);
             }

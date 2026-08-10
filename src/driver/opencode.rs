@@ -567,14 +567,6 @@ fn latest_opencode_usage_info(messages: &Value) -> Option<&Value> {
     assistant
 }
 
-fn latest_opencode_context_usage(
-    messages: &Value,
-    model_context_windows: &HashMap<String, u64>,
-) -> Option<(Option<u64>, Option<u64>)> {
-    latest_opencode_usage_info(messages)
-        .and_then(|info| opencode_context_usage(info, model_context_windows))
-}
-
 fn handle_event(
     value: &Value,
     events: &Sender<DriverEvent>,
@@ -1100,8 +1092,9 @@ mod tests {
             }}
         ]);
 
+        let latest = latest_opencode_usage_info(&messages).expect("latest assistant usage");
         assert_eq!(
-            latest_opencode_context_usage(&messages, &windows),
+            opencode_context_usage(latest, &windows),
             Some((Some(15_467), Some(1_000_000)))
         );
     }

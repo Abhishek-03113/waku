@@ -44,6 +44,7 @@ mod persistence;
 mod platform;
 mod projectless;
 mod query;
+mod review_diff;
 mod terminal;
 mod theme;
 mod ui;

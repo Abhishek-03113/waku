@@ -342,6 +342,8 @@ mod tests {
             "icons/chart-column.svg",
             "icons/chevron-down.svg",
             "icons/chevron-right.svg",
+            "icons/chevron-up.svg",
+            "icons/chevrons-up-down.svg",
             "icons/folder.svg",
             "icons/folder-new.svg",
             "icons/laptop.svg",

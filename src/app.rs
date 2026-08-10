@@ -2,8 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::process::Command;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
@@ -13,8 +13,8 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
     ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
     ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
-    StyleRefinement, WeakEntity, Window, canvas, div, ease_out_quint, fill, img, linear_color_stop,
-    linear_gradient, list, point, prelude::*, pulsating_between, px, rgb,
+    StyleRefinement, TextRun, WeakEntity, Window, canvas, div, ease_out_quint, fill, font, img,
+    linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
@@ -52,6 +52,7 @@ use crate::persistence::{
     DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH, PersistedState, StateStore,
 };
 use crate::query::{Query, QueryCache};
+use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
 use crate::terminal::TerminalView;
 use crate::theme::{Theme, ThemePreference};
 use crate::ui::text_field::TextField;
@@ -83,6 +84,7 @@ const FILE_TREE_MIN_WIDTH: f32 = 140.0;
 const FILE_TREE_MAX_WIDTH: f32 = 360.0;
 const FILE_EDITOR_MIN_WIDTH: f32 = 140.0;
 const FILE_EDITOR_INITIAL_WIDTH: f32 = 500.0;
+const REVIEW_INITIAL_WIDTH: f32 = 820.0;
 const MAIN_PANEL_MIN_WIDTH: f32 = 360.0;
 const FOLLOWUP_TURN_TOP_GAP: f32 = 48.0;
 const NAVIGATION_RAIL_WIDTH: f32 = 44.0;
@@ -287,6 +289,16 @@ fn widened_panel_width_for_file_editor(panel_width: f32, file_tree_width: f32) -
         .min(RIGHT_PANEL_MAX_WIDTH)
 }
 
+fn widened_panel_width_for_review(panel_width: f32) -> f32 {
+    sanitize_panel_width(
+        panel_width,
+        DEFAULT_RIGHT_PANEL_WIDTH,
+        RIGHT_PANEL_MIN_WIDTH,
+        RIGHT_PANEL_MAX_WIDTH,
+    )
+    .max(REVIEW_INITIAL_WIDTH)
+}
+
 fn fitted_panel_widths(
     viewport_width: f32,
     sidebar_visible: bool,
@@ -356,13 +368,6 @@ enum RightPanelSurface {
     File(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RightPanelDiffFile {
-    path: String,
-    additions: u64,
-    deletions: u64,
-}
-
 /// A turn whose checkpoint still has to be captured.
 struct PendingCheckpointCapture {
     session_id: Uuid,
@@ -425,7 +430,10 @@ struct RightPanelSessionState {
     files_selected_path: Option<String>,
     file_tree_width: f32,
     file_editors: HashMap<String, RightPanelFileEditor>,
-    diff_files: Vec<RightPanelDiffFile>,
+    diff_source: ReviewDiffSource,
+    diff_snapshot: Option<Arc<ReviewDiffSnapshot>>,
+    diff_selected_file: Option<usize>,
+    diff_expanded_paths: HashSet<String>,
 }
 
 impl RightPanelSessionState {
@@ -440,7 +448,10 @@ impl RightPanelSessionState {
             files_selected_path: None,
             file_tree_width: DEFAULT_FILE_TREE_WIDTH,
             file_editors: HashMap::new(),
-            diff_files: Vec::new(),
+            diff_source: ReviewDiffSource::default(),
+            diff_snapshot: None,
+            diff_selected_file: None,
+            diff_expanded_paths: HashSet::new(),
         }
     }
 
@@ -736,6 +747,13 @@ pub struct Waku {
     expanded_activity_items: HashSet<Uuid>,
     /// Settled turns whose folded work the user has reopened.
     expanded_turns: HashSet<Uuid>,
+    /// Per-response file cards the user expanded beyond their three-file
+    /// preview. Runtime-only, like the other transcript disclosures.
+    expanded_changed_files: HashSet<Uuid>,
+    /// Stable focus identities for controls inside virtualized transcript and
+    /// diff rows. Recreating a handle on every row build would drop keyboard
+    /// focus whenever GPUI re-renders the list.
+    transcript_control_focuses: RefCell<HashMap<String, FocusHandle>>,
     session_navigation: SessionNavigation,
     sidebar_visible: bool,
     sidebar_width: f32,
@@ -749,8 +767,17 @@ pub struct Waku {
     right_panel_tabs_scroll_handle: ScrollHandle,
     right_panel_files_scroll_handle: ScrollHandle,
     right_panel_files_scrollbar: Rc<ScrollbarState>,
-    right_panel_diff_scroll_handle: ScrollHandle,
+    right_panel_diff_filter: Entity<ComposerInput>,
+    /// Unified diff rows and changed-file tree rows are independently
+    /// virtualized. Large generated patches stay proportional to what is on
+    /// screen rather than the size of the repository change.
+    right_panel_diff_list_state: ListState,
     right_panel_diff_scrollbar: Rc<ScrollbarState>,
+    /// Selection spans and visible glyph geometry for the Review surface.
+    /// Kept separate from the transcript because both surfaces paint at once.
+    right_panel_diff_selection: TranscriptSelection,
+    right_panel_diff_tree_list_state: ListState,
+    right_panel_diff_tree_scrollbar: Rc<ScrollbarState>,
     right_panel_editor_scroll_handle: ScrollHandle,
     right_panel_editor_scrollbar: Rc<ScrollbarState>,
     right_panel_pending_tab_reveal: Option<usize>,
@@ -763,7 +790,15 @@ pub struct Waku {
     /// `cmd-f` and kept for the window's lifetime so the query and toggles
     /// survive closing the bar; `open` inside says whether it is showing.
     file_search: Option<file_search::FileSearch>,
-    right_panel_diff_files: Vec<RightPanelDiffFile>,
+    right_panel_diff_source: ReviewDiffSource,
+    right_panel_diff_snapshot: Option<Arc<ReviewDiffSnapshot>>,
+    right_panel_diff_loading: bool,
+    right_panel_diff_error: Option<String>,
+    right_panel_diff_generation: u64,
+    right_panel_diff_selected_file: Option<usize>,
+    right_panel_diff_expanded_paths: HashSet<String>,
+    right_panel_diff_tree_rows: RefCell<Vec<right_panel::ReviewDiffTreeRow>>,
+    right_panel_diff_tree_cursor: Option<usize>,
     /// The working tree as currently drawn. Held so a refresh can redraw the
     /// previous listing instead of blanking the panel.
     right_panel_working_tree: Vec<right_panel::WorkingTreeEntry>,
@@ -773,9 +808,6 @@ pub struct Waku {
     /// Set when a turn finishes; the drain loop drops the workspace queries,
     /// since the event handler has no `Context` to refresh them itself.
     workspace_queries_stale: bool,
-    /// Diff listing per project path, so a slow refresh cannot land on top of a
-    /// newer one.
-    right_panel_diffs: QueryCache<PathBuf, Vec<RightPanelDiffFile>>,
     right_panel_terminals: HashMap<Uuid, Entity<TerminalView>>,
     right_panel_browsers: HashMap<Uuid, Entity<BrowserView>>,
     /// A Browser surface was just opened; the next right panel render moves
@@ -1124,6 +1156,11 @@ impl Waku {
                 .search_field()
                 .placeholder(tr!("input.filter_projects"))
         });
+        let right_panel_diff_filter = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("diff.filter_files"))
+        });
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
         let startup_toast = match migrate_legacy_projectless_projects(&mut state) {
             Ok(false) => None,
@@ -1425,6 +1462,16 @@ impl Waku {
             )
             .detach();
             cx.subscribe(
+                &right_panel_diff_filter,
+                |this: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        this.sync_right_panel_diff_tree_rows(cx);
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
                 &provider_path_input,
                 |this: &mut Self, _, event: &ComposerEvent, cx| {
                     if matches!(event, ComposerEvent::Submit(_)) {
@@ -1571,6 +1618,8 @@ impl Waku {
                 activities_expanded: HashMap::new(),
                 expanded_activity_items: HashSet::new(),
                 expanded_turns: HashSet::new(),
+                expanded_changed_files: HashSet::new(),
+                transcript_control_focuses: RefCell::new(HashMap::new()),
                 session_navigation: SessionNavigation::default(),
                 sidebar_visible,
                 sidebar_width,
@@ -1584,8 +1633,13 @@ impl Waku {
                 right_panel_tabs_scroll_handle: ScrollHandle::new(),
                 right_panel_files_scroll_handle: ScrollHandle::new(),
                 right_panel_files_scrollbar: ScrollbarState::new(),
-                right_panel_diff_scroll_handle: ScrollHandle::new(),
+                right_panel_diff_filter,
+                right_panel_diff_list_state: ListState::new(0, ListAlignment::Top, px(512.0)),
                 right_panel_diff_scrollbar: ScrollbarState::new(),
+                right_panel_diff_selection: TranscriptSelection::default(),
+                right_panel_diff_tree_list_state: ListState::new(0, ListAlignment::Top, px(180.0))
+                    .with_uniform_item_height(px(30.0)),
+                right_panel_diff_tree_scrollbar: ScrollbarState::new(),
                 right_panel_editor_scroll_handle: ScrollHandle::new(),
                 right_panel_editor_scrollbar: ScrollbarState::new(),
                 right_panel_pending_tab_reveal: None,
@@ -1595,11 +1649,18 @@ impl Waku {
                 right_panel_file_tree_width: DEFAULT_FILE_TREE_WIDTH,
                 right_panel_file_editors: HashMap::new(),
                 file_search: None,
-                right_panel_diff_files: Vec::new(),
+                right_panel_diff_source: ReviewDiffSource::default(),
+                right_panel_diff_snapshot: None,
+                right_panel_diff_loading: false,
+                right_panel_diff_error: None,
+                right_panel_diff_generation: 0,
+                right_panel_diff_selected_file: None,
+                right_panel_diff_expanded_paths: HashSet::new(),
+                right_panel_diff_tree_rows: RefCell::new(Vec::new()),
+                right_panel_diff_tree_cursor: None,
                 right_panel_working_tree: Vec::new(),
                 working_trees: QueryCache::new(MAX_CACHED_WORKSPACES),
                 workspace_queries_stale: false,
-                right_panel_diffs: QueryCache::new(MAX_CACHED_WORKSPACES),
                 right_panel_terminals: HashMap::new(),
                 right_panel_browsers: HashMap::new(),
                 right_panel_pending_browser_focus: None,

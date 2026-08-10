@@ -1,6 +1,12 @@
 use super::*;
 use base64::Engine as _;
 
+const CHANGED_FILES_PREVIEW_LIMIT: usize = 3;
+/// Keep one virtualized transcript row bounded even when a generator touches
+/// hundreds of files. The full immutable list remains one click away in the
+/// right panel.
+const CHANGED_FILES_EXPANDED_LIMIT: usize = 12;
+
 #[derive(Clone, Debug, PartialEq)]
 struct ConversationNavigationRailSnapshot {
     visible: bool,
@@ -85,6 +91,18 @@ impl ConversationNavigationRail {
 
 impl Waku {
     // ── Transcript ─────────────────────────────────────────────────────────
+
+    pub(super) fn transcript_control_focus(
+        &self,
+        key: impl Into<String>,
+        cx: &mut App,
+    ) -> FocusHandle {
+        self.transcript_control_focuses
+            .borrow_mut()
+            .entry(key.into())
+            .or_insert_with(|| cx.focus_handle())
+            .clone()
+    }
 
     pub(super) fn render_transcript(
         &self,
@@ -193,11 +211,20 @@ impl Waku {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let selected = self
-            .toast_selection
-            .selection
-            .borrow()
-            .selected_text()
+        let reviewing_diff = self.right_panel_visible
+            && self
+                .right_panel_active_surface
+                .and_then(|index| self.right_panel_surfaces.get(index))
+                .is_some_and(|surface| matches!(surface, RightPanelSurface::Diff));
+        let selected = reviewing_diff
+            .then(|| {
+                self.right_panel_diff_selection
+                    .selection
+                    .borrow()
+                    .selected_text()
+            })
+            .flatten()
+            .or_else(|| self.toast_selection.selection.borrow().selected_text())
             .or_else(|| self.transcript_selection.selection.borrow().selected_text());
         match selected {
             Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
@@ -891,6 +918,7 @@ impl Waku {
             }
             TranscriptRowKind::TurnBlock(_)
             | TranscriptRowKind::TurnFold(_)
+            | TranscriptRowKind::ChangedFiles(_)
             | TranscriptRowKind::WorkingIndicator => false,
         };
         let inner = match kind {
@@ -966,6 +994,9 @@ impl Waku {
                 })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
+            TranscriptRowKind::ChangedFiles(turn_id) => {
+                self.render_changed_files_row(turn_id, &theme, cx)
+            }
             TranscriptRowKind::WorkingIndicator => self.render_working_indicator_row(&theme),
         };
         div()
@@ -987,6 +1018,281 @@ impl Waku {
                     .child(inner),
             )
             .into_any_element()
+    }
+
+    pub(super) fn toggle_changed_files(
+        &mut self,
+        turn_id: Uuid,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.pin_transcript_for_disclosure();
+        if expanded {
+            self.expanded_changed_files.remove(&turn_id);
+        } else {
+            self.expanded_changed_files.insert(turn_id);
+        }
+        self.remeasure_changed_files(turn_id);
+        cx.notify();
+    }
+
+    /// The immutable file delta captured when a response settles. Small
+    /// summaries stay useful at a glance; larger ones disclose in place and
+    /// always offer the complete per-turn list in the right panel.
+    fn render_changed_files_row(
+        &self,
+        turn_id: Uuid,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(checkpoint) = self
+            .selected_session()
+            .and_then(|session| session.turns.iter().find(|turn| turn.id == turn_id))
+            .and_then(|turn| turn.checkpoint.as_ref())
+            .filter(|checkpoint| checkpoint.status == CheckpointStatus::Ready)
+            .filter(|checkpoint| !checkpoint.files.is_empty())
+        else {
+            return div().into_any_element();
+        };
+
+        let files = checkpoint.files.as_slice();
+        let additions = checkpoint.additions;
+        let deletions = checkpoint.deletions;
+        let expanded = self.expanded_changed_files.contains(&turn_id);
+        let visible_limit = if expanded {
+            CHANGED_FILES_EXPANDED_LIMIT
+        } else {
+            CHANGED_FILES_PREVIEW_LIMIT
+        };
+        let visible_count = files.len().min(visible_limit);
+        let can_expand = files.len() > CHANGED_FILES_PREVIEW_LIMIT;
+        let clipped = expanded && files.len() > CHANGED_FILES_EXPANDED_LIMIT;
+
+        let review_focus =
+            self.transcript_control_focus(format!("changed-files-review-{turn_id}"), cx);
+        let review = div()
+            .id(SharedString::from(format!(
+                "changed-files-review-{turn_id}"
+            )))
+            .track_focus(&review_focus)
+            .tab_index(0)
+            .h(px(28.0))
+            .px(px(10.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_default()
+            .text_size(px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.text_secondary)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
+            .active(|style| style.bg(theme.overlay))
+            .child(icon("icons/file-diff.svg", 12.0, theme.text_tertiary))
+            .child(tr_cow!("transcript.review_changes"))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_turn_diff(turn_id, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.open_turn_diff(turn_id, cx);
+                    cx.stop_propagation();
+                }
+            }));
+
+        let title = if files.len() == 1 {
+            tr!("transcript.changed_file", count = files.len())
+        } else {
+            tr!("transcript.changed_files", count = files.len())
+        };
+        let mut card = div()
+            .id(SharedString::from(format!("changed-files-card-{turn_id}")))
+            .w_full()
+            .min_w_0()
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.overlay)
+            .tab_index(0)
+            .tab_group()
+            .tab_stop(false)
+            .overflow_hidden()
+            .child(
+                div()
+                    .min_h(px(58.0))
+                    .px(px(12.0))
+                    .py(px(9.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .size(px(36.0))
+                            .flex_none()
+                            .rounded(px(9.0))
+                            .bg(theme.overlay_strong)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("icons/file-diff.svg", 16.0, theme.text_tertiary)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .text_size(px(11.0))
+                                    .line_height(px(14.0))
+                                    .child(
+                                        div()
+                                            .text_color(theme.success)
+                                            .child(format!("+{additions}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(theme.danger)
+                                            .child(format!("-{deletions}")),
+                                    ),
+                            ),
+                    )
+                    .child(review),
+            );
+
+        let mut file_rows = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(theme.border);
+        for file in files.iter().take(visible_count) {
+            file_rows = file_rows.child(
+                div()
+                    .h(px(31.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "changed-file-path-{turn_id}-{}",
+                                file.path
+                            )))
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(11.5))
+                            .text_color(theme.text_secondary)
+                            .tooltip(Tooltip::text(file.path.clone()))
+                            .child(file.path.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.5))
+                            .text_color(theme.success)
+                            .child(format!("+{}", file.additions)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.5))
+                            .text_color(theme.danger)
+                            .child(format!("-{}", file.deletions)),
+                    ),
+            );
+        }
+        card = card.child(file_rows);
+
+        if can_expand {
+            let toggle_focus =
+                self.transcript_control_focus(format!("changed-files-toggle-{turn_id}"), cx);
+            let label = if expanded {
+                tr!("transcript.show_fewer_files")
+            } else {
+                tr!(
+                    "transcript.show_more_files",
+                    count = files.len() - CHANGED_FILES_PREVIEW_LIMIT
+                )
+            };
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "changed-files-toggle-{turn_id}"
+                    )))
+                    .track_focus(&toggle_focus)
+                    .tab_index(0)
+                    .h(px(34.0))
+                    .px(px(12.0))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_default()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_secondary)
+                    .focus_visible(|style| style.bg(theme.overlay_strong))
+                    .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
+                    .active(|style| style.bg(theme.overlay))
+                    .child(SharedString::from(label))
+                    .when(clipped, |row| {
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(theme.text_ghost)
+                                .child(tr!(
+                                    "transcript.showing_first_files",
+                                    count = CHANGED_FILES_EXPANDED_LIMIT,
+                                    total = files.len()
+                                )),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(icon(
+                        if expanded {
+                            "icons/chevron-down.svg"
+                        } else {
+                            "icons/chevron-right.svg"
+                        },
+                        11.0,
+                        theme.text_tertiary,
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_changed_files(turn_id, expanded, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.toggle_changed_files(turn_id, expanded, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            );
+        }
+
+        card.into_any_element()
     }
 
     /// Settled reasoning, tool activity, and interim assistant commentary are

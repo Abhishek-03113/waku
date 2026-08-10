@@ -675,6 +675,15 @@ impl Waku {
                 waku.update(cx, |waku, cx| {
                     waku.checkpoint_captures_in_flight
                         .remove(&(session_id, turn_count));
+                    let selected = waku.state.selected_session == Some(session_id);
+                    if selected {
+                        waku.sync_transcript_rows();
+                    }
+                    let previous_kinds = if selected {
+                        waku.transcript_row_kinds.borrow().clone()
+                    } else {
+                        Vec::new()
+                    };
                     let checkpoint = match captured {
                         Ok(checkpoint) => checkpoint,
                         Err(error) => {
@@ -684,11 +693,14 @@ impl Waku {
                                 git_ref: checkpoint::checkpoint_ref(session_id, turn_count),
                                 status: CheckpointStatus::Error,
                                 files: Vec::new(),
+                                additions: 0,
+                                deletions: 0,
                                 created_at: unix_time(),
                             }
                         }
                     };
                     waku.invalidate_checkpoint_refs();
+                    let mut attached = false;
                     if let Some(session) = waku.state.session_mut(session_id)
                         && let Some(turn) = session
                             .turns
@@ -696,8 +708,26 @@ impl Waku {
                             .find(|turn| turn.turn_count == turn_count)
                     {
                         turn.checkpoint = Some(checkpoint);
+                        attached = true;
+                    }
+                    if attached && selected {
+                        // The next queued prompt can already be visible when
+                        // capture lands. Reconcile by row identity so inserting
+                        // this response's card in the middle does not reuse the
+                        // following prompt's measured height.
+                        waku.splice_transcript_rows_after_visibility_change(&previous_kinds);
                     }
                     cx.notify();
+                    if attached {
+                        // Let the new transcript row paint before SQLite work.
+                        // Without this save, a checkpoint that lands after the
+                        // turn's final stream save can disappear on relaunch.
+                        cx.spawn(async move |waku, cx| {
+                            cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
+                            let _ = waku.update(cx, |waku, _| waku.save());
+                        })
+                        .detach();
+                    }
                 })
                 .ok();
             })
@@ -1435,6 +1465,8 @@ impl Waku {
             self.activities_expanded.clear();
             self.expanded_activity_items.clear();
             self.expanded_turns.clear();
+            self.expanded_changed_files.clear();
+            self.transcript_control_focuses.borrow_mut().clear();
             self.splice_transcript_rows_after_visibility_change(&previous_kinds);
             self.show_toast(match cleanup_error {
                 None => tr!("session.rewound", turn = turn_count),
@@ -1846,6 +1878,8 @@ impl Waku {
             self.activities_expanded.clear();
             self.expanded_activity_items.clear();
             self.expanded_turns.clear();
+            self.expanded_changed_files.clear();
+            self.transcript_control_focuses.borrow_mut().clear();
             self.message_edit = None;
             self.hide_toast();
             self.transcript_anchor.set(transcript_anchor);

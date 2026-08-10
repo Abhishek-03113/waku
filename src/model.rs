@@ -568,7 +568,25 @@ pub struct Checkpoint {
     pub status: CheckpointStatus,
     #[serde(default)]
     pub files: Vec<CheckpointFile>,
+    /// Cached once at capture time so a visible transcript row never walks a
+    /// potentially huge file list on every frame.
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
     pub created_at: u64,
+}
+
+impl Checkpoint {
+    pub fn refresh_totals(&mut self) {
+        self.additions = self.files.iter().map(|file| file.additions).sum();
+        self.deletions = self.files.iter().map(|file| file.deletions).sum();
+    }
+
+    pub fn totals_are_current(&self) -> bool {
+        self.additions == self.files.iter().map(|file| file.additions).sum::<u64>()
+            && self.deletions == self.files.iter().map(|file| file.deletions).sum::<u64>()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -804,6 +822,15 @@ impl AgentSession {
                 if activity.kind == ActivityKind::Search && activity.title.trim() == "Search for" {
                     activity.title = tr!("activity.browsed_web");
                 }
+            }
+        }
+
+        // Checkpoints written before cached totals were added still have the
+        // complete file list. Backfill once on load rather than making every
+        // transcript frame rediscover the same totals.
+        for turn in &mut self.turns {
+            if let Some(checkpoint) = turn.checkpoint.as_mut() {
+                checkpoint.refresh_totals();
             }
         }
 
@@ -1737,5 +1764,46 @@ mod tests {
         session.migrate_legacy_state();
 
         assert_eq!(session.messages[0].content, "Claim.\nNext.");
+    }
+
+    #[test]
+    fn legacy_checkpoint_totals_are_backfilled_from_the_file_summary() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.begin_turn("Build it");
+        session.finish_active_turn(TurnStatus::Completed);
+        let mut serialized = serde_json::to_value(Checkpoint {
+            turn_count: 1,
+            git_ref: "refs/waku/test".into(),
+            status: CheckpointStatus::Ready,
+            files: vec![
+                CheckpointFile {
+                    path: "src/app.rs".into(),
+                    additions: 7,
+                    deletions: 2,
+                },
+                CheckpointFile {
+                    path: "src/model.rs".into(),
+                    additions: 3,
+                    deletions: 5,
+                },
+            ],
+            additions: 10,
+            deletions: 7,
+            created_at: 1,
+        })
+        .unwrap();
+        let object = serialized.as_object_mut().unwrap();
+        object.remove("additions");
+        object.remove("deletions");
+        let checkpoint: Checkpoint = serde_json::from_value(serialized).unwrap();
+        assert_eq!((checkpoint.additions, checkpoint.deletions), (0, 0));
+        session.turns[0].checkpoint = Some(checkpoint);
+
+        session.migrate_legacy_state();
+
+        let checkpoint = session.turns[0].checkpoint.as_ref().unwrap();
+        assert_eq!((checkpoint.additions, checkpoint.deletions), (10, 7));
+        assert!(checkpoint.totals_are_current());
     }
 }

@@ -479,8 +479,14 @@ impl<'a> Ctx<'a> {
 /// it first — underneath the glyphs — while the text's prepaint has already
 /// filled in the shared [`TextLayout`]. That ordering is what lets a pure-paint
 /// pass read real glyph geometry without a second layout pass.
-fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
-    let block_break = ctx.take_block_break();
+fn text_element_with_selection(
+    flat: &FlatText,
+    key: TextKey,
+    selection: TranscriptSelection,
+    code_wash: Hsla,
+    selection_wash: Hsla,
+    block_break: bool,
+) -> AnyElement {
     let styled = StyledText::new(flat.text.clone()).with_runs(flat.runs.clone());
     let layout = styled.layout().clone();
 
@@ -499,11 +505,8 @@ fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
     };
 
     let underlay = canvas(|_, _, _| (), {
-        let selection = ctx.selection.clone();
         let text = flat.text.clone();
         let code_ranges = flat.code_ranges.clone();
-        let code_wash = ctx.palette.code_wash;
-        let selection_wash = ctx.palette.selection;
         let layout = layout.clone();
         let key = key.clone();
         move |_, _, window, _| {
@@ -552,6 +555,34 @@ fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
         .child(underlay)
         .child(body)
         .into_any_element()
+}
+
+fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
+    text_element_with_selection(
+        flat,
+        key,
+        ctx.selection.clone(),
+        ctx.palette.code_wash,
+        ctx.palette.selection,
+        ctx.take_block_break(),
+    )
+}
+
+/// A selectable styled line outside the markdown block renderer.
+///
+/// Diff viewers and other virtualized code surfaces can share the transcript's
+/// cross-element selection behavior without manufacturing a markdown tree.
+/// The caller supplies a stable key in paint order and decides whether copying
+/// across this element should insert a paragraph break or a single newline.
+pub fn selectable_flat_text(
+    flat: &FlatText,
+    key: TextKey,
+    selection: TranscriptSelection,
+    code_wash: Hsla,
+    selection_wash: Hsla,
+    block_break: bool,
+) -> AnyElement {
+    text_element_with_selection(flat, key, selection, code_wash, selection_wash, block_break)
 }
 
 /// A selectable plain-text element: user messages, tool output, anything that

@@ -1161,14 +1161,14 @@ session.provider_cannot_rewind:
   en: "%{provider} cannot safely roll back its native conversation yet."
   zh-CN: "%{provider} 目前还无法安全回退原生会话。"
 session.pre_turn_checkpoint_missing:
-  en: The message's pre-turn Git checkpoint is missing.
-  zh-CN: 缺少该消息发送前的 Git 检查点。
+  en: The message's pre-turn Git checkpoint is missing
+  zh-CN: 缺少该消息发送前的 Git 检查点
 session.rewind_title:
   en: "%{title} (rewind)"
   zh-CN: "%{title}（回退）"
 session.rewound:
-  en: Rewound to before turn %{turn}.
-  zh-CN: 已回退到第 %{turn} 轮任务之前。
+  en: Rewound to before turn %{turn}
+  zh-CN: 已回退到第 %{turn} 轮任务之前
 session.rewound_with_stale_refs:
   en: "Rewound to before turn %{turn}; stale refs remain: %{error}"
   zh-CN: "已回退到第 %{turn} 轮任务之前，但仍有过期引用：%{error}"
@@ -1183,8 +1183,8 @@ right_panel.files:
   en: Files
   zh-CN: 文件
 right_panel.diff:
-  en: Diff
-  zh-CN: 更改
+  en: Review
+  zh-CN: 审阅
 right_panel.toggle:
   en: Toggle right panel
   zh-CN: 显示或隐藏右侧面板
@@ -1192,26 +1192,26 @@ right_panel.open_surface:
   en: Open a surface
   zh-CN: 打开一个面板
 right_panel.choose_surface:
-  en: Choose what to show in the right panel.
-  zh-CN: 选择要在右侧面板中显示的内容。
+  en: Choose what to show in the right panel
+  zh-CN: 选择要在右侧面板中显示的内容
 right_panel.browser_description:
-  en: Open a local app or URL.
-  zh-CN: 打开本地应用或网址。
+  en: Open a local app or URL
+  zh-CN: 打开本地应用或网址
 right_panel.terminal_description:
-  en: Start a shell in this workspace.
-  zh-CN: 在此工作区中启动 Shell。
+  en: Start a shell in this workspace
+  zh-CN: 在此工作区中启动 Shell
 right_panel.files_description:
-  en: Browse and read workspace files.
-  zh-CN: 浏览并阅读工作区文件。
+  en: Browse and read workspace files
+  zh-CN: 浏览并阅读工作区文件
 right_panel.diff_description:
-  en: Review current workspace changes.
-  zh-CN: 查看当前工作区中的更改。
+  en: Review file changes
+  zh-CN: 查看已修改文件
 right_panel.terminal_unavailable:
   en: Terminal unavailable
   zh-CN: 终端不可用
 right_panel.terminal_unavailable_description:
-  en: Open the Terminal surface again to start a shell.
-  zh-CN: 请重新打开终端面板以启动 Shell。
+  en: Open the Terminal surface again to start a shell
+  zh-CN: 请重新打开终端面板以启动 Shell
 
 files.unsaved_changes:
   en: Unsaved changes — ⌘S to save
@@ -1220,11 +1220,11 @@ files.no_project_open:
   en: No project open
   zh-CN: 尚未打开项目
 files.no_project_open_description:
-  en: Open a project to browse its files.
-  zh-CN: 打开一个项目即可浏览其中的文件。
+  en: Open a project to browse its files
+  zh-CN: 打开一个项目即可浏览其中的文件
 files.no_project_is_open:
   en: No project is open.
-  zh-CN: 尚未打开项目。
+  zh-CN: 尚未打开项目
 files.unable_to_edit:
   en: "Unable to edit this file: %{error}"
   zh-CN: "无法编辑此文件：%{error}"
@@ -1242,8 +1242,65 @@ diff.no_changes:
   en: No changes
   zh-CN: 没有更改
 diff.no_changes_description:
-  en: The current workspace has no file changes to review.
-  zh-CN: 当前工作区没有可查看的文件更改。
+  en: This source has no file changes to review.
+  zh-CN: 此来源没有可审阅的文件更改。
+diff.filter_files:
+  en: Filter files…
+  zh-CN: 筛选文件…
+diff.source_last_turn:
+  en: Last Turn
+  zh-CN: 上一轮
+diff.source_turn:
+  en: Turn %{turn}
+  zh-CN: 第 %{turn} 轮
+diff.source_uncommitted:
+  en: Uncommitted
+  zh-CN: 未提交
+diff.source_unstaged:
+  en: Unstaged
+  zh-CN: 未暂存
+diff.source_staged:
+  en: Staged
+  zh-CN: 已暂存
+diff.source_committed:
+  en: Committed
+  zh-CN: 已提交
+diff.source_branch:
+  en: Branch
+  zh-CN: 分支
+diff.loading:
+  en: Loading changes…
+  zh-CN: 正在加载更改…
+diff.loading_description:
+  en: Capturing a consistent Git snapshot for review.
+  zh-CN: 正在捕获一致的 Git 快照以供审阅。
+diff.unavailable:
+  en: Changes unavailable
+  zh-CN: 无法查看更改
+diff.refresh:
+  en: Refresh changes
+  zh-CN: 刷新更改
+diff.refresh_failed:
+  en: "Could not refresh changes: %{error}"
+  zh-CN: "无法刷新更改：%{error}"
+diff.truncated:
+  en: Large diff · showing first 50,000 lines
+  zh-CN: 大型差异 · 仅显示前 50,000 行
+diff.unmodified_lines:
+  en: "%{count} unmodified lines"
+  zh-CN: "%{count} 行未更改"
+diff.expand_all_context:
+  en: Expand all unmodified lines
+  zh-CN: 展开所有未更改的行
+diff.expand_context:
+  en: Expand unmodified lines · Shift-click for all
+  zh-CN: 展开未更改的行 · 按住 Shift 点击可全部展开
+diff.expand_context_above:
+  en: Show 100 lines above · Shift-click for all
+  zh-CN: 显示上方 100 行 · 按住 Shift 点击可全部展开
+diff.expand_context_below:
+  en: Show 100 lines below · Shift-click for all
+  zh-CN: 显示下方 100 行 · 按住 Shift 点击可全部展开
 
 browser.back:
   en: Back (⌘[)
@@ -1336,6 +1393,24 @@ transcript.thinking:
 transcript.thought_for:
   en: Thought for %{duration}
   zh-CN: 思考用时 %{duration}
+transcript.changed_file:
+  en: Changed %{count} file
+  zh-CN: 更改了 %{count} 个文件
+transcript.changed_files:
+  en: Changed %{count} files
+  zh-CN: 更改了 %{count} 个文件
+transcript.review_changes:
+  en: Review
+  zh-CN: 查看
+transcript.show_more_files:
+  en: Show %{count} more files
+  zh-CN: 再显示 %{count} 个文件
+transcript.show_fewer_files:
+  en: Show fewer files
+  zh-CN: 收起文件列表
+transcript.showing_first_files:
+  en: Showing first %{count} of %{total}
+  zh-CN: 仅显示前 %{count}/%{total} 个
 
 duration.second:
   en: "%{count} second"

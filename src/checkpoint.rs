@@ -22,6 +22,8 @@ pub fn capture_turn(cwd: &Path, session_id: Uuid, turn_count: usize) -> anyhow::
             git_ref,
             status: CheckpointStatus::Unavailable,
             files: Vec::new(),
+            additions: 0,
+            deletions: 0,
             created_at: unix_time(),
         });
     }
@@ -37,11 +39,15 @@ pub fn capture_turn(cwd: &Path, session_id: Uuid, turn_count: usize) -> anyhow::
             Vec::new()
         }
     };
+    let additions = files.iter().map(|file| file.additions).sum();
+    let deletions = files.iter().map(|file| file.deletions).sum();
     Ok(Checkpoint {
         turn_count,
         git_ref,
         status: CheckpointStatus::Ready,
         files,
+        additions,
+        deletions,
         created_at: unix_time(),
     })
 }
@@ -49,6 +55,21 @@ pub fn capture_turn(cwd: &Path, session_id: Uuid, turn_count: usize) -> anyhow::
 pub fn capture_ref(cwd: &Path, git_ref: &str) -> anyhow::Result<()> {
     if !is_git_repository(cwd) {
         bail!("checkpoints require a Git repository");
+    }
+
+    let commit = capture_worktree_commit(cwd)?;
+    git_output(cwd, ["update-ref", git_ref, &commit])?;
+    Ok(())
+}
+
+/// Capture the current worktree and untracked files as a dangling commit.
+///
+/// This shares the checkpoint path's isolated temporary index, so it never
+/// stages or unstages the user's files. Review uses the returned treeish to
+/// compare a stable worktree snapshot while edits continue on disk.
+pub fn capture_worktree_commit(cwd: &Path) -> anyhow::Result<String> {
+    if !is_git_repository(cwd) {
+        bail!("worktree snapshots require a Git repository");
     }
 
     let common_dir = git_output(cwd, ["rev-parse", "--git-common-dir"])?
@@ -76,7 +97,7 @@ pub fn capture_ref(cwd: &Path, git_ref: &str) -> anyhow::Result<()> {
         if tree.is_empty() {
             bail!("git write-tree returned no object id");
         }
-        let message = format!("Waku checkpoint ref={git_ref}");
+        let message = "Waku worktree snapshot";
         let commit = git_with_identity_and_index(
             cwd,
             &temporary_index,
@@ -87,8 +108,7 @@ pub fn capture_ref(cwd: &Path, git_ref: &str) -> anyhow::Result<()> {
         if commit.is_empty() {
             bail!("git commit-tree returned no object id");
         }
-        git_output(cwd, ["update-ref", git_ref, &commit])?;
-        Ok(())
+        Ok(commit)
     })();
 
     let _ = fs::remove_file(&temporary_index);
@@ -537,6 +557,15 @@ mod tests {
         git_ok(&directory, &["add", "already-staged.txt"]);
         let turn = capture_turn(&directory, session_id, 1).unwrap();
         assert_eq!(turn.files.len(), 3);
+        assert!(turn.totals_are_current());
+        assert_eq!(
+            turn.additions,
+            turn.files.iter().map(|file| file.additions).sum::<u64>()
+        );
+        assert_eq!(
+            turn.deletions,
+            turn.files.iter().map(|file| file.deletions).sum::<u64>()
+        );
         assert_eq!(
             git_text(&directory, &["diff", "--cached", "--name-only"]),
             "already-staged.txt"
