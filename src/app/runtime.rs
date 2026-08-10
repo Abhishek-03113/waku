@@ -336,6 +336,291 @@ fn perform_provider_rewind(
     }
 }
 
+/// Everything a response fork needs after the click has been accepted.
+///
+/// The session is a point-in-time snapshot: provider branching may take long
+/// enough for the user to navigate elsewhere, but the resulting task must
+/// still end at the response they chose. Provider RPCs, process startup,
+/// native transcript I/O, and Git ref copying are all performed by
+/// [`perform_response_fork`] on the background executor.
+struct ResponseForkRequest {
+    source: AgentSession,
+    source_workspace_path: PathBuf,
+    fork_title: String,
+    turn_count: usize,
+    provider_turn_count: usize,
+    turns_to_remove: usize,
+    binary: Option<PathBuf>,
+    driver: Option<DriverHandle>,
+    driver_start: Option<DriverStartRequest>,
+}
+
+fn numbered_title_suffix(title: &str) -> Option<(&str, usize)> {
+    let (base, suffix) = title.rsplit_once(" (")?;
+    let number = suffix.strip_suffix(')')?.parse().ok()?;
+    (!base.is_empty() && number >= 2).then_some((base, number))
+}
+
+fn next_response_fork_title<'a>(
+    source_title: &str,
+    existing_titles: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let existing_titles = existing_titles.into_iter().collect::<Vec<_>>();
+    let base = numbered_title_suffix(source_title)
+        .filter(|(base, _)| existing_titles.iter().any(|title| title == base))
+        .map_or(source_title, |(base, _)| base);
+    let highest_number = existing_titles
+        .iter()
+        .filter_map(|title| {
+            if *title == base {
+                Some(1)
+            } else {
+                numbered_title_suffix(title)
+                    .filter(|(candidate_base, _)| *candidate_base == base)
+                    .map(|(_, number)| number)
+            }
+        })
+        .max()
+        .unwrap_or(1);
+    format!("{base} ({})", highest_number.saturating_add(1).max(2))
+}
+
+struct PreparedResponseFork {
+    forked: AgentSession,
+    prepared_driver: Option<PreparedDriver>,
+    checkpoint_warning: Option<String>,
+}
+
+type ProviderForkResult = (
+    ProviderResumeCursor,
+    Option<HashMap<String, String>>,
+    Option<PreparedDriver>,
+);
+
+fn fork_response_with_driver(
+    request: &mut ResponseForkRequest,
+) -> anyhow::Result<(ProviderResumeCursor, Option<PreparedDriver>)> {
+    let provider = request.source.provider;
+    let mut prepared_driver = None;
+    let driver = if let Some(driver) = request.driver.as_ref() {
+        driver.clone()
+    } else {
+        let start = request.driver_start.take().ok_or_else(|| {
+            anyhow::anyhow!(tr!(
+                "errors.provider_not_found",
+                provider = provider.display_name()
+            ))
+        })?;
+        let prepared = start_driver(start, request.source_workspace_path.clone())?;
+        let driver = prepared.handle.clone();
+        prepared_driver = Some(prepared);
+        driver
+    };
+    Ok((driver.fork(request.turns_to_remove)?, prepared_driver))
+}
+
+fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedResponseFork, String> {
+    let provider = request.source.provider;
+    let native_fork = (|| -> anyhow::Result<ProviderForkResult> {
+        match provider {
+            ProviderKind::Claude => {
+                let ProviderResumeCursor::Claude {
+                    session_id: native_session_id,
+                    ..
+                } = request.source.provider_cursor.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(tr!(
+                        "errors.provider_native_session_unavailable",
+                        provider = "Claude"
+                    ))
+                })?
+                else {
+                    anyhow::bail!(tr!(
+                        "errors.provider_native_session_unavailable",
+                        provider = "Claude"
+                    ));
+                };
+                let resume_at = request
+                    .source
+                    .turns
+                    .get(request.turn_count.saturating_sub(1))
+                    .and_then(|turn| turn.provider_resume_at.clone())
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        crate::claude_session::message_id_for_turn(
+                            native_session_id,
+                            request.provider_turn_count,
+                        )
+                    })?;
+                let fork = crate::claude_session::fork_session_at(
+                    native_session_id,
+                    &resume_at,
+                    &request.fork_title,
+                )?;
+                let fork_resume_at =
+                    fork.message_ids.get(&resume_at).cloned().ok_or_else(|| {
+                        anyhow::anyhow!(tr!("errors.claude_fork_checkpoint_missing"))
+                    })?;
+                Ok((
+                    ProviderResumeCursor::Claude {
+                        session_id: fork.session_id,
+                        resume_at: Some(fork_resume_at),
+                    },
+                    Some(fork.message_ids),
+                    None,
+                ))
+            }
+            ProviderKind::Codex => {
+                if !matches!(
+                    request.source.provider_cursor.as_ref(),
+                    Some(ProviderResumeCursor::Codex { .. })
+                ) {
+                    anyhow::bail!(tr!(
+                        "errors.provider_native_thread_unavailable",
+                        provider = "Codex"
+                    ));
+                }
+                let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
+                Ok((cursor, None, prepared_driver))
+            }
+            ProviderKind::Cursor => Ok((
+                crate::cursor_session::fork_session_at_turn(&request.source, request.turn_count)?,
+                None,
+                None,
+            )),
+            ProviderKind::Amp => {
+                let Some(ProviderResumeCursor::Amp {
+                    thread_id: native_thread_id,
+                    fork_context,
+                }) = request.source.provider_cursor.as_ref()
+                else {
+                    anyhow::bail!(tr!(
+                        "errors.provider_native_thread_unavailable",
+                        provider = "Amp"
+                    ));
+                };
+                let binary = request.binary.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(tr!("errors.provider_not_installed", provider = "Amp"))
+                })?;
+                Ok((
+                    crate::amp_session::fork_session_at_turn(
+                        binary,
+                        &request.source_workspace_path,
+                        native_thread_id,
+                        fork_context.as_deref(),
+                        request.provider_turn_count,
+                    )?,
+                    None,
+                    None,
+                ))
+            }
+            ProviderKind::OpenCode => {
+                let Some(ProviderResumeCursor::OpenCode {
+                    session_id: native_session_id,
+                }) = request.source.provider_cursor.as_ref()
+                else {
+                    anyhow::bail!(tr!(
+                        "errors.provider_native_session_unavailable",
+                        provider = "OpenCode"
+                    ));
+                };
+                let binary = request.binary.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(tr!("errors.provider_not_installed", provider = "OpenCode"))
+                })?;
+                Ok((
+                    crate::opencode_session::fork_session_at_turn(
+                        binary,
+                        &request.source_workspace_path,
+                        native_session_id,
+                        request.provider_turn_count,
+                    )?,
+                    None,
+                    None,
+                ))
+            }
+            ProviderKind::Grok => {
+                let Some(ProviderResumeCursor::Grok {
+                    session_id: native_session_id,
+                }) = request.source.provider_cursor.as_ref()
+                else {
+                    anyhow::bail!(tr!(
+                        "errors.provider_native_session_unavailable",
+                        provider = "Grok"
+                    ));
+                };
+                let binary = request.binary.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(tr!(
+                        "errors.provider_not_installed",
+                        provider = "Grok Build"
+                    ))
+                })?;
+                Ok((
+                    crate::grok_session::fork_session_at_turn(
+                        binary,
+                        &request.source_workspace_path,
+                        native_session_id,
+                        request.provider_turn_count,
+                    )?,
+                    None,
+                    None,
+                ))
+            }
+            ProviderKind::Pi => {
+                if !matches!(
+                    request.source.provider_cursor.as_ref(),
+                    Some(ProviderResumeCursor::Pi {
+                        session_file: Some(_),
+                        ..
+                    })
+                ) {
+                    anyhow::bail!(tr!("errors.pi_session_file_unavailable"));
+                }
+                let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
+                Ok((cursor, None, prepared_driver))
+            }
+        }
+    })();
+
+    let (provider_cursor, claude_message_ids, prepared_driver) =
+        native_fork.map_err(|error| tr!("errors.fork_task", error = error))?;
+    let Some(mut forked) =
+        request
+            .source
+            .fork_through_turn(request.turn_count, provider_cursor, &request.fork_title)
+    else {
+        return Err(tr!("session.response_cannot_copy"));
+    };
+    if let Some(message_ids) = claude_message_ids {
+        for turn in &mut forked.turns {
+            if let Some(message_id) = turn.provider_resume_at.as_mut()
+                && let Some(remapped) = message_ids.get(message_id)
+            {
+                *message_id = remapped.clone();
+            }
+        }
+    }
+
+    let fork_id = forked.id;
+    for turn in &mut forked.turns {
+        if let Some(checkpoint) = turn.checkpoint.as_mut() {
+            checkpoint.git_ref = checkpoint::checkpoint_ref(fork_id, checkpoint.turn_count);
+        }
+    }
+    let checkpoint_warning = checkpoint::copy_session_refs(
+        &request.source_workspace_path,
+        request.source.id,
+        fork_id,
+        request.turn_count,
+    )
+    .err()
+    .map(|error| error.to_string());
+
+    Ok(PreparedResponseFork {
+        forked,
+        prepared_driver,
+        checkpoint_warning,
+    })
+}
+
 impl Waku {
     pub fn composer_focus(&self, cx: &App) -> FocusHandle {
         self.composer.read(cx).focus()
@@ -741,6 +1026,13 @@ impl Waku {
         turn_count: usize,
         cx: &mut Context<Self>,
     ) {
+        if self.response_fork_preparations.contains_key(&session_id)
+            || self.submission_preparations.contains(&session_id)
+        {
+            self.show_toast(tr!("session.response_cannot_fork"));
+            cx.notify();
+            return;
+        }
         let Some(source) = self
             .state
             .sessions
@@ -773,6 +1065,16 @@ impl Waku {
             return;
         };
 
+        let provider = source.provider;
+        let project_id = source.project_id;
+        let fork_title = next_response_fork_title(
+            source.display_title(),
+            self.state
+                .sessions
+                .iter()
+                .filter(|session| session.project_id == project_id)
+                .map(AgentSession::display_title),
+        );
         let provider_turn_count = source
             .turns
             .iter()
@@ -780,230 +1082,153 @@ impl Waku {
             .filter(|turn| turn.provider_turn_started)
             .count();
         let turns_to_remove = source.provider_turns_after(turn_count);
-        let native_fork = (|| -> anyhow::Result<(
-            ProviderResumeCursor,
-            Option<std::collections::HashMap<String, String>>,
-        )> {
-            match source.provider {
-                ProviderKind::Claude => {
-                    let ProviderResumeCursor::Claude {
-                        session_id: native_session_id,
-                        ..
-                    } = source
-                        .provider_cursor
-                        .as_ref()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(tr!(
-                                "errors.provider_native_session_unavailable",
-                                provider = "Claude"
-                            ))
-                        })?
-                    else {
-                        anyhow::bail!(tr!(
-                            "errors.provider_native_session_unavailable",
-                            provider = "Claude"
-                        ));
-                    };
-                    let resume_at = source.turns[turn_count - 1]
-                        .provider_resume_at
-                        .clone()
-                        .map(Ok)
-                        .unwrap_or_else(|| {
-                            crate::claude_session::message_id_for_turn(
-                                native_session_id,
-                                provider_turn_count,
-                            )
-                        })?;
-                    let fork = crate::claude_session::fork_session_at(
-                        native_session_id,
-                        &resume_at,
-                        &tr!("session.fork_title", title = source.display_title()),
-                    )?;
-                    let fork_resume_at = fork
-                        .message_ids
-                        .get(&resume_at)
-                        .cloned()
-                        .ok_or_else(|| anyhow::anyhow!(tr!("errors.claude_fork_checkpoint_missing")))?;
-                    Ok((
-                        ProviderResumeCursor::Claude {
-                            session_id: fork.session_id,
-                            resume_at: Some(fork_resume_at),
-                        },
-                        Some(fork.message_ids),
-                    ))
-                }
-                ProviderKind::Codex => {
-                    if !matches!(
-                        source.provider_cursor.as_ref(),
-                        Some(ProviderResumeCursor::Codex { .. })
-                    ) {
-                        anyhow::bail!(tr!(
-                            "errors.provider_native_thread_unavailable",
-                            provider = "Codex"
-                        ));
-                    }
-                    Ok((self.ensure_driver()?.fork(turns_to_remove)?, None))
-                }
-                ProviderKind::Cursor => Ok((
-                    crate::cursor_session::fork_session_at_turn(&source, turn_count)?,
-                    None,
-                )),
-                ProviderKind::Amp => {
-                    let Some(ProviderResumeCursor::Amp {
-                        thread_id: native_thread_id,
-                        fork_context,
-                    }) = source.provider_cursor.as_ref()
-                    else {
-                        anyhow::bail!(tr!(
-                            "errors.provider_native_thread_unavailable",
-                            provider = "Amp"
-                        ));
-                    };
-                    let binary = self
-                        .probes
-                        .iter()
-                        .find(|probe| probe.provider == ProviderKind::Amp)
-                        .and_then(|probe| probe.path.as_deref())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(tr!("errors.provider_not_installed", provider = "Amp"))
-                        })?;
-                    Ok((
-                        crate::amp_session::fork_session_at_turn(
-                            binary,
-                            &source_workspace_path,
-                            native_thread_id,
-                            fork_context.as_deref(),
-                            provider_turn_count,
-                        )?,
-                        None,
-                    ))
-                }
-                ProviderKind::OpenCode => {
-                    let Some(ProviderResumeCursor::OpenCode {
-                        session_id: native_session_id,
-                    }) = source.provider_cursor.as_ref()
-                    else {
-                        anyhow::bail!(tr!(
-                            "errors.provider_native_session_unavailable",
-                            provider = "OpenCode"
-                        ));
-                    };
-                    let binary = self
-                        .probes
-                        .iter()
-                        .find(|probe| probe.provider == ProviderKind::OpenCode)
-                        .and_then(|probe| probe.path.as_deref())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(tr!(
-                                "errors.provider_not_installed",
-                                provider = "OpenCode"
-                            ))
-                        })?;
-                    Ok((
-                        crate::opencode_session::fork_session_at_turn(
-                            binary,
-                            &source_workspace_path,
-                            native_session_id,
-                            provider_turn_count,
-                        )?,
-                        None,
-                    ))
-                }
-                ProviderKind::Grok => {
-                    let Some(ProviderResumeCursor::Grok {
-                        session_id: native_session_id,
-                    }) = source.provider_cursor.as_ref()
-                    else {
-                        anyhow::bail!(tr!(
-                            "errors.provider_native_session_unavailable",
-                            provider = "Grok"
-                        ));
-                    };
-                    let binary = self
-                        .probes
-                        .iter()
-                        .find(|probe| probe.provider == ProviderKind::Grok)
-                        .and_then(|probe| probe.path.as_deref())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(tr!(
-                                "errors.provider_not_installed",
-                                provider = "Grok Build"
-                            ))
-                        })?;
-                    Ok((
-                        crate::grok_session::fork_session_at_turn(
-                            binary,
-                            &source_workspace_path,
-                            native_session_id,
-                            provider_turn_count,
-                        )?,
-                        None,
-                    ))
-                }
-                ProviderKind::Pi => {
-                    if !matches!(
-                        source.provider_cursor.as_ref(),
-                        Some(ProviderResumeCursor::Pi {
-                            session_file: Some(_),
-                            ..
-                        })
-                    ) {
-                        anyhow::bail!(tr!("errors.pi_session_file_unavailable"));
-                    }
-                    Ok((self.ensure_driver()?.fork(turns_to_remove)?, None))
+        let driver = self
+            .runtimes
+            .get(&session_id)
+            .map(|runtime| runtime.driver.clone());
+        let binary_provider = match provider {
+            ProviderKind::Amp => Some("Amp"),
+            ProviderKind::OpenCode => Some("OpenCode"),
+            ProviderKind::Grok => Some("Grok Build"),
+            _ => None,
+        };
+        let binary = binary_provider.and_then(|_| {
+            self.probes
+                .iter()
+                .find(|probe| probe.provider == provider)
+                .and_then(|probe| probe.path.clone())
+        });
+        if let Some(provider_name) = binary_provider
+            && binary.is_none()
+        {
+            self.show_toast(tr!(
+                "errors.provider_not_installed",
+                provider = provider_name
+            ));
+            cx.notify();
+            return;
+        }
+        let driver_start = if matches!(provider, ProviderKind::Codex | ProviderKind::Pi)
+            && driver.is_none()
+        {
+            match self.driver_start_request_for_session(&source, source_workspace_path.clone()) {
+                Ok(request) => Some(request),
+                Err(error) => {
+                    self.show_toast(tr!("errors.fork_task", error = error));
+                    cx.notify();
+                    return;
                 }
             }
-        })();
+        } else {
+            None
+        };
+        let request = ResponseForkRequest {
+            source,
+            source_workspace_path,
+            fork_title,
+            turn_count,
+            provider_turn_count,
+            turns_to_remove,
+            binary,
+            driver,
+            driver_start,
+        };
 
-        let (provider_cursor, claude_message_ids) = match native_fork {
-            Ok(fork) => fork,
+        self.response_fork_preparations
+            .insert(session_id, turn_count);
+        self.hide_toast();
+        cx.notify();
+
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { perform_response_fork(request) })
+                .await;
+            let _ = waku.update(cx, move |waku, cx| {
+                waku.finish_response_fork(session_id, turn_count, provider, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_response_fork(
+        &mut self,
+        session_id: Uuid,
+        turn_count: usize,
+        provider: ProviderKind,
+        result: Result<PreparedResponseFork, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.response_fork_preparations.get(&session_id) != Some(&turn_count) {
+            return;
+        }
+        self.response_fork_preparations.remove(&session_id);
+
+        let PreparedResponseFork {
+            forked,
+            prepared_driver,
+            checkpoint_warning,
+        } = match result {
+            Ok(prepared) => prepared,
             Err(error) => {
-                if source.provider == ProviderKind::Pi {
-                    // A failed restore after Pi creates a fork can leave the RPC
-                    // process on that fork. Recreate it from the source cursor.
+                if provider == ProviderKind::Pi {
+                    // A failed restore after Pi creates a fork can leave the
+                    // resident RPC process on that fork. Recreate it lazily
+                    // from the source cursor on its next prompt.
                     self.runtimes.remove(&session_id);
                 }
-                self.show_toast(tr!("errors.fork_task", error = error));
+                self.drain_queued_message(session_id, cx);
+                self.show_toast(error);
                 cx.notify();
                 return;
             }
         };
-        let Some(mut forked) = source.fork_through_turn(turn_count, provider_cursor) else {
-            self.show_toast(tr!("session.response_cannot_copy"));
-            cx.notify();
-            return;
-        };
-        if let Some(message_ids) = claude_message_ids {
-            for turn in &mut forked.turns {
-                if let Some(message_id) = turn.provider_resume_at.as_mut()
-                    && let Some(remapped) = message_ids.get(message_id)
-                {
-                    *message_id = remapped.clone();
-                }
-            }
-        }
 
-        let fork_id = forked.id;
-        for turn in &mut forked.turns {
-            if let Some(checkpoint) = turn.checkpoint.as_mut() {
-                checkpoint.git_ref = checkpoint::checkpoint_ref(fork_id, checkpoint.turn_count);
-            }
+        if let Some(prepared) = prepared_driver
+            && !self.runtimes.contains_key(&session_id)
+        {
+            self.install_prepared_driver(session_id, prepared);
         }
-        let checkpoint_warning =
-            checkpoint::copy_session_refs(&source_workspace_path, source.id, fork_id, turn_count)
-                .err();
         self.invalidate_checkpoint_refs();
 
+        let fork_id = forked.id;
         self.state.push_session(forked);
         self.select_session(fork_id, cx);
-        self.show_toast(match checkpoint_warning {
+        self.drain_queued_message(session_id, cx);
+        match checkpoint_warning {
             Some(error) => {
-                tr!("session.forked_with_checkpoint_warning", error = error)
+                self.show_toast(tr!("session.forked_with_checkpoint_warning", error = error))
             }
-            None => tr!("session.forked_from_response"),
-        });
-        self.save();
+            None => self.show_success_toast(tr!("session.forked_from_response")),
+        }
         cx.notify();
+    }
+
+    /// Composer Enter clears the field after emitting its event. A response
+    /// fork temporarily owns the source provider, so restore a keyboard
+    /// submission on the next task turn instead of racing it against the fork.
+    pub(super) fn defer_restore_composer_after_fork(
+        &self,
+        session_id: Uuid,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        let composer = self.composer.clone();
+        cx.spawn(async move |waku, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1))
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                if waku.state.selected_session == Some(session_id) {
+                    composer.update(cx, |input, cx| {
+                        if input.content().is_empty() {
+                            input.set_content(prompt, cx);
+                        }
+                    });
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn begin_message_edit(
@@ -1570,39 +1795,6 @@ impl Waku {
         }
     }
 
-    pub(super) fn ensure_driver(&mut self) -> anyhow::Result<DriverHandle> {
-        let session_id = self
-            .selected_session()
-            .map(|session| session.id)
-            .ok_or_else(|| anyhow::anyhow!(tr!("errors.no_session_selected")))?;
-        self.ensure_driver_for_session(session_id)
-    }
-
-    pub(super) fn ensure_driver_for_session(
-        &mut self,
-        session_id: Uuid,
-    ) -> anyhow::Result<DriverHandle> {
-        let session = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!(tr!("errors.session_not_found")))?;
-        if let Some(runtime) = self.runtimes.get(&session.id) {
-            return Ok(runtime.driver.clone());
-        }
-        let workspace_path = self
-            .workspace_path_for_session(&session)
-            .map(std::path::Path::to_path_buf)
-            .ok_or_else(|| anyhow::anyhow!(tr!("errors.project_not_found")))?;
-        let prepared = start_driver(
-            self.driver_start_request_for_session(&session, workspace_path.clone())?,
-            workspace_path,
-        )?;
-        Ok(self.install_prepared_driver(session.id, prepared))
-    }
-
     fn driver_start_request_for_session(
         &self,
         session: &AgentSession,
@@ -1671,6 +1863,9 @@ impl Waku {
         let Some(session) = self.selected_session() else {
             return;
         };
+        if self.response_fork_preparations.contains_key(&session.id) {
+            return;
+        }
         if session.is_busy() {
             // While the agent is working, Enter queues a follow-up instead of
             // refusing the message. The queue drains once the turn settles.
@@ -1773,6 +1968,9 @@ impl Waku {
     /// Start the next queued follow-up as a fresh turn. Only called once a
     /// settled turn has been fully closed, so the session is Idle.
     fn drain_queued_message(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if self.response_fork_preparations.contains_key(&session_id) {
+            return;
+        }
         let Some(session) = self
             .state
             .sessions
@@ -1800,6 +1998,9 @@ impl Waku {
         prompt: String,
         cx: &mut Context<Self>,
     ) {
+        if self.response_fork_preparations.contains_key(&session_id) {
+            return;
+        }
         let selected = self.state.selected_session == Some(session_id);
         let Some(session) = self
             .state
@@ -2183,6 +2384,34 @@ impl Waku {
             self.save();
         }
         changed || selected_changed
+    }
+}
+
+#[cfg(test)]
+mod response_fork_title_tests {
+    use super::next_response_fork_title;
+
+    #[test]
+    fn response_fork_titles_advance_one_numbered_sequence() {
+        assert_eq!(
+            next_response_fork_title("Fix the bug", ["Fix the bug"]),
+            "Fix the bug (2)"
+        );
+        assert_eq!(
+            next_response_fork_title(
+                "Fix the bug",
+                ["Fix the bug", "Fix the bug (2)", "Fix the bug (4)"]
+            ),
+            "Fix the bug (5)"
+        );
+        assert_eq!(
+            next_response_fork_title("Fix the bug (2)", ["Fix the bug", "Fix the bug (2)"]),
+            "Fix the bug (3)"
+        );
+        assert_eq!(
+            next_response_fork_title("Plan (2026)", ["Plan (2026)"]),
+            "Plan (2026) (2)"
+        );
     }
 }
 

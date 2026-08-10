@@ -1587,8 +1587,10 @@ impl Waku {
     pub(super) fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let session = self.selected_session();
-        let preparing =
-            session.is_some_and(|session| self.submission_preparations.contains(&session.id));
+        let preparing = session.is_some_and(|session| {
+            self.submission_preparations.contains(&session.id)
+                || self.response_fork_preparations.contains_key(&session.id)
+        });
         let submit_action =
             composer_submit_action(session.map(|session| session.status), preparing);
         let has_draft = !self.composer.read(cx).content().trim().is_empty()

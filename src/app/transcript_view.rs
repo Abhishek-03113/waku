@@ -834,9 +834,12 @@ impl Waku {
             .turns
             .iter()
             .find(|turn| turn.id == turn_id && turn.provider_turn_started)?;
+        let pending_turn = self.response_fork_preparations.get(&session.id).copied();
         Some(AssistantMessageAction {
             session_id: session.id,
             turn_count: turn.turn_count,
+            enabled: pending_turn.is_none(),
+            preparing: pending_turn == Some(turn.turn_count),
         })
     }
 

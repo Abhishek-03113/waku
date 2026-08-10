@@ -135,6 +135,11 @@ impl Waku {
     }
 
     pub(super) fn remove_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if self.response_fork_preparations.contains_key(&session_id) {
+            self.show_toast(tr!("session.response_fork_in_progress"));
+            cx.notify();
+            return;
+        }
         // The turn count drives checkpoint cleanup, so the transcript has to be
         // loaded before it can be trusted.
         self.ensure_session_loaded(session_id);

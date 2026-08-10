@@ -243,19 +243,44 @@ fn render_message_footer(
         footer = footer.child(copy_button);
         if let Some(action) = assistant_message_action {
             let fork_waku = waku.clone();
-            footer = footer.child(
-                div()
-                    .id(SharedString::from(format!("fork-response-{message_id}")))
-                    .w(px(27.0))
-                    .h(px(27.0))
-                    .rounded(px(8.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_default()
+            let fork_icon = if action.preparing {
+                icon("icons/loader-circle.svg", 14.0, footer_color)
+                    .with_animation(
+                        SharedString::from(format!("response-fork-spinner-{message_id}")),
+                        Animation::new(Duration::from_millis(900))
+                            .repeat()
+                            .with_easing(gpui::linear),
+                        |icon, delta| {
+                            icon.with_transformation(gpui::Transformation::rotate(
+                                gpui::percentage(delta),
+                            ))
+                        },
+                    )
+                    .into_any_element()
+            } else {
+                icon("icons/fork.svg", 14.0, footer_color).into_any_element()
+            };
+            let fork_button = div()
+                .id(SharedString::from(format!("fork-response-{message_id}")))
+                .w(px(27.0))
+                .h(px(27.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .when(!action.enabled && !action.preparing, |element| {
+                    element.opacity(0.45)
+                })
+                .child(fork_icon)
+                .tooltip(Tooltip::text(if action.enabled {
+                    tr_cow!("session.fork_task")
+                } else {
+                    tr_cow!("session.forking_task")
+                }));
+            footer = footer.child(if action.enabled {
+                fork_button
                     .hover(|element| element.bg(theme.overlay_strong))
-                    .child(icon("icons/fork.svg", 14.0, footer_color))
-                    .tooltip(Tooltip::text(tr_cow!("session.fork_task")))
                     .on_click(move |_, _, cx| {
                         let _ = fork_waku.update(cx, |this, cx| {
                             this.fork_session_from_response(
@@ -264,8 +289,10 @@ fn render_message_footer(
                                 cx,
                             );
                         });
-                    }),
-            );
+                    })
+            } else {
+                fork_button
+            });
         }
         footer = footer.child(timestamp);
     }
@@ -622,12 +649,20 @@ fn message_menu_items(
         let waku = waku.clone();
         items.push(MenuItem::Separator);
         items.push(
-            MenuItem::new(tr!("session.fork_task_title"), move |_, cx| {
-                let _ = waku.update(cx, |this, cx| {
-                    this.fork_session_from_response(action.session_id, action.turn_count, cx);
-                });
-            })
-            .icon("icons/fork.svg"),
+            MenuItem::new(
+                if action.enabled {
+                    tr!("session.fork_task_title")
+                } else {
+                    tr!("session.forking_task_title")
+                },
+                move |_, cx| {
+                    let _ = waku.update(cx, |this, cx| {
+                        this.fork_session_from_response(action.session_id, action.turn_count, cx);
+                    });
+                },
+            )
+            .icon("icons/fork.svg")
+            .disabled(!action.enabled),
         );
     }
 

@@ -1007,12 +1007,12 @@ impl AgentSession {
         &self,
         turn_count: usize,
         provider_cursor: ProviderResumeCursor,
+        fork_title: &str,
     ) -> Option<Self> {
         if turn_count == 0 || turn_count > self.turns.len() {
             return None;
         }
 
-        let fork_title = tr!("session.fork_title", title = self.display_title());
         let mut fork = self.clone();
         fork.truncate_after_turn(turn_count);
         let fork_id = Uuid::new_v4();
@@ -1041,7 +1041,7 @@ impl AgentSession {
         let now = unix_time();
         fork.id = fork_id;
         fork.title = Self::DEFAULT_TITLE.to_owned();
-        fork.auto_title = Some(fork_title);
+        fork.auto_title = Some(fork_title.to_owned());
         fork.status = SessionStatus::Idle;
         fork.created_at = now;
         fork.updated_at = now;
@@ -1580,12 +1580,13 @@ mod tests {
                 ProviderResumeCursor::Codex {
                     thread_id: "forked-thread".into(),
                 },
+                "New task (2)",
             )
             .unwrap();
 
         assert_ne!(fork.id, session.id);
         assert_eq!(fork.title, AgentSession::DEFAULT_TITLE);
-        assert_eq!(fork.auto_title.as_deref(), Some("New task (fork)"));
+        assert_eq!(fork.auto_title.as_deref(), Some("New task (2)"));
         assert_eq!(fork.status, SessionStatus::Idle);
         assert_eq!(fork.turns.len(), 1);
         assert_eq!(fork.messages.len(), 2);
@@ -1620,6 +1621,7 @@ mod tests {
                 ProviderResumeCursor::Codex {
                     thread_id: "forked-thread".into(),
                 },
+                "New task (2)",
             )
             .unwrap();
 

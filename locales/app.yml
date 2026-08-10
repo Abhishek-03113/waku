@@ -456,6 +456,12 @@ session.fork_task:
 session.fork_task_title:
   en: Fork Task
   zh-CN: 从此处派生任务
+session.forking_task:
+  en: Forking task…
+  zh-CN: 正在派生任务…
+session.forking_task_title:
+  en: Forking Task…
+  zh-CN: 正在派生任务…
 session.revert_to_here:
   en: Revert to here
   zh-CN: 回退到这里
@@ -1130,12 +1136,12 @@ session.response_unavailable:
 session.response_cannot_fork:
   en: That response cannot be forked right now.
   zh-CN: 目前无法从该回复派生任务。
+session.response_fork_in_progress:
+  en: Wait for the task fork to finish before removing its source task.
+  zh-CN: 请等待任务派生完成后再移除原任务。
 session.response_cannot_copy:
   en: That response could not be copied into a new task.
   zh-CN: 无法将该回复复制到新任务中。
-session.fork_title:
-  en: "%{title} (fork)"
-  zh-CN: "%{title}（派生）"
 session.forked_with_checkpoint_warning:
   en: "Forked task; some Git checkpoints could not be copied: %{error}"
   zh-CN: "任务已派生，但部分 Git 检查点未能复制：%{error}"

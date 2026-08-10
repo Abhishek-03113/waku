@@ -104,9 +104,9 @@ impl Render for Waku {
         let toast = self
             .toast
             .as_ref()
-            .map(|toast| (toast.message.clone(), toast.id));
-        let toast = toast.map(|(message, generation)| {
-            self.render_toast(message, generation, cx)
+            .map(|toast| (toast.message.clone(), toast.tone, toast.id));
+        let toast = toast.map(|(message, tone, generation)| {
+            self.render_toast(message, tone, generation, cx)
                 .into_any_element()
         });
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
@@ -206,10 +206,15 @@ impl Waku {
     fn render_toast(
         &self,
         message: String,
+        tone: ToastTone,
         generation: u64,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = Theme::current(cx);
+        let (status_icon, status_color) = match tone {
+            ToastTone::Alert => ("icons/alert.svg", theme.danger),
+            ToastTone::Success => ("icons/check.svg", theme.success),
+        };
         let palette = MarkdownPalette::from_theme(&theme);
         let text_ctx = MarkdownCtx::new(
             format!("toast-{generation}"),
@@ -285,7 +290,7 @@ impl Waku {
                     }))
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(md::render::frame_reset(self.toast_selection.clone()))
-                    .child(icon("icons/alert.svg", 14.0, theme.danger))
+                    .child(icon(status_icon, 14.0, status_color))
                     .child(div().flex_1().min_w_0().whitespace_normal().child(message))
                     .child(dismiss)
                     .child(self.toast_selection_input()),

@@ -208,11 +208,18 @@ struct PanelResizeDrag {
 #[derive(Debug)]
 struct ToastState {
     message: String,
+    tone: ToastTone,
     id: u64,
     timer_generation: u64,
     duration_remaining: Duration,
     timer_started: Option<Instant>,
     hovered: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToastTone {
+    Alert,
+    Success,
 }
 
 fn paused_toast_duration(remaining: Duration, elapsed: Duration) -> Duration {
@@ -512,6 +519,8 @@ struct UserMessageAction {
 struct AssistantMessageAction {
     session_id: Uuid,
     turn_count: usize,
+    enabled: bool,
+    preparing: bool,
 }
 
 #[derive(Clone)]
@@ -733,6 +742,11 @@ pub struct Waku {
     /// session is busy immediately, while the composer draws a spinner until
     /// the non-cancellable preparation is complete.
     submission_preparations: HashSet<Uuid>,
+    /// Response fork target per source session while its provider-native
+    /// branch and Git checkpoint refs are being prepared off the UI thread.
+    /// A source can have only one in flight because Pi temporarily changes
+    /// its resident session while producing a branch.
+    response_fork_preparations: HashMap<Uuid, usize>,
     /// Sessions whose just-settled turn should start the next queued
     /// follow-up. Processed at the end of the driver-event drain so the
     /// session's runtime has already been re-inserted before a new prompt
@@ -995,11 +1009,20 @@ fn migrate_legacy_projectless_projects(state: &mut PersistedState) -> std::io::R
 
 impl Waku {
     pub(super) fn show_toast(&mut self, message: impl Into<String>) {
+        self.show_toast_with_tone(message, ToastTone::Alert);
+    }
+
+    pub(super) fn show_success_toast(&mut self, message: impl Into<String>) {
+        self.show_toast_with_tone(message, ToastTone::Success);
+    }
+
+    fn show_toast_with_tone(&mut self, message: impl Into<String>, tone: ToastTone) {
         self.toast_selection.selection.borrow_mut().clear();
         self.toast_selection.registry.borrow_mut().clear();
         self.toast_generation = self.toast_generation.wrapping_add(1);
         self.toast = Some(ToastState {
             message: message.into(),
+            tone,
             id: self.toast_generation,
             timer_generation: self.toast_generation,
             duration_remaining: DEFAULT_TOAST_DURATION,
@@ -1366,12 +1389,24 @@ impl Waku {
                 &composer,
                 |this: &mut Self, _, event: &ComposerEvent, cx| match event {
                     ComposerEvent::Submit(prompt) => {
-                        if let Some(prompt) = this.submission_with_attachments(prompt) {
+                        if let Some(session_id) = this.selected_session().and_then(|session| {
+                            this.response_fork_preparations
+                                .contains_key(&session.id)
+                                .then_some(session.id)
+                        }) {
+                            this.defer_restore_composer_after_fork(session_id, prompt.clone(), cx);
+                        } else if let Some(prompt) = this.submission_with_attachments(prompt) {
                             this.submit_prompt(prompt, cx);
                         }
                     }
                     ComposerEvent::SubmitSteer(prompt) => {
-                        if let Some(prompt) = this.submission_with_attachments(prompt) {
+                        if let Some(session_id) = this.selected_session().and_then(|session| {
+                            this.response_fork_preparations
+                                .contains_key(&session.id)
+                                .then_some(session.id)
+                        }) {
+                            this.defer_restore_composer_after_fork(session_id, prompt.clone(), cx);
+                        } else if let Some(prompt) = this.submission_with_attachments(prompt) {
                             this.steer_prompt(prompt, cx);
                         }
                     }
@@ -1611,6 +1646,7 @@ impl Waku {
                 composer_attachments: Vec::new(),
                 runtimes: HashMap::new(),
                 submission_preparations: HashSet::new(),
+                response_fork_preparations: HashMap::new(),
                 pending_queue_drains: Vec::new(),
                 stream_state_dirty: false,
                 last_stream_save: Instant::now(),
@@ -1671,6 +1707,7 @@ impl Waku {
                 header_drag_armed: false,
                 toast: startup_toast.map(|message| ToastState {
                     message,
+                    tone: ToastTone::Alert,
                     id: 0,
                     timer_generation: 0,
                     duration_remaining: DEFAULT_TOAST_DURATION,
