@@ -470,8 +470,9 @@ reach another's transcript.
 
 | Event | Becomes |
 | --- | --- |
-| `message.part.delta`, `field: "text"` | `TextDelta` |
-| `message.part.delta`, `field: "reasoning"` | `ReasoningDelta` |
+| `message.part.delta`, `field: "text"` on a text or unknown part | `TextDelta` |
+| `message.part.delta`, `field: "reasoning"` / `field: "thinking"`, or `field: "text"` on a native reasoning part | `ReasoningDelta` |
+| `message.part.updated` with a `reasoning` / `thinking` part | records its `partID`, since OpenCode streams the part's content as the generic `text` field |
 | `message.part.updated` with a `tool` part | `RichActivity`, read off `/state/status`, `/state/input`, `/state/output` |
 | `message.updated` with assistant token counters | `UsageUpdated`, paired with `/api/model`'s context limit for the reported provider/model |
 | `session.idle` | `TurnFinished` |

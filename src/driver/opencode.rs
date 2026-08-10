@@ -11,7 +11,7 @@
 //! Routes and payload shapes here were read off a live server's OpenAPI
 //! document and event stream, not guessed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -474,6 +474,7 @@ fn open_event_stream(port: u16, path: &str) -> anyhow::Result<TcpStream> {
 #[derive(Default)]
 struct OpenCodeStreamState {
     tools: HashMap<String, (ActivityKind, String)>,
+    reasoning_parts: HashSet<String>,
     usage_metadata: Arc<OpenCodeUsageMetadata>,
 }
 
@@ -589,11 +590,23 @@ fn handle_event(
             if delta.is_empty() {
                 return;
             }
+            let part_id = properties.get("partID").and_then(Value::as_str);
+            let native_reasoning_part =
+                part_id.is_some_and(|part_id| state.reasoning_parts.contains(part_id));
             match properties.get("field").and_then(Value::as_str) {
+                // OpenCode streams a reasoning part's own `text` property as
+                // `field: "text"`. The preceding part update is therefore the
+                // authoritative distinction between answer and thought text.
+                Some("text") if native_reasoning_part => {
+                    let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
+                }
                 Some("text") => {
                     let _ = events.send(DriverEvent::TextDelta(delta.to_owned()));
                 }
                 Some("reasoning" | "thinking") => {
+                    if let Some(part_id) = part_id {
+                        state.reasoning_parts.insert(part_id.to_owned());
+                    }
                     let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
                 }
                 _ => {}
@@ -601,7 +614,15 @@ fn handle_event(
         }
         "message.part.updated" => {
             let part = properties.get("part").unwrap_or(&Value::Null);
-            if part.get("type").and_then(Value::as_str) == Some("tool") {
+            let part_type = part.get("type").and_then(Value::as_str);
+            if let Some(part_id) = part.get("id").and_then(Value::as_str) {
+                if matches!(part_type, Some("reasoning" | "thinking")) {
+                    state.reasoning_parts.insert(part_id.to_owned());
+                } else {
+                    state.reasoning_parts.remove(part_id);
+                }
+            }
+            if part_type == Some("tool") {
                 tool_activity(part, events, state);
             }
         }
@@ -623,6 +644,7 @@ fn handle_event(
             }
         }
         "session.idle" => {
+            state.reasoning_parts.clear();
             if std::mem::take(&mut *turn_active.lock()) {
                 let _ = events.send(DriverEvent::TurnFinished {
                     success: true,
@@ -1021,6 +1043,38 @@ mod tests {
         ));
         assert_eq!(seen.len(), 5, "non-transcript events leaked");
         assert!(!*turn.lock(), "the turn should be settled exactly once");
+    }
+
+    #[test]
+    fn classifies_text_deltas_by_their_native_part_type() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        // DeepSeek V4 Flash is stored by OpenCode as a reasoning part, but the
+        // part's content still streams through the generic `text` field.
+        let wire = [
+            json!({"type":"message.part.updated","properties":{"part":{"id":"prt_reason","type":"reasoning","text":""}}}),
+            json!({"type":"message.part.delta","properties":{"partID":"prt_reason","field":"text","delta":"thinking"}}),
+            json!({"type":"message.part.updated","properties":{"part":{"id":"prt_answer","type":"text","text":""}}}),
+            json!({"type":"message.part.delta","properties":{"partID":"prt_answer","field":"text","delta":"answer"}}),
+            json!({"type":"message.part.delta","properties":{"partID":"prt_unknown","field":"text","delta":" fallback"}}),
+            json!({"type":"session.idle","properties":{"sessionID":"ses_1"}}),
+        ];
+        for event in wire {
+            handle_event(&event, &events, &commands, &turn, true, &mut state);
+        }
+
+        let seen = event_rx.try_iter().collect::<Vec<_>>();
+        assert!(matches!(&seen[0], DriverEvent::ReasoningDelta(text) if text == "thinking"));
+        assert!(matches!(&seen[1], DriverEvent::TextDelta(text) if text == "answer"));
+        assert!(matches!(&seen[2], DriverEvent::TextDelta(text) if text == " fallback"));
+        assert!(matches!(
+            &seen[3],
+            DriverEvent::TurnFinished { success: true, .. }
+        ));
+        assert_eq!(seen.len(), 4);
+        assert!(
+            state.reasoning_parts.is_empty(),
+            "settled turns should release their part classification state"
+        );
     }
 
     #[test]
