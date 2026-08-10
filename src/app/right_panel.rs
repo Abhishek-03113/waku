@@ -3926,7 +3926,15 @@ impl Waku {
             .and_then(|snapshot| snapshot.files.get(file_index))
             .and_then(|file| file.diff_line)
         {
-            self.right_panel_diff_list_state.scroll_to_reveal_item(line);
+            // `scroll_to_reveal_item` bottom-aligns targets below the viewport,
+            // which can reveal only the file header and leave its diff body
+            // off-screen. A tree selection is an explicit jump, so top-anchor
+            // the header and expose the content immediately below it.
+            self.right_panel_diff_list_state
+                .scroll_to(gpui::ListOffset {
+                    item_ix: line,
+                    offset_in_item: px(0.0),
+                });
         }
         cx.notify();
     }
