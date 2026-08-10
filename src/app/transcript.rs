@@ -700,17 +700,20 @@ pub(super) fn transcript_anchor_end_space(
 }
 
 /// Whether the transcript needs an explicit affordance for returning to its
-/// tail. The final row's bounds are authoritative for both list alignments:
+/// tail. A measured scroll range is required because disclosure pinning can
+/// leave `is_scrolled` set after a collapse removes all overflow. The final
+/// row's bounds then distinguish the tail position for both list alignments:
 /// `ListScrollEvent::is_scrolled` alone stays true at the bottom of the
 /// top-aligned list used while a turn is anchored.
 pub(super) fn should_show_scroll_to_bottom(
     is_scrolled: bool,
     anchor_following: bool,
+    transcript_scrollable: bool,
     viewport_bottom: Pixels,
     tail_bottom: Option<Pixels>,
     end_space: Pixels,
 ) -> bool {
-    if !is_scrolled || anchor_following {
+    if !is_scrolled || anchor_following || !transcript_scrollable {
         return false;
     }
 

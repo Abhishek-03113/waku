@@ -407,6 +407,7 @@ fn scroll_to_bottom_only_appears_while_the_tail_is_below_the_viewport() {
     assert!(!should_show_scroll_to_bottom(
         false,
         false,
+        true,
         viewport_bottom,
         None,
         Pixels::ZERO,
@@ -414,12 +415,17 @@ fn scroll_to_bottom_only_appears_while_the_tail_is_below_the_viewport() {
     assert!(!should_show_scroll_to_bottom(
         true,
         true,
+        true,
         viewport_bottom,
         Some(px(900.0)),
         Pixels::ZERO,
     ));
-    assert!(should_show_scroll_to_bottom(
+    // Disclosure pinning keeps `is_scrolled` true and a splice can leave the
+    // tail temporarily unmeasured, but a collapsed transcript that fits the
+    // viewport has nowhere to scroll back to.
+    assert!(!should_show_scroll_to_bottom(
         true,
+        false,
         false,
         viewport_bottom,
         None,
@@ -428,6 +434,15 @@ fn scroll_to_bottom_only_appears_while_the_tail_is_below_the_viewport() {
     assert!(should_show_scroll_to_bottom(
         true,
         false,
+        true,
+        viewport_bottom,
+        None,
+        Pixels::ZERO,
+    ));
+    assert!(should_show_scroll_to_bottom(
+        true,
+        false,
+        true,
         viewport_bottom,
         Some(px(701.0)),
         Pixels::ZERO,
@@ -435,6 +450,7 @@ fn scroll_to_bottom_only_appears_while_the_tail_is_below_the_viewport() {
     assert!(!should_show_scroll_to_bottom(
         true,
         false,
+        true,
         viewport_bottom,
         Some(px(500.0)),
         px(200.0),

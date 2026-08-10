@@ -127,7 +127,10 @@ impl Waku {
         }
         let entity = cx.entity().downgrade();
         let scrollbar_handle = transcript_rows.clone();
-        let viewport_bottom = transcript_rows.viewport_bounds().bottom();
+        let viewport_bounds = transcript_rows.viewport_bounds();
+        let transcript_scrollable = viewport_bounds.size.height > Pixels::ZERO
+            && transcript_rows.max_offset_for_scrollbar().y > px(0.5);
+        let viewport_bottom = viewport_bounds.bottom();
         let tail_bottom = transcript_rows
             .item_count()
             .checked_sub(1)
@@ -136,6 +139,7 @@ impl Waku {
         let scroll_to_bottom = should_show_scroll_to_bottom(
             self.transcript_is_scrolled.get(),
             self.transcript_anchor_following.get(),
+            transcript_scrollable,
             viewport_bottom,
             tail_bottom,
             anchor_end_space,
@@ -184,9 +188,7 @@ impl Waku {
         });
         const NAVIGATION_RAIL_ENABLED: bool = true;
         let navigation_rail = NAVIGATION_RAIL_ENABLED.then(|| {
-            let viewport_size = transcript_rows.viewport_bounds().size;
-            let transcript_scrollable = viewport_size.height > Pixels::ZERO
-                && transcript_rows.max_offset_for_scrollbar().y > px(0.5);
+            let viewport_size = viewport_bounds.size;
             let navigation_turns = self.navigation_turns();
             let navigation_rail_visible = should_show_navigation_rail(
                 transcript_scrollable,
