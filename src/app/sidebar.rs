@@ -636,7 +636,10 @@ impl Waku {
             return div().into_any_element();
         };
         let selected = self.state.selected_session == Some(session_id);
-        let active = !matches!(session.status, SessionStatus::Idle);
+        let working = matches!(
+            session.status,
+            SessionStatus::Connecting | SessionStatus::Working
+        );
         let project_name = self
             .state
             .projects
@@ -679,10 +682,37 @@ impl Waku {
                             .text_color(theme.text)
                             .child(SharedString::from(localized_session_title(session))),
                     )
-                    .when(active, |element| {
-                        element.child(pulse_dot(
-                            format!("session-pulse-{session_id}"),
-                            5.0,
+                    .when(working, |element| {
+                        element.child(
+                            icon(
+                                "icons/loader-circle.svg",
+                                12.0,
+                                status_color(&theme, session.status),
+                            )
+                            .with_animation(
+                                SharedString::from(format!("session-spinner-{session_id}")),
+                                Animation::new(Duration::from_millis(900))
+                                    .repeat()
+                                    .with_easing(gpui::linear),
+                                |icon, delta| {
+                                    icon.with_transformation(gpui::Transformation::rotate(
+                                        gpui::percentage(delta),
+                                    ))
+                                },
+                            ),
+                        )
+                    })
+                    .when(session.status == SessionStatus::Waiting, |element| {
+                        element.child(icon(
+                            "icons/alert.svg",
+                            12.0,
+                            status_color(&theme, session.status),
+                        ))
+                    })
+                    .when(session.status == SessionStatus::Failed, |element| {
+                        element.child(icon(
+                            "icons/x.svg",
+                            12.0,
                             status_color(&theme, session.status),
                         ))
                     }),
