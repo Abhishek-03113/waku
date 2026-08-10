@@ -596,46 +596,62 @@ fn range_rects(
     if range.is_empty() || layout_missing(layout) {
         return rects;
     }
+
+    let bounds = layout.bounds();
     let line_height = layout.line_height();
-    let mut cursor = range.start;
-    // Walk one visual row at a time. A row-end index still reports the earlier
-    // row's y, so `next` is tracked separately to guarantee progress.
-    let mut guard = 0;
-    while cursor < range.end && guard < 4096 {
-        guard += 1;
-        let Some(start) = layout.position_for_index(cursor) else {
-            break;
-        };
-        let (row_end, next) = match layout.position_for_index(range.end) {
-            Some(end) if end.y == start.y => (range.end, range.end),
-            _ => {
-                // Largest index still on this row.
-                let (mut low, mut high) = (cursor, range.end);
-                while high - low > 1 {
-                    let mid = low + (high - low) / 2;
-                    match layout.position_for_index(mid) {
-                        Some(probe) if probe.y == start.y => low = mid,
-                        _ => high = mid,
-                    }
+    let mut row_top = bounds.top();
+    let mut line_start = 0;
+
+    // A soft-wrap boundary belongs to both adjacent rows, but GPUI's generic
+    // `position_for_index` gives it the preceding row's caret affinity. Walking
+    // with that API therefore has to jump beyond the boundary to make progress,
+    // dropping the first glyph of every continuation row. Use the shaped wrap
+    // boundaries directly, as Zed's Markdown renderer does, so adjacent visual
+    // rows share the exact same byte boundary without a gap.
+    for line in layout.line_layouts() {
+        let line_end = line_start + line.len();
+        let unwrapped = &line.unwrapped_layout;
+        let row_ends = line
+            .wrap_boundaries()
+            .iter()
+            .map(|boundary| {
+                let glyph = &unwrapped.runs[boundary.run_ix].glyphs[boundary.glyph_ix];
+                (line_start + glyph.index, glyph.position.x)
+            })
+            .chain([(line_end, unwrapped.width)]);
+        let mut row_start = line_start;
+        let mut row_start_x = Pixels::ZERO;
+
+        for (row_end, row_end_x) in row_ends {
+            let selected_start = range.start.max(row_start);
+            let selected_end = range.end.min(row_end);
+            if selected_start < selected_end {
+                let x_for_index =
+                    |index| bounds.left() + unwrapped.x_for_index(index - line_start) - row_start_x;
+                let start_x = x_for_index(selected_start);
+                let end_x = x_for_index(selected_end);
+                if end_x > start_x {
+                    rects.push(Bounds::new(
+                        point(start_x - px(pad_x), row_top + px(inset_y)),
+                        size(
+                            end_x - start_x + px(2.0 * pad_x),
+                            line_height - px(2.0 * inset_y),
+                        ),
+                    ));
                 }
-                (low, high)
             }
-        };
-        if let Some(end) = layout.position_for_index(row_end)
-            && end.x > start.x
-        {
-            rects.push(Bounds::new(
-                point(start.x - px(pad_x), start.y + px(inset_y)),
-                size(
-                    end.x - start.x + px(2.0 * pad_x),
-                    line_height - px(2.0 * inset_y),
-                ),
-            ));
+
+            row_start = row_end;
+            row_start_x = row_end_x;
+            row_top += line_height;
         }
-        if next <= cursor {
+
+        // `TextLayout` separates hard lines with one newline byte, which has
+        // no glyph box of its own.
+        line_start = line_end + 1;
+        if line_start > range.end {
             break;
         }
-        cursor = next;
     }
     rects
 }
@@ -1308,6 +1324,7 @@ fn column_widths(
 mod tests {
     use super::*;
     use crate::md::parser;
+    use gpui::TestAppContext;
 
     fn palette() -> Palette {
         Palette::from_theme(&Theme::dark())
@@ -1414,6 +1431,43 @@ mod tests {
         let plain = code_runs(code, None, &code_font, &palette());
         assert_eq!(plain.iter().map(|run| run.len).sum::<usize>(), code.len());
         assert_eq!(plain.len(), 1);
+    }
+
+    /// A soft-wrap boundary has two caret affinities. GPUI's generic
+    /// `position_for_index` resolves it to the preceding row, so selection
+    /// geometry must use the wrapped rows themselves or it can skip the first
+    /// glyph on every continuation row.
+    #[gpui::test]
+    fn wrapped_selection_starts_at_each_continuation_row_origin(cx: &mut TestAppContext) {
+        struct TestWindow;
+
+        impl gpui::Render for TestWindow {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let text: SharedString =
+            "one two three four five six seven eight nine ten eleven twelve".into();
+        let styled = StyledText::new(text.clone());
+        let layout = styled.layout().clone();
+
+        cx.draw(Point::default(), size(px(96.0), px(400.0)), move |_, _| {
+            div()
+                .w(px(96.0))
+                .text_size(px(14.0))
+                .line_height(px(20.0))
+                .child(styled)
+        });
+
+        let rects = range_rects(&layout, &(0..text.len()), 0.0, 0.0);
+        assert!(rects.len() >= 3, "fixture must wrap across several rows");
+        let left = layout.bounds().left();
+        assert!(
+            rects.iter().all(|rect| rect.left() == left),
+            "a full selection must include each wrapped row's first glyph: {rects:?}"
+        );
     }
 
     /// Highlighting must never change the shaped length of a code block, or a
