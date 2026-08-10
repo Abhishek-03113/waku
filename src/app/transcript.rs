@@ -699,6 +699,24 @@ pub(super) fn transcript_anchor_end_space(
     (viewport_height - anchored_tail_height).max(Pixels::ZERO)
 }
 
+/// Whether the transcript needs an explicit affordance for returning to its
+/// tail. The final row's bounds are authoritative for both list alignments:
+/// `ListScrollEvent::is_scrolled` alone stays true at the bottom of the
+/// top-aligned list used while a turn is anchored.
+pub(super) fn should_show_scroll_to_bottom(
+    is_scrolled: bool,
+    anchor_following: bool,
+    viewport_bottom: Pixels,
+    tail_bottom: Option<Pixels>,
+    end_space: Pixels,
+) -> bool {
+    if !is_scrolled || anchor_following {
+        return false;
+    }
+
+    tail_bottom.is_none_or(|tail_bottom| tail_bottom + end_space > viewport_bottom + px(0.5))
+}
+
 pub(super) fn maintain_transcript_anchor(
     transcript_rows: &ListState,
     anchor_row: usize,

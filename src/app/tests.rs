@@ -13,9 +13,9 @@ use super::{
     message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
     navigation_rail_scale, navigation_rail_tick_count, navigation_rail_tick_turn,
     navigation_rail_turn_tick, paused_toast_duration, pop_stream_chunk, session_is_reapable,
-    should_show_navigation_rail, take_stream_prefix, transcript_anchor_end_space,
-    transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
-    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
+    should_show_navigation_rail, should_show_scroll_to_bottom, take_stream_prefix,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
+    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
     widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
@@ -398,6 +398,47 @@ fn anchor_end_space_keeps_a_short_new_turn_at_the_viewport_top() {
         transcript_anchor_end_space(gpui::px(700.0), gpui::px(900.0)),
         gpui::px(0.0)
     );
+}
+
+#[test]
+fn scroll_to_bottom_only_appears_while_the_tail_is_below_the_viewport() {
+    let viewport_bottom = px(700.0);
+
+    assert!(!should_show_scroll_to_bottom(
+        false,
+        false,
+        viewport_bottom,
+        None,
+        Pixels::ZERO,
+    ));
+    assert!(!should_show_scroll_to_bottom(
+        true,
+        true,
+        viewport_bottom,
+        Some(px(900.0)),
+        Pixels::ZERO,
+    ));
+    assert!(should_show_scroll_to_bottom(
+        true,
+        false,
+        viewport_bottom,
+        None,
+        Pixels::ZERO,
+    ));
+    assert!(should_show_scroll_to_bottom(
+        true,
+        false,
+        viewport_bottom,
+        Some(px(701.0)),
+        Pixels::ZERO,
+    ));
+    assert!(!should_show_scroll_to_bottom(
+        true,
+        false,
+        viewport_bottom,
+        Some(px(500.0)),
+        px(200.0),
+    ));
 }
 
 #[test]

@@ -127,6 +127,61 @@ impl Waku {
         }
         let entity = cx.entity().downgrade();
         let scrollbar_handle = transcript_rows.clone();
+        let viewport_bottom = transcript_rows.viewport_bounds().bottom();
+        let tail_bottom = transcript_rows
+            .item_count()
+            .checked_sub(1)
+            .and_then(|last_row| transcript_rows.bounds_for_item(last_row))
+            .map(|bounds| bounds.bottom());
+        let scroll_to_bottom = should_show_scroll_to_bottom(
+            self.transcript_is_scrolled.get(),
+            self.transcript_anchor_following.get(),
+            viewport_bottom,
+            tail_bottom,
+            anchor_end_space,
+        )
+        .then(|| {
+            let theme = Theme::current(cx);
+            let focus = self.transcript_control_focus("transcript-scroll-to-bottom", cx);
+            div()
+                .id("transcript-scroll-to-bottom-layer")
+                .absolute()
+                .left_0()
+                .bottom(px(8.0))
+                .w_full()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("transcript-scroll-to-bottom")
+                        .track_focus(&focus)
+                        .tab_index(0)
+                        .size(px(32.0))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .bg(theme.composer)
+                        .shadow_xs()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_default()
+                        .focus_visible(|style| style.border_color(theme.accent))
+                        .hover(|style| style.bg(theme.raised))
+                        .active(|style| style.bg(theme.overlay_strong))
+                        .child(icon("icons/arrow-down.svg", 16.0, theme.text))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.scroll_transcript_to_bottom(cx);
+                            cx.stop_propagation();
+                        }))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.scroll_transcript_to_bottom(cx);
+                                cx.stop_propagation();
+                            }
+                        })),
+                )
+        });
         const NAVIGATION_RAIL_ENABLED: bool = true;
         let navigation_rail = NAVIGATION_RAIL_ENABLED.then(|| {
             let viewport_size = transcript_rows.viewport_bounds().size;
@@ -189,12 +244,22 @@ impl Waku {
                 .pb(anchor_end_space),
             )
             .children(navigation_rail)
+            .children(scroll_to_bottom)
             .child(scrollbar::vertical(
                 &scrollbar_handle,
                 &self.transcript_scrollbar,
             ))
             .child(self.transcript_selection_input())
             .into_any_element()
+    }
+
+    fn scroll_transcript_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.sync_transcript_rows();
+        self.transcript_anchor_following
+            .set(self.transcript_anchor.get().is_some());
+        self.active_transcript_rows().scroll_to_end();
+        self.transcript_is_scrolled.set(false);
+        cx.notify();
     }
 
     /// Copy the transcript's text selection.
