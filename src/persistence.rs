@@ -37,8 +37,12 @@ const COMPOSER_DRAFTS_FILENAME: &str = "composer-drafts.json";
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
 pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
 
-fn default_panel_visibility() -> bool {
+fn default_sidebar_visibility() -> bool {
     true
+}
+
+fn default_right_panel_visibility() -> bool {
+    false
 }
 
 fn default_computer_use_enabled() -> bool {
@@ -219,9 +223,9 @@ pub struct AppSettings {
     pub theme: ThemePreference,
     #[serde(default)]
     pub language: AppLanguage,
-    #[serde(default = "default_panel_visibility")]
+    #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
-    #[serde(default = "default_panel_visibility")]
+    #[serde(default = "default_right_panel_visibility")]
     pub right_panel_visible: bool,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
@@ -261,9 +265,9 @@ pub struct PersistedState {
     pub theme: ThemePreference,
     #[serde(default)]
     pub language: AppLanguage,
-    #[serde(default = "default_panel_visibility")]
+    #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
-    #[serde(default = "default_panel_visibility")]
+    #[serde(default = "default_right_panel_visibility")]
     pub right_panel_visible: bool,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
@@ -325,7 +329,7 @@ impl PersistedState {
             theme: ThemePreference::System,
             language: AppLanguage::default(),
             sidebar_visible: true,
-            right_panel_visible: true,
+            right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             computer_use_enabled: true,
@@ -1487,6 +1491,22 @@ mod tests {
             text: text.to_owned(),
             attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn panel_visibility_defaults_keep_only_the_sidebar_open() {
+        let state = PersistedState::empty();
+        assert!(state.sidebar_visible);
+        assert!(!state.right_panel_visible);
+
+        let mut settings = serde_json::to_value(state.settings()).unwrap();
+        let settings = settings.as_object_mut().unwrap();
+        settings.remove("sidebar_visible");
+        settings.remove("right_panel_visible");
+        let restored: AppSettings = serde_json::from_value(settings.clone().into()).unwrap();
+
+        assert!(restored.sidebar_visible);
+        assert!(!restored.right_panel_visible);
     }
 
     #[test]
