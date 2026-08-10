@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
+import { Menu } from '@base-ui/react/menu'
 import {
   Command,
   Download,
@@ -103,16 +104,59 @@ function SectionLabel({ children }: { children: ReactNode }) {
   )
 }
 
+function DownloadMenu({
+  downloadUrl,
+  size,
+  align,
+  className,
+  showIcon = false,
+}: {
+  downloadUrl: string
+  size: 'sm' | 'lg'
+  align: 'start' | 'end'
+  className?: string
+  showIcon?: boolean
+}) {
+  const itemClassName =
+    'flex h-8 cursor-default items-center rounded-md px-2.5 text-sm outline-none data-highlighted:bg-accent data-highlighted:text-accent-foreground data-disabled:pointer-events-none data-disabled:opacity-45'
+
+  return (
+    <Menu.Root>
+      <Menu.Trigger render={<Button size={size} className={className} />}>
+        {showIcon && <Download data-icon="inline-start" />}
+        Download
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner
+          side="bottom"
+          sideOffset={6}
+          align={align}
+          className="isolate z-50"
+        >
+          <Menu.Popup className="min-w-52 origin-(--transform-origin) rounded-lg border bg-popover p-1 text-popover-foreground shadow-md outline-none data-[side=bottom]:slide-in-from-top-1 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95">
+            <Menu.LinkItem
+              href={downloadUrl}
+              closeOnClick
+              className={itemClassName}
+            >
+              macOS (Apple Silicon)
+            </Menu.LinkItem>
+            <Menu.Item disabled className={itemClassName}>
+              Windows (soon)
+            </Menu.Item>
+            <Menu.Item disabled className={itemClassName}>
+              Linux (soon)
+            </Menu.Item>
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
+  )
+}
+
 function Home() {
   const { data: release } = useQuery(releaseQuery)
   const downloadUrl = release?.url ?? FALLBACK_DOWNLOAD_URL
-  const releasedOn = release?.pubDate
-    ? new Date(release.pubDate).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      })
-    : null
 
   return (
     <TooltipProvider>
@@ -130,13 +174,11 @@ function Home() {
                 Waku
               </span>
             </a>
-            <Button
+            <DownloadMenu
+              downloadUrl={downloadUrl}
               size="sm"
-              nativeButton={false}
-              render={<a href={downloadUrl} />}
-            >
-              Download
-            </Button>
+              align="end"
+            />
           </header>
 
           <main>
@@ -157,32 +199,18 @@ function Home() {
                 graphite window, entirely on your machine.
               </p>
               <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
-                <Button
+                <DownloadMenu
+                  downloadUrl={downloadUrl}
                   size="lg"
                   className="h-10 px-4"
-                  nativeButton={false}
-                  render={<a href={downloadUrl} />}
-                >
-                  <Download data-icon="inline-start" />
-                  Download for macOS
-                </Button>
-                <div className="font-mono text-xs text-muted-foreground">
-                  {release ? (
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={
-                          <span className="cursor-default underline decoration-dotted underline-offset-3" />
-                        }
-                      >
-                        v{release.version}
-                      </TooltipTrigger>
-                      {releasedOn && (
-                        <TooltipContent>Released {releasedOn}</TooltipContent>
-                      )}
-                    </Tooltip>
-                  ) : null}
-                  {release ? ' · ' : ''}macOS 13+ · Apple silicon
-                </div>
+                  align="start"
+                  showIcon
+                />
+                {release && (
+                  <span className="font-mono text-xs text-muted-foreground">
+                    v{release.version}
+                  </span>
+                )}
               </div>
 
               {/* Providers */}
@@ -263,19 +291,16 @@ function Home() {
                 with delta updates over Sparkle.
               </p>
               <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
-                <Button
+                <DownloadMenu
+                  downloadUrl={downloadUrl}
                   size="lg"
                   className="h-10 px-4"
-                  nativeButton={false}
-                  render={<a href={downloadUrl} />}
-                >
-                  <Download data-icon="inline-start" />
-                  Download for macOS
-                </Button>
+                  align="start"
+                  showIcon
+                />
                 {release && (
                   <span className="font-mono text-xs text-muted-foreground">
                     v{release.version}
-                    {releasedOn ? ` · ${releasedOn}` : ''}
                   </span>
                 )}
               </div>
