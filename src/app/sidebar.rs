@@ -18,7 +18,7 @@ pub fn init(cx: &mut App) {
     )]);
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SessionDateGroup {
     Today,
     Yesterday,
@@ -97,7 +97,7 @@ fn session_date_group_for_dates(session_date: NaiveDate, today: NaiveDate) -> Se
     SessionDateGroup::More
 }
 
-fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
+fn session_group_header(theme: &Theme) -> Div {
     div()
         .h(px(28.0))
         .px(px(8.0))
@@ -106,7 +106,23 @@ fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
         .text_size(px(12.5))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text_tertiary)
-        .child(group.label())
+}
+
+fn append_sidebar_group_rows(
+    rows: &mut Vec<SidebarRow>,
+    group: SessionDateGroup,
+    sessions: &[Uuid],
+    collapsed: bool,
+) {
+    if sessions.is_empty() {
+        return;
+    }
+
+    rows.push(SidebarRow::Header(group));
+    if !collapsed {
+        rows.extend(sessions.iter().copied().map(SidebarRow::Session));
+    }
+    rows.push(SidebarRow::GroupSpacer);
 }
 
 /// Height of a session card plus the separation reserved beneath it in the
@@ -573,12 +589,12 @@ impl Waku {
         let mut rows = vec![SidebarRow::Search];
         for group in SessionDateGroup::ALL {
             let group_sessions = &grouped_sessions[group.index()];
-            if group_sessions.is_empty() {
-                continue;
-            }
-            rows.push(SidebarRow::Header(group));
-            rows.extend(group_sessions.iter().copied().map(SidebarRow::Session));
-            rows.push(SidebarRow::GroupSpacer);
+            append_sidebar_group_rows(
+                &mut rows,
+                group,
+                group_sessions,
+                self.sidebar_collapsed_groups.contains(&group),
+            );
         }
         if rows.len() == 1 {
             // Keep the project action visible while there is no history.
@@ -640,13 +656,81 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = Theme::current(cx);
-        session_group_label(&theme, group)
+        let collapsed = self.sidebar_collapsed_groups.contains(&group);
+        let group_name = SharedString::from(format!("sidebar-group-header-{}", group.index()));
+        let chevron = icon("icons/chevron-down.svg", 11.0, theme.text_ghost)
+            .when(collapsed, |icon| {
+                icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.75)))
+            })
+            .invisible()
+            .group_hover(group_name.clone(), |icon| icon.visible());
+
+        session_group_header(&theme)
+            .group(group_name)
             .w_full()
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "sidebar-group-toggle-{}",
+                        group.index()
+                    )))
+                    .tab_index(0)
+                    .h(px(22.0))
+                    .rounded(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_default()
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .child(group.label())
+                    .child(chevron)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_sidebar_group(group, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        match event.keystroke.key.as_str() {
+                            "enter" | "space" => {
+                                this.toggle_sidebar_group(group, cx);
+                                cx.stop_propagation();
+                            }
+                            "left" if !collapsed => {
+                                this.set_sidebar_group_collapsed(group, true, cx);
+                                cx.stop_propagation();
+                            }
+                            "right" if collapsed => {
+                                this.set_sidebar_group_collapsed(group, false, cx);
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    })),
+            )
             .when(first, |element| {
                 element
                     .justify_between()
                     .child(self.render_sidebar_project_action(cx))
             })
+    }
+
+    fn toggle_sidebar_group(&mut self, group: SessionDateGroup, cx: &mut Context<Self>) {
+        let collapsed = !self.sidebar_collapsed_groups.contains(&group);
+        self.set_sidebar_group_collapsed(group, collapsed, cx);
+    }
+
+    fn set_sidebar_group_collapsed(
+        &mut self,
+        group: SessionDateGroup,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if collapsed {
+            self.sidebar_collapsed_groups.insert(group)
+        } else {
+            self.sidebar_collapsed_groups.remove(&group)
+        };
+        if changed {
+            cx.notify();
+        }
     }
 
     fn begin_session_rename(
@@ -1263,6 +1347,32 @@ mod tests {
         assert_eq!(
             session_date_group_for_dates(tomorrow, today),
             SessionDateGroup::Today
+        );
+    }
+
+    #[test]
+    fn collapsed_sidebar_group_keeps_only_its_header_and_spacer() {
+        let sessions = [Uuid::from_u128(1), Uuid::from_u128(2)];
+        let mut expanded = Vec::new();
+        append_sidebar_group_rows(&mut expanded, SessionDateGroup::Today, &sessions, false);
+        assert_eq!(
+            expanded,
+            vec![
+                SidebarRow::Header(SessionDateGroup::Today),
+                SidebarRow::Session(sessions[0]),
+                SidebarRow::Session(sessions[1]),
+                SidebarRow::GroupSpacer,
+            ]
+        );
+
+        let mut collapsed = Vec::new();
+        append_sidebar_group_rows(&mut collapsed, SessionDateGroup::Today, &sessions, true);
+        assert_eq!(
+            collapsed,
+            vec![
+                SidebarRow::Header(SessionDateGroup::Today),
+                SidebarRow::GroupSpacer,
+            ]
         );
     }
 

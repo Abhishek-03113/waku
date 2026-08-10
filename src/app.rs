@@ -774,6 +774,9 @@ pub struct Waku {
     /// One stable field reused across sidebar rows so virtualization never
     /// replaces the focused editor while a rename is in progress.
     session_rename_input: Entity<ComposerInput>,
+    /// Date groups the user has folded in the sidebar. This is intentionally
+    /// runtime-only, like transcript disclosure state.
+    sidebar_collapsed_groups: HashSet<SessionDateGroup>,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -952,8 +955,8 @@ pub use autocomplete::init as init_composer_autocomplete;
 pub use command_palette::init as init_command_palette;
 use components::*;
 pub use settings::init as init_settings_keys;
-use sidebar::SidebarRow;
 pub use sidebar::init as init_sidebar_keys;
+use sidebar::{SessionDateGroup, SidebarRow};
 use streaming::*;
 use transcript::*;
 use transcript_view::ConversationNavigationRail;
@@ -1675,6 +1678,7 @@ impl Waku {
                 session_navigation: SessionNavigation::default(),
                 session_rename: None,
                 session_rename_input,
+                sidebar_collapsed_groups: HashSet::new(),
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,
