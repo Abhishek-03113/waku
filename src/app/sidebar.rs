@@ -1,8 +1,24 @@
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
+use gpui::{KeyBinding, actions};
 
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+actions!(waku_sidebar, [CancelSessionRename]);
+
+const SESSION_RENAME_PARENT_CONTEXT: &str = "SessionRename";
+const SESSION_RENAME_FIELD_CONTEXT: &str = "SessionRename > ComposerInput";
+
+/// Keep Escape inside the focused inline editor so it cancels the rename,
+/// rather than falling through to the window-wide Stop action.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        CancelSessionRename,
+        Some(SESSION_RENAME_FIELD_CONTEXT),
+    )]);
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SessionDateGroup {
     Today,
     Yesterday,
@@ -81,7 +97,7 @@ fn session_date_group_for_dates(session_date: NaiveDate, today: NaiveDate) -> Se
     SessionDateGroup::More
 }
 
-fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
+fn session_group_header(theme: &Theme) -> Div {
     div()
         .h(px(28.0))
         .px(px(8.0))
@@ -90,7 +106,23 @@ fn session_group_label(theme: &Theme, group: SessionDateGroup) -> Div {
         .text_size(px(12.5))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text_tertiary)
-        .child(group.label())
+}
+
+fn append_sidebar_group_rows(
+    rows: &mut Vec<SidebarRow>,
+    group: SessionDateGroup,
+    sessions: &[Uuid],
+    collapsed: bool,
+) {
+    if sessions.is_empty() {
+        return;
+    }
+
+    rows.push(SidebarRow::Header(group));
+    if !collapsed {
+        rows.extend(sessions.iter().copied().map(SidebarRow::Session));
+    }
+    rows.push(SidebarRow::GroupSpacer);
 }
 
 /// Height of a session card plus the separation reserved beneath it in the
@@ -120,6 +152,13 @@ pub(super) fn session_time_label(session: &AgentSession, now: u64) -> Option<Str
     session
         .last_reply_at
         .map(|last_reply_at| format_time_ago(now.saturating_sub(last_reply_at)))
+}
+
+/// Recency for sidebar ordering and date groups. Metadata edits such as a
+/// rename must not promote an old task; a task without a reply stays anchored
+/// to when it was created.
+fn sidebar_session_timestamp(session: &AgentSession) -> u64 {
+    session.last_reply_at.unwrap_or(session.created_at)
 }
 
 /// Compact "how long ago" for the sidebar: "just now", then one coarse unit —
@@ -540,21 +579,22 @@ impl Waku {
             .iter()
             .filter(|session| session.has_started())
             .collect::<Vec<_>>();
-        sorted_sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        sorted_sessions
+            .sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)));
         for session in sorted_sessions {
-            grouped_sessions[session_date_group(session.updated_at, today).index()]
+            grouped_sessions[session_date_group(sidebar_session_timestamp(session), today).index()]
                 .push(session.id);
         }
 
         let mut rows = vec![SidebarRow::Search];
         for group in SessionDateGroup::ALL {
             let group_sessions = &grouped_sessions[group.index()];
-            if group_sessions.is_empty() {
-                continue;
-            }
-            rows.push(SidebarRow::Header(group));
-            rows.extend(group_sessions.iter().copied().map(SidebarRow::Session));
-            rows.push(SidebarRow::GroupSpacer);
+            append_sidebar_group_rows(
+                &mut rows,
+                group,
+                group_sessions,
+                self.sidebar_collapsed_groups.contains(&group),
+            );
         }
         if rows.len() == 1 {
             // Keep the project action visible while there is no history.
@@ -616,13 +656,144 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = Theme::current(cx);
-        session_group_label(&theme, group)
+        let collapsed = self.sidebar_collapsed_groups.contains(&group);
+        let group_name = SharedString::from(format!("sidebar-group-header-{}", group.index()));
+        let chevron = icon("icons/chevron-down.svg", 11.0, theme.text_ghost)
+            .when(collapsed, |icon| {
+                icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.75)))
+            })
+            .invisible()
+            .group_hover(group_name.clone(), |icon| icon.visible());
+
+        session_group_header(&theme)
+            .group(group_name)
             .w_full()
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "sidebar-group-toggle-{}",
+                        group.index()
+                    )))
+                    .tab_index(0)
+                    .h(px(22.0))
+                    .rounded(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_default()
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .child(group.label())
+                    .child(chevron)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_sidebar_group(group, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        match event.keystroke.key.as_str() {
+                            "enter" | "space" => {
+                                this.toggle_sidebar_group(group, cx);
+                                cx.stop_propagation();
+                            }
+                            "left" if !collapsed => {
+                                this.set_sidebar_group_collapsed(group, true, cx);
+                                cx.stop_propagation();
+                            }
+                            "right" if collapsed => {
+                                this.set_sidebar_group_collapsed(group, false, cx);
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    })),
+            )
             .when(first, |element| {
                 element
                     .justify_between()
                     .child(self.render_sidebar_project_action(cx))
             })
+    }
+
+    fn toggle_sidebar_group(&mut self, group: SessionDateGroup, cx: &mut Context<Self>) {
+        let collapsed = !self.sidebar_collapsed_groups.contains(&group);
+        self.set_sidebar_group_collapsed(group, collapsed, cx);
+    }
+
+    fn set_sidebar_group_collapsed(
+        &mut self,
+        group: SessionDateGroup,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if collapsed {
+            self.sidebar_collapsed_groups.insert(group)
+        } else {
+            self.sidebar_collapsed_groups.remove(&group)
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn begin_session_rename(
+        &mut self,
+        session_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(title) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(localized_session_title)
+        else {
+            return;
+        };
+
+        self.session_rename = Some(session_id);
+        self.session_rename_input.update(cx, |input, cx| {
+            input.set_content(title, cx);
+            input.select_all_text(cx);
+        });
+        let focus = self.session_rename_input.read(cx).focus();
+        window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        cx.notify();
+    }
+
+    pub(super) fn commit_session_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session_rename.take() else {
+            return;
+        };
+        let title = self
+            .session_rename_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let should_update = !title.is_empty()
+            && self
+                .state
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .is_some_and(|session| session.title != title);
+        if should_update
+            && self
+                .state
+                .session_mut(session_id)
+                .is_some_and(|session| session.set_title(&title))
+        {
+            self.save();
+        }
+        cx.notify();
+    }
+
+    fn cancel_session_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_rename.take().is_none() {
+            return;
+        }
+        let focus = self.composer_focus(cx);
+        window.focus(&focus, cx);
+        cx.notify();
     }
 
     fn render_sidebar_session_item(&self, session_id: Uuid, cx: &mut Context<Self>) -> AnyElement {
@@ -647,7 +818,48 @@ impl Waku {
             .find(|project| project.id == session.project_id)
             .map(Project::display_name)
             .unwrap_or_else(|| tr!("sidebar.unknown_project"));
+        let rename_input =
+            (self.session_rename == Some(session_id)).then(|| self.session_rename_input.clone());
+        let renaming = rename_input.is_some();
+        let title = if let Some(rename_input) = rename_input {
+            div()
+                .id(SharedString::from(format!(
+                    "session-rename-field-{session_id}"
+                )))
+                .key_context(SESSION_RENAME_PARENT_CONTEXT)
+                .on_action(cx.listener(|this, _: &CancelSessionRename, window, cx| {
+                    this.cancel_session_rename(window, cx);
+                }))
+                .h(px(18.0))
+                .flex_1()
+                .min_w_0()
+                .px(px(4.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(theme.accent)
+                .bg(theme.inset)
+                .flex()
+                .items_center()
+                .text_size(px(13.5))
+                .text_color(theme.text)
+                .child(rename_input)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .line_clamp(1)
+                .text_overflow(gpui::TextOverflow::Truncate("...".into()))
+                .text_size(px(13.5))
+                .text_color(theme.text)
+                .child(SharedString::from(localized_session_title(session)))
+                .into_any_element()
+        };
         let waku = cx.entity().downgrade();
+        let menu = self.menu_handle(format!("session-{session_id}"), cx);
+        let row_focus = menu.trigger_focus_handle().clone();
+        let keyboard_menu = menu.clone();
         let row = div()
             .id(SharedString::from(format!("session-{}", session.id)))
             .w_full()
@@ -671,17 +883,7 @@ impl Waku {
                     .gap(px(6.0))
                     .overflow_hidden()
                     .line_height(px(18.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .line_clamp(1)
-                            .text_overflow(gpui::TextOverflow::Truncate("...".into()))
-                            .text_size(px(13.5))
-                            .text_color(theme.text)
-                            .child(SharedString::from(localized_session_title(session))),
-                    )
+                    .child(title)
                     .when(working, |element| {
                         element.child(
                             icon(
@@ -749,22 +951,58 @@ impl Waku {
                         },
                     ),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.select_session(session_id, cx);
-            }))
-            .into_any_element();
-        let menu = self.menu_handle(format!("session-{session_id}"), cx);
-        let row = context_menu(
-            div().w_full().child(row),
-            SharedString::from(format!("session-menu-{session_id}")),
-            &menu,
-            move |_| {
-                let waku = waku.clone();
-                vec![MenuItem::new(tr!("common.remove"), move |_, cx| {
-                    let _ = waku.update(cx, |waku, cx| waku.remove_session(session_id, cx));
-                })]
-            },
-        );
+            .when(!renaming, |element| {
+                element
+                    .track_focus(&row_focus)
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        let key = event.keystroke.key.as_str();
+                        if matches!(key, "enter" | "space") {
+                            this.select_session(session_id, cx);
+                            cx.stop_propagation();
+                        } else if key == "f10" && event.keystroke.modifiers.shift {
+                            keyboard_menu.open_context_menu(window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_session(session_id, cx);
+                    }))
+            });
+        let row = if renaming {
+            div()
+                .w_full()
+                .child(row)
+                .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                    if this.session_rename == Some(session_id) {
+                        this.commit_session_rename(cx);
+                    }
+                }))
+                .into_any_element()
+        } else {
+            context_menu(
+                div().w_full().child(row),
+                SharedString::from(format!("session-menu-{session_id}")),
+                &menu,
+                move |_| {
+                    let rename_waku = waku.clone();
+                    let remove_waku = waku.clone();
+                    vec![
+                        MenuItem::new(tr!("common.rename"), move |window, cx| {
+                            let _ = rename_waku.update(cx, |waku, cx| {
+                                waku.begin_session_rename(session_id, window, cx);
+                            });
+                        }),
+                        MenuItem::Separator,
+                        MenuItem::new(tr!("common.remove"), move |_, cx| {
+                            let _ = remove_waku
+                                .update(cx, |waku, cx| waku.remove_session(session_id, cx));
+                        }),
+                    ]
+                },
+            )
+        };
 
         div()
             .w_full()
@@ -1110,5 +1348,52 @@ mod tests {
             session_date_group_for_dates(tomorrow, today),
             SessionDateGroup::Today
         );
+    }
+
+    #[test]
+    fn collapsed_sidebar_group_keeps_only_its_header_and_spacer() {
+        let sessions = [Uuid::from_u128(1), Uuid::from_u128(2)];
+        let mut expanded = Vec::new();
+        append_sidebar_group_rows(&mut expanded, SessionDateGroup::Today, &sessions, false);
+        assert_eq!(
+            expanded,
+            vec![
+                SidebarRow::Header(SessionDateGroup::Today),
+                SidebarRow::Session(sessions[0]),
+                SidebarRow::Session(sessions[1]),
+                SidebarRow::GroupSpacer,
+            ]
+        );
+
+        let mut collapsed = Vec::new();
+        append_sidebar_group_rows(&mut collapsed, SessionDateGroup::Today, &sessions, true);
+        assert_eq!(
+            collapsed,
+            vec![
+                SidebarRow::Header(SessionDateGroup::Today),
+                SidebarRow::GroupSpacer,
+            ]
+        );
+    }
+
+    #[test]
+    fn sidebar_recency_uses_last_reply_with_creation_fallback() {
+        let project_id = Uuid::new_v4();
+        let mut renamed_old_session = AgentSession::new(project_id, ProviderKind::Codex);
+        renamed_old_session.created_at = 10;
+        renamed_old_session.last_reply_at = Some(20);
+        renamed_old_session.updated_at = 1_000;
+
+        let mut newer_unanswered_session = AgentSession::new(project_id, ProviderKind::Codex);
+        newer_unanswered_session.created_at = 30;
+        newer_unanswered_session.last_reply_at = None;
+        newer_unanswered_session.updated_at = 30;
+
+        assert_eq!(sidebar_session_timestamp(&renamed_old_session), 20);
+        assert_eq!(sidebar_session_timestamp(&newer_unanswered_session), 30);
+
+        let mut sessions = [&renamed_old_session, &newer_unanswered_session];
+        sessions.sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)));
+        assert_eq!(sessions[0].id, newer_unanswered_session.id);
     }
 }

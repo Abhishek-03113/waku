@@ -551,7 +551,6 @@ impl Waku {
         self.menus.borrow_mut().clear();
         self.message_edit = None;
         self.hide_toast();
-        self.navigation_rail_active_scale_enabled.set(false);
         self.navigation_rail_reset_generation
             .set(self.navigation_rail_reset_generation.get().wrapping_add(1));
         self.transcript_anchor.set(None);

@@ -184,14 +184,17 @@ struct MenuState {
     open: Option<Point<Pixels>>,
     /// Keyboard cursor over focusable entries.
     highlighted: Option<usize>,
+    /// A dropdown/popover trigger toggles its own surface on left click. The
+    /// outside-click capture must leave that click alone so the later trigger
+    /// handler can close it; a context-menu row has no such handler.
+    trigger_click_toggles: bool,
 }
 
 /// Cross-frame state for one context menu. The owner keeps one per menu site.
 #[derive(Clone)]
 pub struct ContextMenuHandle {
     state: Rc<RefCell<MenuState>>,
-    /// Stable focus identity for dropdown triggers. Context menus never attach
-    /// it, but sharing the handle keeps the two surface types one abstraction.
+    /// Stable focus identity shared by dropdown and keyboard context triggers.
     trigger_focus: FocusHandle,
     focus: FocusHandle,
     /// The trigger's bounds as of the last frame, so a dropdown can align under
@@ -241,12 +244,29 @@ impl ContextMenuHandle {
         &self.focus
     }
 
+    /// Stable focus identity for a keyboard-operable menu trigger.
+    pub fn trigger_focus_handle(&self) -> &FocusHandle {
+        &self.trigger_focus
+    }
+
+    /// Opens a context menu from its trigger instead of a pointer event. The
+    /// card begins just under the row, avoiding an overlap with its focus ring.
+    pub fn open_context_menu(&self, window: &mut Window, cx: &mut App) {
+        let position = self
+            .trigger_bounds
+            .get()
+            .map(|bounds| Point::new(bounds.left() + px(8.0), bounds.bottom()))
+            .unwrap_or_else(|| window.mouse_position());
+        open_menu(self, position, SurfaceFocus::Card, false, window, cx);
+    }
+
     pub fn close(&self, window: &mut Window, cx: &mut App) {
         let was_open = {
             let mut state = self.state.borrow_mut();
             let was_open = state.open.is_some();
             state.open = None;
             state.highlighted = None;
+            state.trigger_click_toggles = false;
             was_open
         };
         if was_open {
@@ -254,30 +274,37 @@ impl ContextMenuHandle {
         }
     }
 
-    /// Dismiss for a mouse down outside the card, except a left click on the
-    /// trigger: the trigger's own bubble-phase handler is the toggle, and it
-    /// runs after this capture-phase listener — closing here first would make
-    /// it see a closed menu and reopen it. Context menus attach no trigger
-    /// probe, so their bounds stay `None` and every outside click dismisses.
+    /// Dismiss for a mouse down outside the card, except a left click on a
+    /// dropdown/popover trigger: its own bubble-phase handler is the toggle,
+    /// and it runs after this capture-phase listener. Closing here first would
+    /// make that handler see a closed menu and reopen it.
     fn dismiss_on_down_out(&self, event: &MouseDownEvent, window: &mut Window, cx: &mut App) {
-        let on_trigger = event.button == MouseButton::Left
+        let on_toggling_trigger = self.state.borrow().trigger_click_toggles
+            && event.button == MouseButton::Left
             && self
                 .trigger_bounds
                 .get()
                 .is_some_and(|bounds| bounds.contains(&event.position));
-        if on_trigger {
+        if on_toggling_trigger {
             return;
         }
         self.close(window, cx);
         window.refresh();
     }
 
-    fn open_at(&self, position: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    fn open_at(
+        &self,
+        position: Point<Pixels>,
+        trigger_click_toggles: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let was_open = {
             let mut state = self.state.borrow_mut();
             let was_open = state.open.is_some();
             state.open = Some(position);
             state.highlighted = None;
+            state.trigger_click_toggles = trigger_click_toggles;
             was_open
         };
         if !was_open {
@@ -307,13 +334,14 @@ fn open_menu(
     handle: &ContextMenuHandle,
     position: Point<Pixels>,
     focus_target: SurfaceFocus,
+    trigger_click_toggles: bool,
     window: &mut Window,
     cx: &mut App,
 ) {
     // Runs the toggle observers, which is where a content-focusing surface
     // schedules its own focus. Ours is scheduled after, so it would win — only
     // request it when the card is what should end up focused.
-    handle.open_at(position, window, cx);
+    handle.open_at(position, trigger_click_toggles, window, cx);
     if focus_target == SurfaceFocus::Card {
         let focus = handle.focus.clone();
         window.on_next_frame(move |window, _| {
@@ -693,7 +721,7 @@ pub fn toggle_popover(
     else {
         return;
     };
-    open_menu(handle, anchor, SurfaceFocus::Content, window, cx);
+    open_menu(handle, anchor, SurfaceFocus::Content, true, window, cx);
 }
 
 /// The shared half of both dropdown surfaces: a trigger that records its bounds
@@ -767,7 +795,7 @@ fn toggle_anchored_surface(
         .get()
         .map(|bounds| align.anchor_point(bounds, px(TRIGGER_GAP)))
         .unwrap_or_else(|| window.mouse_position());
-    open_menu(handle, anchor, focus_target, window, cx);
+    open_menu(handle, anchor, focus_target, true, window, cx);
 }
 
 /// A chrome-less card: dismissal and the menu key context, nothing else.
@@ -817,20 +845,24 @@ where
     let open_at = handle.state.borrow().open;
     let handle_for_down = handle.clone();
 
-    let element = element.relative().on_mouse_down(
-        MouseButton::Right,
-        move |event: &MouseDownEvent, window, cx| {
-            open_menu(
-                &handle_for_down,
-                event.position,
-                SurfaceFocus::Card,
-                window,
-                cx,
-            );
-            cx.stop_propagation();
-            window.prevent_default();
-        },
-    );
+    let element = element
+        .relative()
+        .child(trigger_bounds_probe(handle))
+        .on_mouse_down(
+            MouseButton::Right,
+            move |event: &MouseDownEvent, window, cx| {
+                open_menu(
+                    &handle_for_down,
+                    event.position,
+                    SurfaceFocus::Card,
+                    false,
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+                window.prevent_default();
+            },
+        );
 
     let Some(position) = open_at else {
         return element.into_any_element();
@@ -1101,6 +1133,7 @@ mod tests {
     enum Surface {
         Popover,
         Dropdown,
+        Context,
     }
 
     struct Harness {
@@ -1190,6 +1223,9 @@ mod tests {
                         MenuAlign::BelowLeft,
                         |_| vec![MenuItem::new("Entry", |_, _| {})],
                     ),
+                    Surface::Context => context_menu(trigger, "context", &self.handle, |_| {
+                        vec![MenuItem::new("Entry", |_, _| {})]
+                    }),
                 })
         }
     }
@@ -1230,6 +1266,23 @@ mod tests {
     #[gpui::test]
     fn dropdown_trigger_toggles(cx: &mut TestAppContext) {
         assert_trigger_toggles(Surface::Dropdown, cx);
+    }
+
+    #[gpui::test]
+    fn context_menu_trigger_click_dismisses(cx: &mut TestAppContext) {
+        let handle = cx.update(ContextMenuHandle::new);
+        let harness = Harness {
+            handle: handle.clone(),
+            surface: Surface::Context,
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| harness);
+        let on_trigger = point(px(10.0), px(10.0));
+
+        cx.update(|window, cx| handle.open_context_menu(window, cx));
+        assert!(handle.is_open());
+        cx.run_until_parked();
+        cx.simulate_mouse_down(on_trigger, MouseButton::Left, Modifiers::none());
+        assert!(!handle.is_open(), "a context-menu row click should dismiss");
     }
 
     fn assert_trigger_opens_from_keyboard(surface: Surface, cx: &mut TestAppContext) {

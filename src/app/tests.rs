@@ -275,12 +275,12 @@ fn conversation_navigation_rail_samples_ticks_when_turns_cannot_fit() {
 }
 
 #[test]
-fn conversation_navigation_tick_scale_combines_active_and_hover_falloff() {
-    assert_eq!(navigation_rail_scale(0, Some(0), None), 0.50);
-    assert_eq!(navigation_rail_scale(4, None, Some(4)), 1.0);
-    assert_eq!(navigation_rail_scale(3, None, Some(4)), 0.68);
-    assert_eq!(navigation_rail_scale(2, Some(2), Some(4)), 0.50);
-    assert_eq!(navigation_rail_scale(1, None, Some(4)), 0.25);
+fn conversation_navigation_tick_scale_follows_hover_falloff() {
+    assert_eq!(navigation_rail_scale(0, None), 0.25);
+    assert_eq!(navigation_rail_scale(4, Some(4)), 1.0);
+    assert_eq!(navigation_rail_scale(3, Some(4)), 0.68);
+    assert_eq!(navigation_rail_scale(2, Some(4)), 0.44);
+    assert_eq!(navigation_rail_scale(1, Some(4)), 0.25);
 }
 
 #[test]

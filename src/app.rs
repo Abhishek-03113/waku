@@ -538,7 +538,6 @@ struct TranscriptAnchor {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct NavigationRailVisualState {
-    active_turn: Option<Uuid>,
     emphasized_turn: Option<Uuid>,
 }
 
@@ -769,6 +768,14 @@ pub struct Waku {
     /// focus whenever GPUI re-renders the list.
     transcript_control_focuses: RefCell<HashMap<String, FocusHandle>>,
     session_navigation: SessionNavigation,
+    /// Sidebar task currently showing its inline rename field.
+    session_rename: Option<Uuid>,
+    /// One stable field reused across sidebar rows so virtualization never
+    /// replaces the focused editor while a rename is in progress.
+    session_rename_input: Entity<ComposerInput>,
+    /// Date groups the user has folded in the sidebar. This is intentionally
+    /// runtime-only, like transcript disclosure state.
+    sidebar_collapsed_groups: HashSet<SessionDateGroup>,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -912,7 +919,6 @@ pub struct Waku {
     /// first use and live as long as the window.
     menus: RefCell<HashMap<SharedString, ContextMenuHandle>>,
     navigation_rail: Entity<ConversationNavigationRail>,
-    navigation_rail_active_scale_enabled: Rc<Cell<bool>>,
     navigation_rail_reset_generation: Cell<u64>,
     /// The unix second the pending time-label wake-up targets, or `None` when
     /// none is armed. See `schedule_time_label_wake`.
@@ -947,7 +953,8 @@ pub use autocomplete::init as init_composer_autocomplete;
 pub use command_palette::init as init_command_palette;
 use components::*;
 pub use settings::init as init_settings_keys;
-use sidebar::SidebarRow;
+pub use sidebar::init as init_sidebar_keys;
+use sidebar::{SessionDateGroup, SidebarRow};
 use streaming::*;
 use transcript::*;
 use transcript_view::ConversationNavigationRail;
@@ -1168,6 +1175,7 @@ impl Waku {
                 .search_field()
                 .placeholder(tr!("settings.search"))
         });
+        let session_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
         let provider_path_input = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -1311,30 +1319,21 @@ impl Waku {
         let branch_picker_list_state = ListState::new(0, ListAlignment::Top, px(152.0));
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
-        let navigation_rail_active_scale_enabled = Rc::new(Cell::new(false));
         transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
-            let navigation_rail_active_scale_enabled = navigation_rail_active_scale_enabled.clone();
             move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
-                if event.is_scrolled {
-                    navigation_rail_active_scale_enabled.set(true);
-                }
                 window.refresh();
             }
         });
         anchored_transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
-            let navigation_rail_active_scale_enabled = navigation_rail_active_scale_enabled.clone();
             move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
-                if event.is_scrolled {
-                    navigation_rail_active_scale_enabled.set(true);
-                }
                 window.refresh();
             }
         });
@@ -1484,6 +1483,15 @@ impl Waku {
                     if matches!(event, ComposerEvent::Edited) {
                         cx.notify();
                     }
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &session_rename_input,
+                |this: &mut Self, _, event: &ComposerEvent, cx| match event {
+                    ComposerEvent::Submit(_) => this.commit_session_rename(cx),
+                    ComposerEvent::Edited if this.session_rename.is_some() => cx.notify(),
+                    _ => {}
                 },
             )
             .detach();
@@ -1657,6 +1665,9 @@ impl Waku {
                 expanded_changed_files: HashSet::new(),
                 transcript_control_focuses: RefCell::new(HashMap::new()),
                 session_navigation: SessionNavigation::default(),
+                session_rename: None,
+                session_rename_input,
+                sidebar_collapsed_groups: HashSet::new(),
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,
@@ -1747,7 +1758,6 @@ impl Waku {
                 transcript_scrollbar: ScrollbarState::new(),
                 menus: RefCell::new(HashMap::new()),
                 navigation_rail: navigation_rail.clone(),
-                navigation_rail_active_scale_enabled,
                 navigation_rail_reset_generation: Cell::new(0),
                 time_label_wake: Cell::new(None),
                 time_label_wake_generation: Cell::new(0),

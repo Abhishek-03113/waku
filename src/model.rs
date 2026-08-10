@@ -760,6 +760,19 @@ impl AgentSession {
         }
     }
 
+    /// Sets the user-owned title shown ahead of any provider fallback.
+    /// Empty names are rejected so a cancelled inline rename cannot hide the
+    /// existing title. Returns whether the stored title changed.
+    pub fn set_title(&mut self, title: impl AsRef<str>) -> bool {
+        let title = title.as_ref().trim();
+        if title.is_empty() || self.title == title {
+            return false;
+        }
+        self.title = title.to_owned();
+        self.updated_at = unix_time();
+        true
+    }
+
     pub fn set_title_from_prompt(&mut self, prompt: &str) {
         if self.messages.len() > 1 || self.title != Self::DEFAULT_TITLE || self.auto_title.is_some()
         {
@@ -2326,8 +2339,10 @@ mod tests {
         assert!(session.set_auto_title(Some("Fix provider title events".into())));
         assert_eq!(session.display_title(), "Fix provider title events");
 
-        session.title = "My title".into();
+        assert!(session.set_title("  My title  "));
         assert!(session.set_auto_title(Some("A newer provider title".into())));
+        assert_eq!(session.display_title(), "My title");
+        assert!(!session.set_title("   "));
         assert_eq!(session.display_title(), "My title");
     }
 

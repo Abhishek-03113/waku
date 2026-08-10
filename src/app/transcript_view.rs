@@ -16,7 +16,6 @@ struct ConversationNavigationRailSnapshot {
     turns: Rc<Vec<TranscriptNavigationTurn>>,
     viewport_height: f32,
     active_turn: Option<Uuid>,
-    active_scale_enabled: bool,
     reset_generation: u64,
     theme_is_dark: bool,
 }
@@ -28,7 +27,6 @@ impl Default for ConversationNavigationRailSnapshot {
             turns: Rc::new(Vec::new()),
             viewport_height: 0.0,
             active_turn: None,
-            active_scale_enabled: false,
             reset_generation: 0,
             theme_is_dark: true,
         }
@@ -156,7 +154,6 @@ impl Waku {
                 turns: navigation_turns,
                 viewport_height: f32::from(viewport_size.height),
                 active_turn,
-                active_scale_enabled: self.navigation_rail_active_scale_enabled.get(),
                 reset_generation: self.navigation_rail_reset_generation.get(),
                 theme_is_dark: Theme::current(cx).is_dark,
             };
@@ -311,13 +308,7 @@ impl Render for ConversationNavigationRail {
                 .position(|turn| turn.message_id == message_id)
                 .map(|turn_index| navigation_rail_turn_tick(turn_index, tick_count, turn_count))
         });
-        let scaled_active_tick_index = self
-            .snapshot
-            .active_scale_enabled
-            .then_some(active_tick_index)
-            .flatten();
         let visual_state = NavigationRailVisualState {
-            active_turn: scaled_active_tick_index.map(|index| tick_message_ids[index]),
             emphasized_turn: emphasized_tick_index.map(|index| tick_message_ids[index]),
         };
         let previous_visual_state = self.visual_state;
@@ -331,7 +322,6 @@ impl Render for ConversationNavigationRail {
             message_id
                 .and_then(|message_id| tick_message_ids.iter().position(|&id| id == message_id))
         };
-        let from_active_tick_index = tick_for_message(transition_from.active_turn);
         let from_emphasized_tick_index = tick_for_message(transition_from.emphasized_turn);
         let animation_generation = self.animation_generation;
 
@@ -341,17 +331,9 @@ impl Render for ConversationNavigationRail {
             .enumerate()
             .map(|(tick_index, (&message_id, focus_handle))| {
                 let from_width = NAVIGATION_RAIL_TICK_WIDTH
-                    * navigation_rail_scale(
-                        tick_index,
-                        from_active_tick_index,
-                        from_emphasized_tick_index,
-                    );
+                    * navigation_rail_scale(tick_index, from_emphasized_tick_index);
                 let to_width = NAVIGATION_RAIL_TICK_WIDTH
-                    * navigation_rail_scale(
-                        tick_index,
-                        scaled_active_tick_index,
-                        emphasized_tick_index,
-                    );
+                    * navigation_rail_scale(tick_index, emphasized_tick_index);
                 let prominent = active_tick_index == Some(tick_index)
                     || emphasized_tick_index == Some(tick_index);
                 let tick_color = if prominent {
@@ -595,7 +577,6 @@ impl Waku {
         };
 
         self.transcript_anchor_following.set(false);
-        self.navigation_rail_active_scale_enabled.set(true);
         self.active_transcript_rows().scroll_to(ListOffset {
             item_ix: row_index,
             offset_in_item: Pixels::ZERO,

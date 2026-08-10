@@ -9,7 +9,6 @@ import {
   RefreshCw,
   Zap,
 } from 'lucide-react'
-import { AppWindow } from '@/components/app-window'
 import { Button } from '@/components/ui/button'
 import {
   Accordion,
@@ -217,8 +216,20 @@ function Home() {
             </section>
 
             {/* Product */}
-            <section className="px-5 pb-16 md:px-10 md:pb-24">
-              <AppWindow />
+            <section>
+              <picture>
+                <source
+                  media="(prefers-color-scheme: dark)"
+                  srcSet="/app-screenshot-dark.png"
+                />
+                <img
+                  src="/app-screenshot-light.png"
+                  alt="Waku showing a coding-agent session"
+                  width={2266}
+                  height={1752}
+                  className="block h-auto w-full"
+                />
+              </picture>
             </section>
 
             {/* Features */}
