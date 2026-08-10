@@ -163,6 +163,7 @@ enum BranchPickerAction {
 enum SettingsPage {
     General,
     Providers,
+    Skills,
     Usage,
     ComputerUse,
     Appearance,
@@ -840,6 +841,41 @@ pub struct Waku {
     /// swapping in frozen page pixels while an overlay is open.
     scene_overlay_enabled: bool,
     settings_page: Option<SettingsPage>,
+    /// The Skills page's library snapshot, scanned off-thread. Frames read
+    /// only this; `None` means the first scan has not landed yet.
+    skills_catalog: Option<Rc<crate::skills::SkillsCatalog>>,
+    /// Bumped per scan; a result from a superseded scan is discarded.
+    skills_scan_generation: u64,
+    skills_scan_pending: bool,
+    /// When the current catalog landed, for the reopen-staleness check.
+    skills_scanned_at: Option<Instant>,
+    /// Filter query over the Skills page's rows.
+    skills_search: Entity<ComposerInput>,
+    /// Virtualized list over the filtered skill rows.
+    skills_list_state: ListState,
+    skills_scrollbar: Rc<ScrollbarState>,
+    /// The rows the list currently draws — sections and catalog indices —
+    /// refreshed once per frame rather than per row.
+    skills_rows: RefCell<Vec<skills_page::SkillsRow>>,
+    /// The skill directory the detail pane shows. `None` falls back to the
+    /// first visible row, so the pane never opens empty.
+    skills_selected: Option<PathBuf>,
+    /// Parsed markdown for the selected skill's document, keyed by the skill
+    /// directory it was built from. One entry: only one detail shows at once.
+    skills_detail_markdown: RefCell<Option<(PathBuf, MarkdownView)>>,
+    /// Text selection over the detail pane's rendered document. Its own
+    /// registry, like the toast's, so it can never join a drag to another
+    /// surface's text.
+    skills_selection: TranscriptSelection,
+    /// Scroll position of the detail pane, tracked so it can draw a
+    /// scrollbar and land at the top when the selection moves.
+    skills_detail_scroll: ScrollHandle,
+    skills_detail_scrollbar: Rc<ScrollbarState>,
+    /// Source the list is narrowed to; `None` shows every ecosystem.
+    skills_source_filter: Option<crate::skills::SkillSource>,
+    /// The skill directory whose delete button is armed for its confirming
+    /// second click.
+    skills_delete_arming: Option<PathBuf>,
     /// Scroll position of the settings content column, tracked so the pane
     /// can draw a scrollbar and mark the titlebar boundary once content
     /// slides under it.
@@ -943,6 +979,7 @@ mod runtime;
 mod sessions;
 mod settings;
 mod sidebar;
+mod skills_page;
 mod streaming;
 mod transcript;
 mod transcript_view;
@@ -955,6 +992,7 @@ use components::*;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
 use sidebar::{SessionDateGroup, SidebarRow};
+pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
 use transcript_view::ConversationNavigationRail;
@@ -1175,6 +1213,11 @@ impl Waku {
                 .search_field()
                 .placeholder(tr!("settings.search"))
         });
+        let skills_search = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("skills.search"))
+        });
         let session_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
         let provider_path_input = cx.new(|cx| {
             ComposerInput::new(window, cx)
@@ -1364,6 +1407,11 @@ impl Waku {
                     if this.settings_page == Some(SettingsPage::ComputerUse) {
                         this.request_computer_permissions(false, cx);
                     }
+                    // Skill files are routinely edited in another app; coming
+                    // back to the window is the moment to re-read them.
+                    if this.settings_page == Some(SettingsPage::Skills) {
+                        this.ensure_skills_catalog(true, cx);
+                    }
                 }
             })
             .detach();
@@ -1479,6 +1527,15 @@ impl Waku {
             .detach();
             cx.subscribe(
                 &settings_search,
+                |_: &mut Self, _, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &skills_search,
                 |_: &mut Self, _, event: &ComposerEvent, cx| {
                     if matches!(event, ComposerEvent::Edited) {
                         cx.notify();
@@ -1713,6 +1770,21 @@ impl Waku {
                 right_panel_pending_browser_focus: None,
                 scene_overlay_enabled,
                 settings_page: None,
+                skills_catalog: None,
+                skills_scan_generation: 0,
+                skills_scan_pending: false,
+                skills_scanned_at: None,
+                skills_search,
+                skills_list_state: ListState::new(0, ListAlignment::Top, px(512.0)),
+                skills_scrollbar: ScrollbarState::new(),
+                skills_rows: RefCell::new(Vec::new()),
+                skills_selected: None,
+                skills_detail_markdown: RefCell::new(None),
+                skills_selection: TranscriptSelection::default(),
+                skills_detail_scroll: ScrollHandle::new(),
+                skills_detail_scrollbar: ScrollbarState::new(),
+                skills_source_filter: None,
+                skills_delete_arming: None,
                 settings_scroll: ScrollHandle::new(),
                 settings_scrollbar: ScrollbarState::new(),
                 header_drag_armed: false,
@@ -1785,6 +1857,9 @@ impl Waku {
             // Providers settings page reads only this store and must never
             // open onto a lazy load.
             this.request_provider_version_probes();
+            // The skill library too: the Skills settings page must open onto
+            // data, not a scan.
+            this.ensure_skills_catalog(false, cx);
         });
         entity
     }

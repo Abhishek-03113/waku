@@ -108,6 +108,50 @@ pub fn load_app_icon_for_bundle_id(_: &str) -> Option<std::sync::Arc<gpui::Image
     None
 }
 
+/// Select `path` in a Finder window.
+#[cfg(target_os = "macos")]
+pub fn reveal_in_finder(path: &std::path::Path) {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSArray, NSString, NSURL};
+
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSWorkspace::sharedWorkspace()
+        .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reveal_in_finder(_: &std::path::Path) {}
+
+/// Open `path` with its default application — a document in its editor.
+#[cfg(target_os = "macos")]
+pub fn open_with_default_app(path: &std::path::Path) {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSWorkspace::sharedWorkspace().openURL(&url);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_with_default_app(_: &std::path::Path) {}
+
+/// Move `path` to the Trash, recoverably. Errors surface to the caller so the
+/// UI can say why nothing moved.
+#[cfg(target_os = "macos")]
+pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|error| error.localizedDescription().to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
+    std::fs::remove_dir_all(path).map_err(|error| error.to_string())
+}
+
 /// Keep Waku's single main window alive when the user closes it. This preserves
 /// the current session and lets a Dock activation reveal the same GPUI window.
 #[cfg(target_os = "macos")]

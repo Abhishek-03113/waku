@@ -82,6 +82,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
     "NSData",
     "NSDictionary",
+    "NSError",
+    "NSFileManager",
     "NSGeometry",
     "NSKeyValueObserving",
     "NSLocale",

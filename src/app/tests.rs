@@ -1468,18 +1468,21 @@ fn settings_search_filters_pages_for_arrow_cycling() {
             SettingsPage::General,
             SettingsPage::Appearance,
             SettingsPage::Providers,
+            SettingsPage::Skills,
             SettingsPage::Usage,
             SettingsPage::ComputerUse,
         ]
     );
 
     assert_eq!(pages("theme"), vec![SettingsPage::Appearance]);
+    assert_eq!(pages("skill"), vec![SettingsPage::Skills]);
 
     // A keyword shared across pages keeps them all reachable.
     assert_eq!(
         pages("codex"),
         vec![
             SettingsPage::Providers,
+            SettingsPage::Skills,
             SettingsPage::Usage,
             SettingsPage::ComputerUse
         ]

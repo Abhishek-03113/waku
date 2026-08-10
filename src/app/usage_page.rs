@@ -49,6 +49,9 @@ impl Waku {
         if page == SettingsPage::Usage {
             self.ensure_usage_history(false, cx);
         }
+        if page == SettingsPage::Skills {
+            self.ensure_skills_catalog(false, cx);
+        }
         cx.notify();
     }
 

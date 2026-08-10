@@ -630,6 +630,12 @@ impl Waku {
                 "settings preferences providers agents models cli",
             ),
             (
+                SettingsPage::Skills,
+                "settings.skills",
+                "icons/package.svg",
+                "settings preferences skills library create disable agent skill",
+            ),
+            (
                 SettingsPage::Usage,
                 "settings.usage",
                 "icons/chart-column.svg",

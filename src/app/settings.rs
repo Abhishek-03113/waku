@@ -23,7 +23,7 @@ const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > ComposerInput";
 
 /// The sidebar's rows in display order, each with the keyword haystack the
 /// search field filters against.
-const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 5] = [
+const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 6] = [
     (
         SettingsPage::General,
         "settings.general",
@@ -41,6 +41,12 @@ const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 5] = [
         "settings.providers",
         "icons/bot.svg",
         "settings.providers_keywords",
+    ),
+    (
+        SettingsPage::Skills,
+        "settings.skills",
+        "icons/package.svg",
+        "settings.skills_keywords",
     ),
     (
         SettingsPage::Usage,
@@ -273,6 +279,19 @@ impl Waku {
     fn render_settings_content(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let page = self.settings_page.unwrap_or(SettingsPage::General);
+        // The Skills page is a mail-style split that owns the whole content
+        // column — no page title, no titlebar strip, no width cap, no card.
+        // Window dragging stays with the sidebar's own titlebar region.
+        if page == SettingsPage::Skills {
+            return div()
+                .flex_1()
+                .h_full()
+                .min_w_0()
+                .border_l_1()
+                .border_color(theme.sidebar_border)
+                .bg(theme.surface)
+                .child(self.render_skills_settings(cx));
+        }
         // The Monthly and Projects list views own their own scrolling, so
         // their pages fill the viewport instead of riding the shared scroll
         // container.
@@ -306,6 +325,7 @@ impl Waku {
                     .child(match page {
                         SettingsPage::General => tr!("settings.general"),
                         SettingsPage::Providers => tr!("settings.providers"),
+                        SettingsPage::Skills => tr!("settings.skills"),
                         SettingsPage::Usage => tr!("settings.usage"),
                         SettingsPage::ComputerUse => tr!("settings.computer_use"),
                         SettingsPage::Appearance => tr!("settings.appearance"),
@@ -314,6 +334,7 @@ impl Waku {
             .child(match page {
                 SettingsPage::General => self.render_general_settings(cx),
                 SettingsPage::Providers => self.render_providers_settings(cx),
+                SettingsPage::Skills => self.render_skills_settings(cx),
                 SettingsPage::Usage => self.render_usage_settings(cx),
                 SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
                 SettingsPage::Appearance => self.render_appearance_settings(cx),
@@ -1488,6 +1509,9 @@ impl Waku {
         });
         self.settings_search.update(cx, |input, cx| {
             input.set_placeholder(tr!("settings.search"), cx)
+        });
+        self.skills_search.update(cx, |input, cx| {
+            input.set_placeholder(tr!("skills.search"), cx)
         });
         self.provider_path_input.update(cx, |input, cx| {
             input.set_placeholder(tr!("input.detected_automatically"), cx)

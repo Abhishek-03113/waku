@@ -159,6 +159,12 @@ settings.appearance_keywords:
 settings.providers_keywords:
   en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
   zh-CN: 模型服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
+settings.skills:
+  en: Skills
+  zh-CN: 技能
+settings.skills_keywords:
+  en: skills skill library agent disable enable delete claude codex cursor opencode pi amp shared
+  zh-CN: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
 settings.usage_keywords:
   en: usage tokens cost spend cache daily chart model breakdown history claude codex
   zh-CN: 用量 令牌 费用 支出 缓存 每日 图表 模型 明细 历史 claude codex
@@ -962,6 +968,124 @@ command_scope.skill:
 command_scope.builtin:
   en: built-in
   zh-CN: 内置
+
+skills.search:
+  en: Search skills…
+  zh-CN: 搜索技能…
+skills.count_one:
+  en: 1 skill
+  zh-CN: 1 个技能
+skills.count_many:
+  en: "%{count} skills"
+  zh-CN: "%{count} 个技能"
+skills.count_disabled:
+  en: "%{count} disabled"
+  zh-CN: "已禁用 %{count} 个"
+skills.filter_caption:
+  en: "%{shown} of %{total} shown"
+  zh-CN: "显示 %{shown} / %{total} 个"
+skills.scanning:
+  en: Scanning skill folders…
+  zh-CN: 正在扫描技能目录…
+skills.no_match:
+  en: No skills match your search
+  zh-CN: 没有匹配的技能
+skills.section_user:
+  en: User
+  zh-CN: 用户
+skills.source_shared:
+  en: Shared
+  zh-CN: 共享
+skills.scope_user_detail:
+  en: available in every project
+  zh-CN: 在所有项目中可用
+skills.scope_in_project:
+  en: "in %{project}"
+  zh-CN: "位于 %{project}"
+skills.filter_all:
+  en: All skills
+  zh-CN: 全部技能
+skills.select_placeholder:
+  en: Select a skill
+  zh-CN: 选择一个技能
+skills.detail_invoke:
+  en: Invoke
+  zh-CN: 调用
+skills.detail_location:
+  en: Location
+  zh-CN: 位置
+skills.detail_contents:
+  en: Contents
+  zh-CN: 内容
+skills.detail_updated:
+  en: Updated
+  zh-CN: 更新
+skills.no_description:
+  en: No description
+  zh-CN: 暂无描述
+skills.disabled_badge:
+  en: Disabled
+  zh-CN: 已禁用
+skills.file_count_one:
+  en: 1 supporting file
+  zh-CN: 1 个附属文件
+skills.file_count_many:
+  en: "%{count} supporting files"
+  zh-CN: "%{count} 个附属文件"
+skills.updated_just_now:
+  en: Just now
+  zh-CN: 刚刚
+skills.updated_minutes:
+  en: "%{count}m ago"
+  zh-CN: "%{count} 分钟前"
+skills.updated_hours:
+  en: "%{count}h ago"
+  zh-CN: "%{count} 小时前"
+skills.updated_days:
+  en: "%{count}d ago"
+  zh-CN: "%{count} 天前"
+skills.allowed_tools:
+  en: Tools
+  zh-CN: 工具
+skills.duplicate_one:
+  en: Same name in 1 other location — the most specific copy wins
+  zh-CN: 另有 1 处同名技能 — 更具体的一份生效
+skills.duplicate_many:
+  en: "Same name in %{count} other locations — the most specific copy wins"
+  zh-CN: "另有 %{count} 处同名技能 — 更具体的一份生效"
+skills.open_file:
+  en: Open SKILL.md
+  zh-CN: 打开 SKILL.md
+skills.reveal:
+  en: Reveal in Finder
+  zh-CN: 在访达中显示
+skills.copy_path:
+  en: Copy Path
+  zh-CN: 拷贝路径
+skills.path_copied:
+  en: Path copied
+  zh-CN: 已拷贝路径
+skills.delete:
+  en: Delete
+  zh-CN: 删除
+skills.confirm_delete:
+  en: Confirm delete
+  zh-CN: 确认删除
+skills.deleted_toast:
+  en: "Moved “%{name}” to the Trash"
+  zh-CN: "已将“%{name}”移到废纸篓"
+skills.delete_failed:
+  en: "Couldn’t delete the skill: %{error}"
+  zh-CN: "无法删除技能：%{error}"
+skills.toggle_failed:
+  en: "Couldn’t update the skill: %{error}"
+  zh-CN: "无法更新技能：%{error}"
+skills.empty_title:
+  en: No skills yet
+  zh-CN: 还没有技能
+skills.empty_description:
+  en: A skill is a folder with a SKILL.md — reusable instructions any agent can load, like a deploy runbook or a review checklist. Skills installed for Claude Code, Codex, and every other agent show up here, invoked as /name.
+  zh-CN: 技能是一个包含 SKILL.md 的文件夹 — 任何智能体都能加载的可复用指令，例如部署手册或评审清单。为 Claude Code、Codex 等所有智能体安装的技能都会显示在这里，以 /名称 调用。
 
 commands.init_description:
   en: Create or update %{instructions_file} for this project

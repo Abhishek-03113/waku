@@ -45,6 +45,7 @@ mod platform;
 mod projectless;
 mod query;
 mod review_diff;
+mod skills;
 mod terminal;
 mod theme;
 mod ui;
@@ -136,6 +137,7 @@ fn main() {
             crate::app::init_settings_keys(cx);
             crate::app::init_command_palette(cx);
             crate::app::init_sidebar_keys(cx);
+            crate::app::init_skills_keys(cx);
             crate::theme::init(cx);
             cx.set_reduce_motion(crate::platform::reduce_motion_enabled());
 

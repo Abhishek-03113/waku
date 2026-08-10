@@ -366,6 +366,8 @@ mod tests {
             "icons/x.svg",
             "icons/bot.svg",
             "icons/rotate-cw.svg",
+            "icons/package.svg",
+            "icons/trash.svg",
         ];
         for provider in ProviderKind::ALL {
             paths.push(provider_icon(provider));
