@@ -1484,6 +1484,12 @@ impl Waku {
                     .text_size(px(11.0))
                     .line_height(px(14.0))
                     .cursor_default()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(label)),
+                    )
                     .child(icon(
                         if expanded {
                             "icons/chevron-down.svg"
@@ -1493,25 +1499,6 @@ impl Waku {
                         9.0,
                         theme.text_ghost,
                     ))
-                    .child(if live {
-                        icon("icons/sparkle.svg", 11.0, theme.text_tertiary)
-                            .with_animation(
-                                SharedString::from(format!("thinking-pulse-{block_index}")),
-                                Animation::new(Duration::from_millis(1800))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.4, 1.0)),
-                                |element, delta| element.opacity(delta),
-                            )
-                            .into_any_element()
-                    } else {
-                        icon("icons/sparkle.svg", 11.0, theme.text_ghost).into_any_element()
-                    })
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_tertiary)
-                            .child(SharedString::from(label)),
-                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_reasoning(block_index, expanded, cx);
                     })),
@@ -1533,7 +1520,6 @@ impl Waku {
                 view.set_text(&reasoning.content, live);
                 element.child(
                     div()
-                        .pl(px(15.0))
                         .w_full()
                         .min_w_0()
                         .children(md::render::markdown(view, &ctx)),
@@ -1604,15 +1590,6 @@ impl Waku {
                     .text_size(px(11.0))
                     .line_height(px(14.0))
                     .cursor_default()
-                    .child(icon(
-                        if expanded {
-                            "icons/chevron-down.svg"
-                        } else {
-                            "icons/chevron-right.svg"
-                        },
-                        9.0,
-                        theme.text_ghost,
-                    ))
                     .when(running, |element| {
                         element.child(pulse_dot(
                             format!("activity-running-{block_index}"),
@@ -1626,6 +1603,15 @@ impl Waku {
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(activity_summary(activities))),
                     )
+                    .child(icon(
+                        if expanded {
+                            "icons/chevron-down.svg"
+                        } else {
+                            "icons/chevron-right.svg"
+                        },
+                        9.0,
+                        theme.text_ghost,
+                    ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_activities(block_index, expanded, cx);
                     })),
@@ -1659,20 +1645,6 @@ impl Waku {
                             .cursor_default()
                             .hover(|element| element.bg(theme.overlay))
                             .active(|element| element.bg(theme.overlay_strong))
-                    })
-                    .child(if has_detail {
-                        icon(
-                            if item_expanded {
-                                "icons/chevron-down.svg"
-                            } else {
-                                "icons/chevron-right.svg"
-                            },
-                            9.0,
-                            theme.text_ghost,
-                        )
-                        .into_any_element()
-                    } else {
-                        div().w(px(9.0)).flex_none().into_any_element()
                     })
                     .child(icon(
                         activity_icon(activity.kind),
