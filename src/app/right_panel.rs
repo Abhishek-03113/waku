@@ -1832,6 +1832,9 @@ impl Waku {
             });
             let icon_path =
                 right_panel_tab_icon(&surface, self.right_panel_files_selected_path.as_deref());
+            let uses_file_icon = matches!(&surface, RightPanelSurface::File(_))
+                || matches!(&surface, RightPanelSurface::Files)
+                    && self.right_panel_files_selected_path.is_some();
             let activate_weak = cx.entity().downgrade();
             let close_weak = cx.entity().downgrade();
             tabs = tabs.child(
@@ -1854,7 +1857,11 @@ impl Waku {
                     .when(!active, |element| {
                         element.hover(|element| element.bg(theme.overlay))
                     })
-                    .child(icon(icon_path, 13.0, theme.text_secondary))
+                    .child(if uses_file_icon {
+                        file_icon(icon_path, 13.0).into_any_element()
+                    } else {
+                        icon(icon_path, 13.0, theme.text_secondary).into_any_element()
+                    })
                     .child(
                         div()
                             .min_w_0()
@@ -2183,8 +2190,8 @@ impl Waku {
                 } else {
                     div().w(px(10.0)).h(px(10.0)).flex_none().into_any_element()
                 })
-                .when_some(entry.file_icon, |element, file_icon| {
-                    element.child(icon(file_icon, 14.0, theme.text_secondary))
+                .when_some(entry.file_icon, |element, file_icon_path| {
+                    element.child(file_icon(file_icon_path, 14.0))
                 })
                 .child(
                     div()
@@ -2286,11 +2293,7 @@ impl Waku {
                     .gap(px(8.0))
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(icon(
-                        file_icon_for_path(&relative_path),
-                        13.0,
-                        theme.text_tertiary,
-                    ))
+                    .child(file_icon(file_icon_for_path(&relative_path), 13.0))
                     .child(
                         div()
                             .min_w_0()
@@ -3016,11 +3019,7 @@ impl Waku {
                 .border_b_1()
                 .border_color(theme.border)
                 .bg(theme.surface)
-                .child(icon(
-                    file_icon_for_path(&file.path),
-                    14.0,
-                    theme.text_tertiary,
-                ))
+                .child(file_icon(file_icon_for_path(&file.path), 14.0))
                 .child(
                     div()
                         .id(SharedString::from(format!("review-diff-file-path-{index}")))
@@ -3562,7 +3561,7 @@ impl Waku {
                             .when(!selected && !cursor, |row| {
                                 row.hover(|row| row.bg(theme.overlay))
                             })
-                            .child(icon(file_icon_for_path(&path), 13.0, theme.text_tertiary))
+                            .child(file_icon(file_icon_for_path(&path), 13.0))
                             .child(
                                 div()
                                     .id(SharedString::from(format!(

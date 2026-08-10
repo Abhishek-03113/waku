@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, App, Div, ElementId, Hsla, InteractiveElement, Interactivity, ParentElement,
+    AnyElement, App, Div, ElementId, Hsla, Img, InteractiveElement, Interactivity, ParentElement,
     PathBuilder, Pixels, RenderOnce, SharedString, Stateful, StyleRefinement, Styled, Svg, Window,
-    canvas, div, point, prelude::*, px, rgb, svg,
+    canvas, div, img, point, prelude::*, px, rgb, svg,
 };
 
 pub mod menu;
@@ -20,6 +20,13 @@ pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
         .h(px(size))
         .flex_none()
         .text_color(color)
+}
+
+/// A polychrome file icon rendered as an image so the SVG's authored colors
+/// are preserved. GPUI's `svg()` element intentionally renders an alpha mask
+/// tinted with one text color.
+pub fn file_icon(path: &'static str, size: f32) -> Img {
+    img(path).w(px(size)).h(px(size)).flex_none()
 }
 
 /// A compact ghost icon button: the only button shape outside the composer's
