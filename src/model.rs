@@ -822,6 +822,28 @@ impl AgentSession {
                 if activity.kind == ActivityKind::Search && activity.title.trim() == "Search for" {
                     activity.title = tr!("activity.browsed_web");
                 }
+                let named_kind = ActivityKind::from_tool_name(&activity.title);
+                if named_kind != ActivityKind::Tool
+                    && matches!(
+                        activity.kind,
+                        ActivityKind::Search | ActivityKind::Tool | ActivityKind::FileChange
+                    )
+                {
+                    activity.kind = named_kind;
+                }
+                if activity.arguments.is_none()
+                    && activity.output.is_none()
+                    && !activity.failed
+                    && activity.detail.as_deref().is_some_and(|detail| {
+                        serde_json::from_str::<serde_json::Value>(detail).is_ok()
+                    })
+                {
+                    // Older provider transcripts stored input JSON in
+                    // `detail`. Promote it once so it stays expandable but no
+                    // longer floods the row preview.
+                    activity.arguments = activity.detail.take();
+                }
+                activity.refresh_activity_metadata();
             }
         }
 
@@ -1128,9 +1150,109 @@ pub enum ActivityKind {
     Reasoning,
     Command,
     FileChange,
+    FileRead,
+    FileSearch,
+    FileList,
     Search,
     Plan,
     Tool,
+}
+
+impl ActivityKind {
+    /// Classifies provider tool names without mistaking unrelated MCP tools
+    /// such as `create_thread` or `read_mcp_resource` for file operations.
+    pub fn from_tool_name(name: &str) -> Self {
+        let normalized = name.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        let leaf = normalized
+            .rsplit("__")
+            .next()
+            .unwrap_or(&normalized)
+            .rsplit([':', '.', '/'])
+            .next()
+            .unwrap_or(&normalized);
+        let compact = leaf.replace('_', "");
+
+        if matches!(
+            compact.as_str(),
+            "todo" | "todowrite" | "updateplan" | "plan"
+        ) {
+            Self::Plan
+        } else if matches!(
+            compact.as_str(),
+            "bash"
+                | "command"
+                | "execute"
+                | "executecommand"
+                | "commandexecution"
+                | "runcommand"
+                | "runterminalcommand"
+                | "shell"
+                | "shellcommand"
+                | "terminal"
+        ) {
+            Self::Command
+        } else if matches!(
+            compact.as_str(),
+            "applypatch"
+                | "create"
+                | "createfile"
+                | "delete"
+                | "deletefile"
+                | "edit"
+                | "filechange"
+                | "fileedit"
+                | "editfile"
+                | "move"
+                | "movefile"
+                | "multiedit"
+                | "notebookedit"
+                | "patch"
+                | "rename"
+                | "renamefile"
+                | "replace"
+                | "savefile"
+                | "strreplace"
+                | "write"
+                | "writefile"
+        ) {
+            Self::FileChange
+        } else if matches!(
+            compact.as_str(),
+            "read" | "fileread" | "readfile" | "readtextfile" | "viewfile"
+        ) {
+            Self::FileRead
+        } else if matches!(
+            compact.as_str(),
+            "filesearch"
+                | "find"
+                | "findfiles"
+                | "glob"
+                | "grep"
+                | "ripgrep"
+                | "searchfiles"
+                | "searchinfiles"
+        ) {
+            Self::FileSearch
+        } else if matches!(
+            compact.as_str(),
+            "directorylist"
+                | "filelist"
+                | "list"
+                | "listdirectory"
+                | "listfiles"
+                | "ls"
+                | "readdir"
+        ) {
+            Self::FileList
+        } else if matches!(
+            compact.as_str(),
+            "search" | "searchtool" | "webfetch" | "websearch"
+        ) {
+            Self::Search
+        } else {
+            Self::Tool
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1238,6 +1360,25 @@ pub struct PermissionOption {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ActivityFileChange {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
+}
+
+impl ActivityFileChange {
+    pub fn display_name(&self) -> &str {
+        Path::new(&self.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&self.path)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActivityItem {
     pub id: Uuid,
     #[serde(default)]
@@ -1256,6 +1397,15 @@ pub struct ActivityItem {
     #[serde(default)]
     pub failed: bool,
     pub complete: bool,
+    /// Provider-neutral edit metadata prepared when the tool event arrives.
+    /// Rendering reads this directly instead of reparsing potentially large
+    /// patches on every frame.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_changes: Vec<ActivityFileChange>,
+    /// Compact subject prepared from native tool input (a file, query,
+    /// directory, or command). The row builder only formats this cached value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_target: Option<String>,
 }
 
 impl ActivityItem {
@@ -1266,22 +1416,34 @@ impl ActivityItem {
         detail: Option<String>,
         complete: bool,
     ) -> Self {
+        let title = title.into();
+        let display_target = fallback_activity_display_target(kind, &title);
         Self {
             id: Uuid::new_v4(),
             source_id,
             kind,
-            title: title.into(),
+            title,
             detail,
             arguments: None,
             output: None,
             image_urls: Vec::new(),
             failed: false,
             complete,
+            file_changes: Vec::new(),
+            display_target,
         }
     }
 
     pub fn with_arguments(mut self, arguments: Option<String>) -> Self {
         self.arguments = arguments;
+        self.refresh_activity_metadata();
+        self
+    }
+
+    pub fn with_activity_source(mut self, source: Option<&serde_json::Value>) -> Self {
+        if let Some(source) = source {
+            self.refresh_activity_metadata_from_value(source);
+        }
         self
     }
 
@@ -1298,6 +1460,552 @@ impl ActivityItem {
     pub fn with_failed(mut self, failed: bool) -> Self {
         self.failed = failed;
         self
+    }
+
+    /// Extracts the common tool-input shapes emitted by every provider. This
+    /// runs while handling an event (and once for legacy persisted rows), never
+    /// from a transcript row builder.
+    pub fn refresh_activity_metadata(&mut self) {
+        if self.kind != ActivityKind::FileChange {
+            self.file_changes.clear();
+        }
+
+        let source = self
+            .arguments
+            .as_deref()
+            .map(str::trim)
+            .filter(|source| !source.is_empty());
+        if let Some(source) = source {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(source) {
+                self.refresh_activity_metadata_from_value(&value);
+            } else if self.kind == ActivityKind::FileChange {
+                let extracted = parse_patch_file_changes(source);
+                if !extracted.is_empty() {
+                    self.file_changes = extracted;
+                }
+            }
+        }
+        if self.display_target.is_none() {
+            self.display_target = fallback_activity_display_target(self.kind, &self.title);
+        }
+    }
+
+    fn refresh_activity_metadata_from_value(&mut self, source: &serde_json::Value) {
+        if self.kind == ActivityKind::FileChange {
+            let mut extracted = Vec::new();
+            extract_file_changes_from_value(source, &mut extracted, 0);
+            if !extracted.is_empty() {
+                self.file_changes = extracted;
+            }
+        }
+        if let Some(target) = extract_activity_display_target(self.kind, source) {
+            self.display_target = Some(target);
+        }
+    }
+}
+
+fn fallback_activity_display_target(kind: ActivityKind, title: &str) -> Option<String> {
+    let title = title.trim();
+    if title.is_empty() || is_generic_activity_title(kind, title) {
+        return None;
+    }
+    (matches!(kind, ActivityKind::FileRead | ActivityKind::FileList)
+        && (title.contains('/') || title.contains('\\') || Path::new(title).extension().is_some()))
+    .then(|| compact_activity_target(title))
+}
+
+pub(crate) fn is_generic_activity_title(kind: ActivityKind, title: &str) -> bool {
+    if ActivityKind::from_tool_name(title) == kind {
+        return true;
+    }
+    match kind {
+        ActivityKind::Command => title == tr!("activity.run_command"),
+        ActivityKind::FileChange => {
+            title == tr!("activity.edit_file") || title == tr!("activity.write_file")
+        }
+        ActivityKind::FileRead => title == tr!("activity.read_file"),
+        ActivityKind::FileSearch => {
+            title == tr!("activity.search_files") || title == tr!("activity.find_files")
+        }
+        ActivityKind::FileList => title == tr!("activity.list_files"),
+        ActivityKind::Plan => title == tr!("activity.plan_updated"),
+        _ => false,
+    }
+}
+
+fn extract_activity_display_target(
+    kind: ActivityKind,
+    source: &serde_json::Value,
+) -> Option<String> {
+    let keys: &[&str] = match kind {
+        ActivityKind::Command => &["command", "cmd"],
+        ActivityKind::FileRead => &[
+            "filePath",
+            "file_path",
+            "path",
+            "targetFile",
+            "target_file",
+            "notebookPath",
+            "notebook_path",
+        ],
+        ActivityKind::FileSearch => &["pattern", "query", "regex", "glob"],
+        ActivityKind::FileList => &["path", "directory", "dir", "root"],
+        ActivityKind::Search => &["query", "queries"],
+        ActivityKind::Tool => &["title"],
+        _ => return None,
+    };
+    find_activity_string(source, keys, 0).map(|value| compact_activity_target(&value))
+}
+
+fn find_activity_string(value: &serde_json::Value, keys: &[&str], depth: usize) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    match value {
+        serde_json::Value::String(value) => serde_json::from_str::<serde_json::Value>(value)
+            .ok()
+            .and_then(|nested| find_activity_string(&nested, keys, depth + 1))
+            .or_else(|| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| value.to_owned())
+            }),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_activity_string(value, keys, depth + 1)),
+        serde_json::Value::Object(object) => {
+            for key in keys {
+                let Some(value) = object.get(*key) else {
+                    continue;
+                };
+                if let Some(value) = value.as_str().filter(|value| !value.trim().is_empty()) {
+                    return Some(value.to_owned());
+                }
+                if let Some(value) = value.as_array().and_then(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .find(|value| !value.trim().is_empty())
+                }) {
+                    return Some(value.to_owned());
+                }
+            }
+            for key in [
+                "action",
+                "arguments",
+                "args",
+                "input",
+                "params",
+                "rawInput",
+                "raw_input",
+                "toolInput",
+                "tool_input",
+            ] {
+                if let Some(value) = object.get(key)
+                    && let Some(found) = find_activity_string(value, keys, depth + 1)
+                {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn compact_activity_target(value: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+    compact
+        .chars()
+        .take(MAX_CHARS - 1)
+        .chain(std::iter::once('…'))
+        .collect()
+}
+
+fn extract_file_changes_from_value(
+    value: &serde_json::Value,
+    changes: &mut Vec<ActivityFileChange>,
+    depth: usize,
+) {
+    if depth > 4 {
+        return;
+    }
+    match value {
+        serde_json::Value::String(text) => {
+            if let Ok(nested) = serde_json::from_str::<serde_json::Value>(text) {
+                extract_file_changes_from_value(&nested, changes, depth + 1);
+            } else {
+                extend_file_changes(changes, parse_patch_file_changes(text));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(change) = structured_file_change(item, None) {
+                    merge_file_change(changes, change);
+                } else {
+                    extract_file_changes_from_value(item, changes, depth + 1);
+                }
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for key in ["changes", "fileChanges", "file_changes"] {
+                let Some(collection) = object.get(key) else {
+                    continue;
+                };
+                match collection {
+                    serde_json::Value::Array(items) => {
+                        for item in items {
+                            if let Some(change) = structured_file_change(item, None) {
+                                merge_file_change(changes, change);
+                            } else {
+                                extract_file_changes_from_value(item, changes, depth + 1);
+                            }
+                        }
+                    }
+                    serde_json::Value::Object(items) => {
+                        for (path, item) in items {
+                            if let Some(change) = structured_file_change(item, Some(path)) {
+                                merge_file_change(changes, change);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            for key in ["patch", "patchText", "patch_text"] {
+                if let Some(patch) = object.get(key).and_then(serde_json::Value::as_str) {
+                    extend_file_changes(changes, parse_patch_file_changes(patch));
+                }
+            }
+
+            let structured = structured_file_change(value, None);
+            if structured.is_none() {
+                for key in ["diff", "unifiedDiff", "unified_diff"] {
+                    if let Some(patch) = object.get(key).and_then(serde_json::Value::as_str) {
+                        extend_file_changes(changes, parse_patch_file_changes(patch));
+                    }
+                }
+            }
+            if let Some(change) = structured {
+                merge_file_change(changes, change);
+            }
+
+            for key in [
+                "arguments",
+                "args",
+                "input",
+                "rawInput",
+                "raw_input",
+                "toolInput",
+                "tool_input",
+            ] {
+                if let Some(nested) = object.get(key) {
+                    extract_file_changes_from_value(nested, changes, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn structured_file_change(
+    value: &serde_json::Value,
+    fallback_path: Option<&str>,
+) -> Option<ActivityFileChange> {
+    let object = value.as_object()?;
+    let path = [
+        "path",
+        "filePath",
+        "file_path",
+        "filename",
+        "fileName",
+        "targetFile",
+        "target_file",
+        "notebookPath",
+        "notebook_path",
+    ]
+    .into_iter()
+    .find_map(|key| object.get(key).and_then(serde_json::Value::as_str))
+    .or(fallback_path)?
+    .trim();
+    if path.is_empty() {
+        return None;
+    }
+
+    let diff = ["diff", "unifiedDiff", "unified_diff"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
+    let (mut additions, mut deletions) = diff
+        .map(diff_line_counts)
+        .map(|(additions, deletions)| (Some(additions), Some(deletions)))
+        .unwrap_or((None, None));
+
+    let old = [
+        "oldString",
+        "old_string",
+        "oldText",
+        "old_text",
+        "oldContent",
+        "old_content",
+    ]
+    .into_iter()
+    .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
+    let new = [
+        "newString",
+        "new_string",
+        "newText",
+        "new_text",
+        "newContent",
+        "new_content",
+    ]
+    .into_iter()
+    .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
+    if let (Some(old), Some(new)) = (old, new) {
+        let (added, deleted) = replacement_line_counts(old, new);
+        additions = Some(added);
+        deletions = Some(deleted);
+    } else if let Some(edits) = object.get("edits").and_then(serde_json::Value::as_array) {
+        let mut added = 0;
+        let mut deleted = 0;
+        let mut counted = false;
+        for edit in edits {
+            let Some(edit) = edit.as_object() else {
+                continue;
+            };
+            let old = ["oldString", "old_string", "oldText", "old_text"]
+                .into_iter()
+                .find_map(|key| edit.get(key).and_then(serde_json::Value::as_str));
+            let new = ["newString", "new_string", "newText", "new_text"]
+                .into_iter()
+                .find_map(|key| edit.get(key).and_then(serde_json::Value::as_str));
+            if let (Some(old), Some(new)) = (old, new) {
+                let (edit_added, edit_deleted) = replacement_line_counts(old, new);
+                added += edit_added;
+                deleted += edit_deleted;
+                counted = true;
+            }
+        }
+        if counted {
+            additions = Some(added);
+            deletions = Some(deleted);
+        }
+    }
+
+    let change_type = object
+        .get("kind")
+        .and_then(|kind| {
+            kind.as_str()
+                .or_else(|| kind.get("type").and_then(serde_json::Value::as_str))
+        })
+        .or_else(|| object.get("type").and_then(serde_json::Value::as_str));
+    if additions.is_none()
+        && deletions.is_none()
+        && let Some(content) = object.get("content").and_then(serde_json::Value::as_str)
+    {
+        match change_type {
+            Some("add" | "create") => {
+                additions = Some(logical_line_count(content));
+                deletions = Some(0);
+            }
+            Some("delete") => {
+                additions = Some(0);
+                deletions = Some(logical_line_count(content));
+            }
+            _ => {}
+        }
+    }
+
+    Some(ActivityFileChange {
+        path: path.to_owned(),
+        additions,
+        deletions,
+    })
+}
+
+fn parse_patch_file_changes(patch: &str) -> Vec<ActivityFileChange> {
+    #[derive(Default)]
+    struct PendingChange {
+        path: String,
+        additions: u64,
+        deletions: u64,
+        count_lines: bool,
+    }
+
+    fn finish(pending: &mut Option<PendingChange>, changes: &mut Vec<ActivityFileChange>) {
+        let Some(pending) = pending.take() else {
+            return;
+        };
+        if pending.path.is_empty() || pending.path == "/dev/null" {
+            return;
+        }
+        merge_file_change(
+            changes,
+            ActivityFileChange {
+                path: pending.path,
+                additions: Some(pending.additions),
+                deletions: Some(pending.deletions),
+            },
+        );
+    }
+
+    let mut changes = Vec::new();
+    let mut pending: Option<PendingChange> = None;
+    for line in patch.lines() {
+        let file_marker = ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
+            .into_iter()
+            .find_map(|prefix| line.strip_prefix(prefix));
+        if let Some(path) = file_marker {
+            finish(&mut pending, &mut changes);
+            pending = Some(PendingChange {
+                path: path.trim().to_owned(),
+                count_lines: true,
+                ..PendingChange::default()
+            });
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Move to: ") {
+            if let Some(pending) = pending.as_mut() {
+                pending.path = path.trim().to_owned();
+            }
+            continue;
+        }
+        if let Some(paths) = line.strip_prefix("diff --git ") {
+            finish(&mut pending, &mut changes);
+            let path = paths
+                .split_whitespace()
+                .next_back()
+                .map(clean_diff_path)
+                .unwrap_or_default();
+            pending = Some(PendingChange {
+                path,
+                ..PendingChange::default()
+            });
+            continue;
+        }
+        if line.starts_with("@@") {
+            if let Some(pending) = pending.as_mut() {
+                pending.count_lines = true;
+            }
+            continue;
+        }
+        if pending.as_ref().is_none_or(|pending| !pending.count_lines)
+            && let Some(path) = line.strip_prefix("+++ ")
+        {
+            let path = clean_diff_path(path);
+            if path != "/dev/null" {
+                if let Some(pending) = pending.as_mut() {
+                    pending.path = path;
+                } else {
+                    pending = Some(PendingChange {
+                        path,
+                        ..PendingChange::default()
+                    });
+                }
+            }
+            continue;
+        }
+        let Some(pending) = pending.as_mut() else {
+            continue;
+        };
+        if !pending.count_lines {
+            continue;
+        }
+        if line.starts_with('+') {
+            pending.additions += 1;
+        } else if line.starts_with('-') {
+            pending.deletions += 1;
+        }
+    }
+    finish(&mut pending, &mut changes);
+    changes
+}
+
+fn clean_diff_path(path: &str) -> String {
+    path.trim()
+        .trim_matches('"')
+        .strip_prefix("a/")
+        .or_else(|| path.trim().trim_matches('"').strip_prefix("b/"))
+        .unwrap_or_else(|| path.trim().trim_matches('"'))
+        .to_owned()
+}
+
+fn diff_line_counts(diff: &str) -> (u64, u64) {
+    let mut additions = 0;
+    let mut deletions = 0;
+    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
+    let mut count_lines = !has_hunks;
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            count_lines = true;
+            continue;
+        }
+        if !count_lines || line.starts_with("+++ ") || line.starts_with("--- ") {
+            continue;
+        }
+        if line.starts_with('+') {
+            additions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+    (additions, deletions)
+}
+
+fn logical_line_count(text: &str) -> u64 {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count() as u64
+    }
+}
+
+fn replacement_line_counts(old: &str, new: &str) -> (u64, u64) {
+    let old = old.lines().collect::<Vec<_>>();
+    let new = new.lines().collect::<Vec<_>>();
+    let mut prefix = 0;
+    while prefix < old.len() && prefix < new.len() && old[prefix] == new[prefix] {
+        prefix += 1;
+    }
+    let mut old_end = old.len();
+    let mut new_end = new.len();
+    while old_end > prefix && new_end > prefix && old[old_end - 1] == new[new_end - 1] {
+        old_end -= 1;
+        new_end -= 1;
+    }
+    ((new_end - prefix) as u64, (old_end - prefix) as u64)
+}
+
+fn extend_file_changes(
+    changes: &mut Vec<ActivityFileChange>,
+    extracted: impl IntoIterator<Item = ActivityFileChange>,
+) {
+    for change in extracted {
+        merge_file_change(changes, change);
+    }
+}
+
+fn merge_file_change(changes: &mut Vec<ActivityFileChange>, change: ActivityFileChange) {
+    if let Some(existing) = changes.iter_mut().find(|item| item.path == change.path) {
+        match (existing.additions, change.additions) {
+            (Some(existing_count), Some(change_count)) => {
+                existing.additions = Some(existing_count + change_count);
+            }
+            (None, Some(change_count)) => existing.additions = Some(change_count),
+            _ => {}
+        }
+        match (existing.deletions, change.deletions) {
+            (Some(existing_count), Some(change_count)) => {
+                existing.deletions = Some(existing_count + change_count);
+            }
+            (None, Some(change_count)) => existing.deletions = Some(change_count),
+            _ => {}
+        }
+    } else {
+        changes.push(change);
     }
 }
 
@@ -1364,6 +2072,221 @@ pub fn compact_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_names_are_classified_without_substring_false_positives() {
+        for name in [
+            "read",
+            "ReadFile",
+            "read_text_file",
+            "mcp__filesystem__read_file",
+        ] {
+            assert_eq!(
+                ActivityKind::from_tool_name(name),
+                ActivityKind::FileRead,
+                "{name}"
+            );
+        }
+        for name in ["grep", "Glob", "fileSearch", "search_files"] {
+            assert_eq!(
+                ActivityKind::from_tool_name(name),
+                ActivityKind::FileSearch,
+                "{name}"
+            );
+        }
+        for name in ["ls", "ListDirectory", "read_dir"] {
+            assert_eq!(
+                ActivityKind::from_tool_name(name),
+                ActivityKind::FileList,
+                "{name}"
+            );
+        }
+        for name in ["WriteFile", "applyPatch", "move_file", "str_replace"] {
+            assert_eq!(
+                ActivityKind::from_tool_name(name),
+                ActivityKind::FileChange,
+                "{name}"
+            );
+        }
+        for name in ["create_thread", "read_mcp_resource", "list_threads"] {
+            assert_eq!(
+                ActivityKind::from_tool_name(name),
+                ActivityKind::Tool,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_targets_are_normalized_when_events_arrive() {
+        let cases = [
+            (
+                ActivityKind::FileRead,
+                serde_json::json!({"input": {"file_path": "/tmp/waku/src/app.rs"}}),
+                "/tmp/waku/src/app.rs",
+            ),
+            (
+                ActivityKind::FileSearch,
+                serde_json::json!({"tool_input": {"regex": "ActivityItem"}}),
+                "ActivityItem",
+            ),
+            (
+                ActivityKind::FileList,
+                serde_json::json!({"arguments": {"directory": "/tmp/waku/src"}}),
+                "/tmp/waku/src",
+            ),
+            (
+                ActivityKind::Command,
+                serde_json::json!({"args": {"command": "cargo test activity"}}),
+                "cargo test activity",
+            ),
+            (
+                ActivityKind::Search,
+                serde_json::json!({"action": {"queries": ["Waku GPUI"]}}),
+                "Waku GPUI",
+            ),
+            (
+                ActivityKind::FileRead,
+                serde_json::json!("/tmp/waku/README.md"),
+                "/tmp/waku/README.md",
+            ),
+        ];
+
+        for (kind, arguments, expected) in cases {
+            let activity = ActivityItem::new(None, kind, "tool", None, false)
+                .with_arguments(Some(arguments.to_string()));
+            assert_eq!(
+                activity.display_target.as_deref(),
+                Some(expected),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_edit_metadata_is_normalized_for_every_provider_shape() {
+        let cases = [
+            (
+                ProviderKind::Codex,
+                serde_json::json!([{
+                    "path": "src/codex.rs",
+                    "diff": "@@ -1 +1,2 @@\n-old\n+new\n+next",
+                    "kind": {"type": "update"}
+                }]),
+                "src/codex.rs",
+                2,
+                1,
+            ),
+            (
+                ProviderKind::Claude,
+                serde_json::json!({
+                    "file_path": "src/claude.rs",
+                    "old_string": "old\nline",
+                    "new_string": "new\nline\nadded"
+                }),
+                "src/claude.rs",
+                3,
+                2,
+            ),
+            (
+                ProviderKind::Amp,
+                serde_json::json!({
+                    "file_path": "src/amp.rs",
+                    "old_string": "old",
+                    "new_string": "new"
+                }),
+                "src/amp.rs",
+                1,
+                1,
+            ),
+            (
+                ProviderKind::Cursor,
+                serde_json::json!({
+                    "input": {
+                        "path": "src/cursor.rs",
+                        "oldText": "old",
+                        "newText": "new\nmore"
+                    }
+                }),
+                "src/cursor.rs",
+                2,
+                1,
+            ),
+            (
+                ProviderKind::OpenCode,
+                serde_json::json!({
+                    "filePath": "src/opencode.rs",
+                    "oldString": "same\nold\nend",
+                    "newString": "same\nnew\nend"
+                }),
+                "src/opencode.rs",
+                1,
+                1,
+            ),
+            (
+                ProviderKind::Grok,
+                serde_json::json!({
+                    "tool_input": {
+                        "patchText": "*** Begin Patch\n*** Update File: src/grok.rs\n@@\n-old\n+new\n+more\n*** End Patch"
+                    }
+                }),
+                "src/grok.rs",
+                2,
+                1,
+            ),
+            (
+                ProviderKind::Pi,
+                serde_json::json!({
+                    "path": "src/pi.rs",
+                    "edits": [{"oldText": "old", "newText": "new\nmore"}]
+                }),
+                "src/pi.rs",
+                2,
+                1,
+            ),
+        ];
+
+        for (provider, arguments, path, additions, deletions) in cases {
+            let activity = ActivityItem::new(
+                Some(format!("{}-edit", provider.id())),
+                ActivityKind::FileChange,
+                "edit",
+                None,
+                false,
+            )
+            .with_arguments(Some(arguments.to_string()));
+            assert_eq!(activity.file_changes.len(), 1, "{provider:?}");
+            let change = &activity.file_changes[0];
+            assert_eq!(change.path, path, "{provider:?}");
+            assert_eq!(change.additions, Some(additions), "{provider:?}");
+            assert_eq!(change.deletions, Some(deletions), "{provider:?}");
+        }
+    }
+
+    #[test]
+    fn apply_patch_metadata_keeps_each_file_and_its_counts() {
+        let activity = ActivityItem::new(
+            Some("patch-1".into()),
+            ActivityKind::FileChange,
+            "apply_patch",
+            None,
+            true,
+        )
+        .with_arguments(Some(
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: src/one.rs\n@@\n-old\n+new\n*** Add File: src/two.rs\n+first\n+second\n*** End Patch"
+            })
+            .to_string(),
+        ));
+
+        assert_eq!(activity.file_changes.len(), 2);
+        assert_eq!(activity.file_changes[0].path, "src/one.rs");
+        assert_eq!(activity.file_changes[0].additions, Some(1));
+        assert_eq!(activity.file_changes[0].deletions, Some(1));
+        assert_eq!(activity.file_changes[1].path, "src/two.rs");
+        assert_eq!(activity.file_changes[1].additions, Some(2));
+        assert_eq!(activity.file_changes[1].deletions, Some(0));
+    }
 
     #[test]
     fn projectless_projects_are_descendants_of_the_waku_root() {
@@ -1752,6 +2675,99 @@ mod tests {
             panic!("expected activities");
         };
         assert_eq!(activities[0].title, "Browsed the web");
+    }
+
+    #[test]
+    fn legacy_file_edit_details_are_promoted_to_arguments_and_metadata() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::OpenCode);
+        session.transcript_blocks.push(TranscriptBlock {
+            after_message: 0,
+            turn_id: None,
+            content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+                None,
+                ActivityKind::FileChange,
+                "edit",
+                Some(
+                    serde_json::json!({
+                        "filePath": "/tmp/waku/README.md",
+                        "oldString": "old",
+                        "newString": "new\nmore"
+                    })
+                    .to_string(),
+                ),
+                true,
+            )]),
+        });
+
+        session.migrate_legacy_state();
+
+        let TranscriptBlockContent::Activities(activities) = &session.transcript_blocks[0].content
+        else {
+            panic!("expected activities");
+        };
+        assert!(activities[0].detail.is_none());
+        assert!(activities[0].arguments.is_some());
+        assert_eq!(activities[0].file_changes[0].path, "/tmp/waku/README.md");
+        assert_eq!(activities[0].file_changes[0].additions, Some(2));
+        assert_eq!(activities[0].file_changes[0].deletions, Some(1));
+    }
+
+    #[test]
+    fn legacy_file_tools_are_reclassified_and_gain_cached_targets() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::OpenCode);
+        let mut cached = ActivityItem::new(None, ActivityKind::FileRead, "read", None, true);
+        cached.display_target = Some("/tmp/waku/src/persisted.rs".into());
+        session.transcript_blocks.push(TranscriptBlock {
+            after_message: 0,
+            turn_id: None,
+            content: TranscriptBlockContent::Activities(vec![
+                ActivityItem::new(
+                    None,
+                    ActivityKind::Search,
+                    "read",
+                    Some(r#"{"filePath":"/tmp/waku/src/model.rs"}"#.into()),
+                    true,
+                ),
+                ActivityItem::new(
+                    None,
+                    ActivityKind::Tool,
+                    "glob",
+                    Some(r#"{"pattern":"src/**/*.rs"}"#.into()),
+                    true,
+                ),
+                cached,
+            ]),
+        });
+
+        session.migrate_legacy_state();
+
+        let TranscriptBlockContent::Activities(activities) = &session.transcript_blocks[0].content
+        else {
+            panic!("expected activities");
+        };
+        assert_eq!(activities[0].kind, ActivityKind::FileRead);
+        assert_eq!(
+            activities[0].display_target.as_deref(),
+            Some("/tmp/waku/src/model.rs")
+        );
+        assert_eq!(activities[1].kind, ActivityKind::FileSearch);
+        assert_eq!(activities[1].display_target.as_deref(), Some("src/**/*.rs"));
+        assert_eq!(
+            activities[2].display_target.as_deref(),
+            Some("/tmp/waku/src/persisted.rs")
+        );
+        assert!(
+            activities[..2]
+                .iter()
+                .all(|activity| activity.detail.is_none())
+        );
+        assert!(
+            activities[..2]
+                .iter()
+                .all(|activity| activity.arguments.is_some())
+        );
     }
 
     #[test]

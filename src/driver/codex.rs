@@ -1018,6 +1018,7 @@ fn handle_codex_message(
                         complete,
                     )
                     .with_arguments(codex_item_arguments(item))
+                    .with_activity_source(Some(item))
                     .with_output(output)
                     .with_image_urls(image_urls)
                     .with_failed(codex_item_failed(item));
@@ -1164,7 +1165,13 @@ fn codex_activity_kind(item: &Value) -> Option<ActivityKind> {
     } else if item_type.contains("plan") || item_type.contains("todo") {
         Some(ActivityKind::Plan)
     } else if item_type.contains("tool") || item_type.contains("collab") {
-        Some(ActivityKind::Tool)
+        Some(
+            item.get("tool")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .map(ActivityKind::from_tool_name)
+                .unwrap_or(ActivityKind::Tool),
+        )
     } else {
         None
     }
@@ -1265,6 +1272,9 @@ fn codex_item_detail(item: &Value, output: Option<&str>) -> Option<String> {
     {
         return Some(first_line.to_owned());
     }
+    if item.get("type").and_then(Value::as_str) == Some("fileChange") {
+        return None;
+    }
     item.get("cwd")
         .and_then(Value::as_str)
         .or_else(|| item.get("path").and_then(Value::as_str))
@@ -1276,6 +1286,10 @@ fn codex_item_arguments(item: &Value) -> Option<String> {
     match item.get("type").and_then(Value::as_str) {
         Some("mcpToolCall") => item
             .get("arguments")
+            .filter(|value| !value.is_null())
+            .and_then(format_activity_json),
+        Some("fileChange") => item
+            .get("changes")
             .filter(|value| !value.is_null())
             .and_then(format_activity_json),
         Some("commandExecution") => {
@@ -1989,6 +2003,65 @@ mod tests {
 
         assert_eq!(codex_item_title(&titled), "Inspect Helium browser");
         assert_eq!(codex_item_title(&untitled), "Js");
+    }
+
+    #[test]
+    fn mcp_file_tools_use_the_shared_file_presentation_metadata() {
+        let item = json!({
+            "id": "read-1",
+            "type": "mcpToolCall",
+            "server": "filesystem",
+            "tool": "read_file",
+            "arguments": {"path": "/tmp/waku/src/model.rs"},
+            "status": "inProgress"
+        });
+
+        let kind = codex_activity_kind(&item).expect("MCP call should be an activity");
+        let activity = ActivityItem::new(
+            Some("read-1".into()),
+            kind,
+            codex_item_title(&item),
+            None,
+            false,
+        )
+        .with_arguments(codex_item_arguments(&item))
+        .with_activity_source(Some(&item));
+
+        assert_eq!(activity.kind, ActivityKind::FileRead);
+        assert_eq!(
+            activity.display_target.as_deref(),
+            Some("/tmp/waku/src/model.rs")
+        );
+    }
+
+    #[test]
+    fn file_change_arguments_preserve_provider_diff_metadata() {
+        let item = json!({
+            "id": "patch-1",
+            "type": "fileChange",
+            "changes": [{
+                "path": "src/app.rs",
+                "kind": {"type": "update"},
+                "diff": "@@ -1 +1,2 @@\n-old\n+new\n+more"
+            }],
+            "status": "completed"
+        });
+
+        let arguments = codex_item_arguments(&item).expect("file changes should be retained");
+        let activity = ActivityItem::new(
+            Some("patch-1".into()),
+            ActivityKind::FileChange,
+            codex_item_title(&item),
+            None,
+            true,
+        )
+        .with_arguments(Some(arguments));
+
+        assert_eq!(activity.file_changes.len(), 1);
+        assert_eq!(activity.file_changes[0].path, "src/app.rs");
+        assert_eq!(activity.file_changes[0].additions, Some(2));
+        assert_eq!(activity.file_changes[0].deletions, Some(1));
+        assert_eq!(codex_item_detail(&item, None), None);
     }
 
     #[test]

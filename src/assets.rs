@@ -35,6 +35,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "copy",
     "cursor-spark",
     "external-link",
+    "file",
     "folder",
     "folder-new",
     "file-diff",

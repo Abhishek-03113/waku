@@ -954,10 +954,18 @@ fn tool_activity(update: &Value, events: &Sender<DriverEvent>, state: &mut AcpSt
             state.tools.get(id).cloned()
         }
     });
-    let kind = wire_kind
+    let mut kind = wire_kind
         .map(classify)
         .or_else(|| stored.as_ref().map(|(kind, _)| *kind))
         .unwrap_or(ActivityKind::Tool);
+    if matches!(kind, ActivityKind::Search | ActivityKind::Tool)
+        && let Some(wire_title) = wire_title
+    {
+        let named_kind = ActivityKind::from_tool_name(wire_title);
+        if named_kind != ActivityKind::Tool {
+            kind = named_kind;
+        }
+    }
     let arguments = update.get("rawInput").filter(|value| !value.is_null());
     let title = activity::input_title(arguments)
         .or_else(|| {
@@ -986,7 +994,8 @@ fn classify(kind: &str) -> ActivityKind {
     match kind {
         "execute" => ActivityKind::Command,
         "edit" | "delete" | "move" => ActivityKind::FileChange,
-        "read" | "search" | "fetch" => ActivityKind::Search,
+        "read" => ActivityKind::FileRead,
+        "search" | "fetch" => ActivityKind::Search,
         "think" => ActivityKind::Reasoning,
         _ => ActivityKind::Tool,
     }
@@ -1100,10 +1109,11 @@ mod tests {
         }
         assert!(matches!(&seen[0], DriverEvent::ReasoningDelta(text) if text == "thinking"));
         assert!(matches!(&seen[1], DriverEvent::RichActivity(item)
-                if item.kind == ActivityKind::Search && !item.complete));
+                if item.kind == ActivityKind::FileRead && !item.complete));
         assert!(matches!(&seen[2], DriverEvent::RichActivity(item)
                 if item.complete
                     && item.title == "fixture.txt"
+                    && item.display_target.as_deref() == Some("fixture.txt")
                     && item.output.as_deref().is_some_and(|output| output.contains("waku probe fixture"))));
         assert!(matches!(&seen[3], DriverEvent::TextDelta(text) if text == "OK"));
         // `usage_update` feeds the context meter rather than the transcript.

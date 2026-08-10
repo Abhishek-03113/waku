@@ -1,6 +1,7 @@
 use super::*;
 
 use chrono::{Datelike, Days};
+use std::path::Path;
 
 pub(super) fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
     div()
@@ -725,18 +726,165 @@ pub(super) fn activity_summary(activities: &[ActivityItem]) -> String {
 }
 
 pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
-    if activity.kind == crate::model::ActivityKind::Tool
-        && let Some(arguments) = activity.arguments.as_deref()
-        && let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments)
-        && let Some(title) = arguments
-            .get("title")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-    {
-        return title.to_owned();
+    use crate::model::ActivityKind;
+
+    match activity.kind {
+        ActivityKind::FileChange => {
+            let subject = match activity.file_changes.as_slice() {
+                [change] => Some(change.display_name().to_owned()),
+                changes if !changes.is_empty() => {
+                    Some(tr!("activity.file_count", count = changes.len()))
+                }
+                _ => None,
+            };
+            if subject.is_none()
+                && !crate::model::is_generic_activity_title(activity.kind, &activity.title)
+            {
+                return activity.title.clone();
+            }
+            match (activity.complete, activity.failed, subject) {
+                (false, _, Some(file)) => tr!("activity.editing_named_file", file = file),
+                (true, false, Some(file)) => tr!("activity.edited_named_file", file = file),
+                (true, true, Some(file)) => tr!("activity.edit_failed_named_file", file = file),
+                (false, _, None) => tr!("activity.editing_files"),
+                (true, false, None) => tr!("activity.edited_files"),
+                (true, true, None) => tr!("activity.edit_failed"),
+            }
+        }
+        ActivityKind::FileRead => {
+            let file = activity.display_target.as_deref().map(activity_path_name);
+            if file.is_none()
+                && !crate::model::is_generic_activity_title(activity.kind, &activity.title)
+            {
+                return activity.title.clone();
+            }
+            match (activity.complete, activity.failed, file) {
+                (false, _, Some(file)) => tr!("activity.reading_named_file", file = file),
+                (true, false, Some(file)) => tr!("activity.read_named_file", file = file),
+                (true, true, Some(file)) => tr!("activity.read_named_file_failed", file = file),
+                (false, _, None) => tr!("activity.reading_file"),
+                (true, false, None) => tr!("activity.read_file_completed"),
+                (true, true, None) => tr!("activity.read_file_failed"),
+            }
+        }
+        ActivityKind::FileSearch => {
+            let query = activity.display_target.as_deref();
+            if query.is_none()
+                && !crate::model::is_generic_activity_title(activity.kind, &activity.title)
+            {
+                return activity.title.clone();
+            }
+            match (activity.complete, activity.failed, query) {
+                (false, _, Some(query)) => tr!("activity.searching_files_for", query = query),
+                (true, false, Some(query)) => tr!("activity.searched_files_for", query = query),
+                (true, true, Some(query)) => tr!("activity.file_search_failed_for", query = query),
+                (false, _, None) => tr!("activity.searching_files"),
+                (true, false, None) => tr!("activity.searched_files"),
+                (true, true, None) => tr!("activity.file_search_failed"),
+            }
+        }
+        ActivityKind::FileList => {
+            let directory = activity.display_target.as_deref().map(activity_path_name);
+            if directory.is_none()
+                && !crate::model::is_generic_activity_title(activity.kind, &activity.title)
+            {
+                return activity.title.clone();
+            }
+            match (activity.complete, activity.failed, directory) {
+                (false, _, Some(directory)) => {
+                    tr!("activity.listing_files_in", directory = directory)
+                }
+                (true, false, Some(directory)) => {
+                    tr!("activity.listed_files_in", directory = directory)
+                }
+                (true, true, Some(directory)) => {
+                    tr!("activity.file_list_failed_in", directory = directory)
+                }
+                (false, _, None) => tr!("activity.listing_files"),
+                (true, false, None) => tr!("activity.listed_files"),
+                (true, true, None) => tr!("activity.file_list_failed"),
+            }
+        }
+        ActivityKind::Command => {
+            if let Some(command) = activity.display_target.as_deref() {
+                return match (activity.complete, activity.failed) {
+                    (false, _) => tr!("activity.running_named_command", command = command),
+                    (true, false) => tr!("activity.ran_named_command", command = command),
+                    (true, true) => tr!("activity.named_command_failed", command = command),
+                };
+            }
+            if !crate::model::is_generic_activity_title(activity.kind, &activity.title) {
+                return activity.title.clone();
+            }
+            match (activity.complete, activity.failed) {
+                (false, _) => tr!("activity.running_command"),
+                (true, false) => tr!("activity.ran_command"),
+                (true, true) => tr!("activity.command_failed"),
+            }
+        }
+        ActivityKind::Search => {
+            if let Some(query) = activity.display_target.as_deref() {
+                return match (activity.complete, activity.failed) {
+                    (false, _) => tr!("activity.searching_web_for", query = query),
+                    (true, false) => tr!("activity.searched_web_for", query = query),
+                    (true, true) => tr!("activity.web_search_failed_for", query = query),
+                };
+            }
+            if ActivityKind::from_tool_name(&activity.title) == ActivityKind::Search {
+                return match (activity.complete, activity.failed) {
+                    (false, _) => tr!("activity.searching_web"),
+                    (true, false) => tr!("activity.searched_the_web"),
+                    (true, true) => tr!("activity.web_search_failed"),
+                };
+            }
+            activity.title.clone()
+        }
+        ActivityKind::Plan => {
+            if !crate::model::is_generic_activity_title(activity.kind, &activity.title) {
+                return activity.title.clone();
+            }
+            match (activity.complete, activity.failed) {
+                (false, _) => tr!("activity.updating_plan"),
+                (true, false) => tr!("activity.updated_plan"),
+                (true, true) => tr!("activity.plan_update_failed"),
+            }
+        }
+        ActivityKind::Tool => activity
+            .display_target
+            .clone()
+            .unwrap_or_else(|| activity.title.clone()),
+        ActivityKind::Reasoning => activity.title.clone(),
     }
-    activity.title.clone()
+}
+
+fn activity_path_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_owned()
+}
+
+pub(super) fn activity_file_change_stats(activity: &ActivityItem) -> Option<(u64, u64)> {
+    if activity.kind != crate::model::ActivityKind::FileChange
+        || !activity.complete
+        || activity.failed
+        || activity.file_changes.is_empty()
+    {
+        return None;
+    }
+    let additions = activity
+        .file_changes
+        .iter()
+        .map(|change| change.additions)
+        .sum::<Option<u64>>()?;
+    let deletions = activity
+        .file_changes
+        .iter()
+        .map(|change| change.deletions)
+        .sum::<Option<u64>>()?;
+    Some((additions, deletions))
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -990,5 +1138,152 @@ mod message_time_tests {
 
         assert_eq!(activity_display_title(&titled), "Inspect Helium browser");
         assert_eq!(activity_display_title(&untitled), "Js");
+    }
+
+    #[test]
+    fn file_edit_title_and_stats_follow_the_activity_state() {
+        let mut activity = ActivityItem::new(
+            Some("edit-1".into()),
+            crate::model::ActivityKind::FileChange,
+            "apply_patch",
+            None,
+            false,
+        )
+        .with_arguments(Some(
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: /tmp/waku/src/app.rs\n@@\n-old\n+new\n+more\n*** End Patch"
+            })
+            .to_string(),
+        ));
+
+        assert_eq!(activity_display_title(&activity), "Editing app.rs");
+        assert_eq!(activity_file_change_stats(&activity), None);
+
+        activity.complete = true;
+        assert_eq!(activity_display_title(&activity), "Edited app.rs");
+        assert_eq!(activity_file_change_stats(&activity), Some((2, 1)));
+
+        activity.failed = true;
+        assert_eq!(activity_display_title(&activity), "Failed to edit app.rs");
+        assert_eq!(activity_file_change_stats(&activity), None);
+    }
+
+    #[test]
+    fn multi_file_edits_use_a_compact_count() {
+        let activity = ActivityItem::new(
+            Some("edit-2".into()),
+            crate::model::ActivityKind::FileChange,
+            "apply_patch",
+            None,
+            true,
+        )
+        .with_arguments(Some(
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-a\n+b\n*** Update File: src/b.rs\n@@\n-c\n+d\n*** End Patch"
+            })
+            .to_string(),
+        ));
+
+        assert_eq!(activity_display_title(&activity), "Edited 2 files");
+        assert_eq!(activity_file_change_stats(&activity), Some((2, 2)));
+    }
+
+    #[test]
+    fn file_tool_titles_include_the_target_and_state() {
+        let mut read = ActivityItem::new(
+            Some("read-1".into()),
+            crate::model::ActivityKind::FileRead,
+            "read",
+            None,
+            false,
+        )
+        .with_arguments(Some(
+            serde_json::json!({"filePath": "/tmp/waku/src/model.rs"}).to_string(),
+        ));
+        assert_eq!(activity_display_title(&read), "Reading model.rs");
+        read.complete = true;
+        assert_eq!(activity_display_title(&read), "Read model.rs");
+        read.failed = true;
+        assert_eq!(activity_display_title(&read), "Failed to read model.rs");
+
+        let search = ActivityItem::new(
+            Some("grep-1".into()),
+            crate::model::ActivityKind::FileSearch,
+            "grep",
+            None,
+            true,
+        )
+        .with_arguments(Some(
+            serde_json::json!({"pattern": "ActivityKind"}).to_string(),
+        ));
+        assert_eq!(
+            activity_display_title(&search),
+            "Searched files for ActivityKind"
+        );
+
+        let list = ActivityItem::new(
+            Some("list-1".into()),
+            crate::model::ActivityKind::FileList,
+            "ls",
+            None,
+            false,
+        )
+        .with_arguments(Some(
+            serde_json::json!({"path": "/tmp/waku/src"}).to_string(),
+        ));
+        assert_eq!(activity_display_title(&list), "Listing files in src");
+
+        let custom = ActivityItem::new(
+            Some("read-2".into()),
+            crate::model::ActivityKind::FileRead,
+            "Inspect generated manifest",
+            None,
+            true,
+        );
+        assert_eq!(
+            activity_display_title(&custom),
+            "Inspect generated manifest"
+        );
+    }
+
+    #[test]
+    fn command_web_search_and_plan_titles_include_their_state() {
+        let command = ActivityItem::new(
+            Some("command-1".into()),
+            crate::model::ActivityKind::Command,
+            "bash",
+            None,
+            true,
+        )
+        .with_arguments(Some(
+            serde_json::json!({
+                "description": "Run focused tests",
+                "command": "cargo test activity"
+            })
+            .to_string(),
+        ));
+        assert_eq!(activity_display_title(&command), "Ran cargo test activity");
+
+        let web_search = ActivityItem::new(
+            Some("search-1".into()),
+            crate::model::ActivityKind::Search,
+            "web_search",
+            None,
+            true,
+        )
+        .with_arguments(Some(serde_json::json!({"query": "Waku GPUI"}).to_string()));
+        assert_eq!(
+            activity_display_title(&web_search),
+            "Searched the web for Waku GPUI"
+        );
+
+        let plan = ActivityItem::new(
+            Some("plan-1".into()),
+            crate::model::ActivityKind::Plan,
+            "update_plan",
+            None,
+            false,
+        );
+        assert_eq!(activity_display_title(&plan), "Updating plan");
     }
 }

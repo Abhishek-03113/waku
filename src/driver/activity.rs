@@ -16,6 +16,7 @@ pub(super) fn tool_activity(
     failed: bool,
     complete: bool,
 ) -> ActivityItem {
+    let raw_arguments = arguments;
     let arguments = arguments
         .filter(|value| !value.is_null())
         .and_then(format_json);
@@ -42,6 +43,7 @@ pub(super) fn tool_activity(
 
     ActivityItem::new(source_id, kind, title, detail, complete)
         .with_arguments(arguments)
+        .with_activity_source(raw_arguments)
         .with_output(formatted_output)
         .with_image_urls(image_urls)
         .with_failed(failed)

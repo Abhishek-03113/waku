@@ -1010,7 +1010,9 @@ mod tests {
         assert!(matches!(&seen[0], DriverEvent::TextDelta(text) if text == "OK"));
         assert!(matches!(&seen[1], DriverEvent::ReasoningDelta(text) if text == "thinking"));
         assert!(matches!(&seen[2], DriverEvent::RichActivity(item)
-                if item.kind == ActivityKind::Search && !item.complete));
+                if item.kind == ActivityKind::FileRead
+                    && !item.complete
+                    && item.display_target.as_deref() == Some("a.txt")));
         assert!(matches!(&seen[3], DriverEvent::RichActivity(item)
                 if item.complete && item.title == "read"));
         assert!(matches!(

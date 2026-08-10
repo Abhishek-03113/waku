@@ -563,24 +563,144 @@ activity.output_with_exit_code:
 activity.run_command:
   en: Run command
   zh-CN: 运行命令
+activity.running_named_command:
+  en: Running %{command}
+  zh-CN: 正在运行 %{command}
+activity.ran_named_command:
+  en: Ran %{command}
+  zh-CN: 已运行 %{command}
+activity.named_command_failed:
+  en: "Command failed: %{command}"
+  zh-CN: "命令执行失败：%{command}"
+activity.running_command:
+  en: Running command
+  zh-CN: 正在运行命令
+activity.ran_command:
+  en: Ran command
+  zh-CN: 已运行命令
+activity.command_failed:
+  en: Command failed
+  zh-CN: 命令执行失败
 activity.edit_file:
   en: Edit file
   zh-CN: 编辑文件
 activity.write_file:
   en: Write file
   zh-CN: 写入文件
+activity.editing_named_file:
+  en: Editing %{file}
+  zh-CN: 正在编辑 %{file}
+activity.edited_named_file:
+  en: Edited %{file}
+  zh-CN: 已编辑 %{file}
+activity.edit_failed_named_file:
+  en: Failed to edit %{file}
+  zh-CN: 编辑 %{file} 失败
+activity.editing_files:
+  en: Editing files
+  zh-CN: 正在编辑文件
+activity.edited_files:
+  en: Edited files
+  zh-CN: 已编辑文件
+activity.edit_failed:
+  en: Failed to edit files
+  zh-CN: 编辑文件失败
+activity.file_count:
+  en: "%{count} files"
+  zh-CN: "%{count} 个文件"
 activity.read_file:
   en: Read file
   zh-CN: 读取文件
+activity.reading_named_file:
+  en: Reading %{file}
+  zh-CN: 正在读取 %{file}
+activity.read_named_file:
+  en: Read %{file}
+  zh-CN: 已读取 %{file}
+activity.read_named_file_failed:
+  en: Failed to read %{file}
+  zh-CN: 读取 %{file} 失败
+activity.reading_file:
+  en: Reading file
+  zh-CN: 正在读取文件
+activity.read_file_completed:
+  en: Read file
+  zh-CN: 已读取文件
+activity.read_file_failed:
+  en: Failed to read file
+  zh-CN: 读取文件失败
 activity.search_files:
   en: Search files
   zh-CN: 搜索文件
 activity.find_files:
   en: Find files
   zh-CN: 查找文件
+activity.searching_files_for:
+  en: Searching files for %{query}
+  zh-CN: 正在文件中搜索 %{query}
+activity.searched_files_for:
+  en: Searched files for %{query}
+  zh-CN: 已在文件中搜索 %{query}
+activity.file_search_failed_for:
+  en: Failed to search files for %{query}
+  zh-CN: 在文件中搜索 %{query} 失败
+activity.searching_files:
+  en: Searching files
+  zh-CN: 正在搜索文件
+activity.searched_files:
+  en: Searched files
+  zh-CN: 已搜索文件
+activity.file_search_failed:
+  en: Failed to search files
+  zh-CN: 搜索文件失败
 activity.list_files:
   en: List files
   zh-CN: 列出文件
+activity.listing_files_in:
+  en: Listing files in %{directory}
+  zh-CN: 正在列出 %{directory} 中的文件
+activity.listed_files_in:
+  en: Listed files in %{directory}
+  zh-CN: 已列出 %{directory} 中的文件
+activity.file_list_failed_in:
+  en: Failed to list files in %{directory}
+  zh-CN: 无法列出 %{directory} 中的文件
+activity.listing_files:
+  en: Listing files
+  zh-CN: 正在列出文件
+activity.listed_files:
+  en: Listed files
+  zh-CN: 已列出文件
+activity.file_list_failed:
+  en: Failed to list files
+  zh-CN: 无法列出文件
+activity.searching_web_for:
+  en: Searching the web for %{query}
+  zh-CN: 正在网页中搜索 %{query}
+activity.searched_web_for:
+  en: Searched the web for %{query}
+  zh-CN: 已在网页中搜索 %{query}
+activity.web_search_failed_for:
+  en: Failed to search the web for %{query}
+  zh-CN: 在网页中搜索 %{query} 失败
+activity.searching_web:
+  en: Searching the web
+  zh-CN: 正在搜索网页
+activity.searched_the_web:
+  en: Searched the web
+  zh-CN: 已搜索网页
+activity.web_search_failed:
+  en: Failed to search the web
+  zh-CN: 搜索网页失败
+activity.updating_plan:
+  en: Updating plan
+  zh-CN: 正在更新计划
+activity.updated_plan:
+  en: Updated plan
+  zh-CN: 已更新计划
+activity.plan_update_failed:
+  en: Failed to update plan
+  zh-CN: 更新计划失败
 activity.activity:
   en: Activity
   zh-CN: 操作
@@ -611,6 +731,24 @@ activity.file_edit:
 activity.file_edits:
   en: file edits
   zh-CN: 文件修改
+activity.file_read:
+  en: file read
+  zh-CN: 文件读取
+activity.file_reads:
+  en: file reads
+  zh-CN: 文件读取
+activity.file_search:
+  en: file search
+  zh-CN: 文件搜索
+activity.file_searches:
+  en: file searches
+  zh-CN: 文件搜索
+activity.file_list:
+  en: file listing
+  zh-CN: 文件列表
+activity.file_lists:
+  en: file listings
+  zh-CN: 文件列表
 activity.search:
   en: search
   zh-CN: 搜索

@@ -87,6 +87,7 @@ impl Waku {
                             && !activity.complete)
                 });
                 if let Some(activity) = matching {
+                    let has_arguments = item.arguments.is_some();
                     activity.kind = item.kind;
                     activity.title = item.title;
                     activity.complete = item.complete;
@@ -102,6 +103,14 @@ impl Waku {
                     }
                     if !item.image_urls.is_empty() {
                         activity.image_urls = item.image_urls;
+                    }
+                    if !item.file_changes.is_empty() {
+                        activity.file_changes = item.file_changes;
+                    }
+                    if item.display_target.is_some()
+                        && (activity.display_target.is_none() || has_arguments)
+                    {
+                        activity.display_target = item.display_target;
                     }
                     session.updated_at = unix_time();
                     runtime.stream_phase = Some(StreamPhase::Activity);

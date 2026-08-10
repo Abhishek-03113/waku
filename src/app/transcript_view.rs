@@ -1589,6 +1589,8 @@ impl Waku {
             let id = activity.id;
             let sections = activity_disclosure_sections(activity);
             let preview = activity_preview(activity);
+            let display_title = activity_display_title(activity);
+            let file_change_stats = activity_file_change_stats(activity);
             let has_detail = !sections.is_empty();
             let item_expanded = has_detail && self.expanded_activity_items.contains(&id);
             let mut item = div().flex().flex_col().child(
@@ -1632,9 +1634,32 @@ impl Waku {
                         div()
                             .flex_none()
                             .max_w(px(300.0))
-                            .truncate()
-                            .text_color(theme.text_secondary)
-                            .child(SharedString::from(activity_display_title(activity))),
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.text_secondary)
+                                    .child(SharedString::from(display_title)),
+                            )
+                            .when_some(file_change_stats, |title, (additions, deletions)| {
+                                title
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(theme.success)
+                                            .child(SharedString::from(format!("+{additions}"))),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(theme.danger)
+                                            .child(SharedString::from(format!("-{deletions}"))),
+                                    )
+                            }),
                     )
                     .child(
                         div()

@@ -348,30 +348,7 @@ fn truncate_error(message: &str, max_chars: usize) -> String {
 }
 
 pub(super) fn classify_tool(name: &str) -> ActivityKind {
-    let normalized = name.to_ascii_lowercase();
-    if normalized.contains("bash")
-        || normalized.contains("command")
-        || normalized.contains("shell")
-        || normalized.contains("terminal")
-    {
-        ActivityKind::Command
-    } else if normalized.contains("edit")
-        || normalized.contains("write")
-        || normalized.contains("patch")
-        || normalized.contains("create")
-    {
-        ActivityKind::FileChange
-    } else if normalized.contains("search")
-        || normalized.contains("grep")
-        || normalized.contains("read")
-        || normalized.contains("find")
-    {
-        ActivityKind::Search
-    } else if normalized.contains("todo") || normalized.contains("plan") {
-        ActivityKind::Plan
-    } else {
-        ActivityKind::Tool
-    }
+    ActivityKind::from_tool_name(name)
 }
 
 #[cfg(test)]
@@ -389,6 +366,22 @@ mod tests {
             ),
             process_directory: PathBuf::from("/tmp/waku-computer-use/session"),
         }
+    }
+
+    #[test]
+    fn todo_tools_are_plans_not_file_writes() {
+        assert_eq!(classify_tool("TodoWrite"), ActivityKind::Plan);
+        assert_eq!(classify_tool("todo_write"), ActivityKind::Plan);
+        assert_eq!(classify_tool("apply_patch"), ActivityKind::FileChange);
+        assert_eq!(classify_tool("read"), ActivityKind::FileRead);
+        assert_eq!(classify_tool("ReadFile"), ActivityKind::FileRead);
+        assert_eq!(classify_tool("grep"), ActivityKind::FileSearch);
+        assert_eq!(classify_tool("glob"), ActivityKind::FileSearch);
+        assert_eq!(classify_tool("ls"), ActivityKind::FileList);
+        assert_eq!(classify_tool("websearch"), ActivityKind::Search);
+        assert_eq!(classify_tool("create_thread"), ActivityKind::Tool);
+        assert_eq!(classify_tool("read_mcp_resource"), ActivityKind::Tool);
+        assert_eq!(classify_tool("list_threads"), ActivityKind::Tool);
     }
 
     #[test]

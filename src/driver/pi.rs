@@ -1039,12 +1039,7 @@ fn pi_error_message(value: &Value) -> String {
 }
 
 fn classify_tool(name: &str) -> ActivityKind {
-    match name.to_ascii_lowercase().as_str() {
-        "bash" => ActivityKind::Command,
-        "edit" | "write" => ActivityKind::FileChange,
-        "read" | "grep" | "find" | "ls" => ActivityKind::Search,
-        _ => ActivityKind::Tool,
-    }
+    ActivityKind::from_tool_name(name)
 }
 
 fn tool_title(name: &str) -> String {
@@ -1288,6 +1283,8 @@ mod tests {
             panic!("expected a rich Pi tool activity");
         };
         assert_eq!(started.title, "Inspect Pi source");
+        assert_eq!(started.kind, ActivityKind::FileRead);
+        assert_eq!(started.display_target.as_deref(), Some("src/main.rs"));
         assert!(
             started
                 .arguments
