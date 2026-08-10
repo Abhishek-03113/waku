@@ -538,7 +538,6 @@ struct TranscriptAnchor {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct NavigationRailVisualState {
-    active_turn: Option<Uuid>,
     emphasized_turn: Option<Uuid>,
 }
 
@@ -920,7 +919,6 @@ pub struct Waku {
     /// first use and live as long as the window.
     menus: RefCell<HashMap<SharedString, ContextMenuHandle>>,
     navigation_rail: Entity<ConversationNavigationRail>,
-    navigation_rail_active_scale_enabled: Rc<Cell<bool>>,
     navigation_rail_reset_generation: Cell<u64>,
     /// The unix second the pending time-label wake-up targets, or `None` when
     /// none is armed. See `schedule_time_label_wake`.
@@ -1321,30 +1319,21 @@ impl Waku {
         let branch_picker_list_state = ListState::new(0, ListAlignment::Top, px(152.0));
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
-        let navigation_rail_active_scale_enabled = Rc::new(Cell::new(false));
         transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
-            let navigation_rail_active_scale_enabled = navigation_rail_active_scale_enabled.clone();
             move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
-                if event.is_scrolled {
-                    navigation_rail_active_scale_enabled.set(true);
-                }
                 window.refresh();
             }
         });
         anchored_transcript_rows.set_scroll_handler({
             let transcript_is_scrolled = transcript_is_scrolled.clone();
             let transcript_anchor_following = transcript_anchor_following.clone();
-            let navigation_rail_active_scale_enabled = navigation_rail_active_scale_enabled.clone();
             move |event, window, _| {
                 transcript_is_scrolled.set(event.is_scrolled);
                 transcript_anchor_following.set(false);
-                if event.is_scrolled {
-                    navigation_rail_active_scale_enabled.set(true);
-                }
                 window.refresh();
             }
         });
@@ -1769,7 +1758,6 @@ impl Waku {
                 transcript_scrollbar: ScrollbarState::new(),
                 menus: RefCell::new(HashMap::new()),
                 navigation_rail: navigation_rail.clone(),
-                navigation_rail_active_scale_enabled,
                 navigation_rail_reset_generation: Cell::new(0),
                 time_label_wake: Cell::new(None),
                 time_label_wake_generation: Cell::new(0),

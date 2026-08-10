@@ -487,22 +487,14 @@ pub(super) fn active_navigation_turn_index(
 
 pub(super) fn navigation_rail_scale(
     turn_index: usize,
-    active_turn_index: Option<usize>,
     emphasized_turn_index: Option<usize>,
 ) -> f32 {
-    let active_scale: f32 = if active_turn_index == Some(turn_index) {
-        0.50
-    } else {
-        0.25
-    };
-    let emphasis_scale =
-        emphasized_turn_index.map_or(0.25, |emphasized| match turn_index.abs_diff(emphasized) {
-            0 => 1.0,
-            1 => 0.68,
-            2 => 0.44,
-            _ => 0.25,
-        });
-    active_scale.max(emphasis_scale)
+    emphasized_turn_index.map_or(0.25, |emphasized| match turn_index.abs_diff(emphasized) {
+        0 => 1.0,
+        1 => 0.68,
+        2 => 0.44,
+        _ => 0.25,
+    })
 }
 
 /// How many ticks the rail draws: one per turn while they fit, otherwise as
