@@ -16,8 +16,7 @@ fn prepare_submission(
     driver_start: Option<anyhow::Result<DriverStartRequest>>,
     session_id: Uuid,
     prompt: &str,
-    baseline_count: usize,
-    baseline_in_flight: bool,
+    turn_count: usize,
 ) -> anyhow::Result<PreparedSubmission> {
     let workspace = match workspace {
         SessionWorkspace::NewWorktree { base_branch } => {
@@ -40,17 +39,11 @@ fn prepare_submission(
     };
     let project_path = workspace.path().unwrap_or(&project.path);
 
-    // The pre-turn checkpoint is what a later rewind restores to. A capture
-    // already running for the same turn writes this exact ref, so starting a
-    // second `git add -A` would only race equivalent work over the workspace.
-    let checkpoint_warning = (!baseline_in_flight)
-        .then(|| {
-            let git_ref = checkpoint::checkpoint_ref(session_id, baseline_count);
-            (!checkpoint::has_ref(project_path, &git_ref))
-                .then(|| checkpoint::capture_turn(project_path, session_id, baseline_count).err())
-                .flatten()
-        })
-        .flatten()
+    // Every turn gets its own immutable starting snapshot. Reusing the prior
+    // response's ending ref would attribute branch switches or terminal edits
+    // made between turns to the next response.
+    let checkpoint_warning = checkpoint::capture_turn_start(project_path, session_id, turn_count)
+        .err()
         .map(|error| tr!("errors.capture_pre_turn_checkpoint", error = error));
 
     // Process startup can synchronously resolve executables, bind sockets,
@@ -105,15 +98,22 @@ fn perform_message_rewind(
     mut request: MessageRewindRequest,
 ) -> Result<PreparedMessageRewind, String> {
     let session_id = request.session_id;
-    let checkpoint_ref = checkpoint::checkpoint_ref(session_id, request.retained_turn_count);
-    if !checkpoint::has_ref(&request.project_path, &checkpoint_ref) {
+    let turn_start_ref =
+        checkpoint::turn_start_ref(session_id, request.retained_turn_count.saturating_add(1));
+    let retained_ref = checkpoint::checkpoint_ref(session_id, request.retained_turn_count);
+    let restore_ref = if checkpoint::has_ref(&request.project_path, &turn_start_ref) {
+        turn_start_ref
+    } else {
+        retained_ref
+    };
+    if !checkpoint::has_ref(&request.project_path, &restore_ref) {
         return Err(tr!("session.pre_turn_checkpoint_missing"));
     }
 
     let safety_ref = format!("refs/waku/revert-backup-{session_id}-{}", Uuid::new_v4());
     checkpoint::capture_ref(&request.project_path, &safety_ref)
         .map_err(|error| tr!("errors.create_rewind_snapshot", error = error))?;
-    if let Err(error) = checkpoint::restore_ref(&request.project_path, &checkpoint_ref) {
+    if let Err(error) = checkpoint::restore_ref(&request.project_path, &restore_ref) {
         return Err(
             match checkpoint::restore_ref(&request.project_path, &safety_ref) {
                 Ok(()) => {
@@ -903,6 +903,31 @@ impl Waku {
         }
     }
 
+    fn checkpoint_capture_pending(&self, session_id: Uuid, turn_count: usize) -> bool {
+        self.checkpoint_captures_in_flight
+            .contains(&(session_id, turn_count))
+            || self
+                .pending_checkpoint_captures
+                .iter()
+                .any(|capture| capture.session_id == session_id && capture.turn_count == turn_count)
+    }
+
+    fn ending_checkpoint_pending(&self, session_id: Uuid) -> bool {
+        self.state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.turns.last())
+            .filter(|turn| turn.status != TurnStatus::Running)
+            .is_some_and(|turn| self.checkpoint_capture_pending(session_id, turn.turn_count))
+    }
+
+    fn defer_queue_drain(&mut self, session_id: Uuid) {
+        if !self.pending_queue_drains.contains(&session_id) {
+            self.pending_queue_drains.push(session_id);
+        }
+    }
+
     /// Queues the newest finished turn's checkpoint for capture.
     ///
     /// Bookkeeping only. The capture itself is upwards of ten `git`
@@ -927,6 +952,9 @@ impl Waku {
         else {
             return;
         };
+        if self.checkpoint_capture_pending(session_id, turn_count) {
+            return;
+        }
         let Some(project_path) = self
             .workspace_path_for_session(session)
             .map(std::path::Path::to_path_buf)
@@ -1012,12 +1040,16 @@ impl Waku {
                     if let Some(turn_id) = attached_turn_id
                         && selected
                     {
-                        // The next queued prompt can already be visible when
-                        // capture lands. Reconcile a standalone card by row
-                        // identity, then remeasure the terminal response when
-                        // the card is hosted inline before its footer.
+                        // Reconcile a standalone card by row identity, then
+                        // remeasure the terminal response when the card is
+                        // hosted inline before its footer.
                         waku.splice_transcript_rows_after_visibility_change(&previous_kinds);
                         waku.remeasure_changed_files(turn_id);
+                    }
+                    let resume_queue = waku.pending_queue_drains.contains(&session_id);
+                    if resume_queue {
+                        waku.pending_queue_drains.retain(|id| *id != session_id);
+                        waku.drain_queued_message(session_id, cx);
                     }
                     cx.notify();
                     if attached_turn_id.is_some() {
@@ -2011,7 +2043,10 @@ impl Waku {
         else {
             return;
         };
-        if session.is_busy() || session.queued_messages.is_empty() {
+        if session.is_busy()
+            || session.queued_messages.is_empty()
+            || self.ending_checkpoint_pending(session_id)
+        {
             return;
         }
         let Some(prompt) = self
@@ -2042,6 +2077,11 @@ impl Waku {
         else {
             return;
         };
+        if self.ending_checkpoint_pending(session_id) {
+            self.enqueue_follow_up(session_id, prompt, cx);
+            self.defer_queue_drain(session_id);
+            return;
+        }
         if session.status.is_busy() {
             self.enqueue_follow_up(session_id, prompt, cx);
             return;
@@ -2071,11 +2111,6 @@ impl Waku {
             cx.notify();
             return;
         };
-        let baseline_count = next_turn_count - 1;
-        let baseline_in_flight = self
-            .checkpoint_captures_in_flight
-            .contains(&(session_id, baseline_count));
-
         // Busy is visible before any Git work begins. The separate transient
         // set keeps this non-cancellable phase visually distinct from a
         // connecting provider, whose runtime already has a working Stop path.
@@ -2134,8 +2169,7 @@ impl Waku {
                         driver_start,
                         session_id,
                         &prompt,
-                        baseline_count,
-                        baseline_in_flight,
+                        next_turn_count,
                     )
                 })
                 .await;
@@ -2453,7 +2487,11 @@ impl Waku {
         if !self.pending_queue_drains.is_empty() {
             let drains = std::mem::take(&mut self.pending_queue_drains);
             for session_id in drains {
-                self.drain_queued_message(session_id, cx);
+                if self.ending_checkpoint_pending(session_id) {
+                    self.defer_queue_drain(session_id);
+                } else {
+                    self.drain_queued_message(session_id, cx);
+                }
             }
             changed = true;
         }

@@ -823,9 +823,10 @@ pub struct Waku {
     /// its resident session while producing a branch.
     response_fork_preparations: HashMap<Uuid, usize>,
     /// Sessions whose just-settled turn should start the next queued
-    /// follow-up. Processed at the end of the driver-event drain so the
-    /// session's runtime has already been re-inserted before a new prompt
-    /// reuses it.
+    /// follow-up. The request stays here until the ending checkpoint lands, so
+    /// the next provider cannot edit the worktree while that snapshot is still
+    /// being collected; it then reuses the runtime after the event drain has
+    /// re-inserted it.
     pending_queue_drains: Vec<Uuid>,
     stream_state_dirty: bool,
     last_stream_save: Instant,

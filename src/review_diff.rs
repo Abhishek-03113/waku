@@ -294,10 +294,14 @@ fn resolve_range(cwd: &Path, source: Source) -> anyhow::Result<Range> {
             if turn_count == 0 {
                 bail!("the first checkpoint is a baseline, not a completed turn");
             }
-            let from_ref = checkpoint::checkpoint_ref(session_id, turn_count - 1);
+            let diff_base_ref = checkpoint::turn_diff_base_ref(session_id, turn_count);
+            let start_ref = checkpoint::turn_start_ref(session_id, turn_count);
+            let legacy_ref = checkpoint::checkpoint_ref(session_id, turn_count - 1);
             let to_ref = checkpoint::checkpoint_ref(session_id, turn_count);
             Range {
-                from: resolve(cwd, &from_ref)
+                from: resolve(cwd, &diff_base_ref)
+                    .or_else(|| resolve(cwd, &start_ref))
+                    .or_else(|| resolve(cwd, &legacy_ref))
                     .ok_or_else(|| anyhow!("the turn's starting checkpoint is unavailable"))?,
                 to: resolve(cwd, &to_ref)
                     .ok_or_else(|| anyhow!("the turn's ending checkpoint is unavailable"))?,
@@ -1158,6 +1162,66 @@ index 1111111..2222222 100644
                 .iter()
                 .all(|line| !line.content.contains("after_turn"))
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn last_turn_review_uses_the_branch_aware_diff_base() {
+        let root = repository();
+        git_ok(&root, &["switch", "-c", "feature"]);
+        fs::write(root.join("feature-only.rs"), "fn feature() {}\n").unwrap();
+        git_ok(&root, &["add", "feature-only.rs"]);
+        git_ok(
+            &root,
+            &[
+                "-c",
+                "user.name=Waku Tests",
+                "-c",
+                "user.email=waku@example.com",
+                "commit",
+                "-m",
+                "feature baseline",
+            ],
+        );
+        git_ok(&root, &["switch", "main"]);
+        fs::write(root.join("main-only.rs"), "fn main_only() {}\n").unwrap();
+        git_ok(&root, &["add", "main-only.rs"]);
+        git_ok(
+            &root,
+            &[
+                "-c",
+                "user.name=Waku Tests",
+                "-c",
+                "user.email=waku@example.com",
+                "commit",
+                "-m",
+                "main baseline",
+            ],
+        );
+
+        let session_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        checkpoint::capture_turn_start(&root, session_id, 1).unwrap();
+        git_ok(&root, &["switch", "feature"]);
+        fs::write(
+            root.join("src/lib.rs"),
+            "fn baseline() {}\nfn from_turn() {}\n",
+        )
+        .unwrap();
+        checkpoint::capture_turn(&root, session_id, 1).unwrap();
+
+        let snapshot = collect(
+            &root,
+            Source::LastTurn {
+                session_id,
+                turn_id,
+                turn_count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.files[0].path, "src/lib.rs");
+        assert_eq!((snapshot.additions, snapshot.deletions), (1, 0));
         fs::remove_dir_all(root).ok();
     }
 }
