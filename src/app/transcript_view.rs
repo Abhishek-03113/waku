@@ -902,6 +902,7 @@ impl Waku {
         metrics: MarkdownMetrics,
     ) -> MarkdownCtx<'a> {
         MarkdownCtx::new(row, palette, metrics, self.transcript_selection.clone())
+            .with_link_handler(self.markdown_link_handler.clone())
     }
 
     /// The menu handle for `id`, created on first use.

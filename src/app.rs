@@ -1019,6 +1019,10 @@ pub struct Waku {
     message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
     /// Parsed markdown for reasoning blocks, keyed by transcript block index.
     block_markdown: RefCell<HashMap<usize, MarkdownView>>,
+    /// One allocation for every transcript markdown context to share. The
+    /// callback knows about the active workspace; the renderer deliberately
+    /// does not.
+    markdown_link_handler: md::render::LinkHandler,
     /// Transcript-wide text selection, spanning messages and tool output.
     transcript_selection: TranscriptSelection,
     /// Independent selection for the transient toast message. Keeping it out
@@ -1805,6 +1809,18 @@ impl Waku {
             })
             .detach();
 
+            let markdown_link_handler: md::render::LinkHandler = {
+                let waku = cx.entity().downgrade();
+                Rc::new(move |target, _, cx| {
+                    let handled = waku
+                        .update(cx, |waku, cx| waku.open_transcript_link(target, cx))
+                        .unwrap_or(false);
+                    if !handled {
+                        cx.open_url(target);
+                    }
+                })
+            };
+
             Self {
                 state,
                 store,
@@ -2017,6 +2033,7 @@ impl Waku {
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),
                 block_markdown: RefCell::new(HashMap::new()),
+                markdown_link_handler,
                 transcript_selection: TranscriptSelection::default(),
                 toast_selection: TranscriptSelection::default(),
                 transcript_scrollbar: ScrollbarState::new(),

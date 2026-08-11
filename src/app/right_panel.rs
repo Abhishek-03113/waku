@@ -17,6 +17,157 @@ pub(super) struct WorkingTreeEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum TranscriptLinkRoute {
+    ProjectFile(String),
+    Finder(PathBuf),
+    External,
+}
+
+fn positive_number(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<usize>().is_ok_and(|value| value > 0)
+}
+
+fn line_fragment(fragment: &str) -> bool {
+    let Some(location) = fragment.strip_prefix('L') else {
+        return false;
+    };
+    match location.split_once('C') {
+        Some((line, column)) => positive_number(line) && positive_number(column),
+        None => positive_number(location),
+    }
+}
+
+/// Removes the `:line`, `:line:column`, or `#LlineCcolumn` suffixes Codex uses
+/// in clickable local-file references. The location is not yet consumed by
+/// Waku's compact editor, but it must not become part of the filesystem path.
+fn strip_file_location(target: &str) -> &str {
+    if let Some((path, fragment)) = target.rsplit_once('#')
+        && line_fragment(fragment)
+    {
+        return path;
+    }
+
+    let Some((before_last, last)) = target.rsplit_once(':') else {
+        return target;
+    };
+    if !positive_number(last) {
+        return target;
+    }
+    if let Some((path, line)) = before_last.rsplit_once(':')
+        && positive_number(line)
+    {
+        path
+    } else {
+        before_last
+    }
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_decode_file_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let (Some(high), Some(low)) = (
+                bytes.get(index + 1).copied().and_then(hex_value),
+                bytes.get(index + 2).copied().and_then(hex_value),
+            )
+        {
+            decoded.push(high << 4 | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| path.to_owned())
+}
+
+fn markdown_file_link_path(target: &str) -> Option<PathBuf> {
+    let target = strip_file_location(target.trim());
+    let path = if target.starts_with('/') {
+        target
+    } else if let Some(path) = target.strip_prefix("file://") {
+        if path.starts_with('/') {
+            path
+        } else if let Some(path) = path.strip_prefix("localhost")
+            && path.starts_with('/')
+        {
+            path
+        } else {
+            return None;
+        }
+    } else if let Some(path) = target.strip_prefix("file:")
+        && path.starts_with('/')
+    {
+        path
+    } else {
+        return None;
+    };
+    let path = PathBuf::from(percent_decode_file_path(path));
+    path.is_absolute().then_some(path)
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<String> {
+    fn relative(workspace: &Path, target: &Path) -> Option<String> {
+        let relative = target.strip_prefix(workspace).ok()?;
+        if relative.as_os_str().is_empty() {
+            return None;
+        }
+        Some(relative.to_string_lossy().into_owned())
+    }
+
+    let workspace = normalized_path(workspace);
+    let target = normalized_path(target);
+    match (
+        std::fs::canonicalize(&workspace),
+        std::fs::canonicalize(&target),
+    ) {
+        (Ok(workspace), Ok(target)) => relative(&workspace, &target),
+        _ => relative(&workspace, &target),
+    }
+}
+
+fn transcript_link_route(target: &str, workspace: Option<&Path>) -> TranscriptLinkRoute {
+    let Some(path) = markdown_file_link_path(target) else {
+        return TranscriptLinkRoute::External;
+    };
+    let path = normalized_path(&path);
+    if let Some(relative_path) =
+        workspace.and_then(|workspace| workspace_relative_file_path(workspace, &path))
+    {
+        TranscriptLinkRoute::ProjectFile(relative_path)
+    } else {
+        TranscriptLinkRoute::Finder(path)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ReviewDiffTreeRow {
     Directory {
         path: String,
@@ -746,6 +897,44 @@ fn tab_scroll_fade(
 mod tests {
     use super::*;
 
+    #[test]
+    fn transcript_file_links_route_by_the_active_workspace() {
+        let workspace = Path::new("/Users/egoist/dev/waku");
+
+        assert_eq!(
+            transcript_link_route(
+                "/Users/egoist/dev/waku/src/app/right_panel.rs:1596",
+                Some(workspace),
+            ),
+            TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
+        );
+        assert_eq!(
+            transcript_link_route(
+                "/Users/egoist/dev/waku/src/app/right_panel.rs:1596:8",
+                Some(workspace),
+            ),
+            TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
+        );
+        assert_eq!(
+            transcript_link_route(
+                "file:///Users/egoist/dev/waku/My%20File.rs#L12C4",
+                Some(workspace),
+            ),
+            TranscriptLinkRoute::ProjectFile("My File.rs".into())
+        );
+        assert_eq!(
+            transcript_link_route(
+                "/Users/egoist/dev/waku/../kero/src/app.rs:20",
+                Some(workspace),
+            ),
+            TranscriptLinkRoute::Finder(PathBuf::from("/Users/egoist/dev/kero/src/app.rs"))
+        );
+        assert_eq!(
+            transcript_link_route("https://example.com/file.rs:12", Some(workspace)),
+            TranscriptLinkRoute::External
+        );
+    }
+
     fn review_file(path: &str) -> crate::review_diff::File {
         crate::review_diff::File {
             path: path.into(),
@@ -1272,6 +1461,18 @@ mod tests {
 }
 
 impl Waku {
+    pub(super) fn open_transcript_link(&mut self, target: &str, cx: &mut Context<Self>) -> bool {
+        match transcript_link_route(target, self.selected_workspace_path()) {
+            TranscriptLinkRoute::ProjectFile(relative_path) => {
+                self.open_right_panel_surface(RightPanelSurface::Files, cx);
+                self.open_right_panel_file(relative_path, cx);
+            }
+            TranscriptLinkRoute::Finder(path) => crate::platform::reveal_in_finder(&path),
+            TranscriptLinkRoute::External => return false,
+        }
+        true
+    }
+
     pub(super) fn store_selected_right_panel_state(&mut self) {
         let Some(session_id) = self.state.selected_session else {
             return;

@@ -43,6 +43,13 @@ pub type TextGeometry = TextLayout;
 /// The transcript's shared selection handles, specialised to real geometry.
 pub type TranscriptSelection = SelectionState<TextGeometry>;
 
+/// An optional app-owned override for clicked markdown links.
+///
+/// The markdown renderer stays unaware of projects and workspace surfaces;
+/// callers that do have that context can intercept a link, while every other
+/// markdown view continues to use GPUI's ordinary URL opener.
+pub type LinkHandler = Rc<dyn Fn(&str, &mut Window, &mut gpui::App)>;
+
 // ── Layout metrics ─────────────────────────────────────────────────────────
 //
 // Everything in this block participates in measurement, so these are the only
@@ -409,6 +416,7 @@ pub struct Ctx<'a> {
     palette: &'a Palette,
     metrics: Metrics,
     selection: TranscriptSelection,
+    link_handler: Option<LinkHandler>,
     /// Cross-frame flatten cache, when this render has one to consult.
     cache: Option<&'a MarkdownView>,
     next_ordinal: Cell<usize>,
@@ -428,6 +436,7 @@ impl<'a> Ctx<'a> {
             palette,
             metrics,
             selection,
+            link_handler: None,
             cache: None,
             next_ordinal: Cell::new(0),
             starts_block: Cell::new(true),
@@ -438,12 +447,18 @@ impl<'a> Ctx<'a> {
         &self.selection
     }
 
+    pub fn with_link_handler(mut self, handler: LinkHandler) -> Self {
+        self.link_handler = Some(handler);
+        self
+    }
+
     fn with_cache(&self, view: &'a MarkdownView) -> Self {
         Self {
             row: self.row.clone(),
             palette: self.palette,
             metrics: self.metrics,
             selection: self.selection.clone(),
+            link_handler: self.link_handler.clone(),
             cache: Some(view),
             next_ordinal: Cell::new(self.next_ordinal.get()),
             starts_block: Cell::new(self.starts_block.get()),
@@ -483,6 +498,7 @@ fn text_element_with_selection(
     flat: &FlatText,
     key: TextKey,
     selection: TranscriptSelection,
+    link_handler: Option<LinkHandler>,
     code_wash: Hsla,
     selection_wash: Hsla,
     block_break: bool,
@@ -496,9 +512,13 @@ fn text_element_with_selection(
         let (ranges, urls): (Vec<_>, Vec<_>) = flat.links.iter().cloned().unzip();
         let id = SharedString::from(format!("{}-t{}", key.row, key.index));
         InteractiveText::new(id, styled)
-            .on_click(ranges, move |clicked, _, cx| {
+            .on_click(ranges, move |clicked, window, cx| {
                 if let Some(url) = urls.get(clicked) {
-                    cx.open_url(url);
+                    if let Some(handler) = &link_handler {
+                        handler(url, window, cx);
+                    } else {
+                        cx.open_url(url);
+                    }
                 }
             })
             .into_any_element()
@@ -562,6 +582,7 @@ fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
         flat,
         key,
         ctx.selection.clone(),
+        ctx.link_handler.clone(),
         ctx.palette.code_wash,
         ctx.palette.selection,
         ctx.take_block_break(),
@@ -582,7 +603,15 @@ pub fn selectable_flat_text(
     selection_wash: Hsla,
     block_break: bool,
 ) -> AnyElement {
-    text_element_with_selection(flat, key, selection, code_wash, selection_wash, block_break)
+    text_element_with_selection(
+        flat,
+        key,
+        selection,
+        None,
+        code_wash,
+        selection_wash,
+        block_break,
+    )
 }
 
 /// A selectable plain-text element: user messages, tool output, anything that
