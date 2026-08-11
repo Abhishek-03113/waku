@@ -647,28 +647,6 @@ impl Waku {
         self.open_right_panel_surface(RightPanelSurface::BackgroundWork { key, title }, cx);
     }
 
-    pub(super) fn toggle_background_work_summary(
-        &mut self,
-        session_id: Uuid,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .background_work
-            .get(&session_id)
-            .is_none_or(|registry| registry.items.is_empty())
-        {
-            return;
-        }
-        if self.state.selected_session != Some(session_id) {
-            self.select_session(session_id, cx);
-        }
-        let handle = self.menu_handle(BACKGROUND_SUMMARY_MENU_ID, cx);
-        window.defer(cx, move |window, cx| {
-            crate::ui::menu::toggle_popover(&handle, MenuAlign::BelowRight, window, cx);
-        });
-    }
-
     pub(super) fn render_background_work_summary(&self, cx: &mut Context<Self>) -> AnyElement {
         let session = self.selected_session();
         let session_id = session.map(|session| session.id);
