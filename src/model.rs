@@ -851,11 +851,22 @@ impl AgentSession {
                 }
             }
         }
+        let mut merged_blocks: Vec<TranscriptBlock> =
+            Vec::with_capacity(self.transcript_blocks.len());
+        for mut block in std::mem::take(&mut self.transcript_blocks) {
+            if let Some(previous) = merged_blocks.last_mut()
+                && previous.after_message == block.after_message
+                && previous.turn_id == block.turn_id
+            {
+                previous.activities.append(&mut block.activities);
+            } else {
+                merged_blocks.push(block);
+            }
+        }
+        self.transcript_blocks = merged_blocks;
+
         for block in &mut self.transcript_blocks {
-            let TranscriptBlockContent::Activities(activities) = &mut block.content else {
-                continue;
-            };
-            for activity in activities {
+            for activity in &mut block.activities {
                 if activity.kind == ActivityKind::Search && activity.title.trim() == "Search for" {
                     activity.title = tr!("activity.browsed_web");
                 }
@@ -1641,6 +1652,11 @@ pub struct ActivityItem {
     /// directory, or command). The row builder only formats this cached value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_target: Option<String>,
+    /// Native model reasoning carried by the same ordered activity stream as
+    /// tool work. Generic provider `think` tools can still use the ordinary
+    /// activity fields and leave this empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningBlock>,
 }
 
 impl ActivityItem {
@@ -1666,6 +1682,14 @@ impl ActivityItem {
             complete,
             file_changes: Vec::new(),
             display_target,
+            reasoning: None,
+        }
+    }
+
+    pub fn from_reasoning(reasoning: ReasoningBlock, complete: bool) -> Self {
+        Self {
+            reasoning: Some(reasoning),
+            ..Self::new(None, ActivityKind::Reasoning, "Reasoning", None, complete)
         }
     }
 
@@ -2252,19 +2276,57 @@ pub struct ReasoningBlock {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind", content = "data")]
-pub enum TranscriptBlockContent {
-    Reasoning(ReasoningBlock),
-    Activities(Vec<ActivityItem>),
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TranscriptBlock {
     /// Render this block immediately after this many persisted messages.
     pub after_message: usize,
     #[serde(default)]
     pub turn_id: Option<Uuid>,
-    pub content: TranscriptBlockContent,
+    /// Ordered non-message work emitted at this point in the transcript.
+    /// The persisted field keeps its historical tagged shape so existing
+    /// sessions remain readable while the runtime model stays activity-only.
+    #[serde(
+        rename = "content",
+        serialize_with = "serialize_transcript_activities",
+        deserialize_with = "deserialize_transcript_activities"
+    )]
+    pub activities: Vec<ActivityItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "data")]
+enum StoredTranscriptBlockContentRef<'a> {
+    Activities(&'a [ActivityItem]),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "data")]
+enum StoredTranscriptBlockContent {
+    Reasoning(ReasoningBlock),
+    Activities(Vec<ActivityItem>),
+}
+
+fn serialize_transcript_activities<S>(
+    activities: &Vec<ActivityItem>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    StoredTranscriptBlockContentRef::Activities(activities).serialize(serializer)
+}
+
+fn deserialize_transcript_activities<'de, D>(deserializer: D) -> Result<Vec<ActivityItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        match StoredTranscriptBlockContent::deserialize(deserializer)? {
+            StoredTranscriptBlockContent::Reasoning(reasoning) => {
+                vec![ActivityItem::from_reasoning(reasoning, true)]
+            }
+            StoredTranscriptBlockContent::Activities(activities) => activities,
+        },
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -2722,7 +2784,7 @@ mod tests {
         session.transcript_blocks.push(TranscriptBlock {
             after_message: 2,
             turn_id: Some(first_turn),
-            content: TranscriptBlockContent::Activities(Vec::new()),
+            activities: Vec::new(),
         });
         session.finish_active_turn(TurnStatus::Completed);
 
@@ -2731,7 +2793,7 @@ mod tests {
         session.transcript_blocks.push(TranscriptBlock {
             after_message: 4,
             turn_id: Some(second_turn),
-            content: TranscriptBlockContent::Activities(Vec::new()),
+            activities: Vec::new(),
         });
         session.finish_active_turn(TurnStatus::Completed);
 
@@ -2925,22 +2987,99 @@ mod tests {
         session.transcript_blocks.push(TranscriptBlock {
             after_message: 0,
             turn_id: None,
-            content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+            activities: vec![ActivityItem::new(
                 Some("search-1".into()),
                 ActivityKind::Search,
                 "Search for ",
                 None,
                 true,
-            )]),
+            )],
         });
 
         session.migrate_legacy_state();
 
-        let TranscriptBlockContent::Activities(activities) = &session.transcript_blocks[0].content
-        else {
-            panic!("expected activities");
-        };
+        let activities = &session.transcript_blocks[0].activities;
         assert_eq!(activities[0].title, "Browsed the web");
+    }
+
+    #[test]
+    fn legacy_reasoning_blocks_deserialize_as_reasoning_activities() {
+        let legacy = serde_json::json!({
+            "after_message": 2,
+            "turn_id": null,
+            "content": {
+                "kind": "reasoning",
+                "data": {
+                    "content": "Checking the source",
+                    "started_at_ms": 1_000,
+                    "finished_at_ms": 2_500
+                }
+            }
+        });
+
+        let block: TranscriptBlock = serde_json::from_value(legacy).unwrap();
+        assert_eq!(block.activities.len(), 1);
+        let activity = &block.activities[0];
+        assert_eq!(activity.kind, ActivityKind::Reasoning);
+        assert!(activity.complete);
+        assert_eq!(
+            activity
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.content.as_str()),
+            Some("Checking the source")
+        );
+
+        let stored = serde_json::to_value(block).unwrap();
+        assert_eq!(stored["content"]["kind"], "activities");
+        assert_eq!(
+            stored["content"]["data"][0]["reasoning"]["content"],
+            "Checking the source"
+        );
+    }
+
+    #[test]
+    fn adjacent_legacy_work_blocks_merge_during_session_migration() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.transcript_blocks.extend([
+            TranscriptBlock {
+                after_message: 1,
+                turn_id: None,
+                activities: vec![ActivityItem::from_reasoning(
+                    ReasoningBlock {
+                        content: "Looking around".into(),
+                        started_at_ms: 1_000,
+                        finished_at_ms: 2_000,
+                    },
+                    true,
+                )],
+            },
+            TranscriptBlock {
+                after_message: 1,
+                turn_id: None,
+                activities: vec![ActivityItem::new(
+                    None,
+                    ActivityKind::Command,
+                    "Ran tests",
+                    None,
+                    true,
+                )],
+            },
+        ]);
+
+        session.migrate_legacy_state();
+
+        assert_eq!(session.transcript_blocks.len(), 1);
+        assert_eq!(session.transcript_blocks[0].activities.len(), 2);
+        assert_eq!(
+            session.transcript_blocks[0]
+                .activities
+                .iter()
+                .map(|activity| activity.kind)
+                .collect::<Vec<_>>(),
+            [ActivityKind::Reasoning, ActivityKind::Command]
+        );
     }
 
     #[test]
@@ -2950,7 +3089,7 @@ mod tests {
         session.transcript_blocks.push(TranscriptBlock {
             after_message: 0,
             turn_id: None,
-            content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+            activities: vec![ActivityItem::new(
                 None,
                 ActivityKind::FileChange,
                 "edit",
@@ -2963,15 +3102,12 @@ mod tests {
                     .to_string(),
                 ),
                 true,
-            )]),
+            )],
         });
 
         session.migrate_legacy_state();
 
-        let TranscriptBlockContent::Activities(activities) = &session.transcript_blocks[0].content
-        else {
-            panic!("expected activities");
-        };
+        let activities = &session.transcript_blocks[0].activities;
         assert!(activities[0].detail.is_none());
         assert!(activities[0].arguments.is_some());
         assert_eq!(activities[0].file_changes[0].path, "/tmp/waku/README.md");
@@ -2988,7 +3124,7 @@ mod tests {
         session.transcript_blocks.push(TranscriptBlock {
             after_message: 0,
             turn_id: None,
-            content: TranscriptBlockContent::Activities(vec![
+            activities: vec![
                 ActivityItem::new(
                     None,
                     ActivityKind::Search,
@@ -3004,15 +3140,12 @@ mod tests {
                     true,
                 ),
                 cached,
-            ]),
+            ],
         });
 
         session.migrate_legacy_state();
 
-        let TranscriptBlockContent::Activities(activities) = &session.transcript_blocks[0].content
-        else {
-            panic!("expected activities");
-        };
+        let activities = &session.transcript_blocks[0].activities;
         assert_eq!(activities[0].kind, ActivityKind::FileRead);
         assert_eq!(
             activities[0].display_target.as_deref(),

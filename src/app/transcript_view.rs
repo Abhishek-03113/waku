@@ -668,26 +668,6 @@ impl Waku {
         cx.notify();
     }
 
-    /// The provider's latest ordered block is still reasoning.
-    pub(super) fn reasoning_live(&self) -> bool {
-        self.selected_runtime()
-            .is_some_and(|runtime| runtime.stream_phase == Some(StreamPhase::Reasoning))
-            && self
-                .selected_session()
-                .is_some_and(|session| session.status == SessionStatus::Working)
-    }
-
-    pub(super) fn toggle_reasoning(
-        &mut self,
-        block_index: usize,
-        current: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_block_disclosure(block_index, cx, |this| {
-            this.reasoning_expanded.insert(block_index, !current);
-        });
-    }
-
     /// Open or close one turn-block disclosure, holding the reader's place.
     ///
     /// Re-measuring the row changes its height, and a bottom-aligned list keeps
@@ -720,21 +700,16 @@ impl Waku {
         });
     }
 
-    pub(super) fn toggle_activity_item(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let block_index = self.selected_transcript_blocks().iter().position(|block| {
-            matches!(
-                &block.content,
-                TranscriptBlockContent::Activities(activities)
-                    if activities.iter().any(|activity| activity.id == id)
-            )
-        });
+    pub(super) fn toggle_activity_item(&mut self, id: Uuid, current: bool, cx: &mut Context<Self>) {
+        let block_index = self
+            .selected_transcript_blocks()
+            .iter()
+            .position(|block| block.activities.iter().any(|activity| activity.id == id));
         let Some(block_index) = block_index else {
             return;
         };
         self.toggle_block_disclosure(block_index, cx, |this| {
-            if !this.expanded_activity_items.remove(&id) {
-                this.expanded_activity_items.insert(id);
-            }
+            this.expanded_activity_items.insert(id, !current);
         });
     }
 
@@ -1067,14 +1042,7 @@ impl Waku {
             TranscriptRowKind::TurnBlock(block_index) => self
                 .selected_transcript_blocks()
                 .get(block_index)
-                .map(|block| match &block.content {
-                    TranscriptBlockContent::Reasoning(reasoning) => {
-                        self.render_reasoning_row(reasoning, block_index, &theme, cx)
-                    }
-                    TranscriptBlockContent::Activities(activities) => {
-                        self.render_activities_row(activities, block_index, &theme, cx)
-                    }
-                })
+                .map(|block| self.render_activities_row(&block.activities, block_index, &theme, cx))
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
             TranscriptRowKind::ChangedFiles(turn_id) => self
@@ -1461,98 +1429,6 @@ impl Waku {
             .into_any_element()
     }
 
-    /// The turn's reasoning as a disclosure: open while the provider is
-    /// thinking, collapsing to "Thought for Ns" once the answer starts, and
-    /// clickable either way.
-    pub(super) fn render_reasoning_row(
-        &self,
-        reasoning: &ReasoningBlock,
-        block_index: usize,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let live =
-            self.reasoning_live()
-                && self.selected_transcript_blocks().iter().rposition(|block| {
-                    matches!(block.content, TranscriptBlockContent::Reasoning(_))
-                }) == Some(block_index);
-        let expanded = self
-            .reasoning_expanded
-            .get(&block_index)
-            .copied()
-            .unwrap_or(live);
-        let label = if live {
-            tr!("transcript.thinking")
-        } else {
-            tr!(
-                "transcript.thought_for",
-                duration = format_worked_duration(
-                    reasoning
-                        .finished_at_ms
-                        .saturating_sub(reasoning.started_at_ms)
-                        .div_ceil(1000)
-                        .max(1)
-                )
-            )
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .id(SharedString::from(format!("thinking-toggle-{block_index}")))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(px(11.0))
-                    .line_height(px(14.0))
-                    .cursor_default()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_tertiary)
-                            .child(SharedString::from(label)),
-                    )
-                    .child(icon(
-                        if expanded {
-                            "icons/chevron-down.svg"
-                        } else {
-                            "icons/chevron-right.svg"
-                        },
-                        9.0,
-                        theme.text_ghost,
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_reasoning(block_index, expanded, cx);
-                    })),
-            )
-            .when(expanded, |element| {
-                // Reasoning is model prose like any response, so it renders as
-                // markdown and takes part in transcript selection — it used to
-                // be an inert string that could not even be copied.
-                let mut palette = MarkdownPalette::from_theme(theme);
-                palette.text = theme.text_tertiary;
-                palette.secondary = theme.text_tertiary;
-                let ctx = self.markdown_ctx(
-                    format!("reasoning-{block_index}"),
-                    &palette,
-                    MarkdownMetrics::COMPACT,
-                );
-                let mut views = self.block_markdown.borrow_mut();
-                let view = views.entry(block_index).or_default();
-                view.set_text(&reasoning.content, live);
-                element.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .children(md::render::markdown(view, &ctx)),
-                )
-            })
-            .into_any_element()
-    }
-
     /// The turn's tool activity as a disclosure: the summary line toggles the
     /// row list, and each row with detail expands to its full content.
     fn show_activity_section_copied(
@@ -1599,6 +1475,21 @@ impl Waku {
             .get(&block_index)
             .copied()
             .unwrap_or(live_turn);
+        let live_reasoning_id = (self
+            .selected_runtime()
+            .is_some_and(|runtime| runtime.stream_phase == Some(StreamPhase::Reasoning))
+            && self
+                .selected_session()
+                .is_some_and(|session| session.status == SessionStatus::Working)
+            && block_index + 1 == self.selected_transcript_blocks().len())
+        .then(|| {
+            activities
+                .iter()
+                .rev()
+                .find(|activity| activity.reasoning.is_some())
+                .map(|activity| activity.id)
+        })
+        .flatten();
         let cluster = div()
             .w_full()
             .min_w_0()
@@ -1689,12 +1580,32 @@ impl Waku {
                         }
                     }))
             });
-            let sections = activity_disclosure_sections(activity);
-            let preview = activity_preview(activity);
-            let display_title = activity_display_title(activity);
+            let reasoning = activity.reasoning.as_ref();
+            let reasoning_live = live_reasoning_id == Some(id);
+            let sections = if reasoning.is_some() {
+                Vec::new()
+            } else {
+                activity_disclosure_sections(activity)
+            };
+            let preview = if reasoning.is_some() {
+                String::new()
+            } else {
+                activity_preview(activity)
+            };
+            let display_title = reasoning.map_or_else(
+                || activity_display_title(activity),
+                |reasoning| reasoning_activity_title(reasoning, reasoning_live),
+            );
             let file_change_stats = activity_file_change_stats(activity);
-            let has_detail = !sections.is_empty();
-            let item_expanded = has_detail && self.expanded_activity_items.contains(&id);
+            let has_detail = reasoning
+                .is_some_and(|reasoning| !reasoning.content.trim().is_empty())
+                || !sections.is_empty();
+            let item_expanded = has_detail
+                && self
+                    .expanded_activity_items
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(reasoning_live);
             let mut item = div().flex().flex_col().child(
                 div()
                     .id(SharedString::from(format!("activity-item-{id}")))
@@ -1760,20 +1671,45 @@ impl Waku {
                             .child(SharedString::from(preview)),
                     )
                     .children(background_badge)
-                    .child(if activity.failed {
-                        icon("icons/x.svg", 10.0, theme.danger).into_any_element()
-                    } else if activity.complete {
-                        icon("icons/check.svg", 10.0, theme.text_ghost).into_any_element()
-                    } else {
-                        pulse_dot(format!("activity-pulse-{id}"), 5.0, theme.accent)
+                    .when(reasoning.is_none(), |element| {
+                        element.child(if activity.failed {
+                            icon("icons/x.svg", 10.0, theme.danger).into_any_element()
+                        } else if activity.complete {
+                            icon("icons/check.svg", 10.0, theme.text_ghost).into_any_element()
+                        } else {
+                            pulse_dot(format!("activity-pulse-{id}"), 5.0, theme.accent)
+                        })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if has_detail {
-                            this.toggle_activity_item(id, cx);
+                            this.toggle_activity_item(id, item_expanded, cx);
                         }
                     })),
             );
-            if item_expanded {
+            if item_expanded && let Some(reasoning) = reasoning {
+                // Reasoning remains model prose even though it now shares the
+                // activity stream, so keep selectable markdown rather than
+                // presenting it as monospace tool output.
+                let mut palette = MarkdownPalette::from_theme(theme);
+                palette.text = theme.text_tertiary;
+                palette.secondary = theme.text_tertiary;
+                let ctx = self.markdown_ctx(
+                    format!("reasoning-{id}"),
+                    &palette,
+                    MarkdownMetrics::COMPACT,
+                );
+                let mut views = self.activity_markdown.borrow_mut();
+                let view = views.entry(id).or_default();
+                view.set_text(&reasoning.content, reasoning_live);
+                item = item.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .px(px(4.0))
+                        .children(md::render::markdown(view, &ctx)),
+                );
+            }
+            if item_expanded && reasoning.is_none() {
                 let palette = MarkdownPalette::from_theme(theme);
                 let ctx =
                     self.markdown_ctx(format!("activity-{id}"), &palette, MarkdownMetrics::COMPACT);
@@ -1892,6 +1828,23 @@ impl Waku {
             items = items.child(item);
         }
         cluster.child(items).into_any_element()
+    }
+}
+
+fn reasoning_activity_title(reasoning: &ReasoningBlock, live: bool) -> String {
+    if live {
+        tr!("transcript.thinking")
+    } else {
+        tr!(
+            "transcript.thought_for",
+            duration = format_worked_duration(
+                reasoning
+                    .finished_at_ms
+                    .saturating_sub(reasoning.started_at_ms)
+                    .div_ceil(1000)
+                    .max(1)
+            )
+        )
     }
 }
 

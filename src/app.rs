@@ -34,7 +34,7 @@ use crate::model::{
     DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole,
     PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
     QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
-    TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
+    TurnStatus, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -999,10 +999,10 @@ pub struct Waku {
     stream_state_dirty: bool,
     last_stream_save: Instant,
     /// User expansion overrides keyed by persisted transcript block index.
-    reasoning_expanded: HashMap<usize, bool>,
     activities_expanded: HashMap<usize, bool>,
-    /// Individual tool rows the user has opened to read their full detail.
-    expanded_activity_items: HashSet<Uuid>,
+    /// Per-item disclosure overrides. Reasoning starts open while live; tool
+    /// details start closed, so the stored bool must preserve either choice.
+    expanded_activity_items: HashMap<Uuid, bool>,
     /// Settled turns whose folded work the user has reopened.
     expanded_turns: HashSet<Uuid>,
     /// Per-response file cards the user expanded beyond their three-file
@@ -1186,8 +1186,8 @@ pub struct Waku {
     /// Parsed markdown per assistant message, keeping each response's
     /// incremental parse and flattened blocks alive across frames.
     message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
-    /// Parsed markdown for reasoning blocks, keyed by transcript block index.
-    block_markdown: RefCell<HashMap<usize, MarkdownView>>,
+    /// Parsed markdown for reasoning activities, keyed by stable activity id.
+    activity_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
     /// One allocation for every transcript markdown context to share. The
     /// callback knows about the active workspace; the renderer deliberately
     /// does not.
@@ -1652,20 +1652,20 @@ impl Waku {
             for message in &mut session.messages {
                 message.streaming = false;
             }
-            session.transcript_blocks.retain(|block| {
-                !matches!(
-                    &block.content,
-                    TranscriptBlockContent::Reasoning(reasoning)
-                        if reasoning.content.trim().is_empty()
-                )
-            });
             for block in &mut session.transcript_blocks {
-                if let TranscriptBlockContent::Activities(activities) = &mut block.content {
-                    for activity in activities {
-                        activity.complete = true;
-                    }
+                block.activities.retain(|activity| {
+                    activity
+                        .reasoning
+                        .as_ref()
+                        .is_none_or(|reasoning| !reasoning.content.trim().is_empty())
+                });
+                for activity in &mut block.activities {
+                    activity.complete = true;
                 }
             }
+            session
+                .transcript_blocks
+                .retain(|block| !block.activities.is_empty());
         }
         let initial_composer_draft = state
             .selected_session
@@ -2242,9 +2242,8 @@ impl Waku {
                 pending_queue_drains: Vec::new(),
                 stream_state_dirty: false,
                 last_stream_save: Instant::now(),
-                reasoning_expanded: HashMap::new(),
                 activities_expanded: HashMap::new(),
-                expanded_activity_items: HashSet::new(),
+                expanded_activity_items: HashMap::new(),
                 expanded_turns: HashSet::new(),
                 expanded_changed_files: HashSet::new(),
                 transcript_control_focuses: RefCell::new(HashMap::new()),
@@ -2351,7 +2350,7 @@ impl Waku {
                 transcript_is_scrolled,
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),
-                block_markdown: RefCell::new(HashMap::new()),
+                activity_markdown: RefCell::new(HashMap::new()),
                 markdown_link_handler,
                 transcript_selection: TranscriptSelection::default(),
                 toast_selection: TranscriptSelection::default(),

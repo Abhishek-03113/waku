@@ -1830,7 +1830,6 @@ impl Waku {
             self.message_edit = None;
         }
         if selected {
-            self.reasoning_expanded.clear();
             self.activities_expanded.clear();
             self.expanded_activity_items.clear();
             self.expanded_turns.clear();
@@ -2287,7 +2286,6 @@ impl Waku {
             });
         self.submission_preparations.insert(session_id);
         if selected {
-            self.reasoning_expanded.clear();
             self.activities_expanded.clear();
             self.expanded_activity_items.clear();
             self.expanded_turns.clear();

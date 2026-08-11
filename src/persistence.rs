@@ -28,7 +28,7 @@ use crate::i18n::AppLanguage;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
     AgentSession, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole, Project,
-    ProviderKind, RuntimeMode, SessionWorkspace, TranscriptBlockContent,
+    ProviderKind, RuntimeMode, SessionWorkspace,
 };
 use crate::theme::ThemePreference;
 
@@ -577,10 +577,7 @@ fn externalize_blobs<'a>(
 ) {
     for session in sessions {
         for block in &mut session.transcript_blocks {
-            let TranscriptBlockContent::Activities(activities) = &mut block.content else {
-                continue;
-            };
-            for activity in activities {
+            for activity in &mut block.activities {
                 for image in &mut activity.image_urls {
                     if crate::blob_store::is_blob_reference(image) {
                         continue;
@@ -1670,7 +1667,6 @@ mod tests {
     use super::*;
     use crate::model::{
         ActivityItem, ActivityKind, FavoriteModel, MessageRole, ReasoningBlock, TranscriptBlock,
-        TranscriptBlockContent,
     };
     use base64::Engine as _;
 
@@ -2156,10 +2152,10 @@ mod tests {
             .push(TranscriptBlock {
                 after_message: 0,
                 turn_id: None,
-                content: TranscriptBlockContent::Activities(vec![
+                activities: vec![
                     ActivityItem::new(None, ActivityKind::Tool, "Screenshot", None, true)
                         .with_image_urls(vec![data_url]),
-                ]),
+                ],
             });
         store.save(&mut state).unwrap();
 
@@ -2170,11 +2166,7 @@ mod tests {
         reopened.blob_sweep()();
 
         let checked = load_hydrated(&store_in(&directory));
-        let TranscriptBlockContent::Activities(activities) =
-            &checked.sessions[0].transcript_blocks[0].content
-        else {
-            panic!("expected activities");
-        };
+        let activities = &checked.sessions[0].transcript_blocks[0].activities;
         let path = store
             .blobs()
             .path_for(&activities[0].image_urls[0])
@@ -2280,28 +2272,27 @@ mod tests {
         });
         state.sessions[0].begin_turn("Persist this session");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
-        state.sessions[0].transcript_blocks.extend([
-            TranscriptBlock {
-                after_message: 1,
-                turn_id: None,
-                content: TranscriptBlockContent::Reasoning(ReasoningBlock {
-                    content: "Checking the source".into(),
-                    started_at_ms: 1_000,
-                    finished_at_ms: 2_500,
-                }),
-            },
-            TranscriptBlock {
-                after_message: 1,
-                turn_id: None,
-                content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+        state.sessions[0].transcript_blocks.push(TranscriptBlock {
+            after_message: 1,
+            turn_id: None,
+            activities: vec![
+                ActivityItem::from_reasoning(
+                    ReasoningBlock {
+                        content: "Checking the source".into(),
+                        started_at_ms: 1_000,
+                        finished_at_ms: 2_500,
+                    },
+                    true,
+                ),
+                ActivityItem::new(
                     Some("tool-1".into()),
                     ActivityKind::Search,
                     "Read src/main.rs",
                     Some("{\"path\":\"src/main.rs\"}".into()),
                     true,
-                )]),
-            },
-        ]);
+                ),
+            ],
+        });
         store.save(&mut state).unwrap();
 
         let restored = load_hydrated(&store_in(&directory));
@@ -2332,12 +2323,18 @@ mod tests {
             restored.computer_use_allowed_apps,
             state.computer_use_allowed_apps
         );
-        assert_eq!(restored.sessions[0].transcript_blocks.len(), 2);
-        assert!(matches!(
-            &restored.sessions[0].transcript_blocks[0].content,
-            TranscriptBlockContent::Reasoning(reasoning)
-                if reasoning.content == "Checking the source"
-        ));
+        assert_eq!(restored.sessions[0].transcript_blocks.len(), 1);
+        assert_eq!(
+            restored.sessions[0].transcript_blocks[0].activities.len(),
+            2
+        );
+        assert_eq!(
+            restored.sessions[0].transcript_blocks[0].activities[0]
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.content.as_str()),
+            Some("Checking the source")
+        );
         fs::remove_dir_all(directory).ok();
     }
 
@@ -3061,20 +3058,16 @@ mod tests {
             .push(TranscriptBlock {
                 after_message: 0,
                 turn_id: None,
-                content: TranscriptBlockContent::Activities(vec![
+                activities: vec![
                     ActivityItem::new(None, ActivityKind::Tool, "Screenshot", None, true)
                         .with_image_urls(vec![data_url]),
-                ]),
+                ],
             });
 
         store.save(&mut state).unwrap();
 
         let restored = load_hydrated(&store_in(&directory));
-        let TranscriptBlockContent::Activities(activities) =
-            &restored.sessions[0].transcript_blocks[0].content
-        else {
-            panic!("expected activities");
-        };
+        let activities = &restored.sessions[0].transcript_blocks[0].activities;
         let reference = &activities[0].image_urls[0];
         assert!(crate::blob_store::is_blob_reference(reference));
         let path = store.blobs().path_for(reference).unwrap();

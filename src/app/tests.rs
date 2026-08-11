@@ -13,18 +13,18 @@ use super::{
     format_worked_duration, format_working_elapsed, maintain_transcript_anchor,
     message_starts_followup_turn, navigation_preview_snippet, navigation_rail_height,
     navigation_rail_scale, navigation_rail_tick_count, navigation_rail_tick_turn,
-    navigation_rail_turn_tick, paused_toast_duration, pop_stream_chunk, session_is_reapable,
-    should_show_navigation_rail, should_show_scroll_to_bottom, take_stream_prefix,
-    task_id_from_notification_tag, task_notification_tag, transcript_anchor_end_space,
-    transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
-    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
+    navigation_rail_turn_tick, paused_toast_duration, pop_stream_chunk, push_transcript_activity,
+    session_is_reapable, should_show_navigation_rail, should_show_scroll_to_bottom,
+    take_stream_prefix, task_id_from_notification_tag, task_notification_tag,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
+    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
     widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointFile, CheckpointStatus,
     DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, SessionStatus,
-    TranscriptBlock, TranscriptBlockContent, TurnStatus,
+    TranscriptBlock, TurnStatus,
 };
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
@@ -540,11 +540,14 @@ fn settling_an_anchored_turn_splices_without_resetting_its_prompt() {
     session.transcript_blocks.push(TranscriptBlock {
         after_message: session.messages.len(),
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
-            content: "Inspecting the project".into(),
-            started_at_ms: 1_000,
-            finished_at_ms: 2_000,
-        }),
+        activities: vec![ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Inspecting the project".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        )],
     });
     session.push_message(MessageRole::Assistant, "Here is the overview.");
 
@@ -670,6 +673,60 @@ fn stream_parts_keep_targeting_the_running_session_after_selection_changes() {
     assert_eq!(sessions[0].messages[1].content, "first second");
     assert!(sessions[0].messages[1].streaming);
     assert!(sessions[1].messages.is_empty());
+}
+
+#[test]
+fn reasoning_and_tools_share_one_ordered_activity_block() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("Build it");
+
+    push_transcript_activity(
+        &mut session,
+        ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Inspecting the project".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        ),
+        false,
+    );
+    push_transcript_activity(
+        &mut session,
+        ActivityItem::new(None, ActivityKind::Command, "Ran tests", None, false),
+        true,
+    );
+
+    assert_eq!(session.transcript_blocks.len(), 1);
+    assert_eq!(session.transcript_blocks[0].activities.len(), 2);
+    assert_eq!(
+        session.transcript_blocks[0]
+            .activities
+            .iter()
+            .map(|activity| activity.kind)
+            .collect::<Vec<_>>(),
+        [ActivityKind::Reasoning, ActivityKind::Command]
+    );
+
+    session.push_message(MessageRole::Assistant, "Interim update");
+    push_transcript_activity(
+        &mut session,
+        ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Checking the result".into(),
+                started_at_ms: 3_000,
+                finished_at_ms: 4_000,
+            },
+            false,
+        ),
+        false,
+    );
+    assert_eq!(
+        session.transcript_blocks.len(),
+        2,
+        "assistant text keeps later work at its own transcript position"
+    );
 }
 
 #[test]
@@ -806,22 +863,17 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
-            content: "Looking around".into(),
-            started_at_ms: 1_000,
-            finished_at_ms: 2_000,
-        }),
-    });
-    session.transcript_blocks.push(TranscriptBlock {
-        after_message: 1,
-        turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
-            None,
-            ActivityKind::Command,
-            "Ran tests",
-            None,
-            true,
-        )]),
+        activities: vec![
+            ActivityItem::from_reasoning(
+                ReasoningBlock {
+                    content: "Looking around".into(),
+                    started_at_ms: 1_000,
+                    finished_at_ms: 2_000,
+                },
+                true,
+            ),
+            ActivityItem::new(None, ActivityKind::Command, "Ran tests", None, true),
+        ],
     });
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -837,8 +889,8 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
             .iter()
             .filter(|kind| matches!(kind, TurnBlock(_)))
             .count(),
-        2,
-        "both the reasoning block and the activity cluster: {kinds:?}"
+        1,
+        "reasoning and tools share one activity cluster: {kinds:?}"
     );
     // Every index below the count resolves to a real row.
     for index in 0..kinds.len() {
@@ -887,13 +939,13 @@ fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+        activities: vec![ActivityItem::new(
             None,
             ActivityKind::Command,
             "Edited a file",
             None,
             true,
-        )]),
+        )],
     });
     session.push_message(MessageRole::Assistant, "");
     session.finish_active_turn(TurnStatus::Interrupted);
@@ -1016,23 +1068,26 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
     base.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
-            content: "Looking around".into(),
-            started_at_ms: 1_000,
-            finished_at_ms: 2_000,
-        }),
+        activities: vec![ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Looking around".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        )],
     });
     base.push_message(MessageRole::Assistant, "I found the relevant code.");
     base.transcript_blocks.push(TranscriptBlock {
         after_message: 2,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+        activities: vec![ActivityItem::new(
             None,
             ActivityKind::Command,
             "Ran tests",
             None,
             true,
-        )]),
+        )],
     });
     base.push_message(MessageRole::Assistant, "Done. The change is ready.");
     base.finish_active_turn(TurnStatus::Completed);
@@ -1064,13 +1119,13 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
             session.transcript_blocks.push(TranscriptBlock {
                 after_message: session.messages.len(),
                 turn_id: session.turns.first().map(|turn| turn.id),
-                content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+                activities: vec![ActivityItem::new(
                     None,
                     ActivityKind::Command,
                     "Ran tests",
                     None,
                     true,
-                )]),
+                )],
             });
         }),
         // `update_activity` re-anchors the block it is still appending to, so
@@ -1126,23 +1181,26 @@ fn a_settled_turn_folds_all_of_its_work_above_the_answer() {
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
-            content: "Looking around".into(),
-            started_at_ms: 1_000,
-            finished_at_ms: 2_000,
-        }),
+        activities: vec![ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Looking around".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        )],
     });
     session.push_message(MessageRole::Assistant, "I found the relevant code.");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 2,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+        activities: vec![ActivityItem::new(
             None,
             ActivityKind::Command,
             "Ran tests",
             None,
             true,
-        )]),
+        )],
     });
     session.push_message(MessageRole::Assistant, "Done. The change is ready.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -1178,11 +1236,14 @@ fn consecutive_trailing_text_parts_all_stay_out_of_the_fold() {
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
-            content: "Looking around".into(),
-            started_at_ms: 1_000,
-            finished_at_ms: 2_000,
-        }),
+        activities: vec![ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Looking around".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        )],
     });
     session.push_message(MessageRole::Assistant, "First half of the answer.");
     session.push_message(MessageRole::Assistant, "Second half of the answer.");
@@ -1203,13 +1264,13 @@ fn a_turn_without_an_answer_folds_completely() {
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+        activities: vec![ActivityItem::new(
             None,
             ActivityKind::Command,
             "Ran tests",
             None,
             true,
-        )]),
+        )],
     });
     // The streaming placeholder never received any text.
     session.push_message(MessageRole::Assistant, "");
@@ -1233,23 +1294,26 @@ fn assistant_response_footer_is_owned_by_the_terminal_part_and_copies_the_visibl
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
-            content: "Looking around".into(),
-            started_at_ms: 1_000,
-            finished_at_ms: 2_000,
-        }),
+        activities: vec![ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Looking around".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        )],
     });
     session.push_message(MessageRole::Assistant, "Interim commentary.");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 2,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Activities(vec![ActivityItem::new(
+        activities: vec![ActivityItem::new(
             None,
             ActivityKind::Command,
             "Ran tests",
             None,
             true,
-        )]),
+        )],
     });
     session.push_message(MessageRole::Assistant, "First half of the answer.");
     session.push_message(MessageRole::Assistant, "Second half of the answer.");
@@ -1354,11 +1418,14 @@ fn running_turn_keeps_its_ordered_work_visible() {
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
         turn_id: Some(turn_id),
-        content: TranscriptBlockContent::Reasoning(ReasoningBlock {
-            content: "Still thinking".into(),
-            started_at_ms: 1_000,
-            finished_at_ms: 2_000,
-        }),
+        activities: vec![ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Still thinking".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            false,
+        )],
     });
     session.push_message(MessageRole::Assistant, "Interim update");
 

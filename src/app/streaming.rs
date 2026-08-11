@@ -17,10 +17,30 @@ impl Waku {
         runtime: &mut SessionRuntime,
         delta: String,
     ) {
-        let continuing = runtime.stream_phase == Some(StreamPhase::Text);
+        let previous_phase = runtime.stream_phase;
+        if previous_phase == Some(StreamPhase::Reasoning) {
+            self.complete_reasoning_activity(session_id);
+        }
+        let continuing = previous_phase == Some(StreamPhase::Text);
         append_text_delta_to_session(&mut self.state.sessions, session_id, continuing, delta);
         self.state.mark_session_dirty(session_id);
         runtime.stream_phase = Some(StreamPhase::Text);
+    }
+
+    fn complete_reasoning_activity(&mut self, session_id: Uuid) {
+        let Some(session) = self.state.session_mut(session_id) else {
+            return;
+        };
+        let reasoning = session
+            .transcript_blocks
+            .iter_mut()
+            .rev()
+            .flat_map(|block| block.activities.iter_mut().rev())
+            .find(|activity| activity.reasoning.is_some() && !activity.complete);
+        if let Some(reasoning) = reasoning {
+            reasoning.complete = true;
+            session.updated_at = unix_time();
+        }
     }
 
     pub(super) fn append_reasoning_delta(
@@ -29,7 +49,8 @@ impl Waku {
         runtime: &mut SessionRuntime,
         delta: String,
     ) {
-        let continuing = runtime.stream_phase == Some(StreamPhase::Reasoning);
+        let previous_phase = runtime.stream_phase;
+        let continuing = previous_phase == Some(StreamPhase::Reasoning);
         if !continuing && delta.trim().is_empty() {
             return;
         }
@@ -39,23 +60,30 @@ impl Waku {
         }
         if let Some(session) = self.state.session_mut(session_id) {
             if continuing
-                && let Some(TranscriptBlock {
-                    content: TranscriptBlockContent::Reasoning(reasoning),
-                    ..
-                }) = session.transcript_blocks.last_mut()
+                && let Some(reasoning) = session
+                    .transcript_blocks
+                    .last_mut()
+                    .and_then(|block| block.activities.last_mut())
+                    .and_then(|activity| activity.reasoning.as_mut())
             {
                 reasoning.content.push_str(&delta);
                 reasoning.finished_at_ms = now;
             } else {
-                session.transcript_blocks.push(TranscriptBlock {
-                    after_message: session.messages.len(),
-                    turn_id: session.active_turn_id(),
-                    content: TranscriptBlockContent::Reasoning(ReasoningBlock {
-                        content: delta,
-                        started_at_ms: now,
-                        finished_at_ms: now,
-                    }),
-                });
+                push_transcript_activity(
+                    session,
+                    ActivityItem::from_reasoning(
+                        ReasoningBlock {
+                            content: delta,
+                            started_at_ms: now,
+                            finished_at_ms: now,
+                        },
+                        false,
+                    ),
+                    matches!(
+                        previous_phase,
+                        Some(StreamPhase::Reasoning | StreamPhase::Activity)
+                    ),
+                );
             }
             session.updated_at = unix_time();
         }
@@ -68,17 +96,21 @@ impl Waku {
         runtime: &mut SessionRuntime,
         item: ActivityItem,
     ) {
-        if runtime.stream_phase == Some(StreamPhase::Text) {
+        let previous_phase = runtime.stream_phase;
+        if previous_phase == Some(StreamPhase::Text) {
             self.finish_streaming_assistant(session_id);
         }
+        if previous_phase == Some(StreamPhase::Reasoning) {
+            self.complete_reasoning_activity(session_id);
+        }
 
-        let continuing = runtime.stream_phase == Some(StreamPhase::Activity);
+        let continuing_work = matches!(
+            previous_phase,
+            Some(StreamPhase::Reasoning | StreamPhase::Activity)
+        );
         if let Some(session) = self.state.session_mut(session_id) {
             for block in session.transcript_blocks.iter_mut().rev() {
-                let TranscriptBlockContent::Activities(activities) = &mut block.content else {
-                    continue;
-                };
-                let matching = activities.iter_mut().rev().find(|activity| {
+                let matching = block.activities.iter_mut().rev().find(|activity| {
                     item.source_id
                         .as_ref()
                         .is_some_and(|id| activity.source_id.as_ref() == Some(id))
@@ -112,29 +144,16 @@ impl Waku {
                     {
                         activity.display_target = item.display_target;
                     }
+                    if item.reasoning.is_some() {
+                        activity.reasoning = item.reasoning;
+                    }
                     session.updated_at = unix_time();
                     runtime.stream_phase = Some(StreamPhase::Activity);
                     return;
                 }
             }
 
-            let after_message = session.messages.len();
-            if continuing
-                && let Some(TranscriptBlock {
-                    after_message: anchor,
-                    content: TranscriptBlockContent::Activities(activities),
-                    ..
-                }) = session.transcript_blocks.last_mut()
-                && *anchor == after_message
-            {
-                activities.push(item);
-            } else {
-                session.transcript_blocks.push(TranscriptBlock {
-                    after_message,
-                    turn_id: session.active_turn_id(),
-                    content: TranscriptBlockContent::Activities(vec![item]),
-                });
-            }
+            push_transcript_activity(session, item, continuing_work);
             session.updated_at = unix_time();
         }
         runtime.stream_phase = Some(StreamPhase::Activity);
@@ -143,10 +162,8 @@ impl Waku {
     pub(super) fn complete_turn_blocks(&mut self, session_id: Uuid) {
         if let Some(session) = self.state.session_mut(session_id) {
             for block in &mut session.transcript_blocks {
-                if let TranscriptBlockContent::Activities(activities) = &mut block.content {
-                    for activity in activities {
-                        activity.complete = true;
-                    }
+                for activity in &mut block.activities {
+                    activity.complete = true;
                 }
             }
         }
@@ -627,6 +644,28 @@ impl Waku {
             }
         }
         runtime.computer_use_previews.push(state);
+    }
+}
+
+pub(super) fn push_transcript_activity(
+    session: &mut AgentSession,
+    item: ActivityItem,
+    continuing_work: bool,
+) {
+    let after_message = session.messages.len();
+    let turn_id = session.active_turn_id();
+    if continuing_work
+        && let Some(block) = session.transcript_blocks.last_mut()
+        && block.after_message == after_message
+        && block.turn_id == turn_id
+    {
+        block.activities.push(item);
+    } else {
+        session.transcript_blocks.push(TranscriptBlock {
+            after_message,
+            turn_id,
+            activities: vec![item],
+        });
     }
 }
 
