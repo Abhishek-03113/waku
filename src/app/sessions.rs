@@ -175,6 +175,7 @@ impl Waku {
         let was_selected = self.state.selected_session == Some(session_id);
         self.submission_preparations.remove(&session_id);
         self.reset_session_runtime(session_id);
+        self.background_work.remove(&session_id);
         self.remove_right_panel_session_state(session_id);
         self.remove_composer_draft(composer_draft_key, cx);
         self.state.sessions.remove(index);
@@ -581,6 +582,7 @@ impl Waku {
     pub(super) fn reset_session_runtime(&mut self, session_id: Uuid) {
         if let Some(runtime) = self.runtimes.remove(&session_id) {
             runtime.driver.cancel();
+            self.mark_background_work_lost(session_id);
         }
     }
 
@@ -761,10 +763,16 @@ impl Waku {
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .is_some_and(|session| retain_runtime_after_cancel(session.provider));
+            .is_some_and(|session| retain_runtime_after_cancel(session.provider))
+            || self.session_has_live_detached_work(session_id);
         let mut runtime = self.runtimes.remove(&session_id);
         if let Some(runtime) = runtime.as_ref() {
             runtime.driver.cancel();
+            if retain_runtime {
+                // A detached process keeps Codex's app-server resident, but
+                // Computer Use descendants still belong to the cancelled turn.
+                runtime.driver.cancel_computer_use();
+            }
         }
         // Do not leave already-received text in the smoothing queue: once the
         // message is marked complete, a later delta would otherwise create a
@@ -794,6 +802,7 @@ impl Waku {
             .flatten();
         self.finish_streaming_assistant(session_id);
         self.complete_turn_blocks(session_id);
+        self.settle_foreground_work(session_id, BackgroundWorkStatus::Stopped);
         if let Some(runtime) = runtime.as_mut() {
             runtime.stream_phase = None;
             runtime.pending_permission = None;
@@ -817,10 +826,11 @@ impl Waku {
         if let Some(previous_kinds) = previous_kinds.as_deref() {
             self.splice_active_transcript_rows_after_visibility_change(previous_kinds);
         }
-        // A provider runtime owns its Waku JavaScript REPL and Computer Use descendants.
-        // Stopping the turn must close that whole process tree so capture,
-        // status, and accessibility sessions do not outlive the turn. The
-        // next prompt resumes the same provider thread with a fresh runtime.
+        // A provider runtime owns its Waku JavaScript REPL and Computer Use
+        // descendants. Normally Stop closes that process tree and the next
+        // prompt resumes the same provider thread with a fresh runtime. A
+        // detached process or subagent is the exception: its provider must
+        // remain resident so Waku can keep observing and stopping it.
         if retain_runtime
             && keep_runtime
             && let Some(runtime) = runtime

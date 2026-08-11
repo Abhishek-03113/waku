@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -18,8 +18,9 @@ use super::computer_use as computer_use_runtime;
 use crate::computer_use;
 use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
 use crate::model::{
-    ActivityItem, ActivityKind, DriverEvent, InteractionMode, PermissionOption,
-    ProviderResumeCursor, RuntimeMode,
+    ActivityItem, ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
+    BackgroundWorkKind, BackgroundWorkStatus, DriverEvent, InteractionMode, PermissionOption,
+    ProviderResumeCursor, RuntimeMode, unix_time_millis,
 };
 
 const DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN: &str =
@@ -50,7 +51,34 @@ enum CommandMessage {
         response: Sender<Result<String, String>>,
     },
     Options(SessionOptions),
+    RefreshBackgroundWork,
+    StopBackgroundWork {
+        key: BackgroundWorkKey,
+        control_id: String,
+    },
     Shutdown,
+}
+
+#[derive(Default)]
+struct BackgroundRpcState {
+    lists: HashSet<u64>,
+    stops: HashMap<u64, BackgroundWorkKey>,
+    unsupported: bool,
+}
+
+enum PendingBackgroundRpc {
+    List,
+    Stop(BackgroundWorkKey),
+}
+
+impl BackgroundRpcState {
+    fn take(&mut self, id: u64) -> Option<PendingBackgroundRpc> {
+        if self.lists.remove(&id) {
+            Some(PendingBackgroundRpc::List)
+        } else {
+            self.stops.remove(&id).map(PendingBackgroundRpc::Stop)
+        }
+    }
 }
 
 pub struct CodexDriver {
@@ -208,6 +236,7 @@ impl CodexDriver {
             HashMap::<u64, Sender<Result<String, String>>>::new(),
         ));
         let pending_steers = Arc::new(Mutex::new(HashMap::<u64, String>::new()));
+        let background_rpcs = Arc::new(Mutex::new(BackgroundRpcState::default()));
 
         let writer_thread_id = thread_id.clone();
         let writer_turn_id = turn_id.clone();
@@ -215,6 +244,7 @@ impl CodexDriver {
         let writer_pending_rollbacks = pending_rollbacks.clone();
         let writer_pending_forks = pending_forks.clone();
         let writer_pending_steers = pending_steers.clone();
+        let writer_background_rpcs = background_rpcs.clone();
         let writer_events = events.clone();
         let cwd_string = cwd.display().to_string();
         thread::Builder::new()
@@ -499,6 +529,49 @@ impl CodexDriver {
                             service_tier = options.service_tier;
                             continue;
                         }
+                        CommandMessage::RefreshBackgroundWork => {
+                            if writer_background_rpcs.lock().unsupported {
+                                continue;
+                            }
+                            let Some(thread_id) = wait_for_thread_id(&writer_thread_id) else {
+                                continue;
+                            };
+                            next_request_id += 1;
+                            writer_background_rpcs.lock().lists.insert(next_request_id);
+                            json!({
+                                "method": "thread/backgroundTerminals/list",
+                                "id": next_request_id,
+                                "params": {
+                                    "threadId": thread_id,
+                                    "cursor": null,
+                                    "limit": 100
+                                }
+                            })
+                        }
+                        CommandMessage::StopBackgroundWork { key, control_id } => {
+                            let Some(thread_id) = wait_for_thread_id(&writer_thread_id) else {
+                                let _ = writer_events.send(DriverEvent::BackgroundWork(
+                                    BackgroundWorkEvent::StopFailed {
+                                        key,
+                                        message: tr!("errors.codex_thread_open_incomplete"),
+                                    },
+                                ));
+                                continue;
+                            };
+                            next_request_id += 1;
+                            writer_background_rpcs
+                                .lock()
+                                .stops
+                                .insert(next_request_id, key);
+                            json!({
+                                "method": "thread/backgroundTerminals/terminate",
+                                "id": next_request_id,
+                                "params": {
+                                    "threadId": thread_id,
+                                    "processId": control_id
+                                }
+                            })
+                        }
                         CommandMessage::Shutdown => break,
                     };
                     if let Err(error) = write_json_line(&mut stdin, &message) {
@@ -518,6 +591,7 @@ impl CodexDriver {
         let reader_pending_rollbacks = pending_rollbacks.clone();
         let reader_pending_forks = pending_forks.clone();
         let reader_pending_steers = pending_steers.clone();
+        let reader_background_rpcs = background_rpcs.clone();
         let reader_events = events.clone();
         let reader_thread = thread::Builder::new()
             .name("waku-codex-reader".into())
@@ -535,6 +609,7 @@ impl CodexDriver {
                                     &reader_pending_rollbacks,
                                     &reader_pending_forks,
                                     &reader_pending_steers,
+                                    &reader_background_rpcs,
                                     &reader_events,
                                     &mut stream_state,
                                 ),
@@ -664,6 +739,16 @@ impl DriverControl for CodexDriver {
         ) {
             computer_use_runtime::stop_registered_processes(directory, server_path);
         }
+    }
+
+    fn refresh_background_work(&self) {
+        let _ = self.commands.send(CommandMessage::RefreshBackgroundWork);
+    }
+
+    fn stop_background_work(&self, key: BackgroundWorkKey, control_id: String) {
+        let _ = self
+            .commands
+            .send(CommandMessage::StopBackgroundWork { key, control_id });
     }
 
     fn respond(&self, request_id: String, option_id: String) {
@@ -864,6 +949,169 @@ fn markdown_link_destination(url: &str) -> String {
         .replace(')', "\\)")
 }
 
+fn json_id(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn codex_background_terminal(item: &Value) -> Option<BackgroundWorkItem> {
+    let item_id = json_id(item.get("itemId").or_else(|| item.get("id")))?;
+    let process_id = json_id(item.get("processId"))?;
+    let command = item
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| tr!("background.process"));
+    let mut work = BackgroundWorkItem::new(
+        BackgroundWorkKind::Process,
+        item_id,
+        command.clone(),
+        BackgroundWorkStatus::Running,
+    );
+    work.command = Some(command);
+    work.cwd = item.get("cwd").and_then(Value::as_str).map(str::to_owned);
+    let mut telemetry = Vec::new();
+    if let Some(pid) = item.get("osPid").and_then(Value::as_u64) {
+        telemetry.push(format!("PID {pid}"));
+    }
+    if let Some(cpu) = item.get("cpuPercent").and_then(Value::as_f64) {
+        telemetry.push(format!("CPU {cpu:.1}%"));
+    }
+    if let Some(rss_kb) = item.get("rssKb").and_then(Value::as_u64) {
+        telemetry.push(format!("{:.1} MB", (rss_kb as f64 / 1024.0).max(0.1)));
+    }
+    if !telemetry.is_empty() {
+        work.detail = Some(telemetry.join("  ·  "));
+    }
+    work.background = true;
+    work.can_stop = true;
+    work.control_id = Some(process_id);
+    work.updated_at_ms = unix_time_millis();
+    Some(work)
+}
+
+fn codex_command_work(item: &Value, complete: bool) -> Option<BackgroundWorkItem> {
+    if item.get("type").and_then(Value::as_str) != Some("commandExecution") {
+        return None;
+    }
+    let item_id = item.get("id").and_then(Value::as_str)?.to_owned();
+    let command = item
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| tr!("background.command"));
+    let exit_code = item
+        .get("exitCode")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    let status = if !complete {
+        BackgroundWorkStatus::Running
+    } else if codex_item_failed(item) || exit_code.is_some_and(|code| code != 0) {
+        BackgroundWorkStatus::Failed
+    } else {
+        BackgroundWorkStatus::Completed
+    };
+    let mut work = BackgroundWorkItem::new(
+        BackgroundWorkKind::Process,
+        item_id.clone(),
+        command.clone(),
+        status,
+    );
+    work.command = Some(command);
+    work.cwd = item.get("cwd").and_then(Value::as_str).map(str::to_owned);
+    work.output = item
+        .get("aggregatedOutput")
+        .and_then(Value::as_str)
+        .filter(|output| !output.is_empty())
+        .map(str::to_owned);
+    work.duration_ms = item
+        .get("durationMs")
+        .or_else(|| item.get("duration_ms"))
+        .and_then(Value::as_u64);
+    work.exit_code = exit_code;
+    work.control_id = json_id(item.get("processId"));
+    work.origin_activity_id = Some(item_id);
+    work.updated_at_ms = unix_time_millis();
+    Some(work)
+}
+
+fn codex_agent_status(status: &str) -> BackgroundWorkStatus {
+    match status {
+        "pendingInit" => BackgroundWorkStatus::Starting,
+        "running" => BackgroundWorkStatus::Running,
+        "completed" | "shutdown" => BackgroundWorkStatus::Completed,
+        "interrupted" => BackgroundWorkStatus::Stopped,
+        "errored" | "notFound" => BackgroundWorkStatus::Failed,
+        _ => BackgroundWorkStatus::Running,
+    }
+}
+
+fn codex_subagent_work(item: &Value) -> Vec<BackgroundWorkItem> {
+    if item.get("type").and_then(Value::as_str) != Some("collabAgentToolCall") {
+        return Vec::new();
+    }
+    let origin = item.get("id").and_then(Value::as_str).map(str::to_owned);
+    let prompt = item
+        .get("prompt")
+        .and_then(Value::as_str)
+        .and_then(|prompt| prompt.lines().find(|line| !line.trim().is_empty()))
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .map(|prompt| {
+            let mut title = prompt.chars().take(96).collect::<String>();
+            if prompt.chars().count() > 96 {
+                title.push('…');
+            }
+            title
+        })
+        .unwrap_or_else(|| tr!("background.subagent"));
+    let model = item.get("model").and_then(Value::as_str).map(str::to_owned);
+    let parent_id = item
+        .get("senderThreadId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let role = item
+        .get("agentType")
+        .or_else(|| item.get("role"))
+        .or_else(|| item.get("tool"))
+        .and_then(Value::as_str)
+        .map(split_camel_case);
+    item.get("agentsStates")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(thread_id, state)| {
+            let status = codex_agent_status(
+                state
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("running"),
+            );
+            let mut work = BackgroundWorkItem::new(
+                BackgroundWorkKind::Subagent,
+                thread_id,
+                prompt.clone(),
+                status,
+            );
+            work.detail = state
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|message| !message.is_empty())
+                .map(str::to_owned);
+            work.background = true;
+            work.origin_activity_id = origin.clone();
+            work.role = role.clone();
+            work.model = model.clone();
+            work.parent_id = parent_id.clone();
+            work.updated_at_ms = unix_time_millis();
+            work
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_codex_message(
     value: Value,
@@ -873,6 +1121,7 @@ fn handle_codex_message(
     pending_rollbacks: &Mutex<HashMap<u64, (usize, Sender<Result<(), String>>)>>,
     pending_forks: &Mutex<HashMap<u64, Sender<Result<String, String>>>>,
     pending_steers: &Mutex<HashMap<u64, String>>,
+    background_rpcs: &Mutex<BackgroundRpcState>,
     events: &Sender<DriverEvent>,
     stream_state: &mut CodexStreamState,
 ) {
@@ -880,6 +1129,69 @@ fn handle_codex_message(
     // the same numeric ID as one of Waku's earlier requests. Only messages
     // without a method are responses to Waku-originated requests.
     let is_response = value.get("method").is_none();
+    let pending_background = is_response
+        .then(|| value.get("id").and_then(Value::as_u64))
+        .flatten()
+        .and_then(|id| background_rpcs.lock().take(id));
+    if let Some(pending) = pending_background {
+        match pending {
+            PendingBackgroundRpc::List => {
+                if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
+                    if error.to_ascii_lowercase().contains("method not found")
+                        || error.to_ascii_lowercase().contains("unsupported")
+                    {
+                        background_rpcs.lock().unsupported = true;
+                    }
+                } else {
+                    let items = value
+                        .pointer("/result/data")
+                        .or_else(|| value.pointer("/result/items"))
+                        .or_else(|| value.get("result"))
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(codex_background_terminal)
+                        .collect();
+                    let _ = events.send(DriverEvent::BackgroundWork(
+                        BackgroundWorkEvent::ReconcileProcesses(items),
+                    ));
+                }
+            }
+            PendingBackgroundRpc::Stop(key) => {
+                if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
+                    let _ = events.send(DriverEvent::BackgroundWork(
+                        BackgroundWorkEvent::StopFailed {
+                            key,
+                            message: error.to_owned(),
+                        },
+                    ));
+                } else if value.pointer("/result/terminated").and_then(Value::as_bool)
+                    == Some(false)
+                {
+                    let _ = events.send(DriverEvent::BackgroundWork(
+                        BackgroundWorkEvent::StopFailed {
+                            key,
+                            message: tr!("background.stop_not_running"),
+                        },
+                    ));
+                } else {
+                    let mut item = BackgroundWorkItem::new(
+                        key.kind,
+                        key.provider_id.clone(),
+                        "",
+                        BackgroundWorkStatus::Stopped,
+                    );
+                    item.key = key;
+                    item.background = true;
+                    item.updated_at_ms = unix_time_millis();
+                    let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                        item,
+                    )));
+                }
+            }
+        }
+        return;
+    }
     if is_response
         && let Some(id) = value.get("id").and_then(Value::as_u64)
         && id != 1
@@ -1000,10 +1312,34 @@ fn handle_codex_message(
                 let _ = events.send(DriverEvent::ReasoningDelta(delta.to_owned()));
             }
         }
+        "item/commandExecution/outputDelta" => {
+            if let (Some(item_id), Some(delta)) = (
+                params.get("itemId").and_then(Value::as_str),
+                params.get("delta").and_then(Value::as_str),
+            ) && !delta.is_empty()
+            {
+                let _ = events.send(DriverEvent::BackgroundWork(
+                    BackgroundWorkEvent::OutputDelta {
+                        key: BackgroundWorkKey::new(BackgroundWorkKind::Process, item_id),
+                        delta: delta.to_owned(),
+                    },
+                ));
+            }
+        }
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item") {
                 stream_state.capture_citations(item);
                 let complete = method == "item/completed";
+                if let Some(work) = codex_command_work(item, complete) {
+                    let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                        work,
+                    )));
+                }
+                for work in codex_subagent_work(item) {
+                    let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                        work,
+                    )));
+                }
                 let kind = codex_activity_kind(item);
                 if let Some(kind) = kind {
                     let title = codex_item_title(item);
@@ -1709,6 +2045,7 @@ mod tests {
         let pending_rollbacks = Mutex::new(HashMap::new());
         let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let (event_tx, event_rx) = unbounded();
         let mut stream_state = CodexStreamState::default();
         let mut send = |value| {
@@ -1720,6 +2057,7 @@ mod tests {
                 &pending_rollbacks,
                 &pending_forks,
                 &pending_steers,
+                &background_rpcs,
                 &event_tx,
                 &mut stream_state,
             );
@@ -1772,6 +2110,7 @@ mod tests {
         let pending_rollbacks = Mutex::new(HashMap::new());
         let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let (response_tx, response_rx) = bounded(1);
         pending_rollbacks.lock().insert(42, (1, response_tx));
         let (event_tx, event_rx) = unbounded();
@@ -1785,6 +2124,7 @@ mod tests {
             &pending_rollbacks,
             &pending_forks,
             &pending_steers,
+            &background_rpcs,
             &event_tx,
             &mut stream_state,
         );
@@ -1803,6 +2143,7 @@ mod tests {
         let pending_rollbacks = Mutex::new(HashMap::new());
         let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let (response_tx, response_rx) = bounded(1);
         pending_rollbacks.lock().insert(43, (1, response_tx));
         let (event_tx, event_rx) = unbounded();
@@ -1816,6 +2157,7 @@ mod tests {
             &pending_rollbacks,
             &pending_forks,
             &pending_steers,
+            &background_rpcs,
             &event_tx,
             &mut stream_state,
         );
@@ -1836,6 +2178,7 @@ mod tests {
         let pending_rollbacks = Mutex::new(HashMap::new());
         let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
         let (response_tx, response_rx) = bounded(1);
         pending_forks.lock().insert(44, response_tx);
         let (event_tx, event_rx) = unbounded();
@@ -1849,6 +2192,7 @@ mod tests {
             &pending_rollbacks,
             &pending_forks,
             &pending_steers,
+            &background_rpcs,
             &event_tx,
             &mut stream_state,
         );
@@ -1866,6 +2210,7 @@ mod tests {
         let pending_rollbacks = Mutex::new(HashMap::new());
         let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
         pending_steers
             .lock()
             .insert(50, "Focus on the failing tests first".to_owned());
@@ -1880,6 +2225,7 @@ mod tests {
             &pending_rollbacks,
             &pending_forks,
             &pending_steers,
+            &background_rpcs,
             &event_tx,
             &mut stream_state,
         );
@@ -1902,6 +2248,7 @@ mod tests {
         let pending_rollbacks = Mutex::new(HashMap::new());
         let pending_forks = Mutex::new(HashMap::new());
         let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
         pending_steers.lock().insert(51, "Steer me".to_owned());
         let (event_tx, event_rx) = unbounded();
         let mut stream_state = CodexStreamState::default();
@@ -1914,6 +2261,7 @@ mod tests {
             &pending_rollbacks,
             &pending_forks,
             &pending_steers,
+            &background_rpcs,
             &event_tx,
             &mut stream_state,
         );
@@ -1936,6 +2284,87 @@ mod tests {
         assert_eq!(fork_last_turn_id(&turns, 0), Ok("turn-3".into()));
         assert_eq!(fork_last_turn_id(&turns, 2), Ok("turn-1".into()));
         assert!(fork_last_turn_id(&turns, 3).is_err());
+    }
+
+    #[test]
+    fn background_terminal_snapshot_preserves_native_control_ids() {
+        let item = codex_background_terminal(&json!({
+            "itemId": "item-7",
+            "processId": "process-9",
+            "command": "bun run dev",
+            "cwd": "/tmp/project",
+            "osPid": 123,
+            "cpuPercent": 1.5,
+            "rssKb": 4096
+        }))
+        .unwrap();
+        assert_eq!(item.key.provider_id, "item-7");
+        assert_eq!(item.control_id.as_deref(), Some("process-9"));
+        assert_eq!(item.status, BackgroundWorkStatus::Running);
+        assert!(item.background && item.can_stop);
+    }
+
+    #[test]
+    fn background_terminal_list_responses_reconcile_the_registry() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(None);
+        let turn_ids = Mutex::new(Vec::new());
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_forks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
+        background_rpcs.lock().lists.insert(70);
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+
+        handle_codex_message(
+            json!({
+                "id": 70,
+                "result": {"data": [{
+                    "itemId": "item-7",
+                    "processId": "process-9",
+                    "command": "bun run dev",
+                    "cwd": "/tmp/project"
+                }]}
+            }),
+            &thread_id,
+            &turn_id,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_forks,
+            &pending_steers,
+            &background_rpcs,
+            &event_tx,
+            &mut stream_state,
+        );
+
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::ReconcileProcesses(items)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("the terminal snapshot should be reconciled");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].control_id.as_deref(), Some("process-9"));
+        assert!(background_rpcs.lock().lists.is_empty());
+    }
+
+    #[test]
+    fn collab_agent_states_become_subagent_work() {
+        let items = codex_subagent_work(&json!({
+            "type": "collabAgentToolCall",
+            "id": "collab-1",
+            "tool": "spawnAgent",
+            "prompt": "Inspect the parser\nand report back",
+            "senderThreadId": "root-thread",
+            "agentsStates": {
+                "agent-thread": {"status": "running", "message": "Reading source"}
+            }
+        }));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key.kind, BackgroundWorkKind::Subagent);
+        assert_eq!(items[0].key.provider_id, "agent-thread");
+        assert_eq!(items[0].origin_activity_id.as_deref(), Some("collab-1"));
+        assert_eq!(items[0].status, BackgroundWorkStatus::Running);
     }
 
     #[test]

@@ -28,11 +28,12 @@ use crate::git_branch::BranchSnapshot;
 use crate::input::{ComposerEvent, ComposerInput};
 use crate::md;
 use crate::model::{
-    ActivityItem, AgentSession, Checkpoint, CheckpointStatus, ContextUsage, DriverEvent,
-    FavoriteModel, InteractionMode, Message, MessageRole, PendingPermission, Project, ProviderKind,
-    ProviderModel, ProviderProbe, ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode,
-    SessionStatus, SessionWorkspace, TranscriptBlock, TranscriptBlockContent, TurnStatus,
-    compact_path, unix_time, unix_time_millis,
+    ActivityItem, AgentSession, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
+    BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus, ContextUsage,
+    DriverEvent, FavoriteModel, InteractionMode, Message, MessageRole, PendingPermission, Project,
+    ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor, QueuedMessage,
+    ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
+    TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -104,6 +105,8 @@ const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
 /// abandoned tasks is an afternoon of idle agent processes.
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const IDLE_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const BACKGROUND_WORK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const BACKGROUND_WORK_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Zed keeps status toasts on screen for ten seconds, pausing the countdown
 /// while the pointer is over the toast so a long message remains readable.
@@ -261,8 +264,13 @@ struct ComposerAttachment {
 /// A session mid-turn is not idle however long it has been quiet: a slow tool
 /// call, or an approval waiting on the user, must not have its agent pulled out
 /// from under it.
-fn session_is_reapable(session: Option<&AgentSession>, idle_for: Duration) -> bool {
-    idle_for >= IDLE_SESSION_TIMEOUT
+fn session_is_reapable(
+    session: Option<&AgentSession>,
+    idle_for: Duration,
+    has_live_background_work: bool,
+) -> bool {
+    !has_live_background_work
+        && idle_for >= IDLE_SESSION_TIMEOUT
         && session.is_none_or(|session| {
             session.active_turn_id().is_none()
                 && matches!(session.status, SessionStatus::Idle | SessionStatus::Failed)
@@ -381,6 +389,10 @@ fn fitted_panel_widths(
 enum RightPanelSurface {
     Browser(Uuid),
     Terminal(Uuid),
+    BackgroundWork {
+        key: BackgroundWorkKey,
+        title: String,
+    },
     Files,
     Diff,
     File(String),
@@ -566,6 +578,9 @@ struct SessionRuntime {
     last_driver_error: Option<String>,
     /// When this session last sent or received anything, for idle reaping.
     last_active_at: Instant,
+    /// Background-process snapshots are provider IPC. Keep the polling clock
+    /// on the runtime so switching tasks never creates duplicate probes.
+    last_background_refresh_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -750,6 +765,9 @@ pub struct Waku {
     /// flicker when app activation invalidates the query.
     visible_branch_snapshot: Option<(PathBuf, BranchSnapshot)>,
     branch_operation_pending: bool,
+    /// Window-modal Git commit/push flow. Its snapshot and pending state are
+    /// filled off-thread; frames only read this in-memory value.
+    commit_dialog: Option<commit_dialog::CommitDialogState>,
     /// Slash commands discovered per (provider, project root). Filesystem
     /// walks live on the background executor; frames read the index below.
     slash_commands: QueryCache<(ProviderKind, PathBuf), Vec<SlashCommand>>,
@@ -770,6 +788,11 @@ pub struct Waku {
     /// drained into the next submission.
     composer_attachments: Vec<ComposerAttachment>,
     runtimes: HashMap<Uuid, SessionRuntime>,
+    /// Provider-neutral session work which may remain live after a turn ends.
+    /// Runtime-only by design: providers reconcile their authoritative state
+    /// when the resident transport reconnects.
+    background_work: HashMap<Uuid, BackgroundWorkRegistry>,
+    last_background_work_tick: Instant,
     /// Accepted submissions still creating their workspace/checkpoint, or an
     /// edited past message still rewinding its workspace and provider. The
     /// session is busy immediately, while the composer draws a spinner until
@@ -1001,8 +1024,10 @@ pub struct Waku {
 }
 
 mod autocomplete;
+mod background_work;
 mod branches;
 mod command_palette;
+mod commit_dialog;
 mod components;
 mod composer;
 mod drafts;
@@ -1021,7 +1046,11 @@ mod usage_meter;
 mod usage_page;
 
 pub use autocomplete::init as init_composer_autocomplete;
+use background_work::{
+    BackgroundWorkRegistry, work_kind_icon, work_status_color, work_status_label,
+};
 pub use command_palette::init as init_command_palette;
+pub use commit_dialog::init as init_commit_dialog_keys;
 use components::*;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
@@ -1692,6 +1721,7 @@ impl Waku {
                             if std::mem::take(&mut this.composer_sources_stale) {
                                 this.refresh_composer_sources(cx);
                             }
+                            this.maybe_refresh_background_work(cx);
                             this.reap_idle_sessions();
                             // A finished turn asks for a checkpoint from a
                             // handler with no `Context`; this is where that
@@ -1787,6 +1817,7 @@ impl Waku {
                 branch_snapshots: QueryCache::new(MAX_CACHED_WORKSPACES),
                 visible_branch_snapshot: None,
                 branch_operation_pending: false,
+                commit_dialog: None,
                 // Providers × workspaces; both scans are small, the cache
                 // only exists to keep them off the frame path.
                 slash_commands: QueryCache::new(2 * MAX_CACHED_WORKSPACES),
@@ -1799,6 +1830,8 @@ impl Waku {
                 composer_autocomplete: autocomplete::AutocompleteUi::new(),
                 composer_attachments,
                 runtimes: HashMap::new(),
+                background_work: HashMap::new(),
+                last_background_work_tick: Instant::now(),
                 submission_preparations: HashSet::new(),
                 response_fork_preparations: HashMap::new(),
                 pending_queue_drains: Vec::new(),

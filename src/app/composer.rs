@@ -632,6 +632,7 @@ impl Waku {
                     provider_color(&theme, provider).opacity(0.9),
                 )
                 .label(selected_model_name)
+                .caret(false)
                 .selected(handle.is_open()),
             &handle,
             MenuAlign::AboveLeft,
@@ -1138,6 +1139,7 @@ impl Waku {
                     trigger.icon("icons/zap.svg", theme.text_secondary)
                 })
                 .label(trigger_label)
+                .caret(false)
                 .selected(handle.is_open()),
             "model-traits-menu",
             &handle,
@@ -1209,6 +1211,7 @@ impl Waku {
             MenuChip::new("runtime-mode")
                 .icon(selected_mode.icon(), theme.text_tertiary)
                 .label(selected_mode.label())
+                .caret(false)
                 .selected(handle.is_open()),
             "runtime-mode-menu",
             &handle,
@@ -1908,7 +1911,7 @@ impl Waku {
             } else {
                 selected_branch.clone()
             })
-            .caret(branch_enabled)
+            .caret(false)
             .disabled(!branch_enabled)
             .selected(branch_enabled && handle.is_open())
             .max_w(px(210.0));
@@ -2254,7 +2257,7 @@ impl Waku {
         let project_trigger = MenuChip::new("workspace-project")
             .icon("icons/folder.svg", theme.text_tertiary)
             .label(project_name)
-            .caret(can_configure_workspace)
+            .caret(false)
             .disabled(!can_configure_workspace)
             .selected(can_configure_workspace && project_handle.is_open())
             .max_w(px(190.0));
@@ -2345,7 +2348,7 @@ impl Waku {
         let worktree_trigger = MenuChip::new("workspace-worktree")
             .icon(workspace_icon, theme.text_tertiary)
             .label(workspace_label)
-            .caret(can_configure_workspace)
+            .caret(false)
             .disabled(!can_configure_workspace)
             .selected(can_configure_workspace && worktree_handle.is_open())
             .max_w(px(180.0));

@@ -533,7 +533,7 @@ impl RightPanelSurface {
         Self::Browser(Uuid::new_v4())
     }
 
-    fn new_terminal() -> Self {
+    pub(super) fn new_terminal() -> Self {
         Self::Terminal(Uuid::new_v4())
     }
 
@@ -555,6 +555,17 @@ impl RightPanelSurface {
         match self {
             Self::Browser(_) => tr!("right_panel.browser"),
             Self::Terminal(_) => tr!("right_panel.terminal"),
+            Self::BackgroundWork { key, title } => {
+                if title.is_empty() {
+                    match key.kind {
+                        BackgroundWorkKind::Process => tr!("background.process"),
+                        BackgroundWorkKind::Monitor => tr!("background.monitor"),
+                        BackgroundWorkKind::Subagent => tr!("background.subagent"),
+                    }
+                } else {
+                    title.clone()
+                }
+            }
             Self::Files => tr!("right_panel.files"),
             Self::Diff => tr!("right_panel.diff"),
             Self::File(path) => path.rsplit('/').next().unwrap_or(path).to_owned(),
@@ -565,6 +576,7 @@ impl RightPanelSurface {
         match self {
             Self::Browser(_) => "icons/globe.svg",
             Self::Terminal(_) => "icons/terminal.svg",
+            Self::BackgroundWork { key, .. } => work_kind_icon(key.kind),
             Self::Files => "icons/folder.svg",
             Self::Diff => "icons/file-diff.svg",
             Self::File(path) => file_icon_for_path(path),
@@ -602,6 +614,9 @@ fn reusable_surface_index(
 ) -> Option<usize> {
     match requested {
         RightPanelSurface::Browser(_) | RightPanelSurface::Terminal(_) => None,
+        RightPanelSurface::BackgroundWork { key, .. } => surfaces.iter().position(|surface| {
+            matches!(surface, RightPanelSurface::BackgroundWork { key: candidate, .. } if candidate == key)
+        }),
         RightPanelSurface::Files | RightPanelSurface::Diff | RightPanelSurface::File(_) => {
             surfaces.iter().position(|surface| surface == requested)
         }
@@ -1140,9 +1155,14 @@ mod tests {
     fn only_reuses_single_instance_surface_tabs() {
         let browser = RightPanelSurface::new_browser();
         let terminal = RightPanelSurface::new_terminal();
+        let background = RightPanelSurface::BackgroundWork {
+            key: BackgroundWorkKey::new(BackgroundWorkKind::Process, "process-1"),
+            title: "Process one".into(),
+        };
         let surfaces = vec![
             browser,
             terminal,
+            background,
             RightPanelSurface::Files,
             RightPanelSurface::Diff,
         ];
@@ -1156,12 +1176,22 @@ mod tests {
             None
         );
         assert_eq!(
-            reusable_surface_index(&surfaces, &RightPanelSurface::Files),
+            reusable_surface_index(
+                &surfaces,
+                &RightPanelSurface::BackgroundWork {
+                    key: BackgroundWorkKey::new(BackgroundWorkKind::Process, "process-1"),
+                    title: "Renamed process".into(),
+                },
+            ),
             Some(2)
         );
         assert_eq!(
-            reusable_surface_index(&surfaces, &RightPanelSurface::Diff),
+            reusable_surface_index(&surfaces, &RightPanelSurface::Files),
             Some(3)
+        );
+        assert_eq!(
+            reusable_surface_index(&surfaces, &RightPanelSurface::Diff),
+            Some(4)
         );
     }
 
@@ -1416,7 +1446,11 @@ impl Waku {
         }
     }
 
-    fn open_right_panel_surface(&mut self, surface: RightPanelSurface, cx: &mut Context<Self>) {
+    pub(super) fn open_right_panel_surface(
+        &mut self,
+        surface: RightPanelSurface,
+        cx: &mut Context<Self>,
+    ) {
         let reusable_index = reusable_surface_index(&self.right_panel_surfaces, &surface);
         if matches!(&surface, RightPanelSurface::File(_)) {
             self.ensure_initial_right_panel_file_editor_width();
@@ -1625,6 +1659,9 @@ impl Waku {
         }
         let body = match self.active_right_panel_surface().cloned() {
             None => self.render_right_panel_chooser(cx).into_any_element(),
+            Some(RightPanelSurface::BackgroundWork { key, .. }) => self
+                .render_background_work_surface(&key, cx)
+                .into_any_element(),
             Some(RightPanelSurface::Files) => self
                 .render_right_panel_files(width, window, cx)
                 .into_any_element(),
@@ -1725,6 +1762,7 @@ impl Waku {
     fn any_overlay_open(&self, cx: &App) -> bool {
         self.menus.borrow().values().any(ContextMenuHandle::is_open)
             || self.command_palette.is_open()
+            || self.commit_dialog.is_some()
             || self.composer.read(cx).context_menu_open()
             || self
                 .right_panel_browsers
@@ -3738,7 +3776,11 @@ impl Waku {
         }
     }
 
-    fn set_right_panel_diff_source(&mut self, source: ReviewDiffSource, cx: &mut Context<Self>) {
+    pub(super) fn set_right_panel_diff_source(
+        &mut self,
+        source: ReviewDiffSource,
+        cx: &mut Context<Self>,
+    ) {
         if self.right_panel_diff_source != source {
             self.right_panel_diff_selection.clear();
             self.right_panel_diff_source = source;
@@ -3751,7 +3793,7 @@ impl Waku {
             self.right_panel_diff_tree_list_state.reset(0);
             self.right_panel_diff_list_state.reset(0);
         }
-        self.refresh_right_panel_diff(cx);
+        self.open_right_panel_surface(RightPanelSurface::Diff, cx);
     }
 
     /// Captures one stable Git range and turns it into render-ready rows. Git,

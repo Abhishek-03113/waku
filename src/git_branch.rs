@@ -26,6 +26,10 @@ pub struct BranchSnapshot {
     pub detached_head: Option<String>,
     pub default_branch: Option<String>,
     pub branches: Vec<BranchEntry>,
+    /// Tracked working-tree changes against `HEAD`, cached with the branch
+    /// snapshot so environment UI never shells out from a render path.
+    pub additions: u64,
+    pub deletions: u64,
 }
 
 impl BranchSnapshot {
@@ -115,6 +119,7 @@ pub fn inspect(cwd: &Path) -> anyhow::Result<Option<BranchSnapshot>> {
         .filter(|branch| branches.iter().any(|entry| entry.name == *branch))
         .map(str::to_owned)
         .or_else(|| current.clone());
+    let (additions, deletions) = worktree_line_counts(cwd);
 
     Ok(Some(BranchSnapshot {
         repository,
@@ -122,7 +127,34 @@ pub fn inspect(cwd: &Path) -> anyhow::Result<Option<BranchSnapshot>> {
         detached_head,
         default_branch,
         branches,
+        additions,
+        deletions,
     }))
+}
+
+fn worktree_line_counts(cwd: &Path) -> (u64, u64) {
+    let Ok(output) = Command::new("git")
+        .args(["diff", "--numstat", "HEAD", "--"])
+        .current_dir(cwd)
+        .output()
+    else {
+        return (0, 0);
+    };
+    if !output.status.success() {
+        return (0, 0);
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .fold((0, 0), |(additions, deletions), line| {
+            let mut fields = line.splitn(3, '\t');
+            let added = fields.next().and_then(|value| value.parse::<u64>().ok());
+            let deleted = fields.next().and_then(|value| value.parse::<u64>().ok());
+            match (added, deleted) {
+                (Some(added), Some(deleted)) => (additions + added, deletions + deleted),
+                // Binary files are reported as `-\t-` and have no line count.
+                _ => (additions, deletions),
+            }
+        })
 }
 
 pub fn checkout(cwd: &Path, branch: &str) -> anyhow::Result<BranchSnapshot> {
@@ -282,5 +314,14 @@ mod tests {
                 .iter()
                 .any(|branch| branch.name == "topic/new-picker")
         );
+    }
+
+    #[test]
+    fn counts_tracked_worktree_changes() {
+        let repository = repository();
+        fs::write(repository.join("README.md"), "main\nsecond\n").unwrap();
+
+        let snapshot = inspect(&repository).unwrap().unwrap();
+        assert_eq!((snapshot.additions, snapshot.deletions), (1, 0));
     }
 }

@@ -1177,6 +1177,9 @@ workspace.new_worktree:
 workspace.workspace:
   en: workspace
   zh-CN: 工作区
+workspace.worktree:
+  en: Worktree
+  zh-CN: 工作树
 
 terminal.starting:
   en: Starting terminal…
@@ -1483,6 +1486,162 @@ right_panel.terminal_unavailable:
 right_panel.terminal_unavailable_description:
   en: Open the Terminal surface again to start a shell
   zh-CN: 请重新打开终端面板以启动 Shell
+
+environment.title:
+  en: Environment
+  zh-CN: 环境
+environment.summary:
+  en: Environment and background work
+  zh-CN: 环境和后台工作
+environment.changes:
+  en: Changes
+  zh-CN: 更改
+environment.commit_or_push:
+  en: Commit or push
+  zh-CN: 提交或推送
+environment.compare_branch:
+  en: Compare branch
+  zh-CN: 比较分支
+
+commit.message_placeholder:
+  en: Commit message (leave blank to generate)…
+  zh-CN: 提交信息（留空以自动生成）…
+commit.include_unstaged:
+  en: Include unstaged changes
+  zh-CN: 包含未暂存的更改
+commit.commit:
+  en: Commit
+  zh-CN: 提交
+commit.commit_and_push:
+  en: Commit and push
+  zh-CN: 提交并推送
+commit.push:
+  en: Push
+  zh-CN: 推送
+commit.no_task:
+  en: No task is available to commit
+  zh-CN: 没有可提交的任务
+commit.no_workspace:
+  en: This task has no workspace
+  zh-CN: 当前任务没有工作区
+commit.no_changes:
+  en: There are no changes to commit
+  zh-CN: 没有可提交的更改
+commit.agent_unavailable:
+  en: The current agent CLI is unavailable, so it cannot generate a commit message
+  zh-CN: 当前智能体命令行不可用，无法生成提交信息
+commit.committed:
+  en: Committed changes
+  zh-CN: 已提交更改
+commit.committed_and_pushed:
+  en: Committed and pushed changes
+  zh-CN: 已提交并推送更改
+commit.pushed:
+  en: Pushed changes
+  zh-CN: 已推送更改
+
+background.title:
+  en: Background
+  zh-CN: 后台工作
+background.description:
+  en: Inspect agent-started processes and subagents
+  zh-CN: 查看代理启动的进程和子代理
+background.processes:
+  en: Background processes
+  zh-CN: 后台进程
+background.agents:
+  en: Subagents
+  zh-CN: 子代理
+background.process:
+  en: Process
+  zh-CN: 进程
+background.monitor:
+  en: Monitor
+  zh-CN: 监控任务
+background.subagent:
+  en: Subagent
+  zh-CN: 子代理
+background.no_work:
+  en: No background work
+  zh-CN: 暂无后台工作
+background.no_work_description:
+  en: Long-running commands and subagents will appear here.
+  zh-CN: 长时间运行的命令和子代理会显示在这里。
+background.view:
+  en: View
+  zh-CN: 查看
+background.stop:
+  en: Stop
+  zh-CN: 停止
+background.stop_all:
+  en: Stop all
+  zh-CN: 全部停止
+background.stop_not_running:
+  en: The process is no longer running.
+  zh-CN: 该进程已不再运行。
+background.output:
+  en: Output
+  zh-CN: 输出
+background.no_output:
+  en: No output yet
+  zh-CN: 暂无输出
+background.command:
+  en: Command
+  zh-CN: 命令
+background.cwd:
+  en: Working directory
+  zh-CN: 工作目录
+background.role:
+  en: Role
+  zh-CN: 角色
+background.model:
+  en: Model
+  zh-CN: 模型
+background.latest_update:
+  en: Latest update
+  zh-CN: 最新进展
+background.exit_code:
+  en: Exit code
+  zh-CN: 退出代码
+background.output_truncated:
+  en: Earlier output was truncated
+  zh-CN: 较早的输出已截断
+background.process_count:
+  en: "%{count} background processes"
+  zh-CN: "%{count} 个后台进程"
+background.process_count_one:
+  en: 1 background process
+  zh-CN: 1 个后台进程
+background.agent_count:
+  en: "%{count} subagents"
+  zh-CN: "%{count} 个子代理"
+background.agent_count_one:
+  en: 1 subagent
+  zh-CN: 1 个子代理
+background.status.starting:
+  en: Starting
+  zh-CN: 正在启动
+background.status.running:
+  en: Running
+  zh-CN: 正在运行
+background.status.monitoring:
+  en: Monitoring
+  zh-CN: 正在监控
+background.status.stopping:
+  en: Stopping
+  zh-CN: 正在停止
+background.status.completed:
+  en: Completed
+  zh-CN: 已完成
+background.status.failed:
+  en: Failed
+  zh-CN: 失败
+background.status.stopped:
+  en: Stopped
+  zh-CN: 已停止
+background.status.lost:
+  en: Disconnected
+  zh-CN: 已断开
 
 files.unsaved_changes:
   en: Unsaved changes — ⌘S to save

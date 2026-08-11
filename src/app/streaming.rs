@@ -207,6 +207,8 @@ impl Waku {
         match event {
             DriverEvent::Connected { provider_cursor } => {
                 runtime.last_driver_error = None;
+                runtime.last_background_refresh_at = Instant::now();
+                runtime.driver.refresh_background_work();
                 if let Some(session) = self.state.session_mut(session_id) {
                     if let Some(ProviderResumeCursor::Claude {
                         resume_at: Some(message_id),
@@ -265,17 +267,22 @@ impl Waku {
                 complete,
             } => {
                 if self.accepts_turn_output(session_id) {
-                    self.update_activity(
-                        session_id,
-                        runtime,
-                        ActivityItem::new(id, kind, title, detail, complete),
-                    );
+                    let item = ActivityItem::new(id, kind, title, detail, complete);
+                    self.observe_foreground_command_activity(session_id, &item);
+                    self.update_activity(session_id, runtime, item);
                 }
             }
             DriverEvent::RichActivity(item) => {
                 if self.accepts_turn_output(session_id) {
+                    self.observe_foreground_command_activity(session_id, &item);
                     self.update_activity(session_id, runtime, item);
                 }
+            }
+            DriverEvent::BackgroundWork(event) => {
+                // Background work is session state, not turn output. It must
+                // survive a settled or rewound turn and therefore bypasses
+                // `accepts_turn_output` deliberately.
+                self.handle_background_work_event(session_id, event);
             }
             DriverEvent::Permission {
                 request_id,
@@ -383,6 +390,14 @@ impl Waku {
                 }
             }
             DriverEvent::TurnFinished { success, summary } => {
+                self.settle_foreground_work(
+                    session_id,
+                    if success {
+                        BackgroundWorkStatus::Completed
+                    } else {
+                        BackgroundWorkStatus::Failed
+                    },
+                );
                 let previous_kinds = self.snapshot_selected_transcript_rows(session_id);
                 runtime.last_driver_error = None;
                 // A settled turn moved the account's rate-limit needles; ask
@@ -446,6 +461,7 @@ impl Waku {
                     self.workspace_queries_stale = true;
                 }
                 runtime.computer_use_previews.clear();
+                runtime.driver.refresh_background_work();
                 self.capture_latest_turn_checkpoint_for(session_id);
                 if allow_queue_drain && success {
                     // Start the next queued follow-up once the runtime has
@@ -489,6 +505,7 @@ impl Waku {
                 }
             }
             DriverEvent::ProcessExited => {
+                self.mark_background_work_lost(session_id);
                 let previous_kinds = self.snapshot_selected_transcript_rows(session_id);
                 self.finish_streaming_assistant(session_id);
                 self.complete_turn_blocks(session_id);

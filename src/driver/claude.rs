@@ -28,7 +28,9 @@ use uuid::Uuid;
 use super::activity;
 use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
 use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
+    ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey, BackgroundWorkKind,
+    BackgroundWorkStatus, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor,
+    RuntimeMode, unix_time_millis,
 };
 
 enum CommandMessage {
@@ -40,6 +42,10 @@ enum CommandMessage {
         option_id: String,
     },
     Options(SessionOptions),
+    StopBackgroundWork {
+        key: BackgroundWorkKey,
+        control_id: String,
+    },
     Shutdown,
 }
 
@@ -52,6 +58,14 @@ fn user_message_payload(text: &str) -> Value {
             "content": [{"type": "text", "text": text}]
         },
         "parent_tool_use_id": null
+    })
+}
+
+fn stop_task_request(request_id: u64, task_id: &str) -> Value {
+    json!({
+        "type": "control_request",
+        "request_id": format!("waku-{request_id}"),
+        "request": {"subtype": "stop_task", "task_id": task_id}
     })
 }
 
@@ -173,15 +187,20 @@ impl ClaudeDriver {
         let (commands, command_rx) = unbounded();
         let auto_approve = mode != RuntimeMode::Ask;
         let turn_active = Arc::new(Mutex::new(false));
+        let pending_task_stops = Arc::new(Mutex::new(HashMap::<String, BackgroundWorkKey>::new()));
 
         let reader_events = events.clone();
         let reader_commands = commands.clone();
         let reader_turn = turn_active.clone();
         let reader_session = session_id.clone();
+        let reader_pending_task_stops = pending_task_stops.clone();
         let reader_thread = thread::Builder::new()
             .name("waku-claude-reader".into())
             .spawn(move || {
-                let mut state = ClaudeStreamState::default();
+                let mut state = ClaudeStreamState {
+                    pending_task_stops: reader_pending_task_stops,
+                    ..ClaudeStreamState::default()
+                };
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     if line.trim().is_empty() {
                         continue;
@@ -203,6 +222,7 @@ impl ClaudeDriver {
 
         let writer_events = events.clone();
         let writer_turn = turn_active;
+        let writer_pending_task_stops = pending_task_stops;
         thread::Builder::new()
             .name("waku-claude-writer".into())
             .spawn(move || {
@@ -310,6 +330,14 @@ impl ClaudeDriver {
                                 }),
                             )
                         }
+                        CommandMessage::StopBackgroundWork { key, control_id } => {
+                            next_request_id += 1;
+                            let request_id = format!("waku-{next_request_id}");
+                            writer_pending_task_stops
+                                .lock()
+                                .insert(request_id, key.clone());
+                            write_line(&mut stdin, &stop_task_request(next_request_id, &control_id))
+                        }
                         CommandMessage::Shutdown => break,
                     };
                     if let Err(error) = written {
@@ -395,6 +423,12 @@ impl DriverControl for ClaudeDriver {
         let _ = self.commands.send(CommandMessage::Cancel);
     }
 
+    fn stop_background_work(&self, key: BackgroundWorkKey, control_id: String) {
+        let _ = self
+            .commands
+            .send(CommandMessage::StopBackgroundWork { key, control_id });
+    }
+
     fn respond(&self, request_id: String, option_id: String) {
         let _ = self.commands.send(CommandMessage::Respond {
             request_id,
@@ -434,7 +468,9 @@ fn write_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
 struct ClaudeStreamState {
     saw_text_delta: bool,
     saw_reasoning_delta: bool,
-    tools: HashMap<String, (ActivityKind, String)>,
+    tools: HashMap<String, (ActivityKind, String, String)>,
+    background_task_kinds: HashMap<String, BackgroundWorkKind>,
+    pending_task_stops: Arc<Mutex<HashMap<String, BackgroundWorkKey>>>,
     /// Model of the latest main-thread assistant message, so the settled
     /// turn's `modelUsage` map can be read for that model's context window
     /// rather than a subagent's.
@@ -457,6 +493,202 @@ fn context_window_from_result(value: &Value, last_model: Option<&str>) -> Option
         .values()
         .filter_map(|entry| entry.get("contextWindow").and_then(Value::as_u64))
         .max()
+}
+
+fn claude_task_id(value: &Value) -> Option<&str> {
+    value
+        .get("task_id")
+        .or_else(|| value.get("taskId"))
+        .or_else(|| value.pointer("/task/id"))
+        .and_then(Value::as_str)
+}
+
+fn claude_task_status(value: &Value) -> BackgroundWorkStatus {
+    let status = value
+        .get("status")
+        .or_else(|| value.pointer("/task/status"))
+        .or_else(|| value.pointer("/patch/status"))
+        .and_then(Value::as_str)
+        .unwrap_or("running")
+        .to_ascii_lowercase();
+    match status.as_str() {
+        "pending" | "starting" => BackgroundWorkStatus::Starting,
+        "completed" | "complete" | "succeeded" | "success" => BackgroundWorkStatus::Completed,
+        "failed" | "errored" | "error" => BackgroundWorkStatus::Failed,
+        "killed" | "cancelled" | "canceled" | "stopped" | "interrupted" => {
+            BackgroundWorkStatus::Stopped
+        }
+        _ => BackgroundWorkStatus::Running,
+    }
+}
+
+fn claude_task_kind(value: &Value, state: &ClaudeStreamState) -> BackgroundWorkKind {
+    if let Some(task_id) = claude_task_id(value)
+        && let Some(kind) = state.background_task_kinds.get(task_id)
+    {
+        return *kind;
+    }
+    let task_type = value
+        .get("task_type")
+        .or_else(|| value.get("taskType"))
+        .or_else(|| value.get("subagent_type"))
+        .or_else(|| value.get("subagentType"))
+        .or_else(|| value.get("agentType"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if task_type == "monitor" {
+        return BackgroundWorkKind::Monitor;
+    }
+    if task_type.contains("agent")
+        || task_type.contains("teammate")
+        || task_type.contains("workflow")
+        || task_type == "remote"
+    {
+        return BackgroundWorkKind::Subagent;
+    }
+    let tool_use_id = value
+        .get("tool_use_id")
+        .or_else(|| value.get("toolUseId"))
+        .and_then(Value::as_str);
+    if tool_use_id
+        .and_then(|id| state.tools.get(id))
+        .is_some_and(|(_, _, wire_name)| wire_name.eq_ignore_ascii_case("monitor"))
+    {
+        BackgroundWorkKind::Monitor
+    } else {
+        BackgroundWorkKind::Process
+    }
+}
+
+fn claude_task_item(value: &Value, state: &ClaudeStreamState) -> Option<BackgroundWorkItem> {
+    let task_id = claude_task_id(value)?.to_owned();
+    let kind = claude_task_kind(value, state);
+    let title = value
+        .get("description")
+        .or_else(|| value.get("subject"))
+        .or_else(|| value.get("summary"))
+        .or_else(|| value.get("workflowName"))
+        .or_else(|| value.pointer("/task/description"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| match kind {
+            BackgroundWorkKind::Subagent => tr!("background.subagent"),
+            BackgroundWorkKind::Monitor => tr!("background.monitor"),
+            BackgroundWorkKind::Process => tr!("background.process"),
+        });
+    let mut status = claude_task_status(value);
+    if status == BackgroundWorkStatus::Running && kind == BackgroundWorkKind::Monitor {
+        status = BackgroundWorkStatus::Monitoring;
+    }
+    let mut item = BackgroundWorkItem::new(kind, task_id.clone(), title, status);
+    item.background = value
+        .get("is_backgrounded")
+        .or_else(|| value.get("isBackgrounded"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    item.can_stop = status.is_live();
+    item.control_id = Some(task_id);
+    item.origin_activity_id = value
+        .get("tool_use_id")
+        .or_else(|| value.get("toolUseId"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    item.role = value
+        .get("subagent_type")
+        .or_else(|| value.get("subagentType"))
+        .or_else(|| value.get("agentType"))
+        .or_else(|| value.get("task_type"))
+        .or_else(|| value.get("taskType"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    item.model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    item.detail = value
+        .get("summary")
+        .or_else(|| value.get("last_tool_name"))
+        .or_else(|| value.get("lastToolName"))
+        .or_else(|| value.get("error"))
+        .or_else(|| value.pointer("/patch/error"))
+        .or_else(|| value.get("output_file"))
+        .or_else(|| value.get("outputFile"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+    item.duration_ms = value
+        .pointer("/usage/duration_ms")
+        .or_else(|| value.get("duration_ms"))
+        .and_then(Value::as_u64);
+    item.updated_at_ms = unix_time_millis();
+    Some(item)
+}
+
+fn handle_claude_system(
+    value: &Value,
+    events: &Sender<DriverEvent>,
+    state: &mut ClaudeStreamState,
+) {
+    let subtype = value.get("subtype").and_then(Value::as_str);
+    if subtype == Some("background_tasks_changed") {
+        let items = value
+            .get("background_tasks")
+            .or_else(|| value.get("backgroundTasks"))
+            .or_else(|| value.get("tasks"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let bare_id = entry.as_str();
+                let task_id = bare_id
+                    .map(str::to_owned)
+                    .or_else(|| claude_task_id(entry).map(str::to_owned))?;
+                let known_kind = state.background_task_kinds.get(&task_id).copied();
+                // The level signal normally precedes task_started. Bare IDs
+                // carry no kind, so wait for that edge instead of briefly
+                // inventing a Process entry beside the real Subagent entry.
+                let kind = known_kind
+                    .or_else(|| bare_id.is_none().then(|| claude_task_kind(entry, state)))?;
+                let mut item = BackgroundWorkItem::new(
+                    kind,
+                    task_id.clone(),
+                    match kind {
+                        BackgroundWorkKind::Subagent => tr!("background.subagent"),
+                        BackgroundWorkKind::Monitor => tr!("background.monitor"),
+                        BackgroundWorkKind::Process => tr!("background.process"),
+                    },
+                    match kind {
+                        BackgroundWorkKind::Monitor => BackgroundWorkStatus::Monitoring,
+                        BackgroundWorkKind::Process | BackgroundWorkKind::Subagent => {
+                            BackgroundWorkStatus::Running
+                        }
+                    },
+                );
+                item.background = true;
+                item.can_stop = true;
+                item.control_id = Some(task_id);
+                Some(item)
+            })
+            .collect();
+        let _ = events.send(DriverEvent::BackgroundWork(
+            BackgroundWorkEvent::ReconcileLive(items),
+        ));
+        return;
+    }
+    if matches!(
+        subtype,
+        Some("task_started" | "task_progress" | "task_updated" | "task_notification")
+    ) && let Some(item) = claude_task_item(value, state)
+    {
+        state
+            .background_task_kinds
+            .insert(item.key.provider_id.clone(), item.key.kind);
+        let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+            item,
+        )));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -488,10 +720,53 @@ fn handle_message(
                     let _ = events.send(DriverEvent::AvailableCommands(commands));
                 }
             }
+            handle_claude_system(value, events, state);
         }
         Some("control_request") => {
             if value.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool") {
                 request_permission(value, events, commands, auto_approve);
+            }
+        }
+        Some("control_response") => {
+            let Some(request_id) = value
+                .pointer("/response/request_id")
+                .or_else(|| value.get("request_id"))
+                .and_then(Value::as_str)
+            else {
+                return;
+            };
+            let Some(key) = state.pending_task_stops.lock().remove(request_id) else {
+                return;
+            };
+            let subtype = value.pointer("/response/subtype").and_then(Value::as_str);
+            let stop_status = value
+                .pointer("/response/response/status")
+                .or_else(|| value.pointer("/response/status"))
+                .or_else(|| value.pointer("/response/response"))
+                .and_then(Value::as_str);
+            if subtype == Some("error") || matches!(stop_status, Some("not_found" | "not_running"))
+            {
+                let message = value
+                    .pointer("/response/error")
+                    .or_else(|| value.pointer("/response/response/message"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| tr!("background.stop_not_running"));
+                let _ = events.send(DriverEvent::BackgroundWork(
+                    BackgroundWorkEvent::StopFailed { key, message },
+                ));
+            } else {
+                let mut item = BackgroundWorkItem::new(
+                    key.kind,
+                    key.provider_id.clone(),
+                    "",
+                    BackgroundWorkStatus::Stopped,
+                );
+                item.key = key;
+                item.background = true;
+                let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
+                    item,
+                )));
             }
         }
         Some("stream_event") => {
@@ -573,9 +848,12 @@ fn handle_message(
                             .map(str::to_owned)
                             .unwrap_or_else(|| tr!("activity.tool"));
                         let kind = super::support::classify_tool(&wire_title);
-                        let title = activity::input_title(block.get("input")).unwrap_or(wire_title);
+                        let title = activity::input_title(block.get("input"))
+                            .unwrap_or_else(|| wire_title.clone());
                         if let Some(id) = &id {
-                            state.tools.insert(id.clone(), (kind, title.clone()));
+                            state
+                                .tools
+                                .insert(id.clone(), (kind, title.clone(), wire_title.clone()));
                         }
                         let _ = events.send(DriverEvent::RichActivity(activity::tool_activity(
                             id,
@@ -609,10 +887,10 @@ fn handle_message(
                     .get("tool_use_id")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let (kind, title) = id
+                let (kind, title, _) = id
                     .as_ref()
                     .and_then(|id| state.tools.remove(id))
-                    .unwrap_or((ActivityKind::Tool, "Tool".to_owned()));
+                    .unwrap_or((ActivityKind::Tool, "Tool".to_owned(), "Tool".to_owned()));
                 let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
                 let _ = events.send(DriverEvent::RichActivity(activity::tool_activity(
                     id,
@@ -912,6 +1190,116 @@ mod tests {
             Ok(_) => panic!("expected a steer command"),
             Err(_) => panic!("no command was sent"),
         }
+    }
+
+    #[test]
+    fn stop_task_uses_claudes_native_control_request() {
+        assert_eq!(
+            stop_task_request(7, "agent-42"),
+            json!({
+                "type": "control_request",
+                "request_id": "waku-7",
+                "request": {"subtype": "stop_task", "task_id": "agent-42"}
+            })
+        );
+    }
+
+    #[test]
+    fn stop_task_control_errors_restore_the_live_item() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        let key = BackgroundWorkKey::new(BackgroundWorkKind::Subagent, "agent-42");
+        state
+            .pending_task_stops
+            .lock()
+            .insert("waku-8".into(), key.clone());
+        handle_message(
+            &json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": "waku-8",
+                    "response": {"status": "not_running"}
+                }
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(DriverEvent::BackgroundWork(BackgroundWorkEvent::StopFailed {
+                key: failed_key,
+                ..
+            })) if failed_key == key
+        ));
+    }
+
+    #[test]
+    fn task_lifecycle_surfaces_subagents_independently_of_the_turn() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        let tool = json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": "toolu-agent",
+                "name": "Task",
+                "input": {"description": "Inspect the parser"}
+            }]}
+        });
+        handle_message(&tool, "s", &events, &commands, &turn, true, &mut state);
+        let _ = event_rx.try_recv().unwrap();
+
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "agent-42",
+                "tool_use_id": "toolu-agent",
+                "task_type": "local_agent",
+                "subagent_type": "Explore",
+                "description": "Inspect the parser"
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(started)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("task_started should surface a background item");
+        };
+        assert_eq!(started.key.kind, BackgroundWorkKind::Subagent);
+        assert_eq!(started.key.provider_id, "agent-42");
+        assert_eq!(started.origin_activity_id.as_deref(), Some("toolu-agent"));
+        assert_eq!(started.status, BackgroundWorkStatus::Running);
+
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_updated",
+                "task_id": "agent-42",
+                "patch": {"status": "completed"}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(completed)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("task_updated should settle the background item");
+        };
+        assert_eq!(completed.key.kind, BackgroundWorkKind::Subagent);
+        assert_eq!(completed.status, BackgroundWorkStatus::Completed);
     }
 
     #[test]

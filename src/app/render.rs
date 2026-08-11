@@ -80,12 +80,14 @@ impl Render for Waku {
         }
         if self.settings_page.is_some() {
             let command_palette = self.render_command_palette(window, cx);
+            let commit_dialog = self.render_commit_dialog(cx);
             return div()
                 .relative()
                 .size_full()
                 .on_action(cx.listener(Self::toggle_command_palette_action))
                 .child(self.render_settings(cx))
                 .children(command_palette)
+                .children(commit_dialog)
                 .into_any_element();
         }
         // Re-armed every frame this window shows time labels; parks while
@@ -100,6 +102,7 @@ impl Render for Waku {
         let permission = self.render_permission(cx);
         let computer_use = self.render_computer_use_overlay(cx);
         let command_palette = self.render_command_palette(window, cx);
+        let commit_dialog = self.render_commit_dialog(cx);
         self.start_toast_dismiss_timer(cx);
         let toast = self
             .toast
@@ -198,6 +201,7 @@ impl Render for Waku {
                 root.child(self.render_right_panel(right_panel_width, window, cx))
             })
             .children(command_palette)
+            .children(commit_dialog)
             .into_any_element()
     }
 }

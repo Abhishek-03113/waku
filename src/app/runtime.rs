@@ -1673,8 +1673,11 @@ impl Waku {
             // Headless drivers retain their original native session ID. Recreate
             // them lazily so the next prompt resumes the fork instead.
             self.runtimes.remove(&session_id);
+            self.mark_background_work_lost(session_id);
         } else if let Some(runtime) = self.runtimes.get_mut(&session_id) {
-            runtime.pending_events.clear();
+            runtime
+                .pending_events
+                .retain(|event| matches!(event, DriverEvent::BackgroundWork(_)));
             runtime.stream_remeasure_pending = false;
             runtime.stream_phase = None;
             runtime.pending_permission = None;
@@ -1764,7 +1767,11 @@ impl Waku {
                     .sessions
                     .iter()
                     .find(|session| session.id == **session_id);
-                session_is_reapable(session, runtime.last_active_at.elapsed())
+                session_is_reapable(
+                    session,
+                    runtime.last_active_at.elapsed(),
+                    self.session_has_live_background_work(**session_id),
+                )
             })
             .map(|(session_id, _)| *session_id)
             .collect::<Vec<_>>();
@@ -1857,6 +1864,9 @@ impl Waku {
                 computer_session_grants: HashSet::new(),
                 last_driver_error: None,
                 last_active_at: Instant::now(),
+                last_background_refresh_at: Instant::now()
+                    .checked_sub(BACKGROUND_WORK_REFRESH_INTERVAL)
+                    .unwrap_or_else(Instant::now),
             },
         );
         handle
@@ -2216,7 +2226,9 @@ impl Waku {
         };
         self.invalidate_checkpoint_refs();
         if let Some(runtime) = self.runtimes.get_mut(&session_id) {
-            runtime.pending_events.clear();
+            runtime
+                .pending_events
+                .retain(|event| matches!(event, DriverEvent::BackgroundWork(_)));
             runtime.stream_remeasure_pending = false;
             runtime.stream_phase = None;
             runtime.pending_permission = None;
@@ -2310,6 +2322,7 @@ impl Waku {
     pub(super) fn drain_driver_events(&mut self, cx: &mut Context<Self>) -> bool {
         let session_ids = self.runtimes.keys().copied().collect::<Vec<_>>();
         let mut changed = false;
+        let mut persisted_state_changed = false;
         let mut force_save = false;
         let mut selected_changed = false;
         for session_id in session_ids {
@@ -2319,6 +2332,7 @@ impl Waku {
             let follow_up_remeasure = std::mem::take(&mut runtime.stream_remeasure_pending);
             Self::collect_runtime_events(&mut runtime);
             let mut runtime_changed = false;
+            let mut background_changed = false;
             let mut markdown_changed = false;
             let mut revealed_stream_chunk = false;
             let mut keep_runtime = true;
@@ -2337,6 +2351,11 @@ impl Waku {
                 let Some(event) = event else {
                     break;
                 };
+                let background_event = matches!(event, DriverEvent::BackgroundWork(_));
+                let background_output_delta = matches!(
+                    event,
+                    DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta { .. })
+                );
                 force_save |= matches!(
                     event,
                     DriverEvent::Connected { .. }
@@ -2349,7 +2368,15 @@ impl Waku {
                         | DriverEvent::ProcessExited
                 );
                 markdown_changed |= matches!(event, DriverEvent::TextDelta(_));
-                runtime_changed = true;
+                if background_output_delta {
+                    // The registry batches log text into SharedString at 10Hz;
+                    // repainting and saving for every provider chunk would
+                    // turn a noisy command into UI-thread work.
+                } else if background_event {
+                    background_changed = true;
+                } else {
+                    runtime_changed = true;
+                }
                 keep_runtime &= self.handle_driver_event(session_id, &mut runtime, event, true, cx);
                 if !keep_runtime {
                     break;
@@ -2359,7 +2386,8 @@ impl Waku {
             if keep_runtime {
                 self.runtimes.insert(session_id, runtime);
             }
-            changed |= runtime_changed;
+            changed |= runtime_changed || background_changed;
+            persisted_state_changed |= runtime_changed;
             if self.state.selected_session == Some(session_id)
                 && (runtime_changed || follow_up_remeasure)
             {
@@ -2375,7 +2403,7 @@ impl Waku {
             changed = true;
         }
 
-        if changed {
+        if persisted_state_changed {
             self.stream_state_dirty = true;
         }
         if selected_changed {

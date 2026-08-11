@@ -14,7 +14,10 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 
 use crate::computer_use::ComputerToolRequest;
-use crate::model::{DriverEvent, InteractionMode, ProviderKind, ProviderResumeCursor, RuntimeMode};
+use crate::model::{
+    BackgroundWorkKey, DriverEvent, InteractionMode, ProviderKind, ProviderResumeCursor,
+    RuntimeMode,
+};
 
 #[derive(Clone)]
 pub struct DriverHandle {
@@ -42,6 +45,14 @@ impl DriverHandle {
 
     pub fn cancel_computer_use(&self) {
         self.inner.cancel_computer_use();
+    }
+
+    pub fn refresh_background_work(&self) {
+        self.inner.refresh_background_work();
+    }
+
+    pub fn stop_background_work(&self, key: BackgroundWorkKey, control_id: String) {
+        self.inner.stop_background_work(key, control_id);
     }
 
     pub fn respond(&self, request_id: String, option_id: String) {
@@ -80,6 +91,8 @@ pub trait DriverControl: Send + Sync {
     fn steer(&self, _prompt: String) {}
     fn cancel(&self);
     fn cancel_computer_use(&self) {}
+    fn refresh_background_work(&self) {}
+    fn stop_background_work(&self, _key: BackgroundWorkKey, _control_id: String) {}
     fn respond(&self, request_id: String, option_id: String);
     fn run_computer_tool(&self, _request: ComputerToolRequest) {}
     fn reject_computer_tool(&self, _request: ComputerToolRequest, _reason: String) {}

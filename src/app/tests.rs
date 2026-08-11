@@ -628,29 +628,30 @@ fn idle_reaping_releases_finished_sessions_but_never_a_running_turn() {
     let stale = Duration::from_secs(60 * 60);
 
     let idle = AgentSession::new(project_id, ProviderKind::Codex);
-    assert!(session_is_reapable(Some(&idle), stale));
-    assert!(!session_is_reapable(Some(&idle), fresh));
+    assert!(session_is_reapable(Some(&idle), stale, false));
+    assert!(!session_is_reapable(Some(&idle), fresh, false));
+    assert!(!session_is_reapable(Some(&idle), stale, true));
 
     let mut working = AgentSession::new(project_id, ProviderKind::Codex);
     working.begin_turn("a long tool call");
     working.status = SessionStatus::Working;
-    assert!(!session_is_reapable(Some(&working), stale));
+    assert!(!session_is_reapable(Some(&working), stale, false));
 
     // An approval can sit unanswered far longer than the idle window; its agent
     // is blocked on the user, not abandoned.
     let mut waiting = AgentSession::new(project_id, ProviderKind::Codex);
     waiting.begin_turn("needs approval");
     waiting.status = SessionStatus::Waiting;
-    assert!(!session_is_reapable(Some(&waiting), stale));
+    assert!(!session_is_reapable(Some(&waiting), stale, false));
 
     let mut failed = AgentSession::new(project_id, ProviderKind::Codex);
     failed.begin_turn("failed turn");
     failed.finish_active_turn(TurnStatus::Failed);
     failed.status = SessionStatus::Failed;
-    assert!(session_is_reapable(Some(&failed), stale));
+    assert!(session_is_reapable(Some(&failed), stale, false));
 
     // A runtime whose session is already gone is pure leak.
-    assert!(session_is_reapable(None, stale));
+    assert!(session_is_reapable(None, stale, false));
 }
 
 #[test]

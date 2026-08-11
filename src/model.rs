@@ -1292,6 +1292,10 @@ pub enum DriverEvent {
         complete: bool,
     },
     RichActivity(ActivityItem),
+    /// Session-level work that can outlive the turn which created it. This is
+    /// deliberately separate from transcript activities: completing a turn
+    /// must not make a detached process or subagent look complete.
+    BackgroundWork(BackgroundWorkEvent),
     Permission {
         request_id: String,
         title: String,
@@ -1327,6 +1331,130 @@ pub enum DriverEvent {
     },
     Error(String),
     ProcessExited,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BackgroundWorkKind {
+    Process,
+    Monitor,
+    Subagent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackgroundWorkStatus {
+    Starting,
+    Running,
+    Monitoring,
+    Stopping,
+    Completed,
+    Failed,
+    Stopped,
+    Lost,
+}
+
+impl BackgroundWorkStatus {
+    pub fn is_live(self) -> bool {
+        matches!(
+            self,
+            Self::Starting | Self::Running | Self::Monitoring | Self::Stopping
+        )
+    }
+
+    pub fn is_stoppable(self) -> bool {
+        matches!(self, Self::Starting | Self::Running | Self::Monitoring)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct BackgroundWorkKey {
+    pub kind: BackgroundWorkKind,
+    pub provider_id: String,
+}
+
+impl BackgroundWorkKey {
+    pub fn new(kind: BackgroundWorkKind, provider_id: impl Into<String>) -> Self {
+        Self {
+            kind,
+            provider_id: provider_id.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BackgroundWorkItem {
+    pub key: BackgroundWorkKey,
+    pub title: String,
+    pub detail: Option<String>,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub output: Option<String>,
+    pub output_truncated: bool,
+    pub started_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub duration_ms: Option<u64>,
+    pub exit_code: Option<i32>,
+    /// Whether the provider considers this detached from the foreground turn.
+    pub background: bool,
+    pub can_stop: bool,
+    /// Provider-native identifier used for an authoritative stop request.
+    pub control_id: Option<String>,
+    /// Transcript activity that created this work, when the provider exposes it.
+    pub origin_activity_id: Option<String>,
+    pub role: Option<String>,
+    pub model: Option<String>,
+    pub parent_id: Option<String>,
+    pub status: BackgroundWorkStatus,
+}
+
+impl BackgroundWorkItem {
+    pub fn new(
+        kind: BackgroundWorkKind,
+        provider_id: impl Into<String>,
+        title: impl Into<String>,
+        status: BackgroundWorkStatus,
+    ) -> Self {
+        let now = unix_time_millis();
+        Self {
+            key: BackgroundWorkKey::new(kind, provider_id),
+            title: title.into(),
+            detail: None,
+            command: None,
+            cwd: None,
+            output: None,
+            output_truncated: false,
+            started_at_ms: now,
+            updated_at_ms: now,
+            duration_ms: None,
+            exit_code: None,
+            background: false,
+            can_stop: false,
+            control_id: None,
+            origin_activity_id: None,
+            role: None,
+            model: None,
+            parent_id: None,
+            status,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum BackgroundWorkEvent {
+    Upsert(BackgroundWorkItem),
+    OutputDelta {
+        key: BackgroundWorkKey,
+        delta: String,
+    },
+    /// Authoritative snapshot of the provider's detached terminal registry.
+    ReconcileProcesses(Vec<BackgroundWorkItem>),
+    /// Authoritative snapshot of all provider work still live. Used by
+    /// transports which publish a level signal in addition to edge events.
+    ReconcileLive(Vec<BackgroundWorkItem>),
+    StopRequested(BackgroundWorkKey),
+    StopFailed {
+        key: BackgroundWorkKey,
+        message: String,
+    },
 }
 
 /// A slash command a live provider process advertised for its session.

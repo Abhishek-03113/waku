@@ -821,6 +821,88 @@ impl Waku {
         let rename_input =
             (self.session_rename == Some(session_id)).then(|| self.session_rename_input.clone());
         let renaming = rename_input.is_some();
+        let (background_processes, background_agents) = self.background_work_counts(session_id);
+        let process_chip = (background_processes > 0).then(|| {
+            let focus =
+                self.transcript_control_focus(format!("sidebar-processes-{session_id}"), cx);
+            div()
+                .id(SharedString::from(format!(
+                    "sidebar-processes-{session_id}"
+                )))
+                .track_focus(&focus)
+                .tab_index(0)
+                .h(px(18.0))
+                .px(px(4.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(theme.border)
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(3.0))
+                .cursor_default()
+                .text_size(px(10.0))
+                .text_color(theme.accent)
+                .focus_visible(|style| style.border_color(theme.accent))
+                .hover(|style| style.bg(theme.overlay))
+                .tooltip(Tooltip::text(if background_processes == 1 {
+                    tr!("background.process_count_one")
+                } else {
+                    tr!("background.process_count", count = background_processes)
+                }))
+                .child(icon("icons/terminal.svg", 9.0, theme.accent))
+                .child(background_processes.to_string())
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.toggle_background_work_summary(session_id, window, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.toggle_background_work_summary(session_id, window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        });
+        let agent_chip = (background_agents > 0).then(|| {
+            let focus = self.transcript_control_focus(format!("sidebar-agents-{session_id}"), cx);
+            div()
+                .id(SharedString::from(format!("sidebar-agents-{session_id}")))
+                .track_focus(&focus)
+                .tab_index(0)
+                .h(px(18.0))
+                .px(px(4.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(theme.border)
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(3.0))
+                .cursor_default()
+                .text_size(px(10.0))
+                .text_color(theme.accent)
+                .focus_visible(|style| style.border_color(theme.accent))
+                .hover(|style| style.bg(theme.overlay))
+                .tooltip(Tooltip::text(if background_agents == 1 {
+                    tr!("background.agent_count_one")
+                } else {
+                    tr!("background.agent_count", count = background_agents)
+                }))
+                .child(icon("icons/bot.svg", 9.0, theme.accent))
+                .child(background_agents.to_string())
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.toggle_background_work_summary(session_id, window, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.toggle_background_work_summary(session_id, window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        });
         let title = if let Some(rename_input) = rename_input {
             div()
                 .id(SharedString::from(format!(
@@ -935,6 +1017,8 @@ impl Waku {
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(project_name)),
                     )
+                    .children(process_chip)
+                    .children(agent_chip)
                     .when_some(
                         session_time_label(session, unix_time()),
                         |element, label| {
@@ -1095,6 +1179,7 @@ impl Waku {
                     cx,
                 ),
             )
+            .child(self.render_background_work_summary(cx))
             .when(!self.right_panel_visible, |element| {
                 element
                     .when(self.fps_counter_visible, |element| {
