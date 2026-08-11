@@ -94,6 +94,10 @@ const FAQ = [
     q: 'What about Windows and Linux?',
     a: "Waku's core is cross-platform Rust. macOS ships first; Windows and Linux builds are planned.",
   },
+  {
+    q: 'What is the future plan?',
+    a: 'A mobile app for remote control, and cloud agents are planned',
+  },
 ]
 
 function SectionLabel({ children }: { children: ReactNode }) {
