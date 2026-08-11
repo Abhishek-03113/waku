@@ -125,6 +125,37 @@ fn append_sidebar_group_rows(
     rows.push(SidebarRow::GroupSpacer);
 }
 
+fn updater_button_available_content(
+    foreground: Hsla,
+    label: SharedString,
+    label_reveal: f32,
+) -> Div {
+    div()
+        .relative()
+        .size_full()
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(1.0 - label_reveal)
+                .child(icon("icons/download.svg", 12.0, foreground)),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .whitespace_nowrap()
+                .opacity(label_reveal)
+                .child(label),
+        )
+}
+
 /// Height of a session card plus the separation reserved beneath it in the
 /// virtualized sidebar list. Keep the gap inside the list row so measured and
 /// estimated heights stay identical for off-screen sessions.
@@ -463,6 +494,145 @@ impl Waku {
             .child(search)
     }
 
+    fn start_available_update(&mut self, cx: &mut Context<Self>) {
+        if self.updater_status != crate::updater::UpdateStatus::Available {
+            return;
+        }
+        let started = cx
+            .try_global::<crate::updater::UpdaterState>()
+            .and_then(|state| state.0.as_ref())
+            .is_some_and(|updater| updater.install_available_update());
+        if started {
+            self.updater_status = crate::updater::UpdateStatus::Updating;
+            self.reset_updater_button_animation();
+            cx.notify();
+        }
+    }
+
+    fn render_updater_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let status = self.updater_status;
+        if status == crate::updater::UpdateStatus::Idle {
+            return None;
+        }
+
+        let theme = Theme::current(cx);
+        let foreground = rgb(0xFFFFFF).into();
+        let available = status == crate::updater::UpdateStatus::Available;
+        let button = div()
+            .id("sidebar-update")
+            .track_focus(&self.updater_button_focus)
+            .when(available, |button| button.tab_index(0))
+            .w(px(UPDATER_BUTTON_COLLAPSED_WIDTH))
+            .h(px(20.0))
+            .flex_none()
+            .overflow_hidden()
+            .rounded_full()
+            .relative()
+            .cursor_default()
+            .bg(theme.gauge)
+            .text_color(foreground)
+            .text_size(px(11.0))
+            .font_weight(FontWeight::MEDIUM)
+            .when(available, |button| {
+                button
+                    .hover(|style| style.opacity(0.92))
+                    .focus_visible(|style| style.border_1().border_color(rgb(0xFFFFFF)))
+                    .active(|style| style.opacity(0.8))
+                    .on_hover(cx.listener(|this, hovering: &bool, _, cx| {
+                        this.set_updater_button_hovered(*hovering, cx);
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.start_available_update(cx);
+                    }))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.start_available_update(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            });
+
+        if !available {
+            let indicator = icon("icons/loader-circle.svg", 14.0, foreground)
+                .with_animation(
+                    "sidebar-updater-spinner",
+                    Animation::new(Duration::from_millis(900))
+                        .repeat()
+                        .with_easing(gpui::linear),
+                    |icon, delta| {
+                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(
+                            delta,
+                        )))
+                    },
+                )
+                .into_any_element();
+            return Some(
+                button
+                    .tooltip(Tooltip::text(
+                        if status == crate::updater::UpdateStatus::Checking {
+                            tr!("updater.checking")
+                        } else {
+                            tr!("updater.updating")
+                        },
+                    ))
+                    .child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(indicator),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let label: SharedString = tr_cow!("updater.update").into();
+        let animation_generation = self.updater_button_animation_generation;
+        if animation_generation == 0 {
+            return Some(
+                button
+                    .child(updater_button_available_content(foreground, label, 0.0))
+                    .into_any_element(),
+            );
+        }
+
+        let from_width = self.updater_button_animation_from_width;
+        let from_reveal = self.updater_button_animation_from_reveal;
+        let target_width = if self.updater_button_expanded() {
+            UPDATER_BUTTON_EXPANDED_WIDTH
+        } else {
+            UPDATER_BUTTON_COLLAPSED_WIDTH
+        };
+        let target_reveal = if self.updater_button_expanded() {
+            1.0
+        } else {
+            0.0
+        };
+        let current_width = self.updater_button_width.clone();
+        let current_reveal = self.updater_button_label_reveal.clone();
+
+        Some(
+            button
+                .with_animation(
+                    SharedString::from(format!("sidebar-updater-expand-{animation_generation}")),
+                    Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()),
+                    move |button, delta| {
+                        let width = from_width + (target_width - from_width) * delta;
+                        let reveal = from_reveal + (target_reveal - from_reveal) * delta;
+                        current_width.set(width);
+                        current_reveal.set(reveal);
+                        button.w(px(width)).child(updater_button_available_content(
+                            foreground,
+                            label.clone(),
+                            reveal,
+                        ))
+                    },
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_sidebar_footer(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         div()
@@ -492,6 +662,10 @@ impl Waku {
                         this.open_settings_action(&OpenSettings, window, cx);
                     })),
             )
+            .child(div().flex_1())
+            .when_some(self.render_updater_button(cx), |footer, button| {
+                footer.child(button)
+            })
     }
 
     pub(super) fn render_sidebar(&self, width: f32, cx: &mut Context<Self>) -> Div {

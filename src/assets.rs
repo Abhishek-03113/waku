@@ -37,6 +37,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "compose",
     "copy",
     "cursor-spark",
+    "download",
     "external-link",
     "file",
     "folder",

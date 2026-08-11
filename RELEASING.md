@@ -14,9 +14,11 @@ bun run release
 ```
 
 - Updater code: [`src/updater.rs`](src/updater.rs) — loads the embedded
-  Sparkle.framework at runtime and starts `SPUStandardUpdaterController`.
-  **Check for Updates…** lives in the app menu; the **Automatic updates**
-  toggle in Settings → General mirrors Sparkle's persisted setting.
+  Sparkle.framework at runtime and starts `SPUUpdater` with Waku's custom user
+  driver. Available updates appear in the sidebar footer; download, signature
+  verification, install, and relaunch remain owned by Sparkle. **Check for
+  Updates…** lives in the app menu, and the **Automatic updates** toggle in
+  Settings → General mirrors Sparkle's persisted setting.
 - Feed URL + public key: [`resources/Info.plist`](resources/Info.plist)
   (`SUFeedURL`, `SUPublicEDKey`).
 - Framework embedding + pinned Sparkle version:
@@ -154,7 +156,10 @@ Test by keeping an older build around, launching it, and choosing
   under `debug_assertions`, so the dev watcher's app can't offer to replace
   itself with a production Waku. Set `WAKU_FORCE_UPDATER=1` to exercise the
   real Sparkle flow from a debug bundle anyway. A bare `cargo run` binary has
-  no embedded framework and also degrades to no updater.
+  no embedded framework and also degrades to no updater. For UI-only testing,
+  start the watcher with `WAKU_PREVIEW_UPDATE=1`; the sidebar immediately
+  shows an available update and clicking it changes to the spinner without
+  contacting Sparkle or installing anything.
 - **First-run consent:** Sparkle shows its one-time "check automatically?"
   prompt on the second launch. The Settings → General toggle reads and writes
   the same persisted value.

@@ -73,6 +73,22 @@ menu.close_window:
   en: Close Window
   zh-CN: 关闭窗口
 
+updater.update:
+  en: Update
+  zh-CN: 更新
+updater.checking:
+  en: Checking for updates…
+  zh-CN: 正在检查更新…
+updater.updating:
+  en: Updating…
+  zh-CN: 正在更新…
+updater.up_to_date:
+  en: Waku is up to date
+  zh-CN: Waku 已是最新版本
+updater.failed:
+  en: "Update failed: %{error}"
+  zh-CN: "更新失败：%{error}"
+
 command_palette.placeholder:
   en: Search tasks or run a command…
   zh-CN: 搜索任务或运行命令…
