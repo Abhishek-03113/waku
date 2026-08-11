@@ -466,12 +466,20 @@ impl Waku {
                             }),
                         );
                     }
-                    session.finish_active_turn(if success {
+                }
+                self.finish_active_turn_with_analytics(
+                    session_id,
+                    if success {
                         TurnStatus::Completed
                     } else {
                         TurnStatus::Failed
-                    });
-                }
+                    },
+                    if success {
+                        crate::analytics::TurnOutcome::Completed
+                    } else {
+                        crate::analytics::TurnOutcome::Failed
+                    },
+                );
                 runtime.pending_permission = None;
                 runtime.pending_computer_approval = None;
                 runtime.driver.cancel_computer_use();
@@ -540,20 +548,28 @@ impl Waku {
                     .last_driver_error
                     .take()
                     .unwrap_or_else(|| tr!("session.codex_exited_before_response"));
-                let mut finished_turn = false;
-                if let Some(session) = self.state.session_mut(session_id)
+                let should_finish_turn = if let Some(session) = self.state.session_mut(session_id)
                     && matches!(
                         session.status,
                         SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
-                    )
-                {
+                    ) {
                     session.status = SessionStatus::Failed;
                     session.updated_at = unix_time();
                     if needs_fallback {
                         session.push_message(MessageRole::Assistant, failure_message);
                     }
-                    finished_turn = session.finish_active_turn(TurnStatus::Failed).is_some();
-                }
+                    true
+                } else {
+                    false
+                };
+                let finished_turn = should_finish_turn
+                    && self
+                        .finish_active_turn_with_analytics(
+                            session_id,
+                            TurnStatus::Failed,
+                            crate::analytics::TurnOutcome::ProcessExited,
+                        )
+                        .is_some();
                 if finished_turn {
                     self.capture_latest_turn_checkpoint_for(session_id);
                 }

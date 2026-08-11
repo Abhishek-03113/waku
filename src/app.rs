@@ -715,6 +715,7 @@ impl SessionNavigation {
 }
 
 pub struct Waku {
+    analytics: crate::analytics::Analytics,
     state: PersistedState,
     store: StateStore,
     composer: Entity<ComposerInput>,
@@ -1421,6 +1422,23 @@ impl Waku {
         let composer_drafts = composer_draft_store.load().unwrap_or_default();
         let mut state = store.load_or_fresh(cwd);
         crate::i18n::set_language(state.language);
+        let analytics = crate::analytics::Analytics::new(
+            state.language.locale(),
+            state.analytics_id,
+            state.analytics_enabled,
+        );
+        analytics.track(crate::analytics::Event::AppLaunched {
+            task_count: state
+                .sessions
+                .iter()
+                .filter(|session| session.has_started())
+                .count(),
+            project_count: state
+                .projects
+                .iter()
+                .filter(|project| !project.is_projectless())
+                .count(),
+        });
 
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
         let command_palette_search = cx.new(|cx| {
@@ -2014,6 +2032,7 @@ impl Waku {
             };
 
             Self {
+                analytics,
                 state,
                 store,
                 composer,

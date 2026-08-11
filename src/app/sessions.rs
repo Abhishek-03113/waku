@@ -332,6 +332,10 @@ impl Waku {
             return;
         }
         self.right_panel_visible = visible;
+        if visible {
+            self.analytics
+                .track(crate::analytics::Event::RightPanelOpened);
+        }
         self.persist_panel_layout();
         cx.notify();
     }
@@ -816,8 +820,12 @@ impl Waku {
                 if needs_fallback {
                     session.push_message(MessageRole::Assistant, tr!("session.stopped"));
                 }
-                session.finish_active_turn(TurnStatus::Interrupted);
             }
+            self.finish_active_turn_with_analytics(
+                session_id,
+                TurnStatus::Interrupted,
+                crate::analytics::TurnOutcome::Cancelled,
+            );
         }
         if has_active_turn {
             self.capture_latest_turn_checkpoint_for(session_id);
@@ -851,9 +859,39 @@ impl Waku {
         let Some(session_id) = self.state.selected_session else {
             return;
         };
-        if let Some(runtime) = self.runtimes.get_mut(&session_id) {
+        let provider = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| session.provider.id());
+        let decision = if let Some(runtime) = self.runtimes.get_mut(&session_id) {
+            let decision = runtime
+                .pending_permission
+                .as_ref()
+                .and_then(|permission| {
+                    permission
+                        .options
+                        .iter()
+                        .find(|option| option.id == option_id)
+                })
+                .map_or(
+                    "other",
+                    |option| if option.allow { "allow" } else { "deny" },
+                );
             runtime.driver.respond(request_id, option_id);
             runtime.pending_permission = None;
+            Some(decision)
+        } else {
+            None
+        };
+        if let (Some(provider), Some(decision)) = (provider, decision) {
+            self.analytics
+                .track(crate::analytics::Event::PermissionResponded {
+                    provider,
+                    kind: "provider",
+                    decision,
+                });
         }
         if let Some(session) = self.selected_session_mut() {
             session.status = SessionStatus::Working;
@@ -869,6 +907,12 @@ impl Waku {
         let Some(session_id) = self.state.selected_session else {
             return;
         };
+        let provider = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map_or("unknown", |session| session.provider.id());
         let Some(mut runtime) = self.runtimes.remove(&session_id) else {
             return;
         };
@@ -905,6 +949,17 @@ impl Waku {
         if let Some(session) = self.state.session_mut(session_id) {
             session.status = SessionStatus::Working;
         }
+        self.analytics
+            .track(crate::analytics::Event::PermissionResponded {
+                provider,
+                kind: "computer_use",
+                decision: match decision {
+                    "deny" => "deny",
+                    "always" => "allow_always",
+                    "task" => "allow_task",
+                    _ => "other",
+                },
+            });
         self.runtimes.insert(session_id, runtime);
         cx.notify();
     }
@@ -962,6 +1017,7 @@ impl Waku {
                     let project = Project::from_path(path);
                     let project_id = project.id;
                     this.state.projects.push(project);
+                    this.analytics.track(crate::analytics::Event::ProjectAdded);
                     this.create_session_for(project_id, this.state.last_provider, cx);
                 });
             }

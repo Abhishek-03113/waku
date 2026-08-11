@@ -29,11 +29,13 @@ uuid = { version = "1.18", features = ["v4", "serde"] }
 pulldown-cmark = "0.13"
 regex = "1"
 rust-i18n = "4"
+rust-umami = "0.1.1"
 smol = "2"
 ropey = "=2.0.0-beta.1"
 futures-lite = "2"
 futures = "0.3"
 nucleo-matcher = "0.3.1"
+tokio = { version = "1", features = ["rt"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

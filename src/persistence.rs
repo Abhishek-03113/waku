@@ -49,6 +49,10 @@ fn default_computer_use_enabled() -> bool {
     false
 }
 
+fn default_analytics_enabled() -> bool {
+    true
+}
+
 fn default_sidebar_width() -> f32 {
     DEFAULT_SIDEBAR_WIDTH
 }
@@ -228,6 +232,12 @@ impl ComposerDraftStore {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppSettings {
     pub version: u32,
+    /// Random installation-scoped analytics identity. It is deliberately
+    /// unrelated to provider accounts, projects, or session content.
+    #[serde(default = "Uuid::new_v4")]
+    pub analytics_id: Uuid,
+    #[serde(default = "default_analytics_enabled")]
+    pub analytics_enabled: bool,
     pub selected_project: Option<Uuid>,
     pub selected_session: Option<Uuid>,
     pub last_provider: ProviderKind,
@@ -268,6 +278,11 @@ pub struct AppSettings {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PersistedState {
     pub version: u32,
+    /// Random installation-scoped analytics identity. See [`AppSettings`].
+    #[serde(default = "Uuid::new_v4")]
+    pub analytics_id: Uuid,
+    #[serde(default = "default_analytics_enabled")]
+    pub analytics_enabled: bool,
     pub projects: Vec<Project>,
     pub sessions: Vec<AgentSession>,
     pub selected_project: Option<Uuid>,
@@ -337,6 +352,8 @@ impl PersistedState {
     pub fn empty() -> Self {
         Self {
             version: STATE_VERSION,
+            analytics_id: Uuid::new_v4(),
+            analytics_enabled: true,
             projects: Vec::new(),
             sessions: Vec::new(),
             selected_project: None,
@@ -387,6 +404,8 @@ impl PersistedState {
     fn settings(&self) -> AppSettings {
         AppSettings {
             version: STATE_VERSION,
+            analytics_id: self.analytics_id,
+            analytics_enabled: self.analytics_enabled,
             selected_project: self.selected_project,
             selected_session: self.persistable_selected_session(),
             last_provider: self.last_provider,
@@ -409,6 +428,8 @@ impl PersistedState {
 
     fn apply_settings(&mut self, settings: AppSettings) {
         self.version = STATE_VERSION;
+        self.analytics_id = settings.analytics_id;
+        self.analytics_enabled = settings.analytics_enabled;
         self.selected_project = settings.selected_project;
         self.selected_session = settings.selected_session;
         self.last_provider = settings.last_provider;
@@ -860,12 +881,15 @@ impl StateStore {
         state
     }
 
-    fn read_settings(&self) -> io::Result<Option<AppSettings>> {
+    fn read_settings(&self) -> io::Result<(Option<AppSettings>, bool)> {
         let Ok(bytes) = fs::read(&self.settings_path) else {
-            return Ok(None);
+            return Ok((None, true));
         };
-        serde_json::from_slice(&bytes)
-            .map(Some)
+        let value = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(to_io_error)?;
+        let analytics_settings_missing =
+            value.get("analytics_id").is_none() || value.get("analytics_enabled").is_none();
+        serde_json::from_value(value)
+            .map(|settings| (Some(settings), analytics_settings_missing))
             .map_err(to_io_error)
     }
 
@@ -885,7 +909,7 @@ impl StateStore {
 
         // A missing settings file just means defaults; the database is still
         // the source of truth for projects and sessions.
-        let settings = self.read_settings()?;
+        let (settings, analytics_settings_missing) = self.read_settings()?;
         let from_version = settings
             .as_ref()
             .map_or(STATE_VERSION, |settings| settings.version);
@@ -961,6 +985,12 @@ impl StateStore {
         drop(sessions);
 
         state.migrate_loaded();
+        if analytics_settings_missing {
+            // Persist the random installation ID before the first event is
+            // sent. This is a tiny, one-time settings migration; failure must
+            // never discard otherwise valid project/session state.
+            let _ = self.write_settings(&state.settings());
+        }
 
         *self.storage.lock() = Some(Storage {
             connection,
@@ -1589,6 +1619,42 @@ mod tests {
 
         assert!(restored.sidebar_visible);
         assert!(!restored.right_panel_visible);
+    }
+
+    #[test]
+    fn analytics_preferences_are_persisted_and_backfilled_for_existing_settings() {
+        let mut state = PersistedState::empty();
+        state.analytics_enabled = false;
+        let analytics_id = state.analytics_id;
+        let mut settings = serde_json::to_value(state.settings()).unwrap();
+
+        let restored: AppSettings = serde_json::from_value(settings.clone()).unwrap();
+        assert_eq!(restored.analytics_id, analytics_id);
+        assert!(!restored.analytics_enabled);
+
+        settings.as_object_mut().unwrap().remove("analytics_id");
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("analytics_enabled");
+        let backfilled: AppSettings = serde_json::from_value(settings).unwrap();
+        assert_ne!(backfilled.analytics_id, Uuid::nil());
+        assert!(backfilled.analytics_enabled);
+    }
+
+    #[test]
+    fn analytics_preferences_are_backfilled_on_disk_during_load() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let restored = store.load().unwrap();
+        let settings_path = directory.join("settings.json");
+        let settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+
+        assert_eq!(settings["analytics_id"], restored.analytics_id.to_string());
+        assert_eq!(settings["analytics_enabled"], true);
+
+        fs::remove_dir_all(directory).ok();
     }
 
     #[test]

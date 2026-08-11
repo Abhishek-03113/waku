@@ -20,6 +20,7 @@ macro_rules! tr_cow {
 }
 
 mod amp_session;
+mod analytics;
 mod app;
 mod assets;
 mod blob_store;
