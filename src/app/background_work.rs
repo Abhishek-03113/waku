@@ -27,6 +27,7 @@ struct BackgroundSummaryEntry {
 struct EnvironmentSummary {
     additions: u64,
     deletions: u64,
+    commit_status: Option<String>,
     changes_focus: FocusHandle,
     commit_focus: FocusHandle,
     compare_focus: FocusHandle,
@@ -690,6 +691,7 @@ impl Waku {
         let environment = Some(EnvironmentSummary {
             additions: snapshot.map_or(0, |snapshot| snapshot.additions),
             deletions: snapshot.map_or(0, |snapshot| snapshot.deletions),
+            commit_status: self.commit_operation_status_label(),
             changes_focus: self.transcript_control_focus("environment-summary-changes", cx),
             commit_focus: self.transcript_control_focus("environment-summary-commit", cx),
             compare_focus: self.transcript_control_focus("environment-summary-compare", cx),
@@ -1058,6 +1060,8 @@ fn render_environment_summary_section(
         &environment.changes_focus,
         "icons/changes.svg",
         tr!("environment.changes"),
+        true,
+        false,
         Some(
             div()
                 .flex_none()
@@ -1090,11 +1094,16 @@ fn render_environment_summary_section(
 
     let commit_handle = handle.clone();
     let commit_weak = weak.clone();
+    let commit_pending = environment.commit_status.is_some();
     let commit = render_environment_action_row(
         "environment-summary-commit",
         &environment.commit_focus,
         "icons/git-commit-horizontal.svg",
-        tr!("environment.commit_or_push"),
+        environment
+            .commit_status
+            .unwrap_or_else(|| tr!("environment.commit_or_push")),
+        !commit_pending,
+        commit_pending,
         None,
         theme,
         move |window, cx| {
@@ -1113,6 +1122,8 @@ fn render_environment_summary_section(
         &environment.compare_focus,
         "icons/github.svg",
         tr!("environment.compare_branch"),
+        true,
+        false,
         Some(icon("icons/arrow-up-right.svg", 13.0, theme.text_tertiary).into_any_element()),
         theme,
         move |window, cx| {
@@ -1149,16 +1160,43 @@ fn render_environment_action_row(
     focus: &FocusHandle,
     icon_path: &'static str,
     label: String,
+    enabled: bool,
+    active: bool,
     trailing: Option<AnyElement>,
     theme: &Theme,
     action: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    let foreground = if enabled || active {
+        theme.text
+    } else {
+        theme.text_ghost
+    };
+    let icon_foreground = if enabled || active {
+        theme.text_secondary
+    } else {
+        theme.text_ghost
+    };
+    let indicator = if active {
+        icon("icons/loader-circle.svg", 14.0, theme.text_secondary)
+            .with_animation(
+                SharedString::from(format!("{id}-spinner")),
+                Animation::new(Duration::from_millis(900))
+                    .repeat()
+                    .with_easing(gpui::linear),
+                |icon, delta| {
+                    icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta)))
+                },
+            )
+            .into_any_element()
+    } else {
+        icon(icon_path, 14.0, icon_foreground).into_any_element()
+    };
     let action: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(action);
     let key_action = action.clone();
     div()
         .id(id)
         .track_focus(focus)
-        .tab_index(0)
+        .when(enabled, |row| row.tab_index(0))
         .min_h(px(32.0))
         .w_full()
         .px(px(8.0))
@@ -1168,24 +1206,28 @@ fn render_environment_action_row(
         .gap(px(10.0))
         .cursor_default()
         .focus_visible(|style| style.border_1().border_color(theme.accent))
-        .hover(|style| style.bg(theme.overlay_strong))
-        .child(icon(icon_path, 14.0, theme.text_secondary))
+        .when(enabled, |row| {
+            row.hover(|style| style.bg(theme.overlay_strong))
+        })
+        .child(indicator)
         .child(
             div()
                 .min_w_0()
                 .flex_1()
                 .truncate()
                 .text_size(px(13.5))
-                .text_color(theme.text)
+                .text_color(foreground)
                 .child(label),
         )
         .children(trailing)
-        .on_click(move |_, window, cx| action(window, cx))
-        .on_key_down(move |event: &KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                key_action(window, cx);
-                cx.stop_propagation();
-            }
+        .when(enabled, |row| {
+            row.on_click(move |_, window, cx| action(window, cx))
+                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        key_action(window, cx);
+                        cx.stop_propagation();
+                    }
+                })
         })
 }
 

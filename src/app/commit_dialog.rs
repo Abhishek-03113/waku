@@ -1,7 +1,7 @@
 //! Modal Git commit/push flow opened from the Environment summary.
 //!
 //! Git inspection, mutation, and one-shot agent CLI generation all run on the
-//! background executor. The modal only paints the cached snapshot below.
+//! background executor. UI surfaces only paint the cached state below.
 
 use gpui::{KeyBinding, actions};
 
@@ -36,6 +36,29 @@ enum CommitPending {
     Git(CommitAction),
 }
 
+pub(super) struct CommitOperationState {
+    id: Uuid,
+    workspace: PathBuf,
+    pending: CommitPending,
+}
+
+impl CommitOperationState {
+    fn status_label(&self) -> String {
+        commit_pending_status_label(self.pending)
+    }
+}
+
+fn commit_pending_status_label(pending: CommitPending) -> String {
+    match pending {
+        CommitPending::Generating(_) => tr!("commit.generating_message"),
+        CommitPending::Git(CommitAction::Commit) => tr!("commit.committing"),
+        CommitPending::Git(CommitAction::CommitAndPush) => {
+            tr!("commit.committing_and_pushing")
+        }
+        CommitPending::Git(CommitAction::Push) => tr!("commit.pushing"),
+    }
+}
+
 pub(super) struct CommitDialogState {
     id: Uuid,
     workspace: PathBuf,
@@ -44,7 +67,6 @@ pub(super) struct CommitDialogState {
     include_unstaged: bool,
     snapshot: crate::git_commit::Snapshot,
     snapshot_loading: bool,
-    pending: Option<CommitPending>,
     error: Option<String>,
     include_focus: FocusHandle,
     commit_focus: FocusHandle,
@@ -55,12 +77,11 @@ pub(super) struct CommitDialogState {
 impl CommitDialogState {
     fn can_commit(&self) -> bool {
         !self.snapshot_loading
-            && self.pending.is_none()
             && (self.snapshot.has_staged || (self.include_unstaged && self.snapshot.has_unstaged))
     }
 
     fn can_push(&self) -> bool {
-        !self.snapshot_loading && self.pending.is_none() && self.snapshot.can_push
+        !self.snapshot_loading && self.snapshot.can_push
     }
 
     fn displayed_counts(&self) -> (u64, u64) {
@@ -76,7 +97,16 @@ impl CommitDialogState {
 }
 
 impl Waku {
+    pub(super) fn commit_operation_status_label(&self) -> Option<String> {
+        self.commit_operation
+            .as_ref()
+            .map(CommitOperationState::status_label)
+    }
+
     pub(super) fn open_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.commit_operation.is_some() {
+            return;
+        }
         let Some((workspace, provider, model, reasoning_effort)) =
             self.selected_session().and_then(|session| {
                 Some((
@@ -130,7 +160,6 @@ impl Waku {
             include_unstaged: true,
             snapshot,
             snapshot_loading: true,
-            pending: None,
             error: None,
             include_focus: cx.focus_handle(),
             commit_focus: cx.focus_handle(),
@@ -169,13 +198,6 @@ impl Waku {
     }
 
     fn close_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .commit_dialog
-            .as_ref()
-            .is_some_and(|dialog| matches!(dialog.pending, Some(CommitPending::Git(_))))
-        {
-            return;
-        }
         if self.commit_dialog.take().is_none() {
             return;
         }
@@ -185,11 +207,10 @@ impl Waku {
     }
 
     fn toggle_include_unstaged(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self
-            .commit_dialog
-            .as_mut()
-            .filter(|dialog| dialog.pending.is_none())
-        else {
+        if self.commit_operation.is_some() {
+            return;
+        }
+        let Some(dialog) = self.commit_dialog.as_mut() else {
             return;
         };
         dialog.include_unstaged = !dialog.include_unstaged;
@@ -203,6 +224,9 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.commit_operation.is_some() {
+            return;
+        }
         let Some(dialog) = self.commit_dialog.as_ref() else {
             return;
         };
@@ -230,12 +254,16 @@ impl Waku {
                 return;
             };
             if let Some(dialog) = self.commit_dialog.as_mut() {
-                dialog.pending = Some(CommitPending::Generating(action));
                 dialog.error = None;
                 dialog
                     .message
                     .update(cx, |message, _| message.set_read_only(true));
             }
+            self.commit_operation = Some(CommitOperationState {
+                id,
+                workspace: workspace.clone(),
+                pending: CommitPending::Generating(action),
+            });
             self.spawn_commit_message_generation(
                 id,
                 action,
@@ -250,12 +278,16 @@ impl Waku {
         }
 
         if let Some(dialog) = self.commit_dialog.as_mut() {
-            dialog.pending = Some(CommitPending::Git(action));
             dialog.error = None;
             dialog
                 .message
                 .update(cx, |message, _| message.set_read_only(true));
         }
+        self.commit_operation = Some(CommitOperationState {
+            id,
+            workspace: workspace.clone(),
+            pending: CommitPending::Git(action),
+        });
         self.spawn_git_action(
             id,
             action,
@@ -292,40 +324,49 @@ impl Waku {
                 })
                 .await;
             let _ = waku.update(cx, |waku, cx| {
-                let mut generated = None;
-                {
-                    let Some(dialog) = waku.commit_dialog.as_mut().filter(|dialog| {
-                        dialog.id == id && dialog.pending == Some(CommitPending::Generating(action))
-                    }) else {
-                        return;
-                    };
-                    match result {
-                        Ok(message) => {
+                let current = waku.commit_operation.as_ref().is_some_and(|operation| {
+                    operation.id == id
+                        && operation.workspace == workspace
+                        && operation.pending == CommitPending::Generating(action)
+                });
+                if !current {
+                    return;
+                }
+                match result {
+                    Ok(message) => {
+                        if let Some(operation) = waku.commit_operation.as_mut() {
+                            operation.pending = CommitPending::Git(action);
+                        }
+                        if let Some(dialog) =
+                            waku.commit_dialog.as_mut().filter(|dialog| dialog.id == id)
+                        {
                             dialog
                                 .message
                                 .update(cx, |input, cx| input.set_content(message.clone(), cx));
-                            dialog.pending = Some(CommitPending::Git(action));
-                            generated = Some(message);
                         }
-                        Err(error) => {
-                            dialog.pending = None;
+                        waku.spawn_git_action(
+                            id,
+                            action,
+                            workspace,
+                            message,
+                            include_unstaged,
+                            window_handle,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        waku.commit_operation = None;
+                        if let Some(dialog) =
+                            waku.commit_dialog.as_mut().filter(|dialog| dialog.id == id)
+                        {
                             dialog.error = Some(error);
                             dialog
                                 .message
                                 .update(cx, |message, _| message.set_read_only(false));
+                        } else {
+                            waku.show_toast(error);
                         }
                     }
-                }
-                if let Some(message) = generated {
-                    waku.spawn_git_action(
-                        id,
-                        action,
-                        workspace,
-                        message,
-                        include_unstaged,
-                        window_handle,
-                        cx,
-                    );
                 }
                 cx.notify();
             });
@@ -370,34 +411,44 @@ impl Waku {
                 })
                 .await;
             let focus = waku.update(cx, |waku, cx| {
-                let current = waku.commit_dialog.as_ref().is_some_and(|dialog| {
-                    dialog.id == id && dialog.pending == Some(CommitPending::Git(action))
+                let current = waku.commit_operation.as_ref().is_some_and(|operation| {
+                    operation.id == id
+                        && operation.workspace == workspace
+                        && operation.pending == CommitPending::Git(action)
                 });
                 if !current {
                     return None;
                 }
                 let (result, refreshed_snapshot) = result;
+                waku.commit_operation = None;
+                if waku
+                    .selected_workspace_path()
+                    .is_some_and(|path| path == workspace)
+                {
+                    waku.invalidate_workspace_queries(cx);
+                } else {
+                    waku.branch_snapshots.invalidate(&workspace);
+                }
                 let focus = match result {
                     Ok(()) => {
-                        waku.commit_dialog = None;
-                        if waku
-                            .selected_workspace_path()
-                            .is_some_and(|path| path == workspace)
-                        {
-                            waku.invalidate_workspace_queries(cx);
-                        } else {
-                            waku.branch_snapshots.invalidate(&workspace);
+                        let dialog_was_open = waku
+                            .commit_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.id == id);
+                        if dialog_was_open {
+                            waku.commit_dialog = None;
                         }
                         waku.show_success_toast(match action {
                             CommitAction::Commit => tr!("commit.committed"),
                             CommitAction::CommitAndPush => tr!("commit.committed_and_pushed"),
                             CommitAction::Push => tr!("commit.pushed"),
                         });
-                        Some(waku.composer_focus(cx))
+                        dialog_was_open.then(|| waku.composer_focus(cx))
                     }
                     Err(error) => {
-                        if let Some(dialog) = waku.commit_dialog.as_mut() {
-                            dialog.pending = None;
+                        if let Some(dialog) =
+                            waku.commit_dialog.as_mut().filter(|dialog| dialog.id == id)
+                        {
                             dialog.error = Some(error);
                             if let Some(snapshot) = refreshed_snapshot {
                                 dialog.snapshot = snapshot;
@@ -406,6 +457,8 @@ impl Waku {
                             dialog
                                 .message
                                 .update(cx, |message, _| message.set_read_only(false));
+                        } else {
+                            waku.show_toast(error);
                         }
                         None
                     }
@@ -426,11 +479,16 @@ impl Waku {
         let branch = dialog.snapshot.branch.clone();
         let message = dialog.message.clone();
         let include_unstaged = dialog.include_unstaged;
-        let include_enabled = dialog.pending.is_none();
+        let pending = self
+            .commit_operation
+            .as_ref()
+            .filter(|operation| operation.id == dialog.id)
+            .map(|operation| operation.pending);
+        let include_enabled = pending.is_none();
         let (additions, deletions) = dialog.displayed_counts();
-        let can_commit = dialog.can_commit();
-        let can_push = dialog.can_push();
-        let pending = dialog.pending;
+        let can_commit = pending.is_none() && dialog.can_commit();
+        let can_push = pending.is_none() && dialog.can_push();
+        let pending_status = pending.map(commit_pending_status_label);
         let error = dialog.error.clone();
         let weak = cx.entity().downgrade();
 
@@ -522,45 +580,64 @@ impl Waku {
                 })
         };
 
+        let commit_active = pending.is_some_and(|pending| match pending {
+            CommitPending::Generating(action) | CommitPending::Git(action) => {
+                action == CommitAction::Commit
+            }
+        });
         let commit = render_commit_action_row(
             "commit-dialog-commit",
             &dialog.commit_focus,
             "icons/git-commit-horizontal.svg",
-            tr!("commit.commit"),
+            if commit_active {
+                pending_status
+                    .clone()
+                    .unwrap_or_else(|| tr!("commit.commit"))
+            } else {
+                tr!("commit.commit")
+            },
             can_commit,
-            pending.is_some_and(|pending| match pending {
-                CommitPending::Generating(action) | CommitPending::Git(action) => {
-                    action == CommitAction::Commit
-                }
-            }),
+            commit_active,
             Some("⌘↩"),
             CommitAction::Commit,
             weak.clone(),
             &theme,
         );
+        let commit_and_push_active = pending.is_some_and(|pending| match pending {
+            CommitPending::Generating(action) | CommitPending::Git(action) => {
+                action == CommitAction::CommitAndPush
+            }
+        });
         let commit_and_push = render_commit_action_row(
             "commit-dialog-commit-and-push",
             &dialog.commit_push_focus,
             "icons/cloud-upload.svg",
-            tr!("commit.commit_and_push"),
+            if commit_and_push_active {
+                pending_status
+                    .clone()
+                    .unwrap_or_else(|| tr!("commit.commit_and_push"))
+            } else {
+                tr!("commit.commit_and_push")
+            },
             can_commit,
-            pending.is_some_and(|pending| match pending {
-                CommitPending::Generating(action) | CommitPending::Git(action) => {
-                    action == CommitAction::CommitAndPush
-                }
-            }),
+            commit_and_push_active,
             None,
             CommitAction::CommitAndPush,
             weak.clone(),
             &theme,
         );
+        let push_active = pending == Some(CommitPending::Git(CommitAction::Push));
         let push = render_commit_action_row(
             "commit-dialog-push",
             &dialog.push_focus,
             "icons/cloud-upload.svg",
-            tr!("commit.push"),
+            if push_active {
+                pending_status.unwrap_or_else(|| tr!("commit.push"))
+            } else {
+                tr!("commit.push")
+            },
             can_push,
-            pending == Some(CommitPending::Git(CommitAction::Push)),
+            push_active,
             None,
             CommitAction::Push,
             weak,

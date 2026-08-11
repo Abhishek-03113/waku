@@ -925,9 +925,13 @@ pub struct Waku {
     /// flicker when app activation invalidates the query.
     visible_branch_snapshot: Option<(PathBuf, BranchSnapshot)>,
     branch_operation_pending: bool,
-    /// Window-modal Git commit/push flow. Its snapshot and pending state are
-    /// filled off-thread; frames only read this in-memory value.
+    /// Window-modal Git commit/push UI. Its repository snapshot is filled
+    /// off-thread; frames only read this in-memory value.
     commit_dialog: Option<commit_dialog::CommitDialogState>,
+    /// Commit-message generation and Git mutation outlive the modal that
+    /// started them. Keeping the operation on the app also lets every
+    /// Environment surface reflect and gate the same in-flight action.
+    commit_operation: Option<commit_dialog::CommitOperationState>,
     /// Slash commands discovered per (provider, project root). Filesystem
     /// walks live on the background executor; frames read the index below.
     slash_commands: QueryCache<(ProviderKind, PathBuf), Vec<SlashCommand>>,
@@ -2196,6 +2200,7 @@ impl Waku {
                 visible_branch_snapshot: None,
                 branch_operation_pending: false,
                 commit_dialog: None,
+                commit_operation: None,
                 // Providers × workspaces; both scans are small, the cache
                 // only exists to keep them off the frame path.
                 slash_commands: QueryCache::new(2 * MAX_CACHED_WORKSPACES),
