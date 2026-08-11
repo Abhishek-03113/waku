@@ -22,6 +22,8 @@ actions!(
         Delete,
         Left,
         Right,
+        Up,
+        Down,
         SelectLeft,
         SelectRight,
         SelectAll,
@@ -43,6 +45,7 @@ actions!(
         Undo,
         Redo,
         Enter,
+        Newline,
         SubmitSteer,
     ]
 );
@@ -64,6 +67,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-k", DeleteToEnd, Some("ComposerInput")),
         KeyBinding::new("left", Left, Some("ComposerInput")),
         KeyBinding::new("right", Right, Some("ComposerInput")),
+        KeyBinding::new("up", Up, Some("ComposerInput")),
+        KeyBinding::new("down", Down, Some("ComposerInput")),
         KeyBinding::new("ctrl-b", Left, Some("ComposerInput")),
         KeyBinding::new("ctrl-f", Right, Some("ComposerInput")),
         KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
@@ -99,6 +104,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-z", Undo, Some("ComposerInput")),
         KeyBinding::new("cmd-shift-z", Redo, Some("ComposerInput")),
         KeyBinding::new("enter", Enter, Some("ComposerInput")),
+        KeyBinding::new("shift-enter", Newline, Some("ComposerInput")),
         // While a turn is running, Enter queues a follow-up; ⌘Enter injects
         // the message into the running turn when the provider supports it.
         KeyBinding::new("cmd-enter", SubmitSteer, Some("ComposerInput")),
@@ -521,6 +527,11 @@ pub struct ComposerInput {
     /// address bar's page echo shows the start of the URL.
     scroll_offset: Pixels,
     last_layout: Option<TextLayout>,
+    /// Horizontal goal and soft-wrap affinity for consecutive Up/Down
+    /// presses. A byte offset at a wrap boundary can mean either the end of
+    /// one visual row or the start of the next, so the offset alone is not
+    /// enough to reproduce native textarea movement or paint its caret.
+    vertical_navigation: Option<VerticalNavigation>,
     is_selecting: bool,
     selected_word_range: Option<Range<usize>>,
     history: EditHistory,
@@ -528,6 +539,20 @@ pub struct ComposerInput {
     context_menu: ContextMenuHandle,
     blink_cursor: Entity<BlinkCursor>,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy)]
+struct VerticalNavigation {
+    /// Desired horizontal position within a visual row. This survives a
+    /// shorter intermediate row so moving again can return to the old column.
+    goal_x: Pixels,
+    /// The visual row carrying the caret, including soft-wrapped rows.
+    visual_row: usize,
+    /// Actual caret x within `visual_row`, which can be less than `goal_x`
+    /// when that row is shorter.
+    cursor_x: Pixels,
+    cursor_offset: usize,
+    layout_width: Pixels,
 }
 
 impl ComposerInput {
@@ -566,6 +591,7 @@ impl ComposerInput {
             marked_range: None,
             scroll_offset: px(0.),
             last_layout: None,
+            vertical_navigation: None,
             is_selecting: false,
             selected_word_range: None,
             history: EditHistory::default(),
@@ -747,6 +773,7 @@ impl ComposerInput {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.vertical_navigation = None;
         self.history.seal();
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
@@ -788,6 +815,7 @@ impl ComposerInput {
         }
         self.selected_range = range;
         self.selection_reversed = false;
+        self.vertical_navigation = None;
         self.pause_blink_cursor(cx);
         cx.notify();
     }
@@ -797,6 +825,7 @@ impl ComposerInput {
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
+        self.vertical_navigation = None;
         self.pause_blink_cursor(cx);
         cx.notify();
     }
@@ -833,6 +862,7 @@ impl ComposerInput {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.vertical_navigation = None;
         self.highlight.clear();
         // A programmatic clear is a new baseline, not an edit to step back
         // over — a submitted prompt should not resurface via cmd-z.
@@ -854,6 +884,7 @@ impl ComposerInput {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.vertical_navigation = None;
         // A load or reload from disk is a new baseline: undoing into text
         // from before an external change would silently revert that change.
         // An unchanged reload keeps the history alive.
@@ -904,6 +935,103 @@ impl ComposerInput {
             self.move_to(self.next_boundary(self.cursor_offset()), cx);
         } else {
             self.move_to(self.selected_range.end, cx);
+        }
+    }
+
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertically(false, cx);
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertically(true, cx);
+    }
+
+    /// Move by one rendered row, not merely one newline-delimited line. This
+    /// is the textarea convention: soft wraps count, and the original x goal
+    /// survives a shorter row between two longer ones.
+    fn move_vertically(&mut self, down: bool, cx: &mut Context<Self>) {
+        if self.mode == FieldMode::Search {
+            self.vertical_navigation = None;
+            cx.propagate();
+            return;
+        }
+
+        let anchor = if down {
+            self.selected_range.end
+        } else {
+            self.selected_range.start
+        };
+        let Some(layout) = self
+            .last_layout
+            .as_ref()
+            .filter(|layout| layout.len() == self.content.len())
+        else {
+            // The field normally has a current layout whenever it can receive
+            // a key. If an edit and this action race the next paint, let an
+            // enclosing surface handle the arrow rather than navigating with
+            // stale geometry.
+            self.vertical_navigation = None;
+            cx.propagate();
+            return;
+        };
+        let row_count = visual_row_count(layout);
+        if row_count == 0 {
+            cx.propagate();
+            return;
+        }
+
+        let bounds = layout.bounds();
+        let layout_width = bounds.size.width;
+        let continuing = if self.selected_range.is_empty() {
+            self.vertical_navigation.filter(|navigation| {
+                navigation.cursor_offset == anchor
+                    && navigation.layout_width == layout_width
+                    && navigation.visual_row < row_count
+            })
+        } else {
+            None
+        };
+        let (current_row, goal_x) = if let Some(navigation) = continuing {
+            (navigation.visual_row, navigation.goal_x)
+        } else {
+            let Some(position) = layout.position_for_index(anchor) else {
+                self.vertical_navigation = None;
+                cx.propagate();
+                return;
+            };
+            let row = ((position.y - bounds.top()) / layout.line_height()) as usize;
+            (row.min(row_count - 1), position.x - bounds.left())
+        };
+        let target_row = if down {
+            (current_row + 1).min(row_count - 1)
+        } else {
+            current_row.saturating_sub(1)
+        };
+        let Some((offset, cursor_x)) = visual_row_offset_for_x(layout, target_row, goal_x) else {
+            self.vertical_navigation = None;
+            cx.propagate();
+            return;
+        };
+
+        let previous_range = self.selected_range.clone();
+        let previous_row = continuing.map(|navigation| navigation.visual_row);
+        self.selected_range = offset..offset;
+        self.selection_reversed = false;
+        self.vertical_navigation = Some(VerticalNavigation {
+            goal_x,
+            visual_row: target_row,
+            cursor_x,
+            cursor_offset: offset,
+            layout_width,
+        });
+        self.pause_blink_cursor(cx);
+        cx.notify();
+
+        // Match Zed/native controls at the boundary: if neither the text
+        // selection nor its soft-wrap affinity moved, an enclosing surface
+        // gets a chance to use the arrow.
+        if previous_range == self.selected_range && previous_row == Some(target_row) {
+            cx.propagate();
         }
     }
 
@@ -1060,6 +1188,15 @@ impl ComposerInput {
         }
     }
 
+    fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == FieldMode::Search {
+            // Find bars and picker fields assign Shift+Enter their own meaning.
+            cx.propagate();
+            return;
+        }
+        self.replace_text_in_range(None, "\n", window, cx);
+    }
+
     fn submit_steer(&mut self, _: &SubmitSteer, _: &mut Window, cx: &mut Context<Self>) {
         if self.mode != FieldMode::Composer {
             // Search and code fields have no running turn to steer; let an
@@ -1185,6 +1322,7 @@ impl ComposerInput {
         self.selected_range = selection;
         self.selection_reversed = selection_reversed;
         self.marked_range = None;
+        self.vertical_navigation = None;
         self.refresh_highlight();
         self.pause_blink_cursor(cx);
         cx.emit(ComposerEvent::Edited);
@@ -1197,6 +1335,7 @@ impl ComposerInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.vertical_navigation = None;
         self.is_selecting = true;
         self.selected_word_range = None;
         // A plain click that is also the focusing click arms select-all for
@@ -1267,6 +1406,7 @@ impl ComposerInput {
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
+        self.vertical_navigation = None;
         self.pause_blink_cursor(cx);
         cx.notify();
     }
@@ -1293,6 +1433,7 @@ impl ComposerInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.vertical_navigation = None;
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -1454,6 +1595,7 @@ impl EntityInputHandler for ComposerInput {
         let offset = range.start + new_text.len();
         self.selected_range = offset..offset;
         self.marked_range = None;
+        self.vertical_navigation = None;
         if composing {
             self.history.finalize_composition();
         }
@@ -1510,6 +1652,7 @@ impl EntityInputHandler for ComposerInput {
                 let offset = range.start + new_text.len();
                 offset..offset
             });
+        self.vertical_navigation = None;
         self.pause_blink_cursor(cx);
         if previous != self.content {
             cx.emit(ComposerEvent::Edited);
@@ -1555,6 +1698,56 @@ impl EntityInputHandler for ComposerInput {
             .min(self.content.len());
         Some(self.offset_to_utf16(utf8_index))
     }
+}
+
+fn visual_row_count(layout: &TextLayout) -> usize {
+    layout
+        .line_layouts()
+        .iter()
+        .map(|line| line.wrap_boundaries().len() + 1)
+        .sum()
+}
+
+/// Resolve the closest caret offset on one rendered row for a desired x.
+/// GPUI's whole-text `position_for_index` intentionally gives a soft-wrap
+/// boundary to the preceding row, so this works against the concrete wrapped
+/// row and returns its unambiguous caret x as well as the byte offset.
+fn visual_row_offset_for_x(
+    layout: &TextLayout,
+    visual_row: usize,
+    goal_x: Pixels,
+) -> Option<(usize, Pixels)> {
+    let line_height = layout.line_height();
+    let mut first_visual_row = 0;
+    let mut first_byte = 0;
+
+    for line in layout.line_layouts() {
+        let line_row_count = line.wrap_boundaries().len() + 1;
+        if visual_row < first_visual_row + line_row_count {
+            let row_in_line = visual_row - first_visual_row;
+            let local_offset = line
+                .closest_index_for_position(
+                    point(goal_x, line_height * (row_in_line as f32 + 0.5)),
+                    line_height,
+                )
+                .unwrap_or_else(|offset| offset);
+            let row_start = row_in_line
+                .checked_sub(1)
+                .and_then(|boundary_index| line.wrap_boundaries().get(boundary_index))
+                .map(|boundary| {
+                    line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
+                })
+                .unwrap_or(0);
+            let cursor_x = line.unwrapped_layout.x_for_index(local_offset)
+                - line.unwrapped_layout.x_for_index(row_start);
+            return Some((first_byte + local_offset, cursor_x));
+        }
+        first_visual_row += line_row_count;
+        // TextLayout separates its newline-delimited shaped lines by the one
+        // source byte occupied by `\n`.
+        first_byte += line.len() + 1;
+    }
+    None
 }
 
 fn cursor_should_be_visible(
@@ -1915,7 +2108,22 @@ impl Element for InputElement {
         let theme = Theme::current(cx);
         let layout = layout_state.text.layout();
         let cursor = (input.selected_range.is_empty() && cursor_visible)
-            .then(|| layout.position_for_index(cursor))
+            .then(|| {
+                input
+                    .vertical_navigation
+                    .filter(|navigation| {
+                        navigation.cursor_offset == cursor
+                            && navigation.layout_width == layout.bounds().size.width
+                    })
+                    .map(|navigation| {
+                        point(
+                            layout.bounds().left() + navigation.cursor_x,
+                            layout.bounds().top()
+                                + layout.line_height() * navigation.visual_row as f32,
+                        )
+                    })
+                    .or_else(|| layout.position_for_index(cursor))
+            })
             .flatten()
             .map(|cursor_position| {
                 fill(
@@ -1976,6 +2184,8 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_all))
@@ -1997,6 +2207,7 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::enter))
+            .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::submit_steer))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_mouse_down))
@@ -2105,15 +2316,102 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use gpui::{
-        ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat, TextRun, font, hsla,
+        ClipboardEntry, ClipboardItem, Context, Entity, ExternalPaths, Image, ImageFormat, Pixels,
+        Render, TestAppContext, TextRun, Window, div, font, hsla, prelude::*, px,
     };
 
     use super::TokenClass;
     use super::{
-        EditHistory, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP, attachment_paste_entries,
-        cursor_should_be_visible, input_text_runs, next_word_boundary, previous_word_boundary,
-        single_line_scroll, trimmed_splice, word_range_at,
+        ComposerInput, EditHistory, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP,
+        attachment_paste_entries, cursor_should_be_visible, input_text_runs, next_word_boundary,
+        previous_word_boundary, single_line_scroll, trimmed_splice, visual_row_count,
+        word_range_at,
     };
+
+    struct InputHarness {
+        input: Entity<ComposerInput>,
+        width: Pixels,
+    }
+
+    impl Render for InputHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(self.width).child(self.input.clone())
+        }
+    }
+
+    fn setup_input<'a>(
+        cx: &'a mut TestAppContext,
+        content: &str,
+        width: Pixels,
+    ) -> (Entity<ComposerInput>, &'a mut gpui::VisualTestContext) {
+        cx.update(super::init);
+        let content = content.to_owned();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let input = cx.new(|cx| {
+                let mut input = ComposerInput::new(window, cx);
+                input.set_content(content, cx);
+                input
+            });
+            InputHarness { input, width }
+        });
+        let input = cx.read_entity(&harness, |harness, _| harness.input.clone());
+        cx.update(|window, cx| window.focus(&input.read(cx).focus(), cx));
+        cx.run_until_parked();
+        (input, cx)
+    }
+
+    #[gpui::test]
+    fn shift_enter_inserts_a_newline_at_the_caret(cx: &mut TestAppContext) {
+        let (input, cx) = setup_input(cx, "hello world", px(300.));
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(5..5, cx)));
+
+        cx.simulate_keystrokes("shift-enter");
+
+        cx.read_entity(&input, |input, _| {
+            assert_eq!(input.content(), "hello\n world");
+            assert_eq!(input.cursor(), 6);
+        });
+    }
+
+    #[gpui::test]
+    fn vertical_arrows_keep_the_original_column_across_short_lines(cx: &mut TestAppContext) {
+        let (input, cx) = setup_input(cx, "abcdef\nx\nabcdef", px(300.));
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(5..5, cx)));
+
+        cx.simulate_keystrokes("down");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 8));
+
+        cx.simulate_keystrokes("down");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 14));
+
+        cx.simulate_keystrokes("up");
+        cx.read_entity(&input, |input, _| assert_eq!(input.cursor(), 8));
+    }
+
+    #[gpui::test]
+    fn vertical_arrows_advance_across_soft_wrap_boundaries(cx: &mut TestAppContext) {
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        let (input, cx) = setup_input(cx, text, px(90.));
+        cx.read_entity(&input, |input, _| {
+            assert!(
+                visual_row_count(input.last_layout.as_ref().unwrap()) >= 3,
+                "fixture must wrap across at least three visual rows"
+            );
+        });
+        cx.update(|_, cx| input.update(cx, |input, cx| input.select_range(0..0, cx)));
+
+        cx.simulate_keystrokes("down");
+        let first_boundary = cx.read_entity(&input, |input, _| input.cursor());
+        assert!(first_boundary > 0);
+
+        cx.simulate_keystrokes("down");
+        cx.read_entity(&input, |input, _| {
+            assert!(
+                input.cursor() > first_boundary,
+                "the wrap-boundary affinity must not leave the caret stuck"
+            );
+        });
+    }
 
     #[test]
     fn image_and_file_first_clipboards_become_attachments() {
