@@ -1304,8 +1304,10 @@ fn render_environment_action_row(
     theme: &Theme,
     action: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let foreground = if enabled || active {
+    let foreground = if enabled {
         theme.text
+    } else if active {
+        theme.text_secondary
     } else {
         theme.text_ghost
     };

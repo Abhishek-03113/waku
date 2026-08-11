@@ -748,8 +748,10 @@ fn render_commit_action_row(
     weak: WeakEntity<Waku>,
     theme: &Theme,
 ) -> Stateful<Div> {
-    let foreground = if enabled || active {
+    let foreground = if enabled {
         theme.text
+    } else if active {
+        theme.text_secondary
     } else {
         theme.text_ghost
     };
