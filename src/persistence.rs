@@ -2922,28 +2922,31 @@ mod tests {
         assert_eq!(created as u64, session.created_at);
         assert_eq!(updated as u64, session.updated_at);
         assert_eq!(last_reply.map(|at| at as u64), session.last_reply_at);
-        assert!(last_reply.is_some(), "a finished turn sets last_reply_at");
+        assert!(last_reply.is_some(), "a submitted turn sets last_reply_at");
 
         fs::remove_dir_all(directory).ok();
     }
 
     #[test]
-    fn last_reply_at_tracks_replies_not_every_edit() {
+    fn last_reply_at_tracks_turn_activity_not_every_edit() {
         let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        assert!(session.last_reply_at.is_none(), "no reply yet");
+        assert!(session.last_reply_at.is_none(), "no turn yet");
 
         session.begin_turn("Ask");
-        assert!(session.last_reply_at.is_none(), "still running");
+        let submitted_at = session.last_reply_at.expect("submission recorded");
+        assert_eq!(submitted_at, session.turns.last().unwrap().started_at);
         session.finish_active_turn(crate::model::TurnStatus::Completed);
         let replied_at = session.last_reply_at.expect("reply recorded");
+        assert!(replied_at >= submitted_at);
 
         // A later edit moves updated_at but must not look like a new reply.
         session.title = "Renamed".into();
         session.updated_at = replied_at + 500;
         assert_eq!(session.last_reply_at, Some(replied_at));
 
-        // A second turn does move it.
+        // A second turn moves it immediately, before that turn finishes.
         session.begin_turn("Again");
+        assert!(session.last_reply_at >= Some(replied_at));
         session.finish_active_turn(crate::model::TurnStatus::Failed);
         assert!(session.last_reply_at >= Some(replied_at));
     }
@@ -2964,6 +2967,13 @@ mod tests {
         let mut fresh = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
         fresh.backfill_last_reply_at();
         assert!(fresh.last_reply_at.is_none());
+
+        // A running legacy turn still has submission activity to recover.
+        fresh.begin_turn("Ask");
+        let started_at = fresh.turns.last().unwrap().started_at;
+        fresh.last_reply_at = None;
+        fresh.backfill_last_reply_at();
+        assert_eq!(fresh.last_reply_at, Some(started_at));
     }
 
     #[test]

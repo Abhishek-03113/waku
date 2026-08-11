@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 
@@ -91,6 +91,39 @@ fn permission_mode(mode: RuntimeMode, interaction_mode: InteractionMode) -> &'st
     }
 }
 
+fn configure_stream_command(
+    command: &mut Command,
+    mode: RuntimeMode,
+    interaction_mode: InteractionMode,
+) {
+    command.args([
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        // Newer Claude models omit readable thinking text unless the caller
+        // explicitly asks for a summary. Raw reasoning remains provider-private.
+        "--thinking-display",
+        "summarized",
+        // Echoes each user message back, which is how a queued prompt is
+        // distinguished from one the agent has started on.
+        "--replay-user-messages",
+        // Undocumented, and the whole reason Supervised can mean supervised:
+        // without it the CLI decides permissions itself and only reports
+        // denials after the fact.
+        "--permission-prompt-tool",
+        "stdio",
+        "--permission-mode",
+        permission_mode(mode, interaction_mode),
+    ]);
+    if mode == RuntimeMode::FullAccess && interaction_mode != InteractionMode::Plan {
+        command.arg("--dangerously-skip-permissions");
+    }
+}
+
 impl ClaudeDriver {
     pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
@@ -124,28 +157,8 @@ impl ClaudeDriver {
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
         let mut command = crate::command_env::command(&binary);
-        command.current_dir(&cwd).args([
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            // Echoes each user message back, which is how a queued prompt is
-            // distinguished from one the agent has started on.
-            "--replay-user-messages",
-            // Undocumented, and the whole reason Supervised can mean supervised:
-            // without it the CLI decides permissions itself and only reports
-            // denials after the fact.
-            "--permission-prompt-tool",
-            "stdio",
-            "--permission-mode",
-            permission_mode(mode, interaction_mode),
-        ]);
-        if mode == RuntimeMode::FullAccess && interaction_mode != InteractionMode::Plan {
-            command.arg("--dangerously-skip-permissions");
-        }
+        command.current_dir(&cwd);
+        configure_stream_command(&mut command, mode, interaction_mode);
         if let Some(model) = model.as_deref() {
             command.args(["--model", model]);
         }
@@ -1201,6 +1214,26 @@ fn request_permission(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_command_requests_readable_reasoning_summary() {
+        let mut command = Command::new("/usr/bin/true");
+        configure_stream_command(
+            &mut command,
+            RuntimeMode::AutoAcceptEdits,
+            InteractionMode::Build,
+        );
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            arguments
+                .windows(2)
+                .any(|arguments| { arguments == ["--thinking-display", "summarized"] })
+        );
+    }
 
     fn harness() -> (
         Sender<DriverEvent>,

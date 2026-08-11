@@ -367,13 +367,13 @@ impl CodexDriver {
                                 continue;
                             };
                             next_request_id += 1;
-                            let mut params = json!({
-                                "threadId": thread_id,
-                                "input": [{"type": "text", "text": text}],
-                                "approvalPolicy": approval_policy,
-                                "approvalsReviewer": approvals_reviewer,
-                                "sandboxPolicy": codex_sandbox_policy(sandbox)
-                            });
+                            let mut params = turn_start_params(
+                                &thread_id,
+                                text,
+                                approval_policy,
+                                approvals_reviewer,
+                                sandbox,
+                            );
                             if let Some(model) = model.as_deref() {
                                 params["model"] = json!(model);
                             }
@@ -711,6 +711,25 @@ fn codex_sandbox_policy(sandbox: &str) -> Value {
         "danger-full-access" => json!({"type": "dangerFullAccess"}),
         _ => json!({"type": "workspaceWrite"}),
     }
+}
+
+fn turn_start_params(
+    thread_id: &str,
+    text: String,
+    approval_policy: &str,
+    approvals_reviewer: &str,
+    sandbox: &str,
+) -> Value {
+    json!({
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": text}],
+        "approvalPolicy": approval_policy,
+        "approvalsReviewer": approvals_reviewer,
+        "sandboxPolicy": codex_sandbox_policy(sandbox),
+        // Some current models default reasoning summaries to `none`. Waku has
+        // a native reasoning disclosure, so explicitly request readable text.
+        "summary": "auto"
+    })
 }
 
 fn toml_string(value: &str) -> String {
@@ -1850,6 +1869,21 @@ fn is_visible_stderr_notice(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turns_request_readable_reasoning_summaries() {
+        let params = turn_start_params(
+            "thread-1",
+            "Inspect the failure".into(),
+            "never",
+            "user",
+            "danger-full-access",
+        );
+
+        assert_eq!(params["summary"], "auto");
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["input"][0]["text"], "Inspect the failure");
+    }
 
     #[test]
     fn access_modes_match_codex_permission_profiles() {

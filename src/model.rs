@@ -667,9 +667,10 @@ pub struct AgentSession {
     pub status: SessionStatus,
     pub created_at: u64,
     /// Any mutation, including title edits and truncation. Use
-    /// [`Self::last_reply_at`] for "when did the agent last respond".
+    /// [`Self::last_reply_at`] for conversation recency.
     pub updated_at: u64,
-    /// Completion of the most recent assistant turn, whatever its outcome.
+    /// Activity time of the newest turn. Set as soon as the user submits it,
+    /// then refreshed when the turn settles, whatever its outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reply_at: Option<u64>,
     #[serde(default)]
@@ -758,9 +759,8 @@ impl AgentSession {
         }
         self.last_reply_at = self
             .turns
-            .iter()
-            .rev()
-            .find_map(|turn| turn.completed_at)
+            .last()
+            .map(|turn| turn.completed_at.unwrap_or(turn.started_at))
             .filter(|_| self.has_started());
     }
 
@@ -968,6 +968,7 @@ impl AgentSession {
             Message::new_for_turn(MessageRole::User, prompt, id)
                 .with_presentation(display_content, attachments),
         );
+        self.last_reply_at = Some(now);
         id
     }
 
@@ -982,7 +983,8 @@ impl AgentSession {
     /// the submission-preparation failure path, where the prompt returns to
     /// the composer. The turn and its messages leave the transcript, and a
     /// first-prompt unwind also gives back the default title that
-    /// [`Self::set_title_from_prompt`] replaced.
+    /// [`Self::set_title_from_prompt`] replaced. Its submission timestamp stays
+    /// as the session's latest activity.
     pub fn unwind_unstarted_turn(&mut self, turn_id: Uuid) {
         let unstarted = self.turns.last().is_some_and(|turn| {
             turn.id == turn_id && turn.status == TurnStatus::Running && !turn.provider_turn_started
@@ -2676,13 +2678,15 @@ mod tests {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
         let mut session = AgentSession::new(project.id, ProviderKind::Codex);
 
-        // A first prompt: the unwind restores the untouched session, default
-        // title included, because the prompt returns to the composer.
+        // A first prompt: the unwind restores the default title because the
+        // prompt returns to the composer, but keeps the submission activity.
         session.set_title_from_prompt("Build the thing");
         let turn_id = session.begin_turn("Build the thing");
+        let submitted_at = session.last_reply_at;
         session.unwind_unstarted_turn(turn_id);
         assert!(session.turns.is_empty());
         assert!(session.messages.is_empty());
+        assert_eq!(session.last_reply_at, submitted_at);
         assert_eq!(session.title, AgentSession::DEFAULT_TITLE);
         assert!(session.auto_title.is_none());
 
@@ -2692,10 +2696,12 @@ mod tests {
         session.finish_active_turn(TurnStatus::Completed);
         session.set_title_from_prompt("first");
         let follow_up = session.begin_turn("second");
+        let follow_up_submitted_at = session.last_reply_at;
         session.unwind_unstarted_turn(follow_up);
         assert_eq!(session.turns.len(), 1);
         assert_eq!(session.turns[0].id, first);
         assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.last_reply_at, follow_up_submitted_at);
 
         // A turn the provider has already started never unwinds — losing a
         // live conversation turn would desync the provider transcript.

@@ -185,9 +185,9 @@ pub(super) fn session_time_label(session: &AgentSession, now: u64) -> Option<Str
         .map(|last_reply_at| format_time_ago(now.saturating_sub(last_reply_at)))
 }
 
-/// Recency for sidebar ordering and date groups. Metadata edits such as a
-/// rename must not promote an old task; a task without a reply stays anchored
-/// to when it was created.
+/// Recency for sidebar ordering and date groups. A submitted turn promotes the
+/// task immediately, while metadata edits such as a rename do not; a task with
+/// no turns stays anchored to when it was created.
 fn sidebar_session_timestamp(session: &AgentSession) -> u64 {
     session.last_reply_at.unwrap_or(session.created_at)
 }
