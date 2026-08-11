@@ -286,10 +286,6 @@ function Home() {
               <h2 className="mt-3 text-2xl font-semibold tracking-tight">
                 Get Waku
               </h2>
-              <p className="mt-2 max-w-[34rem] text-[15px] leading-relaxed text-muted-foreground">
-                One signed, notarized DMG. From then on it keeps itself current
-                with delta updates over Sparkle.
-              </p>
               <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
                 <DownloadMenu
                   downloadUrl={downloadUrl}
