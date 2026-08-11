@@ -649,7 +649,7 @@ impl RightPanelSessionState {
 
 /// One choice in the model-traits menu: a label plus a badge marking the
 /// provider's own default, so the current selection and the default read apart.
-fn traits_choice(theme: Theme, label: String, is_default: bool) -> MenuItem {
+fn traits_choice(theme: Theme, label: String, is_default: bool, selected: bool) -> MenuItem {
     MenuItem::custom(move |_, _| {
         div()
             .w(px(190.0))
@@ -682,6 +682,9 @@ fn traits_choice(theme: Theme, label: String, is_default: bool) -> MenuItem {
                         .text_color(theme.text_tertiary)
                         .child(tr!("common.default")),
                 )
+            })
+            .when(selected, |element| {
+                element.child(icon("icons/check.svg", 11.0, theme.text_tertiary))
             })
             .into_any_element()
     })

@@ -1152,14 +1152,15 @@ impl Waku {
                         let weak = weak.clone();
                         let effort = option.id;
                         let is_default = default_effort.as_deref() == Some(effort.as_str());
+                        let selected = selected_effort.as_deref() == Some(effort.as_str());
                         items.push(
-                            traits_choice(theme, option.label, is_default)
-                                .selected(selected_effort.as_deref() == Some(effort.as_str()))
-                                .on_click(move |_, cx| {
+                            traits_choice(theme, option.label, is_default, selected).on_click(
+                                move |_, cx| {
                                     let _ = weak.update(cx, |this, cx| {
                                         this.set_reasoning_effort(effort.clone(), cx);
                                     });
-                                }),
+                                },
+                            ),
                         );
                     }
                 }
@@ -1170,26 +1171,31 @@ impl Waku {
                     items.push(MenuItem::Header(tr!("models.service_tier").into()));
                     let weak_standard = weak.clone();
                     items.push(
-                        traits_choice(theme, tr!("models.standard"), default_tier == "default")
-                            .selected(selected_tier == "default")
-                            .on_click(move |_, cx| {
-                                let _ = weak_standard.update(cx, |this, cx| {
-                                    this.set_service_tier("default".to_owned(), cx);
-                                });
-                            }),
+                        traits_choice(
+                            theme,
+                            tr!("models.standard"),
+                            default_tier == "default",
+                            selected_tier == "default",
+                        )
+                        .on_click(move |_, cx| {
+                            let _ = weak_standard.update(cx, |this, cx| {
+                                this.set_service_tier("default".to_owned(), cx);
+                            });
+                        }),
                     );
                     for option in service_tiers.clone() {
                         let weak = weak.clone();
                         let tier = option.id;
                         let is_default = default_tier == tier;
+                        let selected = selected_tier == tier;
                         items.push(
-                            traits_choice(theme, option.label, is_default)
-                                .selected(selected_tier == tier)
-                                .on_click(move |_, cx| {
+                            traits_choice(theme, option.label, is_default, selected).on_click(
+                                move |_, cx| {
                                     let _ = weak.update(cx, |this, cx| {
                                         this.set_service_tier(tier.clone(), cx);
                                     });
-                                }),
+                                },
+                            ),
                         );
                     }
                 }
