@@ -969,8 +969,13 @@ impl Waku {
         let theme = Theme::current(cx);
         let mut detail = div().w_full().flex().flex_col().bg(theme.surface);
         let mut metadata = Vec::new();
+        // A subagent's "command" is the prompt it was launched with.
+        let command_label = match item.key.kind {
+            BackgroundWorkKind::Subagent => tr!("background.prompt"),
+            BackgroundWorkKind::Process | BackgroundWorkKind::Monitor => tr!("background.command"),
+        };
         for (label, value) in [
-            (tr!("background.command"), item.command.as_ref()),
+            (command_label, item.command.as_ref()),
             (tr!("background.cwd"), item.cwd.as_ref()),
             (tr!("background.role"), item.role.as_ref()),
             (tr!("background.model"), item.model.as_ref()),

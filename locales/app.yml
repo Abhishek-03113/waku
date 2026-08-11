@@ -1625,6 +1625,9 @@ background.no_output:
 background.command:
   en: Command
   zh-CN: 命令
+background.prompt:
+  en: Prompt
+  zh-CN: 提示词
 background.cwd:
   en: Working directory
   zh-CN: 工作目录

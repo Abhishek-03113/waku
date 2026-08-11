@@ -241,6 +241,24 @@ fn main() {
                 )
                 .expect("failed to open Waku window");
 
+            cx.on_system_notification_response({
+                let window = window;
+                move |response, cx| {
+                    let Some(session_id) = crate::app::task_id_from_notification_tag(&response.tag)
+                    else {
+                        return;
+                    };
+                    window
+                        .update(cx, |waku, window, cx| {
+                            waku.open_task_from_notification(session_id, cx);
+                            window.activate_window();
+                            cx.activate(true);
+                        })
+                        .ok();
+                    cx.dismiss_system_notification(&response.tag);
+                }
+            });
+
             window
                 .update(cx, |_, window, cx| {
                     crate::platform::configure_sidebar_material(

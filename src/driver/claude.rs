@@ -13,7 +13,7 @@
 //! invocation, not guessed. `--permission-prompt-tool` in particular is absent
 //! from `claude --help`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -472,6 +472,17 @@ struct ClaudeStreamState {
     saw_reasoning_delta: bool,
     tools: HashMap<String, (ActivityKind, String, String)>,
     background_task_kinds: HashMap<String, BackgroundWorkKind>,
+    /// Task tool-use id → task id, so a subagent's own messages — they arrive
+    /// on the main channel with `parent_tool_use_id` set — can be routed into
+    /// that task's output pane instead of this session's transcript.
+    subagent_tasks: HashMap<String, String>,
+    /// The description each task started with. Progress events reuse the
+    /// `description` field for the agent's current activity line, which
+    /// belongs in the detail row, never the title.
+    task_descriptions: HashMap<String, String>,
+    /// Tasks whose output pane already carries streamed transcript; the
+    /// settle notification's summary would only duplicate it.
+    streamed_task_output: HashSet<String>,
     pending_task_stops: Arc<Mutex<HashMap<String, BackgroundWorkKey>>>,
     /// Model of the latest main-thread assistant message, so the settled
     /// turn's `modelUsage` map can be read for that model's context window
@@ -563,23 +574,51 @@ fn claude_task_kind(value: &Value, state: &ClaudeStreamState) -> BackgroundWorkK
     }
 }
 
-fn claude_task_item(value: &Value, state: &ClaudeStreamState) -> Option<BackgroundWorkItem> {
+/// Progress summaries and errors may span paragraphs; the detail row under a
+/// task is a one-liner.
+fn one_line(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let mut short = line.chars().take(160).collect::<String>();
+    if short.len() < line.len() {
+        short.push('…');
+    }
+    Some(short)
+}
+
+fn claude_task_item(
+    subtype: &str,
+    value: &Value,
+    state: &ClaudeStreamState,
+) -> Option<BackgroundWorkItem> {
     let task_id = claude_task_id(value)?.to_owned();
     let kind = claude_task_kind(value, state);
-    let title = value
+    let wire_description = value
         .get("description")
         .or_else(|| value.get("subject"))
-        .or_else(|| value.get("summary"))
+        .or_else(|| value.get("workflow_name"))
         .or_else(|| value.get("workflowName"))
         .or_else(|| value.pointer("/task/description"))
         .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| match kind {
-            BackgroundWorkKind::Subagent => tr!("background.subagent"),
-            BackgroundWorkKind::Monitor => tr!("background.monitor"),
-            BackgroundWorkKind::Process => tr!("background.process"),
-        });
+        .filter(|text| !text.is_empty());
+    // Only the start names a task; on later events `description` is the
+    // agent's current activity line ("Running …") and `summary` can be the
+    // whole final report. An empty title keeps the stored one on upsert.
+    let title = if subtype == "task_started" {
+        wire_description
+            .map(str::to_owned)
+            .unwrap_or_else(|| match kind {
+                BackgroundWorkKind::Subagent => tr!("background.subagent"),
+                BackgroundWorkKind::Monitor => tr!("background.monitor"),
+                BackgroundWorkKind::Process => tr!("background.process"),
+            })
+    } else {
+        value
+            .pointer("/patch/description")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_default()
+    };
     let mut status = claude_task_status(value);
     if status == BackgroundWorkStatus::Running && kind == BackgroundWorkKind::Monitor {
         status = BackgroundWorkStatus::Monitoring;
@@ -591,7 +630,6 @@ fn claude_task_item(value: &Value, state: &ClaudeStreamState) -> Option<Backgrou
         .and_then(Value::as_bool)
         .unwrap_or(false);
     item.can_stop = status.is_live();
-    item.control_id = Some(task_id);
     item.origin_activity_id = value
         .get("tool_use_id")
         .or_else(|| value.get("toolUseId"))
@@ -609,17 +647,52 @@ fn claude_task_item(value: &Value, state: &ClaudeStreamState) -> Option<Backgrou
         .get("model")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    item.detail = value
-        .get("summary")
-        .or_else(|| value.get("last_tool_name"))
-        .or_else(|| value.get("lastToolName"))
-        .or_else(|| value.get("error"))
-        .or_else(|| value.pointer("/patch/error"))
-        .or_else(|| value.get("output_file"))
-        .or_else(|| value.get("outputFile"))
+    // The launch prompt rides task_started and lands in the detail surface.
+    item.command = value
+        .get("prompt")
         .and_then(Value::as_str)
+        .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
+    // The settle notification's summary is the subagent's final report and
+    // belongs in the output pane — unless the live transcript already
+    // streamed there.
+    if subtype == "task_notification" && !state.streamed_task_output.contains(&task_id) {
+        item.output = value
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned);
+    }
+    let progress_line = (subtype != "task_notification")
+        .then(|| value.get("summary").and_then(Value::as_str))
+        .flatten()
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            (subtype != "task_started")
+                .then_some(wire_description)
+                .flatten()
+                .filter(|text| {
+                    state
+                        .task_descriptions
+                        .get(&task_id)
+                        .is_none_or(|original| original != text)
+                })
+        });
+    item.detail = progress_line
+        .or_else(|| {
+            value
+                .get("last_tool_name")
+                .or_else(|| value.get("lastToolName"))
+                .or_else(|| value.get("error"))
+                .or_else(|| value.pointer("/patch/error"))
+                .or_else(|| value.get("output_file"))
+                .or_else(|| value.get("outputFile"))
+                .and_then(Value::as_str)
+        })
+        .and_then(one_line);
+    item.control_id = Some(task_id);
     item.duration_ms = value
         .pointer("/usage/duration_ms")
         .or_else(|| value.get("duration_ms"))
@@ -679,18 +752,107 @@ fn handle_claude_system(
         ));
         return;
     }
-    if matches!(
-        subtype,
-        Some("task_started" | "task_progress" | "task_updated" | "task_notification")
-    ) && let Some(item) = claude_task_item(value, state)
+    if let Some(subtype @ ("task_started" | "task_progress" | "task_updated" | "task_notification")) =
+        subtype
+        && let Some(item) = claude_task_item(subtype, value, state)
     {
-        state
-            .background_task_kinds
-            .insert(item.key.provider_id.clone(), item.key.kind);
+        let task_id = item.key.provider_id.clone();
+        state.background_task_kinds.insert(task_id.clone(), item.key.kind);
+        if subtype == "task_started"
+            && let Some(tool_use_id) = item.origin_activity_id.clone()
+        {
+            state.subagent_tasks.insert(tool_use_id, task_id.clone());
+        }
+        // Remember what the task is called: `task_started` names it, and a
+        // `task_updated` patch is an explicit rename. Later activity lines
+        // that merely repeat this stay out of the detail row.
+        let described = match subtype {
+            "task_started" => value.get("description"),
+            _ => value.pointer("/patch/description"),
+        };
+        if let Some(description) = described
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            state.task_descriptions.insert(task_id, description.to_owned());
+        }
         let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
             item,
         )));
     }
+}
+
+/// Renders a subagent message into its task's output pane: narrative text
+/// as-is, tool calls as single `› tool · subject` lines.
+fn forward_subagent_transcript(
+    parent_tool_use_id: &str,
+    value: &Value,
+    events: &impl DriverEventSink,
+    state: &mut ClaudeStreamState,
+) {
+    let Some(task_id) = state.subagent_tasks.get(parent_tool_use_id).cloned() else {
+        return;
+    };
+    let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
+        return;
+    };
+    let mut delta = String::new();
+    for block in content {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    delta.push_str(text);
+                    delta.push_str("\n\n");
+                }
+            }
+            Some("tool_use") => {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                let input = block.get("input");
+                let subject = activity::input_title(input)
+                    .or_else(|| {
+                        input.and_then(|input| {
+                            [
+                                "command",
+                                "file_path",
+                                "path",
+                                "pattern",
+                                "query",
+                                "url",
+                                "description",
+                            ]
+                            .into_iter()
+                            .find_map(|key| input.get(key).and_then(Value::as_str))
+                            .and_then(one_line)
+                        })
+                    });
+                match subject {
+                    Some(subject) => delta.push_str(&format!("› {name} · {subject}\n")),
+                    None => delta.push_str(&format!("› {name}\n")),
+                }
+            }
+            _ => {}
+        }
+    }
+    if delta.is_empty() {
+        return;
+    }
+    let kind = state
+        .background_task_kinds
+        .get(&task_id)
+        .copied()
+        .unwrap_or(BackgroundWorkKind::Subagent);
+    state.streamed_task_output.insert(task_id.clone());
+    let _ = events.send(DriverEvent::BackgroundWork(
+        BackgroundWorkEvent::OutputDelta {
+            key: BackgroundWorkKey::new(kind, task_id),
+            delta,
+        },
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -772,6 +934,15 @@ fn handle_message(
             }
         }
         Some("stream_event") => {
+            // A subagent's partial stream must not feed — or re-arm — the
+            // main message; its transcript lands via the completed messages.
+            if value
+                .get("parent_tool_use_id")
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                return;
+            }
             let event = value.get("event").unwrap_or(&Value::Null);
             // Each assistant message re-arms the delta fallback.
             if event.get("type").and_then(Value::as_str) == Some("message_start") {
@@ -804,11 +975,14 @@ fn handle_message(
             }
         }
         Some("assistant") => {
-            // Subagent calls (a set `parent_tool_use_id`) run their own
-            // context; only the main thread's usage describes this session.
-            if value.get("parent_tool_use_id").is_none_or(Value::is_null)
-                && let Some(usage) = value.pointer("/message/usage")
-            {
+            // A subagent message (a set `parent_tool_use_id`) runs in its own
+            // context and belongs to its task's output pane, not this
+            // session's transcript or usage meter.
+            if let Some(parent) = value.get("parent_tool_use_id").and_then(Value::as_str) {
+                forward_subagent_transcript(parent, value, events, state);
+                return;
+            }
+            if let Some(usage) = value.pointer("/message/usage") {
                 if let Some(model) = value.pointer("/message/model").and_then(Value::as_str) {
                     state.last_assistant_model = Some(model.to_owned());
                 }
@@ -850,7 +1024,22 @@ fn handle_message(
                             .map(str::to_owned)
                             .unwrap_or_else(|| tr!("activity.tool"));
                         let kind = super::support::classify_tool(&wire_title);
+                        // The Agent tool names its work in `description`;
+                        // without this the row reads as a bare "Agent".
                         let title = activity::input_title(block.get("input"))
+                            .or_else(|| {
+                                (wire_title.eq_ignore_ascii_case("task")
+                                    || wire_title.eq_ignore_ascii_case("agent"))
+                                .then(|| {
+                                    block
+                                        .pointer("/input/description")
+                                        .and_then(Value::as_str)
+                                        .map(str::trim)
+                                        .filter(|text| !text.is_empty())
+                                        .map(str::to_owned)
+                                })
+                                .flatten()
+                            })
                             .unwrap_or_else(|| wire_title.clone());
                         if let Some(id) = &id {
                             state
@@ -873,6 +1062,15 @@ fn handle_message(
             }
         }
         Some("user") => {
+            // A subagent's tool results echo on the main channel too; its
+            // transcript lives in the task's output pane, not here.
+            if value
+                .get("parent_tool_use_id")
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                return;
+            }
             // `--replay-user-messages` echoes Waku's own prompts back; they are
             // an acknowledgement, not transcript content.
             if value.get("isReplay").and_then(Value::as_bool) == Some(true) {
@@ -1302,6 +1500,245 @@ mod tests {
         };
         assert_eq!(completed.key.kind, BackgroundWorkKind::Subagent);
         assert_eq!(completed.status, BackgroundWorkStatus::Completed);
+    }
+
+    /// Wire shapes read off CLI 2.1.226: progress events reuse `description`
+    /// for the agent's current activity line, and the settle notification's
+    /// `summary` is the whole final report. Neither may retitle the task —
+    /// the activity line is the detail row, the report is the output pane.
+    #[test]
+    fn task_progress_and_final_report_never_retitle_the_task() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "agent-42",
+                "tool_use_id": "toolu-agent",
+                "task_type": "local_agent",
+                "subagent_type": "Explore",
+                "description": "Map right panel + UI stack",
+                "prompt": "Dig through src/app/right_panel.rs and report the stack."
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(started)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("task_started should surface a background item");
+        };
+        assert_eq!(started.title, "Map right panel + UI stack");
+        assert_eq!(
+            started.command.as_deref(),
+            Some("Dig through src/app/right_panel.rs and report the stack."),
+            "the launch prompt should ride into the detail surface"
+        );
+
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_progress",
+                "task_id": "agent-42",
+                "tool_use_id": "toolu-agent",
+                "description": "Running Terminal/Browser entity patterns",
+                "subagent_type": "Explore",
+                "last_tool_name": "Bash",
+                "usage": {"total_tokens": 900, "tool_uses": 12, "duration_ms": 61_000}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(progress)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("task_progress should update the background item");
+        };
+        assert!(
+            progress.title.is_empty(),
+            "the activity line must not replace the stored title, got {:?}",
+            progress.title
+        );
+        assert_eq!(
+            progress.detail.as_deref(),
+            Some("Running Terminal/Browser entity patterns")
+        );
+
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "agent-42",
+                "tool_use_id": "toolu-agent",
+                "status": "completed",
+                "output_file": "",
+                "summary": "I have a complete map.\n\n# Waku Right Panel\nDetails…"
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(settled)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("task_notification should settle the background item");
+        };
+        assert_eq!(settled.status, BackgroundWorkStatus::Completed);
+        assert!(settled.title.is_empty(), "the report must not become the title");
+        assert!(settled.detail.is_none(), "the report must not become the detail row");
+        assert_eq!(
+            settled.output.as_deref(),
+            Some("I have a complete map.\n\n# Waku Right Panel\nDetails…"),
+            "the final report belongs in the output pane"
+        );
+    }
+
+    #[test]
+    fn subagent_messages_stream_into_the_tasks_output_pane() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "agent-42",
+                "tool_use_id": "toolu-agent",
+                "task_type": "local_agent",
+                "description": "Map right panel + UI stack"
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let _ = event_rx.try_recv().unwrap();
+
+        // The subagent's own turn: narrative text, a tool call, its result.
+        handle_message(
+            &json!({"type": "assistant", "parent_tool_use_id": "toolu-agent", "message": {
+                "usage": {"input_tokens": 999_999, "output_tokens": 1},
+                "content": [
+                    {"type": "text", "text": "Scanning the panel."},
+                    {"type": "tool_use", "id": "toolu-sub-1", "name": "Bash",
+                     "input": {"command": "rg overlay src"}}
+                ]
+            }}),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        handle_message(
+            &json!({"type": "user", "parent_tool_use_id": "toolu-agent", "message": {
+                "content": [{"type": "tool_result", "tool_use_id": "toolu-sub-1", "content": "hits"}]
+            }}),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let mut seen = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            seen.push(event);
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "subagent content must not reach the transcript or usage meter"
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta { key, delta }) = &seen[0]
+        else {
+            panic!("the subagent message should stream into its task output");
+        };
+        assert_eq!(key.provider_id, "agent-42");
+        assert_eq!(key.kind, BackgroundWorkKind::Subagent);
+        assert_eq!(delta, "Scanning the panel.\n\n› Bash · rg overlay src\n");
+
+        // The settle notification's summary would duplicate the streamed
+        // transcript; the pane keeps what it already has.
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "agent-42",
+                "status": "completed",
+                "summary": "Scanning the panel."
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(settled)) =
+            event_rx.try_recv().unwrap()
+        else {
+            panic!("task_notification should settle the background item");
+        };
+        assert!(settled.output.is_none());
+    }
+
+    #[test]
+    fn subagent_partials_do_not_rearm_the_main_delta_fallback() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        let wire = [
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}),
+            // A concurrent subagent's partial stream interleaves mid-message.
+            json!({"type":"stream_event","parent_tool_use_id":"toolu-agent","event":{"type":"message_start","message":{"role":"assistant"}}}),
+            json!({"type":"stream_event","parent_tool_use_id":"toolu-agent","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"sub text"}}}),
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":"Hello"}]}}),
+        ];
+        for message in wire {
+            handle_message(&message, "s", &events, &commands, &turn, true, &mut state);
+        }
+        let deltas = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .filter_map(|event| match event {
+                DriverEvent::TextDelta(text) => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deltas, ["Hello"], "subagent partials leaked or re-armed the fallback");
+    }
+
+    #[test]
+    fn the_agent_tool_row_is_titled_by_its_description() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({"type": "assistant", "message": {"content": [{
+                "type": "tool_use",
+                "id": "toolu-agent",
+                "name": "Agent",
+                "input": {"description": "Map right panel + UI stack", "prompt": "Dig in."}
+            }]}}),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let DriverEvent::RichActivity(item) = event_rx.try_recv().unwrap() else {
+            panic!("the tool call should surface an activity");
+        };
+        assert_eq!(item.title, "Map right panel + UI stack");
     }
 
     #[test]
