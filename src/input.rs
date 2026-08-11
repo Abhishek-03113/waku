@@ -4,12 +4,12 @@ use std::time::{Duration, Instant};
 use crate::md::highlight::{self, Lang, TokenClass};
 use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, StyledText, Subscription,
-    Task, TextLayout, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point,
-    prelude::*, px, size,
+    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString,
+    StyledText, Subscription, Task, TextLayout, TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, div, fill, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -445,6 +445,36 @@ pub enum ComposerEvent {
     /// Backspace in an already-empty composer. The chat idiom for "remove
     /// the last staged attachment"; owners without attachments ignore it.
     BackspaceOnEmpty,
+}
+
+/// Clipboard payloads whose primary representation is an image or file list.
+/// The owning composer persists them and presents them as attachment chips;
+/// code/search fields continue using their ordinary text paste behavior.
+#[derive(Clone)]
+pub struct ComposerAttachmentPaste(pub Vec<ClipboardEntry>);
+
+/// Respect the representation priority chosen by the source application.
+/// Finder puts paths first (and a text fallback second), while screenshots put
+/// an image first. Text-first clipboard content remains ordinary text paste.
+fn attachment_paste_entries(clipboard: &ClipboardItem) -> Option<Vec<ClipboardEntry>> {
+    if !matches!(
+        clipboard.entries().first(),
+        Some(ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_))
+    ) {
+        return None;
+    }
+    let entries = clipboard
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    (!entries.is_empty()).then_some(entries)
 }
 
 /// What the field is for. The difference is small but load-bearing: Enter
@@ -1045,7 +1075,16 @@ impl ComposerInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+        if self.mode == FieldMode::Composer
+            && let Some(entries) = attachment_paste_entries(&clipboard)
+        {
+            cx.emit(ComposerAttachmentPaste(entries));
+            return;
+        }
+        let Some(text) = clipboard.text() else {
             return;
         };
         let text = match self.mode {
@@ -1349,6 +1388,7 @@ fn word_range_at(content: &str, offset: usize) -> Range<usize> {
 }
 
 impl EventEmitter<ComposerEvent> for ComposerInput {}
+impl EventEmitter<ComposerAttachmentPaste> for ComposerInput {}
 
 impl EntityInputHandler for ComposerInput {
     fn text_for_range(
@@ -2061,16 +2101,60 @@ impl Focusable for ComposerInput {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use gpui::{TextRun, font, hsla};
+    use gpui::{
+        ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat, TextRun, font, hsla,
+    };
 
     use super::TokenClass;
     use super::{
-        EditHistory, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP, cursor_should_be_visible,
-        input_text_runs, next_word_boundary, previous_word_boundary, single_line_scroll,
-        trimmed_splice, word_range_at,
+        EditHistory, SearchPaint, UNDO_GROUP_INTERVAL, UNDO_HISTORY_CAP, attachment_paste_entries,
+        cursor_should_be_visible, input_text_runs, next_word_boundary, previous_word_boundary,
+        single_line_scroll, trimmed_splice, word_range_at,
     };
+
+    #[test]
+    fn image_and_file_first_clipboards_become_attachments() {
+        let image = Image {
+            format: ImageFormat::Png,
+            bytes: vec![1, 2, 3],
+            id: 7,
+        };
+        let image_clipboard = ClipboardItem::new_image(&image);
+        assert!(matches!(
+            attachment_paste_entries(&image_clipboard).as_deref(),
+            Some([ClipboardEntry::Image(found)]) if found == &image
+        ));
+
+        let paths = ExternalPaths(vec![PathBuf::from("/tmp/reference.png")].into());
+        let file_clipboard = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::ExternalPaths(paths.clone()),
+                ClipboardEntry::from("/tmp/reference.png".to_owned()),
+            ],
+        };
+        assert!(matches!(
+            attachment_paste_entries(&file_clipboard).as_deref(),
+            Some([ClipboardEntry::ExternalPaths(found)]) if found == &paths
+        ));
+    }
+
+    #[test]
+    fn text_first_clipboard_keeps_text_paste_priority() {
+        let clipboard = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::from("keep this text".to_owned()),
+                ClipboardEntry::Image(Image {
+                    format: ImageFormat::Png,
+                    bytes: vec![1, 2, 3],
+                    id: 8,
+                }),
+            ],
+        };
+        assert!(attachment_paste_entries(&clipboard).is_none());
+    }
 
     /// Type each string in sequence at `at`, advancing the caret, the way
     /// keystrokes arrive: record first, then apply the splice.

@@ -25,8 +25,8 @@ use crate::computer_use::ComputerAppGrant;
 use crate::i18n::AppLanguage;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
-    AgentSession, FavoriteModel, InteractionMode, Message, MessageRole, Project, ProviderKind,
-    RuntimeMode, SessionWorkspace, TranscriptBlockContent,
+    AgentSession, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole, Project,
+    ProviderKind, RuntimeMode, SessionWorkspace, TranscriptBlockContent,
 };
 use crate::theme::ThemePreference;
 
@@ -68,6 +68,8 @@ pub struct ComposerDraftAttachment {
     pub name: String,
     pub is_dir: bool,
     pub is_image: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_reference: Option<String>,
 }
 
 /// Text and staged attachments waiting in one composer.
@@ -545,24 +547,32 @@ fn externalize_blobs<'a>(
 /// images" would delete screenshots that are still in use.
 fn live_blob_references(connection: &Connection) -> io::Result<HashSet<String>> {
     let mut statement = connection
-        .prepare("SELECT data FROM session_details")
+        .prepare(
+            "SELECT data FROM session_details
+             UNION ALL
+             SELECT attachments FROM messages WHERE attachments != '[]'",
+        )
         .map_err(to_io_error)?;
     let mut references = HashSet::new();
     let rows = statement
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(to_io_error)?;
     for data in rows.filter_map(Result::ok) {
-        // Scanning the raw JSON keeps this independent of how deeply the
-        // reference is nested inside a transcript block.
-        let mut rest = data.as_str();
-        while let Some(start) = rest.find(crate::blob_store::BLOB_SCHEME) {
-            rest = &rest[start..];
-            let end = rest.find('"').unwrap_or(rest.len());
-            references.insert(rest[..end].to_owned());
-            rest = &rest[end..];
-        }
+        collect_blob_references(&data, &mut references);
     }
     Ok(references)
+}
+
+/// Scanning raw JSON keeps blob retention independent of how deeply a
+/// reference is nested in transcript or composer-draft metadata.
+fn collect_blob_references(data: &str, references: &mut HashSet<String>) {
+    let mut rest = data;
+    while let Some(start) = rest.find(crate::blob_store::BLOB_SCHEME) {
+        rest = &rest[start..];
+        let end = rest.find('"').unwrap_or(rest.len());
+        references.insert(rest[..end].to_owned());
+        rest = &rest[end..];
+    }
 }
 
 fn fingerprint(value: &str) -> u64 {
@@ -810,7 +820,6 @@ impl StateStore {
         move || search_session_messages(&path, &query, limit)
     }
 
-    #[cfg(test)]
     pub fn blobs(&self) -> Arc<BlobStore> {
         Arc::clone(&self.blobs)
     }
@@ -1014,7 +1023,8 @@ impl StateStore {
 
         let mut statement = connection
             .prepare(
-                "SELECT id, turn_id, role, content, created_at, streaming
+                "SELECT id, turn_id, role, content, display_content, attachments,
+                        created_at, streaming
                  FROM messages WHERE session_id = ?1 ORDER BY position",
             )
             .map_err(to_io_error)?;
@@ -1025,8 +1035,10 @@ impl StateStore {
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             })
             .map_err(to_io_error)?
@@ -1196,13 +1208,20 @@ impl StateStore {
     pub fn blob_sweep(&self) -> impl FnOnce() + Send + 'static {
         let blobs = Arc::clone(&self.blobs);
         let path = self.path.clone();
+        let drafts_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(COMPOSER_DRAFTS_FILENAME);
         move || {
             let Ok(connection) = Connection::open(&path) else {
                 return;
             };
-            let Ok(live) = live_blob_references(&connection) else {
+            let Ok(mut live) = live_blob_references(&connection) else {
                 return;
             };
+            if let Ok(drafts) = fs::read_to_string(drafts_path) {
+                collect_blob_references(&drafts, &mut live);
+            }
             let _ = blobs.retain(&live);
         }
     }
@@ -1268,15 +1287,27 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
     })
 }
 
-type MessageColumns = (String, Option<String>, String, String, i64, i64);
+type MessageColumns = (
+    String,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    String,
+    i64,
+    i64,
+);
 
 fn message_from_row(row: MessageColumns) -> Option<Message> {
-    let (id, turn_id, role, content, created_at, streaming) = row;
+    let (id, turn_id, role, content, display_content, attachments, created_at, streaming) = row;
     Some(Message {
         id: Uuid::parse_str(&id).ok()?,
         turn_id: turn_id.as_deref().and_then(|id| Uuid::parse_str(id).ok()),
         role: serde_json::from_value(serde_json::Value::String(role)).ok()?,
         content,
+        display_content,
+        attachments: serde_json::from_str::<Vec<MessageAttachment>>(&attachments)
+            .unwrap_or_default(),
         created_at: created_at as u64,
         streaming: streaming != 0,
     })
@@ -1295,14 +1326,17 @@ fn session_data(session: &AgentSession) -> io::Result<String> {
 }
 
 const UPSERT_MESSAGE: &str = "INSERT INTO messages(
-         id, session_id, turn_id, position, role, content, created_at, streaming
-     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         id, session_id, turn_id, position, role, content, display_content,
+         attachments, created_at, streaming
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
      ON CONFLICT(id) DO UPDATE SET
          session_id = excluded.session_id,
          turn_id    = excluded.turn_id,
          position   = excluded.position,
          role       = excluded.role,
          content    = excluded.content,
+         display_content = excluded.display_content,
+         attachments = excluded.attachments,
          created_at = excluded.created_at,
          streaming  = excluded.streaming";
 
@@ -1336,6 +1370,11 @@ fn write_messages(
         if written.get(&message.id) == Some(&fingerprint) {
             continue;
         }
+        let attachments = if message.attachments.is_empty() {
+            "[]".to_owned()
+        } else {
+            serde_json::to_string(&message.attachments).map_err(to_io_error)?
+        };
         transaction
             .execute(
                 UPSERT_MESSAGE,
@@ -1348,6 +1387,11 @@ fn write_messages(
                     Value::Integer(position as i64),
                     Value::Text(tag_of(message.role)),
                     Value::Text(message.content.clone()),
+                    message
+                        .display_content
+                        .clone()
+                        .map_or(Value::Null, Value::Text),
+                    Value::Text(attachments),
                     Value::Integer(message.created_at as i64),
                     Value::Integer(i64::from(message.streaming)),
                 ]),
@@ -1410,6 +1454,26 @@ fn message_fingerprint(message: &Message, position: usize) -> u64 {
     tail[..remainder.len()].copy_from_slice(remainder);
     fold(u64::from_le_bytes(tail));
     fold(bytes.len() as u64);
+    if let Some(display_content) = &message.display_content {
+        fold(1);
+        fold(fingerprint(display_content));
+    } else {
+        fold(0);
+    }
+    fold(message.attachments.len() as u64);
+    for attachment in &message.attachments {
+        fold(fingerprint(&attachment.path.to_string_lossy()));
+        fold(fingerprint(&attachment.mention));
+        fold(fingerprint(&attachment.name));
+        fold(u64::from(attachment.is_dir));
+        fold(u64::from(attachment.is_image));
+        if let Some(reference) = &attachment.blob_reference {
+            fold(1);
+            fold(fingerprint(reference));
+        } else {
+            fold(0);
+        }
+    }
     hash
 }
 
@@ -1613,6 +1677,7 @@ mod tests {
                 name: "reference image.png".to_owned(),
                 is_dir: false,
                 is_image: true,
+                blob_reference: None,
             }],
         };
         let mut drafts = ComposerDrafts::default();
@@ -1730,6 +1795,35 @@ mod tests {
                 .iter()
                 .any(|message| message.content == "an answer")
         );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn sent_attachment_presentation_round_trips_with_message_rows() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let attachment = MessageAttachment {
+            path: PathBuf::from("/tmp/reference.png"),
+            mention: "/tmp/reference.png".to_owned(),
+            name: "reference.png".to_owned(),
+            is_dir: false,
+            is_image: true,
+            blob_reference: Some("waku-blob:abcdef.png".to_owned()),
+        };
+        state.sessions[0].begin_turn_with_presentation(
+            "compare @/tmp/reference.png",
+            Some("compare".to_owned()),
+            vec![attachment.clone()],
+        );
+        store.save(&mut state).unwrap();
+
+        let restored = load_hydrated(&store);
+        let message = &restored.sessions[0].messages[0];
+        assert_eq!(message.content, "compare @/tmp/reference.png");
+        assert_eq!(message.visible_content(), "compare");
+        assert_eq!(message.attachments, vec![attachment]);
 
         fs::remove_dir_all(directory).ok();
     }
@@ -1891,6 +1985,45 @@ mod tests {
             .unwrap();
         assert_eq!(fs::read(path).unwrap(), payload, "the image survived");
 
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn blob_sweep_keeps_clipboard_attachments_in_composer_drafts() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        // Open the database so the sweep has a migrated source to scan.
+        store.load().unwrap();
+        let payload = vec![9u8; 1024];
+        let reference = store
+            .blobs()
+            .store_image_bytes("image/png", &payload)
+            .unwrap();
+        let path = store.blobs().path_for(&reference).unwrap();
+
+        let project_id = Uuid::new_v4();
+        let mut drafts = ComposerDrafts::default();
+        drafts.set(
+            ComposerDraftKey::NewSession(project_id),
+            ComposerDraft {
+                text: String::new(),
+                attachments: vec![ComposerDraftAttachment {
+                    path: path.clone(),
+                    mention: path.display().to_string(),
+                    name: "image.png".to_owned(),
+                    is_dir: false,
+                    is_image: true,
+                    blob_reference: Some(reference),
+                }],
+            },
+        );
+        ComposerDraftStore::for_state_path(&directory.join("app.db"))
+            .save(drafts, 1)
+            .unwrap();
+
+        store.blob_sweep()();
+
+        assert_eq!(fs::read(path).unwrap(), payload);
         fs::remove_dir_all(directory).ok();
     }
 

@@ -42,6 +42,9 @@ fn extension_for_mime(mime_type: &str) -> &'static str {
         "image/webp" => "webp",
         "image/bmp" => "bmp",
         "image/svg+xml" => "svg",
+        "image/tiff" | "image/tif" => "tiff",
+        "image/ico" => "ico",
+        "image/x-portable-anymap" => "pnm",
         _ => "bin",
     }
 }
@@ -104,9 +107,21 @@ impl BlobStore {
 
     /// Resolves a `waku-blob:` reference against this store's root. Render
     /// paths use [`shared_path_for`] instead, since they only hold the string.
-    #[cfg(test)]
     pub fn path_for(&self, reference: &str) -> Option<PathBuf> {
         resolve_path(&self.root, reference)
+    }
+
+    /// Stores raw binary image bytes and returns a durable blob reference.
+    /// Clipboard paste calls this off the UI thread, then resolves the
+    /// reference to the real path that providers can read.
+    pub fn store_image_bytes(&self, mime_type: &str, bytes: &[u8]) -> io::Result<String> {
+        let name = format!(
+            "{:016x}.{}",
+            fingerprint(bytes),
+            extension_for_mime(mime_type)
+        );
+        self.write_blob(&name, bytes)?;
+        Ok(format!("{BLOB_SCHEME}{name}"))
     }
 
     /// Stores a `data:` URL and returns its reference. Values that are already
@@ -122,13 +137,8 @@ impl BlobStore {
         if bytes.len() < MIN_EXTERNALIZED_BYTES {
             return url.to_owned();
         }
-        let name = format!(
-            "{:016x}.{}",
-            fingerprint(&bytes),
-            extension_for_mime(mime_type)
-        );
-        match self.write_blob(&name, &bytes) {
-            Ok(()) => format!("{BLOB_SCHEME}{name}"),
+        match self.store_image_bytes(mime_type, &bytes) {
+            Ok(reference) => reference,
             Err(_) => url.to_owned(),
         }
     }

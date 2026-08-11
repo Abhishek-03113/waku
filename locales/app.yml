@@ -1301,6 +1301,9 @@ errors.project_not_found:
 errors.prepare_task_project_not_found:
   en: "Could not prepare the task: project not found"
   zh-CN: 无法准备任务：找不到项目
+errors.store_pasted_image:
+  en: "Could not attach the pasted image: %{error}"
+  zh-CN: "无法添加粘贴的图片：%{error}"
 errors.create_worktree:
   en: "Could not create the worktree: %{error}"
   zh-CN: "无法创建工作树：%{error}"

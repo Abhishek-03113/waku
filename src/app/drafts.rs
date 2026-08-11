@@ -10,6 +10,7 @@ impl From<&ComposerAttachment> for crate::persistence::ComposerDraftAttachment {
             name: attachment.name.to_string(),
             is_dir: attachment.is_dir,
             is_image: attachment.is_image,
+            blob_reference: attachment.blob_reference.clone(),
         }
     }
 }
@@ -22,12 +23,41 @@ impl From<crate::persistence::ComposerDraftAttachment> for ComposerAttachment {
             name: SharedString::from(attachment.name),
             is_dir: attachment.is_dir,
             is_image: attachment.is_image,
+            blob_reference: attachment.blob_reference,
+        }
+    }
+}
+
+impl From<ComposerAttachment> for MessageAttachment {
+    fn from(attachment: ComposerAttachment) -> Self {
+        Self {
+            path: attachment.path,
+            mention: attachment.mention,
+            name: attachment.name.to_string(),
+            is_dir: attachment.is_dir,
+            is_image: attachment.is_image,
+            blob_reference: attachment.blob_reference,
+        }
+    }
+}
+
+impl From<MessageAttachment> for ComposerAttachment {
+    fn from(attachment: MessageAttachment) -> Self {
+        Self {
+            path: attachment.path,
+            mention: attachment.mention,
+            name: SharedString::from(attachment.name),
+            is_dir: attachment.is_dir,
+            is_image: attachment.is_image,
+            blob_reference: attachment.blob_reference,
         }
     }
 }
 
 impl Waku {
-    fn selected_composer_draft_key(&self) -> Option<crate::persistence::ComposerDraftKey> {
+    pub(super) fn selected_composer_draft_key(
+        &self,
+    ) -> Option<crate::persistence::ComposerDraftKey> {
         self.state
             .selected_session
             .and_then(|selected| {

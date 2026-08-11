@@ -347,6 +347,71 @@ pub(super) struct MessageRender<'a> {
     pub(super) composer: Entity<ComposerInput>,
 }
 
+fn render_sent_message_attachments(
+    message_id: Uuid,
+    attachments: &[MessageAttachment],
+    theme: &Theme,
+) -> Option<AnyElement> {
+    if attachments.is_empty() {
+        return None;
+    }
+    let mut row = div()
+        .max_w(px(540.0))
+        .flex()
+        .flex_wrap()
+        .justify_end()
+        .gap(px(8.0));
+    for (index, attachment) in attachments.iter().enumerate() {
+        let icon_path = if attachment.is_dir {
+            "icons/folder.svg"
+        } else {
+            right_panel::file_icon_for_path(&attachment.mention)
+        };
+        let mut tile = div()
+            .id(SharedString::from(format!(
+                "message-{message_id}-attachment-{index}"
+            )))
+            .w(px(96.0))
+            .h(px(80.0))
+            .rounded(px(9.0))
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.inset)
+            .tooltip(Tooltip::text(attachment.name.clone()));
+        if attachment.is_image {
+            tile = tile.child(
+                img(attachment.path.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            );
+        } else {
+            tile = tile.child(
+                div()
+                    .size_full()
+                    .px(px(7.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(7.0))
+                    .child(icon(icon_path, 18.0, theme.text_tertiary))
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_center()
+                            .text_size(px(9.5))
+                            .text_color(theme.text_secondary)
+                            .child(attachment.name.clone()),
+                    ),
+            );
+        }
+        row = row.child(tile);
+    }
+    Some(row.into_any_element())
+}
+
 pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement {
     let MessageRender {
         theme,
@@ -365,7 +430,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         composer,
     } = params;
 
-    let content = message.content.clone();
+    let content = message.visible_content().to_owned();
     // "Copy Message" must match what the row presents. The terminal part of a
     // settled response stands in for the whole visible answer, so its menu
     // shares the footer's copy content — parts hidden behind "Worked for X"
@@ -385,8 +450,14 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 .items_end()
                 .gap(px(3.0))
                 .group(group_name.clone());
+            if let Some(attachments) =
+                render_sent_message_attachments(message_id, &message.attachments, theme)
+            {
+                column = column.child(attachments);
+            }
             if let Some(edit_input) = message_edit_input {
-                let can_submit = !edit_input.read(cx).content().trim().is_empty();
+                let can_submit = !edit_input.read(cx).content().trim().is_empty()
+                    || !message.attachments.is_empty();
                 let cancel_waku = waku.clone();
                 let submit_waku = waku.clone();
                 column = column.child(
@@ -468,28 +539,30 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                         ),
                 );
             } else {
-                column = column.child(
-                    div()
-                        .max_w(px(540.0))
-                        .rounded(px(12.0))
-                        .bg(theme.raised)
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .text_size(px(14.0))
-                        .line_height(px(20.0))
-                        .child(md::render::plain_text(
-                            content.clone(),
-                            md::render::SANS_FAMILY,
-                            FontWeight::NORMAL,
-                            theme.text,
-                            ctx,
-                        )),
-                );
+                if !content.trim().is_empty() {
+                    column = column.child(
+                        div()
+                            .max_w(px(540.0))
+                            .rounded(px(12.0))
+                            .bg(theme.raised)
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .text_size(px(14.0))
+                            .line_height(px(20.0))
+                            .child(md::render::plain_text(
+                                content.clone(),
+                                md::render::SANS_FAMILY,
+                                FontWeight::NORMAL,
+                                theme.text,
+                                ctx,
+                            )),
+                    );
+                }
                 column = column.child(render_message_footer(
                     theme,
                     message,
                     message.created_at,
-                    message.content.clone(),
+                    content.clone(),
                     copied,
                     group_name,
                     true,

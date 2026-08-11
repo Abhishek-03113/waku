@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,12 +9,13 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local, Utc};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Div, Entity, ExternalPaths,
-    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
-    StyleRefinement, TextRun, WeakEntity, Window, canvas, div, ease_out_quint, fill, font, img,
-    linear_color_stop, linear_gradient, list, point, prelude::*, pulsating_between, px, rgb,
+    Animation, AnimationExt, AnyElement, App, ClipboardEntry, ClipboardItem, Context, Div, Entity,
+    ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
+    ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, NavigationDirection, ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle,
+    SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window, canvas, div,
+    ease_out_quint, fill, font, img, linear_color_stop, linear_gradient, list, point, prelude::*,
+    pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
@@ -25,14 +26,14 @@ use crate::computer_use::{
 };
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::git_branch::BranchSnapshot;
-use crate::input::{ComposerEvent, ComposerInput};
+use crate::input::{ComposerAttachmentPaste, ComposerEvent, ComposerInput};
 use crate::md;
 use crate::model::{
     ActivityItem, AgentSession, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
     BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus, ContextUsage,
-    DriverEvent, FavoriteModel, InteractionMode, Message, MessageRole, PendingPermission, Project,
-    ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor, QueuedMessage,
-    ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
+    DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole,
+    PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
+    QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
     TranscriptBlockContent, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -265,6 +266,64 @@ struct ComposerAttachment {
     /// Whether the chip shows a thumbnail. Decided by extension at drop time
     /// so render never touches the filesystem.
     is_image: bool,
+    /// Present for images copied out of the clipboard into Waku's blob store.
+    /// Sent-message persistence retains the blob by this reference.
+    blob_reference: Option<String>,
+}
+
+/// One accepted composer submission. `prompt` is the exact provider-facing
+/// text; presentation metadata keeps its appended attachment mentions out of
+/// the user bubble.
+#[derive(Clone, Debug)]
+struct ComposerSubmission {
+    prompt: String,
+    display_content: Option<String>,
+    attachments: Vec<MessageAttachment>,
+}
+
+impl ComposerSubmission {
+    fn plain(prompt: String) -> Self {
+        Self {
+            prompt,
+            display_content: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn into_queued_message(self) -> QueuedMessage {
+        QueuedMessage::with_presentation(self.prompt, self.display_content, self.attachments)
+    }
+
+    fn from_queued_message(message: QueuedMessage) -> Self {
+        Self {
+            prompt: message.content,
+            display_content: message.display_content,
+            attachments: message.attachments,
+        }
+    }
+
+    /// Human-facing task text for titles and generated worktree names. An
+    /// attachment-only submission uses basenames instead of its transport
+    /// paths; providers still receive `prompt` unchanged.
+    fn human_prompt(&self) -> String {
+        let visible = self
+            .display_content
+            .as_deref()
+            .unwrap_or(&self.prompt)
+            .trim();
+        if !visible.is_empty() {
+            return visible.to_owned();
+        }
+        if !self.attachments.is_empty() {
+            return self
+                .attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+        self.prompt.trim().to_owned()
+    }
 }
 
 /// Whether an untouched session's provider process may be released.
@@ -567,6 +626,7 @@ struct MessageEdit {
     session_id: Uuid,
     turn_count: usize,
     input: Entity<ComposerInput>,
+    attachments: Vec<MessageAttachment>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -584,6 +644,9 @@ struct SessionRuntime {
     driver: DriverHandle,
     events: Receiver<DriverEvent>,
     pending_events: VecDeque<DriverEvent>,
+    /// Presentation metadata for steering messages awaiting the provider's
+    /// accepted/rejected acknowledgement, in transport order.
+    pending_steers: VecDeque<ComposerSubmission>,
     stream_phase: Option<StreamPhase>,
     stream_remeasure_pending: bool,
     pending_permission: Option<PendingPermission>,
@@ -1562,8 +1625,10 @@ impl Waku {
                                 .then_some(session.id)
                         }) {
                             this.defer_restore_composer_after_fork(session_id, prompt.clone(), cx);
-                        } else if let Some(prompt) = this.submission_with_attachments(prompt, cx) {
-                            this.submit_prompt(prompt, cx);
+                        } else if let Some(submission) =
+                            this.submission_with_attachments(prompt, cx)
+                        {
+                            this.submit_composer_submission(submission, cx);
                         }
                     }
                     ComposerEvent::SubmitSteer(prompt) => {
@@ -1573,8 +1638,10 @@ impl Waku {
                                 .then_some(session.id)
                         }) {
                             this.defer_restore_composer_after_fork(session_id, prompt.clone(), cx);
-                        } else if let Some(prompt) = this.submission_with_attachments(prompt, cx) {
-                            this.steer_prompt(prompt, cx);
+                        } else if let Some(submission) =
+                            this.submission_with_attachments(prompt, cx)
+                        {
+                            this.steer_composer_submission(submission, cx);
                         }
                     }
                     ComposerEvent::Edited => {
@@ -1588,6 +1655,17 @@ impl Waku {
                             cx.notify();
                         }
                     }
+                },
+            )
+            .detach();
+
+            // Clipboard images and Finder file copies are attachment payloads,
+            // not text paths. The input owns representation priority; Waku
+            // owns durable staging and composer/session state.
+            cx.subscribe(
+                &composer,
+                |this: &mut Self, _, event: &ComposerAttachmentPaste, cx| {
+                    this.stage_pasted_attachments(event.0.clone(), cx);
                 },
             )
             .detach();

@@ -524,6 +524,12 @@ impl SessionStatus {
 pub struct QueuedMessage {
     pub id: Uuid,
     pub content: String,
+    /// The text typed before Waku appended provider-facing attachment
+    /// mentions. `None` is the legacy/plain-message representation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<MessageAttachment>,
     pub created_at: u64,
 }
 
@@ -532,8 +538,26 @@ impl QueuedMessage {
         Self {
             id: Uuid::new_v4(),
             content: content.into(),
+            display_content: None,
+            attachments: Vec::new(),
             created_at: unix_time(),
         }
+    }
+
+    pub fn with_presentation(
+        content: impl Into<String>,
+        display_content: Option<String>,
+        attachments: Vec<MessageAttachment>,
+    ) -> Self {
+        Self {
+            display_content,
+            attachments,
+            ..Self::new(content)
+        }
+    }
+
+    pub fn visible_content(&self) -> &str {
+        self.display_content.as_deref().unwrap_or(&self.content)
     }
 }
 
@@ -917,7 +941,17 @@ impl AgentSession {
         }
     }
 
+    #[cfg(test)]
     pub fn begin_turn(&mut self, prompt: impl Into<String>) -> Uuid {
+        self.begin_turn_with_presentation(prompt, None, Vec::new())
+    }
+
+    pub fn begin_turn_with_presentation(
+        &mut self,
+        prompt: impl Into<String>,
+        display_content: Option<String>,
+        attachments: Vec<MessageAttachment>,
+    ) -> Uuid {
         let id = Uuid::new_v4();
         let now = unix_time();
         self.turns.push(AgentTurn {
@@ -930,8 +964,10 @@ impl AgentSession {
             completed_at: None,
             checkpoint: None,
         });
-        self.messages
-            .push(Message::new_for_turn(MessageRole::User, prompt, id));
+        self.messages.push(
+            Message::new_for_turn(MessageRole::User, prompt, id)
+                .with_presentation(display_content, attachments),
+        );
         id
     }
 
@@ -1008,6 +1044,22 @@ impl AgentSession {
             Some(turn_id) => Message::new_for_turn(role, content, turn_id),
             None => Message::new(role, content),
         };
+        let id = message.id;
+        self.messages.push(message);
+        id
+    }
+
+    pub fn push_user_message_with_presentation(
+        &mut self,
+        content: impl Into<String>,
+        display_content: Option<String>,
+        attachments: Vec<MessageAttachment>,
+    ) -> Uuid {
+        let message = match self.active_turn_id() {
+            Some(turn_id) => Message::new_for_turn(MessageRole::User, content, turn_id),
+            None => Message::new(MessageRole::User, content),
+        }
+        .with_presentation(display_content, attachments);
         let id = message.id;
         self.messages.push(message);
         id
@@ -1126,6 +1178,24 @@ pub enum MessageRole {
     System,
 }
 
+/// A file represented by a composer chip and retained with the sent message.
+///
+/// Render paths consume only this cached metadata; they never stat the file.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MessageAttachment {
+    /// Absolute file path used by the thumbnail and handed to the provider.
+    pub path: PathBuf,
+    /// Provider-facing path text, relative to the workspace when possible.
+    pub mention: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub is_image: bool,
+    /// Clipboard images live in Waku's blob store. Keeping the reference in
+    /// persisted metadata prevents the blob collector from reclaiming them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_reference: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Message {
     pub id: Uuid,
@@ -1133,6 +1203,12 @@ pub struct Message {
     pub turn_id: Option<Uuid>,
     pub role: MessageRole,
     pub content: String,
+    /// User-visible text before provider-facing attachment mentions were
+    /// appended. Plain and legacy messages omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<MessageAttachment>,
     pub created_at: u64,
     pub streaming: bool,
 }
@@ -1144,6 +1220,8 @@ impl Message {
             turn_id: None,
             role,
             content: content.into(),
+            display_content: None,
+            attachments: Vec::new(),
             created_at: unix_time(),
             streaming: false,
         }
@@ -1154,6 +1232,20 @@ impl Message {
             turn_id: Some(turn_id),
             ..Self::new(role, content)
         }
+    }
+
+    pub fn with_presentation(
+        mut self,
+        display_content: Option<String>,
+        attachments: Vec<MessageAttachment>,
+    ) -> Self {
+        self.display_content = display_content;
+        self.attachments = attachments;
+        self
+    }
+
+    pub fn visible_content(&self) -> &str {
+        self.display_content.as_deref().unwrap_or(&self.content)
     }
 }
 
@@ -2213,6 +2305,31 @@ pub fn compact_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_messages_keep_transport_and_visible_content_separate() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        let attachment = MessageAttachment {
+            path: PathBuf::from("/tmp/reference.png"),
+            mention: "/tmp/reference.png".to_owned(),
+            name: "reference.png".to_owned(),
+            is_dir: false,
+            is_image: true,
+            blob_reference: Some("waku-blob:ab/reference.png".to_owned()),
+        };
+
+        session.begin_turn_with_presentation(
+            "compare this @/tmp/reference.png",
+            Some("compare this".to_owned()),
+            vec![attachment.clone()],
+        );
+
+        let message = &session.messages[0];
+        assert_eq!(message.content, "compare this @/tmp/reference.png");
+        assert_eq!(message.visible_content(), "compare this");
+        assert_eq!(message.attachments, vec![attachment]);
+    }
 
     #[test]
     fn tool_names_are_classified_without_substring_false_positives() {

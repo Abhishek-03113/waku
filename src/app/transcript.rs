@@ -449,7 +449,16 @@ pub(super) fn transcript_navigation_turns(
             message_id: message.id,
             message_index,
             row_index,
-            prompt: navigation_preview_snippet(&message.content, 100),
+            prompt: if message.visible_content().trim().is_empty() {
+                message
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                navigation_preview_snippet(message.visible_content(), 100)
+            },
             response,
         });
     }

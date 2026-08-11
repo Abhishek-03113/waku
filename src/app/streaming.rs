@@ -308,15 +308,36 @@ impl Waku {
                 }
             }
             DriverEvent::SteerAccepted { message } => {
+                let submission = runtime
+                    .pending_steers
+                    .iter()
+                    .position(|submission| submission.prompt == message)
+                    .and_then(|index| runtime.pending_steers.remove(index))
+                    // Providers normally echo the exact transport text, but a
+                    // normalized echo still acknowledges the oldest pending
+                    // steer. Preserve its attachment presentation metadata.
+                    .or_else(|| runtime.pending_steers.pop_front())
+                    .unwrap_or_else(|| ComposerSubmission::plain(message.clone()));
                 // The provider folded the message into the live turn. Append
                 // it to the same turn so the transcript mirrors the provider
                 // conversation (no new turn boundary).
                 if let Some(session) = self.state.session_mut(session_id) {
-                    session.push_message(MessageRole::User, message);
+                    session.push_user_message_with_presentation(
+                        message,
+                        submission.display_content,
+                        submission.attachments,
+                    );
                     session.updated_at = unix_time();
                 }
             }
             DriverEvent::SteerRejected { message, reason } => {
+                let submission = runtime
+                    .pending_steers
+                    .iter()
+                    .position(|submission| submission.prompt == message)
+                    .and_then(|index| runtime.pending_steers.remove(index))
+                    .or_else(|| runtime.pending_steers.pop_front())
+                    .unwrap_or_else(|| ComposerSubmission::plain(message));
                 let (busy, settled_cleanly) = self
                     .state
                     .sessions
@@ -331,7 +352,7 @@ impl Waku {
                     })
                     .unwrap_or((false, false));
                 if busy {
-                    self.enqueue_follow_up(session_id, message, cx);
+                    self.enqueue_follow_up_submission(session_id, submission, cx);
                     if self.state.selected_session == Some(session_id) {
                         self.show_toast(tr!(
                             "session.steer_rejected",
@@ -349,7 +370,7 @@ impl Waku {
                     if let Some(session) = self.state.session_mut(session_id) {
                         session
                             .queued_messages
-                            .insert(0, QueuedMessage::new(message));
+                            .insert(0, submission.into_queued_message());
                     }
                     if allow_queue_drain {
                         self.pending_queue_drains.push(session_id);
@@ -358,7 +379,7 @@ impl Waku {
                     // The user stopped the turn (or the provider died) before
                     // the steer landed. Keep the message visible and
                     // user-controlled instead of auto-running it.
-                    self.enqueue_follow_up(session_id, message, cx);
+                    self.enqueue_follow_up_submission(session_id, submission, cx);
                 }
             }
             DriverEvent::PlanUsageUpdated(usage) => {

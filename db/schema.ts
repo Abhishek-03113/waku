@@ -67,6 +67,10 @@ export const messages = sqliteTable(
     position: integer("position").notNull(),
     role: text("role").notNull(),
     content: text("content").notNull(),
+    /** User-visible text before provider-facing attachment mentions. */
+    displayContent: text("display_content"),
+    /** JSON-serialized MessageAttachment array. */
+    attachments: text("attachments").notNull().default("[]"),
     createdAt: integer("created_at").notNull(),
     streaming: integer("streaming", { mode: "boolean" }).notNull(),
   },

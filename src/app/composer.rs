@@ -1337,77 +1337,189 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.stage_attachment_paths(paths.paths(), cx) {
+            return;
+        }
+        let focus = self.composer.read(cx).focus();
+        window.focus(&focus, cx);
+    }
+
+    fn stage_attachment_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
         let root = self
             .selected_workspace_path()
             .map(std::path::Path::to_path_buf);
         let mut staged = false;
-        for path in paths.paths() {
-            if self
-                .composer_attachments
-                .iter()
-                .any(|attachment| attachment.path == *path)
-            {
-                continue;
-            }
-            let is_dir = path.is_dir();
-            let mention = dropped_file_mention(root.as_deref(), path, is_dir);
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| mention.clone());
-            let is_image = !is_dir
-                && path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        matches!(
-                            extension.to_ascii_lowercase().as_str(),
-                            "png"
-                                | "jpg"
-                                | "jpeg"
-                                | "gif"
-                                | "webp"
-                                | "bmp"
-                                | "tif"
-                                | "tiff"
-                                | "ico"
-                        )
-                    });
-            self.composer_attachments.push(ComposerAttachment {
-                path: path.clone(),
-                mention,
-                name: SharedString::from(name),
-                is_dir,
-                is_image,
-            });
-            staged = true;
+        for path in paths {
+            staged |= self.stage_attachment_path(root.as_deref(), path.clone(), None, None);
         }
-        if !staged {
-            return;
+        if staged {
+            self.schedule_composer_draft_save(cx);
+            cx.notify();
         }
-        self.schedule_composer_draft_save(cx);
-        let focus = self.composer.read(cx).focus();
-        window.focus(&focus, cx);
-        cx.notify();
+        staged
     }
 
-    /// The text a submission sends, with staged chips drained into it —
-    /// submitting consumes them. `None` means there is nothing to send.
+    fn stage_attachment_path(
+        &mut self,
+        root: Option<&Path>,
+        path: PathBuf,
+        name_override: Option<String>,
+        blob_reference: Option<String>,
+    ) -> bool {
+        if self
+            .composer_attachments
+            .iter()
+            .any(|attachment| attachment.path == path)
+        {
+            return false;
+        }
+        let is_dir = path.is_dir();
+        let mention = dropped_file_mention(root, &path, is_dir);
+        let name = name_override.unwrap_or_else(|| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| mention.clone())
+        });
+        let is_image = !is_dir && is_image_attachment_path(&path);
+        self.composer_attachments.push(ComposerAttachment {
+            path,
+            mention,
+            name: SharedString::from(name),
+            is_dir,
+            is_image,
+            blob_reference,
+        });
+        true
+    }
+
+    /// Stage the clipboard's primary image/file representation. On-disk paths
+    /// reuse drop handling immediately; raw image bytes are copied into Waku's
+    /// durable blob store on the background executor before their chip appears.
+    pub(super) fn stage_pasted_attachments(
+        &mut self,
+        entries: Vec<ClipboardEntry>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut paths = Vec::new();
+        let mut images = Vec::new();
+        for entry in entries {
+            match entry {
+                ClipboardEntry::Image(image) if !image.bytes.is_empty() => images.push(image),
+                ClipboardEntry::ExternalPaths(external) => {
+                    paths.extend(external.paths().iter().cloned())
+                }
+                ClipboardEntry::String(_) | ClipboardEntry::Image(_) => {}
+            }
+        }
+        self.stage_attachment_paths(&paths, cx);
+        if images.is_empty() {
+            return;
+        }
+
+        let blobs = self.store.blobs();
+        let draft_owner = self.selected_composer_draft_key();
+        cx.spawn(async move |waku, cx| {
+            let stored = cx
+                .background_executor()
+                .spawn(async move {
+                    let image_count = images.len();
+                    images
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, image)| {
+                            let reference = blobs
+                                .store_image_bytes(image.format.mime_type(), &image.bytes)
+                                .map_err(|error| error.to_string())?;
+                            let path = blobs.path_for(&reference).ok_or_else(|| {
+                                "stored clipboard image had no local path".to_owned()
+                            })?;
+                            let extension = path
+                                .extension()
+                                .and_then(|extension| extension.to_str())
+                                .unwrap_or("png");
+                            let name = if image_count == 1 {
+                                format!("image.{extension}")
+                            } else {
+                                format!("image-{}.{extension}", index + 1)
+                            };
+                            Ok::<_, String>((path, name, reference))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| match stored {
+                Ok(stored) => {
+                    if waku.selected_composer_draft_key() != draft_owner {
+                        return;
+                    }
+                    let root = waku
+                        .selected_workspace_path()
+                        .map(std::path::Path::to_path_buf);
+                    let mut staged = false;
+                    for (path, name, reference) in stored {
+                        staged |= waku.stage_attachment_path(
+                            root.as_deref(),
+                            path,
+                            Some(name),
+                            Some(reference),
+                        );
+                    }
+                    if staged {
+                        waku.schedule_composer_draft_save(cx);
+                        cx.notify();
+                    }
+                }
+                Err(error) => {
+                    waku.show_toast(tr!("errors.store_pasted_image", error = error));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The text and attachment presentation accepted from the composer. The
+    /// exact provider prompt keeps its `@` mentions, while sent-message UI uses
+    /// `display_content` and the retained attachment metadata.
     pub(super) fn submission_with_attachments(
         &mut self,
         prompt: &str,
         cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let mentions = self
+    ) -> Option<ComposerSubmission> {
+        let attachments = self
             .composer_attachments
             .drain(..)
-            .map(|attachment| attachment.mention)
+            .map(MessageAttachment::from)
             .collect::<Vec<_>>();
-        let submission = merged_submission(prompt, &mentions);
-        if submission.is_some() {
-            self.discard_current_composer_draft(cx);
-        }
-        submission
+        let mentions = attachments
+            .iter()
+            .map(|attachment| attachment.mention.clone())
+            .collect::<Vec<_>>();
+        let submission = merged_submission(prompt, &mentions)?;
+        let display_content = (!attachments.is_empty()).then(|| prompt.trim().to_owned());
+        self.discard_current_composer_draft(cx);
+        Some(ComposerSubmission {
+            prompt: submission,
+            display_content,
+            attachments,
+        })
+    }
+
+    pub(super) fn restore_composer_submission(
+        &mut self,
+        submission: ComposerSubmission,
+        cx: &mut Context<Self>,
+    ) {
+        self.composer_attachments = submission
+            .attachments
+            .into_iter()
+            .map(ComposerAttachment::from)
+            .collect();
+        let content = submission.display_content.unwrap_or(submission.prompt);
+        self.composer
+            .update(cx, |input, cx| input.set_content(content, cx));
+        self.schedule_composer_draft_save(cx);
+        cx.notify();
     }
 
     /// The staged-attachment chips above the input: a thumbnail tile per
@@ -1516,7 +1628,16 @@ impl Waku {
         let mut list = div().flex().flex_col().gap(px(6.0));
         for message in &session.queued_messages {
             let message_id = message.id;
-            let content = message.content.clone();
+            let content = if message.visible_content().trim().is_empty() {
+                message
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                message.visible_content().to_owned()
+            };
             list = list.child(
                 div()
                     .id(SharedString::from(format!("queued-message-{message_id}")))
@@ -1752,12 +1873,12 @@ impl Waku {
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 let prompt =
                                                     this.composer.read(cx).content().to_owned();
-                                                if let Some(prompt) =
+                                                if let Some(submission) =
                                                     this.submission_with_attachments(&prompt, cx)
                                                 {
                                                     this.composer
                                                         .update(cx, |input, cx| input.clear(cx));
-                                                    this.steer_prompt(prompt, cx);
+                                                    this.steer_composer_submission(submission, cx);
                                                 }
                                             })),
                                     )
@@ -1785,12 +1906,12 @@ impl Waku {
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 let prompt =
                                                     this.composer.read(cx).content().to_owned();
-                                                if let Some(prompt) =
+                                                if let Some(submission) =
                                                     this.submission_with_attachments(&prompt, cx)
                                                 {
                                                     this.composer
                                                         .update(cx, |input, cx| input.clear(cx));
-                                                    this.submit_prompt(prompt, cx);
+                                                    this.submit_composer_submission(submission, cx);
                                                 }
                                             })),
                                     )
@@ -1825,11 +1946,11 @@ impl Waku {
                                 ))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let prompt = this.composer.read(cx).content().to_owned();
-                                    if let Some(prompt) =
+                                    if let Some(submission) =
                                         this.submission_with_attachments(&prompt, cx)
                                     {
                                         this.composer.update(cx, |input, cx| input.clear(cx));
-                                        this.submit_prompt(prompt, cx);
+                                        this.submit_composer_submission(submission, cx);
                                     }
                                 })),
                         }),
@@ -2474,6 +2595,30 @@ pub(super) fn dropped_file_mention(
     } else {
         mention
     }
+}
+
+fn is_image_attachment_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "gif"
+                    | "webp"
+                    | "bmp"
+                    | "svg"
+                    | "tif"
+                    | "tiff"
+                    | "ico"
+                    | "pnm"
+                    | "pbm"
+                    | "pgm"
+                    | "ppm"
+            )
+        })
 }
 
 /// The prompt a submission sends: the typed text plus one `@` mention per
