@@ -102,6 +102,7 @@ const NAVIGATION_RAIL_TICK_GAP: f32 = 10.0;
 const NAVIGATION_RAIL_INACTIVE_OPACITY: f32 = 0.45;
 const NAVIGATION_RAIL_TURN_HEIGHT: f32 = NAVIGATION_RAIL_TICK_HEIGHT + NAVIGATION_RAIL_TICK_GAP;
 const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
+const ESCAPE_STOP_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Presentation pacing only. The app sleeps until a provider or background
 /// result wakes it, then uses this cadence while streamed chunks remain.
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
@@ -505,6 +506,74 @@ struct PreparedDriver {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EscapeStopTarget {
+    session_id: Uuid,
+    turn_id: Option<Uuid>,
+}
+
+impl EscapeStopTarget {
+    fn for_session(session: &AgentSession) -> Self {
+        Self {
+            session_id: session.id,
+            turn_id: session.active_turn_id(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EscapeStopPress {
+    Arm(EscapeStopArm),
+    Stop,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EscapeStopArm {
+    target: EscapeStopTarget,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct EscapeStopConfirmation {
+    arm: Option<EscapeStopArm>,
+}
+
+impl EscapeStopConfirmation {
+    fn press(&mut self, target: EscapeStopTarget, now: Instant) -> EscapeStopPress {
+        if self
+            .arm
+            .is_some_and(|arm| arm.target == target && now < arm.expires_at)
+        {
+            self.arm = None;
+            EscapeStopPress::Stop
+        } else {
+            let arm = EscapeStopArm {
+                target,
+                expires_at: now + ESCAPE_STOP_CONFIRMATION_TIMEOUT,
+            };
+            self.arm = Some(arm);
+            EscapeStopPress::Arm(arm)
+        }
+    }
+
+    fn is_armed_for(&self, target: EscapeStopTarget, now: Instant) -> bool {
+        self.arm
+            .is_some_and(|arm| arm.target == target && now < arm.expires_at)
+    }
+
+    fn expire(&mut self, arm: EscapeStopArm) -> bool {
+        if self.arm != Some(arm) {
+            return false;
+        }
+        self.arm = None;
+        true
+    }
+
+    fn clear(&mut self) {
+        self.arm = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EventPumpSchedule {
     Idle,
     StreamFrame,
@@ -892,6 +961,10 @@ pub struct Waku {
     /// session is busy immediately, while the composer draws a spinner until
     /// the non-cancellable preparation is complete.
     submission_preparations: HashSet<Uuid>,
+    /// First Escape press for the current turn. A matching second press stops
+    /// the response; otherwise this returns to the ordinary Stop icon after a
+    /// short timeout.
+    escape_stop_confirmation: EscapeStopConfirmation,
     /// Response fork target per source session while its provider-native
     /// branch and Git checkpoint refs are being prepared off the UI thread.
     /// A source can have only one in flight because Pi temporarily changes
@@ -2139,6 +2212,7 @@ impl Waku {
                 background_work: HashMap::new(),
                 last_background_work_tick: Instant::now(),
                 submission_preparations: HashSet::new(),
+                escape_stop_confirmation: EscapeStopConfirmation::default(),
                 response_fork_preparations: HashMap::new(),
                 pending_queue_drains: Vec::new(),
                 stream_state_dirty: false,

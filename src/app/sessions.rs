@@ -544,7 +544,33 @@ impl Waku {
             self.cancel_message_edit(window, cx);
             return;
         }
-        self.cancel_turn(cx);
+        let Some(target) = self.selected_escape_stop_target() else {
+            self.cancel_turn(cx);
+            return;
+        };
+        match self.escape_stop_confirmation.press(target, Instant::now()) {
+            EscapeStopPress::Stop => self.cancel_turn(cx),
+            EscapeStopPress::Arm(arm) => {
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(ESCAPE_STOP_CONFIRMATION_TIMEOUT)
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.escape_stop_confirmation.expire(arm) {
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn selected_escape_stop_target(&self) -> Option<EscapeStopTarget> {
+        let session = self.selected_session()?;
+        (!self.submission_preparations.contains(&session.id) && session.status.is_busy())
+            .then(|| EscapeStopTarget::for_session(session))
     }
 
     pub(super) fn reset_visible_state(&mut self) {
@@ -752,6 +778,7 @@ impl Waku {
     }
 
     pub(super) fn cancel_turn(&mut self, cx: &mut Context<Self>) {
+        self.escape_stop_confirmation.clear();
         let Some(session_id) = self.state.selected_session else {
             return;
         };

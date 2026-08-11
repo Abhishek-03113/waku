@@ -1727,6 +1727,10 @@ impl Waku {
         });
         let submit_action =
             composer_submit_action(session.map(|session| session.status), preparing);
+        let escape_stop_armed = session.is_some_and(|session| {
+            self.escape_stop_confirmation
+                .is_armed_for(EscapeStopTarget::for_session(session), Instant::now())
+        });
         let has_draft = !self.composer.read(cx).content().trim().is_empty()
             || !self.composer_attachments.is_empty();
         let steerable = session.is_some_and(|session| {
@@ -1849,7 +1853,18 @@ impl Waku {
                                         .bg(theme.overlay_strong)
                                         .hover(|element| element.bg(theme.danger_soft))
                                         .active(|element| element.opacity(0.8))
-                                        .child(icon("icons/stop.svg", 18.0, theme.text))
+                                        .when(escape_stop_armed, |element| {
+                                            element.child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.text)
+                                                    .child("Esc"),
+                                            )
+                                        })
+                                        .when(!escape_stop_armed, |element| {
+                                            element.child(icon("icons/stop.svg", 18.0, theme.text))
+                                        })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.cancel_turn(cx);
                                         })),

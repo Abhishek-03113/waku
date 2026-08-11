@@ -4,6 +4,7 @@ use super::composer::{
 };
 use super::settings::visible_settings_pages;
 use super::{
+    ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget,
     NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
     TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
     assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
@@ -27,7 +28,7 @@ use crate::model::{
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
     collections::{HashSet, VecDeque},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
@@ -70,6 +71,45 @@ fn composer_only_offers_stop_after_submission_preparation() {
         composer_submit_action(Some(SessionStatus::Failed), false),
         ComposerSubmitAction::Send
     );
+}
+
+#[test]
+fn escape_stop_requires_a_matching_second_press_and_expires() {
+    let target = EscapeStopTarget {
+        session_id: Uuid::new_v4(),
+        turn_id: Some(Uuid::new_v4()),
+    };
+    let other_turn = EscapeStopTarget {
+        session_id: target.session_id,
+        turn_id: Some(Uuid::new_v4()),
+    };
+    let mut confirmation = EscapeStopConfirmation::default();
+    let now = Instant::now();
+
+    let first_arm = match confirmation.press(target, now) {
+        EscapeStopPress::Arm(arm) => arm,
+        EscapeStopPress::Stop => panic!("the first press must arm Stop"),
+    };
+    assert!(confirmation.is_armed_for(target, now + Duration::from_secs(2)));
+    assert_eq!(
+        confirmation.press(target, now + Duration::from_secs(2)),
+        EscapeStopPress::Stop
+    );
+    assert!(!confirmation.is_armed_for(target, now + Duration::from_secs(2)));
+
+    assert_eq!(ESCAPE_STOP_CONFIRMATION_TIMEOUT, Duration::from_secs(3));
+    let second_arm = match confirmation.press(target, now) {
+        EscapeStopPress::Arm(arm) => arm,
+        EscapeStopPress::Stop => panic!("an unarmed confirmation must arm Stop"),
+    };
+    assert!(!confirmation.is_armed_for(target, now + Duration::from_secs(3)));
+    let replacement_arm = match confirmation.press(other_turn, now + Duration::from_secs(3)) {
+        EscapeStopPress::Arm(arm) => arm,
+        EscapeStopPress::Stop => panic!("an expired or different target must arm Stop again"),
+    };
+    assert!(!confirmation.expire(first_arm));
+    assert!(!confirmation.expire(second_arm));
+    assert!(confirmation.expire(replacement_arm));
 }
 
 #[test]

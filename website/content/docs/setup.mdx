@@ -1,0 +1,42 @@
+---
+title: Set up Waku
+description: Install Waku, connect an agent, and open a project.
+---
+
+## Install Waku
+
+Waku currently ships for Apple silicon Macs.
+
+1. Download the latest build from [waku.sh](https://waku.sh).
+2. Open the disk image and move Waku to **Applications**.
+3. Open Waku. Future releases can be installed from the update prompt or **Waku → Check for Updates…**.
+
+## Connect a coding agent
+
+Waku supports Amp, Claude Code, Codex, Cursor, OpenCode, Grok, and Pi.
+
+<Steps>
+  <Step>
+    ### Install and sign in
+
+    Install the agent's command-line app using its official instructions, then sign in once from Terminal. Waku uses that same account.
+  </Step>
+  <Step>
+    ### Check detection
+
+    Open **Waku → Settings… → Providers**. A connected agent shows its detected location and available models.
+  </Step>
+  <Step>
+    ### Point Waku to a custom install if needed
+
+    If an agent is not found, set its **Binary path** to the executable and press Return. Leave the field empty to return to automatic detection.
+  </Step>
+</Steps>
+
+## Open a project
+
+Press `⌘O` and choose a project folder. It appears in the sidebar and remains available the next time you open Waku.
+
+<Callout type="info" title="Where your data goes">
+  Projects, tasks, and settings are stored on this Mac. Prompts and selected context are sent through the agent you choose, so that provider's account and data policy still apply.
+</Callout>

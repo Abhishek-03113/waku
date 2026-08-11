@@ -1,0 +1,32 @@
+---
+title: Review and recover changes
+description: Inspect what changed, explore an alternative, or return to an earlier turn.
+---
+
+## Review file changes
+
+Click **Review** beside the changed-file summary in a response, or open the right panel with `⌘⇧B` and choose **Review**.
+
+The source picker lets you inspect the last turn, all uncommitted changes, unstaged or staged changes, committed work, or the current branch. Select a file to read its diff; expand unchanged lines when you need more context.
+
+## Fork from a response
+
+Use **Fork task** on an assistant response when you want to try a different direction without disturbing the original task. Waku creates a separate task that keeps the conversation up to that response.
+
+This works well for comparing two approaches or handing one line of work to a different model.
+
+## Return to an earlier prompt
+
+In a Git project, use **Revert to here** on an earlier prompt, or **Edit** when that action is offered. Waku restores the project to the point before that prompt and removes the later turns from the current task.
+
+Before reverting:
+
+1. Stop any running turn.
+2. Review or commit work you want to keep.
+3. Choose the prompt, confirm the action, then send the revised request.
+
+The action appears only when Waku can safely align both the project and the selected agent's conversation. If it is unavailable, fork the task or use your normal Git workflow instead.
+
+<Callout type="warn" title="Reverting changes the working tree">
+  Treat it like any other rollback: inspect uncommitted work first, especially changes made outside Waku.
+</Callout>
