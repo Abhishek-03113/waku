@@ -9,11 +9,12 @@ use std::time::Duration;
 use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point as TerminalPoint, Side};
+use alacritty_terminal::grid::{BidirectionalIterator, Dimensions, Scroll};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point as TerminalPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty::{self, Shell};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
@@ -22,9 +23,10 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontFallbacks,
     FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, ScrollDelta, ScrollWheelEvent, SharedString, StrikethroughStyle, Styled, StyledText,
-    Subscription, Task, TextRun, UnderlineStyle, Window, canvas, div, font, px, rgb,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
+    SharedString, StrikethroughStyle, Styled, StyledText, Subscription, Task, TextRun,
+    UnderlineStyle, Window, canvas, div, font, px, rgb,
 };
 use parking_lot::Mutex;
 
@@ -42,6 +44,14 @@ const TERMINAL_MIN_ROWS: usize = 8;
 const TERMINAL_SCROLLBACK_LINES: usize = 10_000;
 const TERMINAL_CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const TERMINAL_CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(300);
+
+/// Alacritty's default URL hint plus local file paths containing a slash.
+/// Requiring a slash keeps ordinary dotted words from becoming links.
+#[rustfmt::skip]
+const TERMINAL_LINK_REGEX: &str = "((ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)|\
+                                    (/|~/|\\./|\\.\\./|[A-Za-z0-9._@%+~-]+/))\
+                                   [^\u{0000}-\u{001F}\u{007F}-\u{009F}<>\"\\s{-}\\^⟨⟩`\\\\]+";
+const MAX_TERMINAL_LINK_SEARCH_LINES: i32 = 100;
 
 /// Icon glyphs (nerd-font private-use codepoints) resolve through CoreText's
 /// cascade rather than run splitting: JetBrains Mono itself keeps the
@@ -142,6 +152,7 @@ struct TerminalSession {
     window_size: Arc<Mutex<WindowSize>>,
     grid_size: (usize, usize),
     dark_theme: Arc<AtomicBool>,
+    url_regex: RegexSearch,
 }
 
 impl TerminalSession {
@@ -159,6 +170,8 @@ impl TerminalSession {
         let sender_slot = Arc::new(OnceLock::new());
         let dark_theme = Arc::new(AtomicBool::new(true));
         let (ui_event_tx, ui_events) = unbounded();
+        let url_regex = RegexSearch::new(TERMINAL_LINK_REGEX)
+            .map_err(|error| anyhow::anyhow!("compile terminal link regex: {error}"))?;
         let proxy = TerminalEventProxy {
             dirty: dirty.clone(),
             sender: sender_slot.clone(),
@@ -211,6 +224,7 @@ impl TerminalSession {
             window_size: shared_window_size,
             grid_size: (columns, rows),
             dark_theme,
+            url_regex,
         })
     }
 
@@ -258,11 +272,22 @@ impl TerminalSession {
         self.dirty.swap(false, Ordering::AcqRel)
     }
 
+    fn link_at(&mut self, point: TerminalPoint) -> Option<TerminalLink> {
+        let TerminalSession {
+            term, url_regex, ..
+        } = self;
+        let term = term.lock();
+        let (value, bounds) =
+            hyperlink_at(&term, point).or_else(|| plain_link_at(&term, url_regex, point))?;
+        Some(TerminalLink { value, bounds })
+    }
+
     fn snapshot(
         &self,
         theme: Theme,
         selection_color: Hsla,
         cursor_style: TerminalCursorStyle,
+        hovered_link: Option<&Match>,
     ) -> TerminalSnapshot {
         self.dark_theme.store(theme.is_dark, Ordering::Release);
         let term = self.term.lock();
@@ -338,7 +363,8 @@ impl TerminalSession {
                 background,
                 bold: cell.flags.contains(Flags::BOLD),
                 italic: cell.flags.contains(Flags::ITALIC),
-                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                underline: cell.flags.intersects(Flags::ALL_UNDERLINES)
+                    || hovered_link.is_some_and(|bounds| bounds.contains(&indexed.point)),
                 strikeout: cell.flags.contains(Flags::STRIKEOUT),
             };
         }
@@ -428,6 +454,18 @@ struct TerminalRow {
 struct TerminalSnapshot {
     rows: Vec<TerminalRow>,
     outline_cursor: Option<(usize, usize)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TerminalLink {
+    value: String,
+    bounds: Match,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TerminalLinkTarget {
+    Url(String),
+    File(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -529,6 +567,7 @@ pub struct TerminalView {
     panel_width: f32,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     selecting: bool,
+    hovered_link: Option<TerminalLink>,
     cursor_blink: gpui::Entity<TerminalCursorBlink>,
     cursor_focus_tracking_started: bool,
     context_menu: ContextMenuHandle,
@@ -588,6 +627,7 @@ impl TerminalView {
             panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             grid_bounds: Rc::new(Cell::new(None)),
             selecting: false,
+            hovered_link: None,
             cursor_blink,
             cursor_focus_tracking_started: false,
             context_menu,
@@ -704,6 +744,27 @@ impl TerminalView {
         let Some((point, side)) = self.grid_point_for_position(event.position, false) else {
             return;
         };
+
+        if event.modifiers.platform
+            && let Some(link) = self
+                .session
+                .as_mut()
+                .and_then(|session| session.link_at(point))
+            && let Some(target) =
+                terminal_link_target(&link.value, self.working_directory.as_path())
+        {
+            self.selecting = false;
+            self.hovered_link = Some(link);
+            match target {
+                TerminalLinkTarget::Url(url) => cx.open_url(&url),
+                TerminalLinkTarget::File(path) => crate::platform::reveal_in_finder(&path),
+            }
+            window.prevent_default();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
         let Some(session) = &self.session else {
             return;
         };
@@ -730,7 +791,15 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let hover_changed = if self.selecting {
+            self.set_hovered_link(None)
+        } else {
+            self.refresh_hovered_link(event.modifiers.platform, event.position)
+        };
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+            if hover_changed {
+                cx.notify();
+            }
             return;
         }
         let Some((point, side)) = self.grid_point_for_position(event.position, true) else {
@@ -745,11 +814,48 @@ impl TerminalView {
             session.dirty.store(true, Ordering::Release);
             cx.stop_propagation();
             cx.notify();
+        } else if hover_changed {
+            cx.notify();
         }
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.selecting = false;
+    }
+
+    fn on_mouse_exit(&mut self, _: &MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.set_hovered_link(None) {
+            cx.notify();
+        }
+    }
+
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.refresh_hovered_link(event.modifiers.platform, window.mouse_position()) {
+            cx.notify();
+        }
+    }
+
+    fn refresh_hovered_link(&mut self, command_pressed: bool, position: Point<Pixels>) -> bool {
+        let link = if command_pressed {
+            self.grid_point_for_position(position, false)
+                .and_then(|(point, _)| self.session.as_mut()?.link_at(point))
+        } else {
+            None
+        };
+        self.set_hovered_link(link)
+    }
+
+    fn set_hovered_link(&mut self, link: Option<TerminalLink>) -> bool {
+        if self.hovered_link == link {
+            return false;
+        }
+        self.hovered_link = link;
+        true
     }
 
     fn selected_text(&self) -> Option<String> {
@@ -877,10 +983,19 @@ impl Render for TerminalView {
         let terminal_focused = window.is_window_active() && self.focus_handle.is_focused(window);
         let cursor_style =
             terminal_cursor_style(terminal_focused, self.cursor_blink.read(cx).visible());
-        let snapshot = self.session.as_mut().map(|session| {
+        if let Some(session) = self.session.as_mut() {
             session.resize(columns, rows);
-            session.snapshot(theme, selection_color, cursor_style)
-        });
+        }
+        if self.selecting {
+            self.set_hovered_link(None);
+        } else {
+            self.refresh_hovered_link(window.modifiers().platform, window.mouse_position());
+        }
+        let hovered_link = self.hovered_link.as_ref().map(|link| &link.bounds);
+        let snapshot = self
+            .session
+            .as_ref()
+            .map(|session| session.snapshot(theme, selection_color, cursor_style, hovered_link));
         let title = if self.title.trim().is_empty() {
             tr!("right_panel.terminal")
         } else {
@@ -905,7 +1020,13 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move));
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_exit(cx.listener(Self::on_mouse_exit))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed));
+
+        if self.hovered_link.is_some() {
+            screen = screen.cursor_pointer();
+        }
 
         if let Some(snapshot) = snapshot {
             let TerminalSnapshot {
@@ -1142,6 +1263,171 @@ fn terminal_grid_point(
     Some((TerminalPoint::new(line, Column(column)), side))
 }
 
+/// Apply the same delimiter heuristics as Alacritty's hint system.
+fn post_process_terminal_link<T: EventListener>(
+    term: &Term<T>,
+    regex_match: &Match,
+) -> Option<Match> {
+    let mut iter = term.grid().iter_from(*regex_match.start());
+    let mut character = iter.cell().c;
+    let end = *regex_match.end();
+    let mut open_parens = 0;
+    let mut open_brackets = 0;
+
+    loop {
+        match character {
+            '(' => open_parens += 1,
+            '[' => open_brackets += 1,
+            ')' if open_parens == 0 => {
+                iter.prev();
+                break;
+            }
+            ')' => open_parens -= 1,
+            ']' if open_brackets == 0 => {
+                iter.prev();
+                break;
+            }
+            ']' => open_brackets -= 1,
+            _ => {}
+        }
+
+        if iter.point() == end {
+            break;
+        }
+        let Some(indexed) = iter.next() else {
+            break;
+        };
+        character = indexed.cell.c;
+    }
+
+    let start = *regex_match.start();
+    while iter.point() != start {
+        if !matches!(
+            character,
+            '.' | ',' | ':' | ';' | '?' | '!' | '(' | '[' | '\''
+        ) {
+            break;
+        }
+        let Some(indexed) = iter.prev() else {
+            break;
+        };
+        character = indexed.cell.c;
+    }
+
+    (start <= iter.point()).then(|| start..=iter.point())
+}
+
+fn plain_link_at<T: EventListener>(
+    term: &Term<T>,
+    regex: &mut RegexSearch,
+    point: TerminalPoint,
+) -> Option<(String, Match)> {
+    let mut start = term.line_search_left(point);
+    let mut end = term.line_search_right(point);
+    start.line = start.line.max(point.line - MAX_TERMINAL_LINK_SEARCH_LINES);
+    end.line = end.line.min(point.line + MAX_TERMINAL_LINK_SEARCH_LINES);
+
+    let raw_match = RegexIter::new(start, end, Direction::Right, term, regex)
+        .find(|bounds| bounds.contains(&point))?;
+    let raw_end = *raw_match.end();
+    let mut next_match = Some(raw_match);
+
+    // Post-processing can split a greedy match at an unmatched closing
+    // bracket. Continue inside the original range in case the clicked URL is
+    // a later segment of that match.
+    while let Some(regex_match) = next_match {
+        let processed = post_process_terminal_link(term, &regex_match);
+        if processed
+            .as_ref()
+            .is_some_and(|bounds| bounds.contains(&point))
+        {
+            let bounds = processed.unwrap();
+            let value = term.bounds_to_string(*bounds.start(), *bounds.end());
+            return Some((value, bounds));
+        }
+
+        let next_start = processed
+            .as_ref()
+            .map_or_else(|| *regex_match.start(), |bounds| *bounds.end())
+            .add(term, Boundary::Grid, 1);
+        if next_start > raw_end {
+            return None;
+        }
+        next_match = term.regex_search_right(regex, next_start, raw_end);
+    }
+
+    None
+}
+
+fn hyperlink_at<T: EventListener>(term: &Term<T>, point: TerminalPoint) -> Option<(String, Match)> {
+    let hyperlink = term.grid()[point].hyperlink()?;
+    let grid = term.grid();
+
+    let mut end = point;
+    for cell in grid.iter_from(point) {
+        if cell.hyperlink().as_ref() == Some(&hyperlink) {
+            end = cell.point;
+        } else {
+            break;
+        }
+    }
+
+    let mut start = point;
+    let mut iter = grid.iter_from(point);
+    while let Some(cell) = iter.prev() {
+        if cell.hyperlink().as_ref() == Some(&hyperlink) {
+            start = cell.point;
+        } else {
+            break;
+        }
+    }
+
+    Some((hyperlink.uri().to_owned(), start..=end))
+}
+
+fn terminal_link_target(value: &str, working_directory: &Path) -> Option<TerminalLinkTarget> {
+    if let Some(path) = existing_terminal_file_path(value, working_directory) {
+        return Some(TerminalLinkTarget::File(path));
+    }
+
+    let url = url::Url::parse(value).ok()?;
+    if url.scheme() == "file" {
+        return None;
+    }
+    Some(TerminalLinkTarget::Url(url.to_string()))
+}
+
+fn existing_terminal_file_path(value: &str, working_directory: &Path) -> Option<PathBuf> {
+    let mut path = match url::Url::parse(value) {
+        Ok(url) if url.scheme() == "file" => url.to_file_path().ok()?,
+        Ok(_) => return None,
+        Err(_) => {
+            if let Some(relative) = value.strip_prefix("~/") {
+                dirs::home_dir()?.join(relative)
+            } else {
+                let path = Path::new(value);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    working_directory.join(path)
+                }
+            }
+        }
+    };
+
+    loop {
+        if path.exists() {
+            return Some(path);
+        }
+        let value = path.to_string_lossy();
+        let (prefix, suffix) = value.rsplit_once(':')?;
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        path = PathBuf::from(prefix);
+    }
+}
+
 fn bracketed_paste(text: String, mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::BRACKETED_PASTE) {
         format!("\x1b[200~{text}\x1b[201~").into_bytes()
@@ -1358,6 +1644,8 @@ fn terminal_rgb(index: usize, is_dark: bool) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::vte::ansi::Processor;
     use gpui::{Modifiers, point, size};
 
     fn key(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> Keystroke {
@@ -1366,6 +1654,83 @@ mod tests {
             key_char: key_char.map(str::to_owned),
             modifiers,
         }
+    }
+
+    fn parse_terminal(input: &[u8]) -> Term<VoidListener> {
+        let dimensions = TerminalDimensions {
+            columns: 40,
+            rows: 3,
+        };
+        let mut term = Term::new(Config::default(), &dimensions, VoidListener);
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, input);
+        term
+    }
+
+    fn terminal_point_for(content: &str, needle: &str) -> TerminalPoint {
+        let offset = content.find(needle).unwrap();
+        TerminalPoint::new(Line((offset / 40) as i32), Column(offset % 40))
+    }
+
+    fn plain_link_value(term: &Term<VoidListener>, point: TerminalPoint) -> Option<String> {
+        let mut regex = RegexSearch::new(TERMINAL_LINK_REGEX).unwrap();
+        plain_link_at(term, &mut regex, point).map(|(value, _)| value)
+    }
+
+    #[test]
+    fn detects_plain_and_osc8_terminal_links() {
+        let content = "visit (https://example.com/docs). next";
+        let term = parse_terminal(content.as_bytes());
+        assert_eq!(
+            plain_link_value(&term, terminal_point_for(content, "example")),
+            Some("https://example.com/docs".to_owned())
+        );
+        assert_eq!(
+            plain_link_value(&term, terminal_point_for(content, ").")),
+            None
+        );
+
+        let term = parse_terminal(b"x\x1b]8;;https://waku.gg\x1b\\Waku\x1b]8;;\x1b\\ y");
+        let (value, bounds) = hyperlink_at(&term, TerminalPoint::new(Line(0), Column(2))).unwrap();
+        assert_eq!(value, "https://waku.gg");
+        assert_eq!(
+            bounds,
+            TerminalPoint::new(Line(0), Column(1))..=TerminalPoint::new(Line(0), Column(4))
+        );
+    }
+
+    #[test]
+    fn detects_links_across_soft_wrapped_lines() {
+        let content = "prefix https://example.com/a/very/long/path/that/wraps suffix";
+        let term = parse_terminal(content.as_bytes());
+        let mut regex = RegexSearch::new(TERMINAL_LINK_REGEX).unwrap();
+        let (value, bounds) =
+            plain_link_at(&term, &mut regex, terminal_point_for(content, "that")).unwrap();
+
+        assert_eq!(value, "https://example.com/a/very/long/path/that/wraps");
+        assert_eq!(*bounds.start(), terminal_point_for(content, "https"));
+        assert_eq!(bounds.end().line, Line(1));
+    }
+
+    #[test]
+    fn resolves_terminal_urls_and_existing_project_paths() {
+        let working_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            terminal_link_target("https://example.com/docs", working_directory),
+            Some(TerminalLinkTarget::Url(
+                "https://example.com/docs".to_owned()
+            ))
+        );
+        assert_eq!(
+            terminal_link_target("src/terminal.rs:42:8", working_directory),
+            Some(TerminalLinkTarget::File(
+                working_directory.join("src/terminal.rs")
+            ))
+        );
+        assert_eq!(
+            terminal_link_target("src/does-not-exist.rs", working_directory),
+            None
+        );
     }
 
     #[test]
