@@ -299,6 +299,14 @@ impl BackgroundWorkRegistry {
         self.last_output_cache_refresh = Some(Instant::now());
         true
     }
+
+    fn output_refresh_delay(&self) -> Option<Duration> {
+        (!self.dirty_output.is_empty()).then(|| {
+            self.last_output_cache_refresh
+                .map(|last| OUTPUT_CACHE_REFRESH_INTERVAL.saturating_sub(last.elapsed()))
+                .unwrap_or_default()
+        })
+    }
 }
 
 fn merge_option<T>(target: &mut Option<T>, incoming: Option<T>) {
@@ -431,6 +439,13 @@ fn work_elapsed(item: &BackgroundWorkItem) -> String {
 }
 
 impl Waku {
+    pub(super) fn background_output_refresh_delay(&self) -> Option<Duration> {
+        self.background_work
+            .values()
+            .filter_map(BackgroundWorkRegistry::output_refresh_delay)
+            .min()
+    }
+
     pub(super) fn observe_foreground_command_activity(
         &mut self,
         session_id: Uuid,
@@ -1389,6 +1404,24 @@ mod tests {
         registry.append_output(&key, "[31mred\u{1b}[0m");
         assert!(registry.refresh_output_cache());
         assert_eq!(registry.rendered_output[&key].as_ref(), "red");
+    }
+
+    #[test]
+    fn output_cache_requests_a_retry_only_while_dirty() {
+        let mut registry = BackgroundWorkRegistry::default();
+        let key = BackgroundWorkKey::new(BackgroundWorkKind::Process, "one");
+        registry.upsert(item("one", BackgroundWorkStatus::Running, true));
+        registry.append_output(&key, "first");
+        assert_eq!(registry.output_refresh_delay(), Some(Duration::ZERO));
+        assert!(registry.refresh_output_cache());
+        assert_eq!(registry.output_refresh_delay(), None);
+
+        registry.append_output(&key, " second");
+        let delay = registry
+            .output_refresh_delay()
+            .expect("new output should request one cache refresh");
+        assert!(delay <= OUTPUT_CACHE_REFRESH_INTERVAL);
+        assert!(!registry.refresh_output_cache());
     }
 
     #[test]

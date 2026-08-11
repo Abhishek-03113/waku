@@ -31,8 +31,8 @@ const PLAN_USAGE_RETRY: Duration = Duration::from_secs(90);
 
 impl Waku {
     /// Start background fetches of any plan meters whose snapshot is due.
-    /// Runs every pump tick; the guards keep it to one in-flight fetch per
-    /// provider and clock comparisons otherwise.
+    /// The slow maintenance clock and explicit panel-open requests call this;
+    /// guards keep it to one in-flight fetch per provider.
     pub(super) fn maybe_refresh_plan_usage(&mut self, cx: &mut Context<Self>) {
         // Disabling a provider only stops it backing new sessions; a session
         // already locked to it keeps running, and while one is selected its
@@ -64,6 +64,7 @@ impl Waku {
             }
             self.plan_usage_pending.insert(provider);
             let tx = self.plan_usage_tx.clone();
+            let event_wake = self.event_wake_tx.clone();
             let claude_version = self
                 .provider_versions
                 .get(&ProviderKind::Claude)
@@ -88,7 +89,12 @@ impl Waku {
                         // its panel section on the loading skeleton.
                         _ => Err(anyhow::anyhow!("no plan usage fetcher")),
                     };
-                    let _ = tx.send((provider, result.map_err(|error| format!("{error:#}"))));
+                    if tx
+                        .send((provider, result.map_err(|error| format!("{error:#}"))))
+                        .is_ok()
+                    {
+                        signal_event_pump(&event_wake);
+                    }
                 })
                 .detach();
         }
@@ -186,6 +192,7 @@ impl Waku {
                     {
                         this.plan_usage_stale.insert(provider);
                     }
+                    this.maybe_refresh_plan_usage(cx);
                     card_focus = this
                         .menus
                         .borrow()

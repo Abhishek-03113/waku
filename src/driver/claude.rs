@@ -26,7 +26,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::activity;
-use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
+use crate::driver::{
+    DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
+};
 use crate::model::{
     ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey, BackgroundWorkKind,
     BackgroundWorkStatus, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor,
@@ -90,7 +92,7 @@ fn permission_mode(mode: RuntimeMode, interaction_mode: InteractionMode) -> &'st
 }
 
 impl ClaudeDriver {
-    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+    pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
             cwd,
@@ -628,7 +630,7 @@ fn claude_task_item(value: &Value, state: &ClaudeStreamState) -> Option<Backgrou
 
 fn handle_claude_system(
     value: &Value,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     state: &mut ClaudeStreamState,
 ) {
     let subtype = value.get("subtype").and_then(Value::as_str);
@@ -695,7 +697,7 @@ fn handle_claude_system(
 fn handle_message(
     value: &Value,
     session_id: &str,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     commands: &Sender<CommandMessage>,
     turn_active: &Mutex<bool>,
     auto_approve: bool,
@@ -944,7 +946,7 @@ fn handle_message(
 
 fn request_permission(
     value: &Value,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     commands: &Sender<CommandMessage>,
     auto_approve: bool,
 ) {
@@ -1030,7 +1032,7 @@ mod tests {
     fn claude_streaming_session_against_the_real_cli() {
         let binary =
             crate::command_env::find_executable("claude").expect("claude is not installed");
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let driver = ClaudeDriver::start(
             DriverStartOptions {
                 binary,
@@ -1097,7 +1099,7 @@ mod tests {
     fn claude_steering_folds_a_mid_turn_message_into_the_running_turn() {
         let binary =
             crate::command_env::find_executable("claude").expect("claude is not installed");
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let driver = ClaudeDriver::start(
             DriverStartOptions {
                 binary,

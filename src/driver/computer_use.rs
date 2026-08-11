@@ -10,10 +10,10 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
-use crossbeam_channel::Sender;
 use uuid::Uuid;
 
 use crate::computer_use;
+use crate::driver::DriverEventSender;
 use crate::model::DriverEvent;
 
 #[derive(Clone)]
@@ -30,7 +30,7 @@ pub(super) struct ComputerUseRuntime {
 }
 
 impl ComputerUseRuntime {
-    pub(super) fn start(events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+    pub(super) fn start(events: DriverEventSender) -> anyhow::Result<Self> {
         let server_path = computer_use::mcp_server_command()?;
         let repl_path = computer_use::js_repl_server_path()?;
         let skill_path = computer_use::skill_root_path()?
@@ -74,7 +74,7 @@ pub(super) struct ComputerUsePreviewMonitor {
 }
 
 impl ComputerUsePreviewMonitor {
-    pub(super) fn start(directory: PathBuf, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+    pub(super) fn start(directory: PathBuf, events: DriverEventSender) -> anyhow::Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = running.clone();
         thread::Builder::new()

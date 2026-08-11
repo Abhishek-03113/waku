@@ -1374,12 +1374,15 @@ impl Waku {
         }
         self.computer_permission_request_pending = true;
         let tx = self.computer_permission_tx.clone();
+        let event_wake = self.event_wake_tx.clone();
         std::thread::Builder::new()
             .name("waku-computer-permission-request".into())
             .spawn(move || {
                 let result = crate::computer_use::probe_permissions(prompt)
                     .map_err(|error| error.to_string());
-                let _ = tx.send(result);
+                if tx.send(result).is_ok() {
+                    signal_event_pump(&event_wake);
+                }
             })
             .ok();
         cx.notify();

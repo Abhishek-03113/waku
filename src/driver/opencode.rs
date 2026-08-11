@@ -24,7 +24,9 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::activity;
-use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
+use crate::driver::{
+    DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
+};
 use crate::model::{
     ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
 };
@@ -65,7 +67,7 @@ pub struct OpenCodeDriver {
 }
 
 impl OpenCodeDriver {
-    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+    pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
             cwd,
@@ -570,7 +572,7 @@ fn latest_opencode_usage_info(messages: &Value) -> Option<&Value> {
 
 fn handle_event(
     value: &Value,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     commands: &Sender<CommandMessage>,
     turn_active: &Mutex<bool>,
     auto_approve: bool,
@@ -681,7 +683,7 @@ fn handle_event(
 
 fn request_permission(
     properties: &Value,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     commands: &Sender<CommandMessage>,
     auto_approve: bool,
 ) {
@@ -756,7 +758,7 @@ fn request_permission(
     });
 }
 
-fn tool_activity(part: &Value, events: &Sender<DriverEvent>, state: &mut OpenCodeStreamState) {
+fn tool_activity(part: &Value, events: &impl DriverEventSink, state: &mut OpenCodeStreamState) {
     let wire_title = part
         .get("tool")
         .and_then(Value::as_str)
@@ -845,7 +847,7 @@ mod tests {
     fn opencode_session_against_a_real_server() {
         let binary =
             crate::command_env::find_executable("opencode").expect("opencode is not installed");
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let driver = OpenCodeDriver::start(
             DriverStartOptions {
                 binary,
@@ -932,7 +934,7 @@ mod tests {
     fn opencode_steering_folds_a_mid_turn_message_into_the_running_turn() {
         let binary =
             crate::command_env::find_executable("opencode").expect("opencode is not installed");
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let driver = OpenCodeDriver::start(
             DriverStartOptions {
                 binary,

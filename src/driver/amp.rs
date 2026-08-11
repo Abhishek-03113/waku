@@ -31,7 +31,9 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::activity;
-use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
+use crate::driver::{
+    DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
+};
 use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
 
 enum CommandMessage {
@@ -80,7 +82,7 @@ pub(super) fn amp_args(
 }
 
 impl AmpDriver {
-    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+    pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
             cwd,
@@ -386,7 +388,7 @@ struct AmpStreamState {
 
 fn handle_message(
     value: &Value,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     turn_active: &Mutex<bool>,
     state: &mut AmpStreamState,
 ) {
@@ -534,7 +536,7 @@ mod tests {
     #[ignore = "requires an installed, authenticated amp"]
     fn amp_streaming_session_against_the_real_cli() {
         let binary = crate::command_env::find_executable("amp").expect("amp is not installed");
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let driver = AmpDriver::start(
             DriverStartOptions {
                 binary,
@@ -591,7 +593,7 @@ mod tests {
     #[ignore = "requires an installed, authenticated amp"]
     fn amp_steering_folds_a_mid_turn_message_into_the_running_turn() {
         let binary = crate::command_env::find_executable("amp").expect("amp is not installed");
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let driver = AmpDriver::start(
             DriverStartOptions {
                 binary,

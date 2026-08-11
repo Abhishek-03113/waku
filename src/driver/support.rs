@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context as _, anyhow};
-use crossbeam_channel::Sender;
 use serde_json::Value;
 
 use super::computer_use as computer_use_runtime;
-use crate::model::{ActivityKind, DriverEvent, ProviderKind};
+use crate::driver::DriverEventSender;
+use crate::model::{ActivityKind, ProviderKind};
 
 /// The context-window occupancy of one API call from a Claude-wire `usage`
 /// object (Claude Code and Amp share the format): prompt (fresh + cached) plus
@@ -53,10 +53,7 @@ pub(super) struct HeadlessComputerUseRuntime {
 }
 
 impl HeadlessComputerUseRuntime {
-    pub(super) fn start(
-        provider: ProviderKind,
-        events: Sender<DriverEvent>,
-    ) -> anyhow::Result<Self> {
+    pub(super) fn start(provider: ProviderKind, events: DriverEventSender) -> anyhow::Result<Self> {
         let runtime = computer_use_runtime::ComputerUseRuntime::start(events)?;
         let config = match provider {
             ProviderKind::OpenCode => {

@@ -29,7 +29,9 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::activity;
-use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
+use crate::driver::{
+    DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
+};
 use crate::model::{
     ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderKind,
     ProviderResumeCursor, RuntimeMode,
@@ -90,7 +92,7 @@ impl AcpDriver {
     pub fn start(
         provider: ProviderKind,
         options: DriverStartOptions,
-        events: Sender<DriverEvent>,
+        events: DriverEventSender,
     ) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
@@ -577,7 +579,7 @@ fn apply_model(
     session_id: &str,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
 ) {
     let Some(model) = model else {
         return;
@@ -656,7 +658,7 @@ fn handle_message(
     pending: &PendingResponses,
     prompt_requests: &Mutex<Vec<u64>>,
     commands: &Sender<CommandMessage>,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     auto_approve: bool,
     state: &mut AcpStreamState,
 ) {
@@ -799,7 +801,7 @@ fn handle_message(
     }
 }
 
-fn finish_turn(value: &Value, events: &Sender<DriverEvent>) {
+fn finish_turn(value: &Value, events: &impl DriverEventSink) {
     if let Some(error) = value
         .pointer("/error/data/message")
         .or_else(|| value.pointer("/error/message"))
@@ -831,7 +833,7 @@ fn request_permission(
     id: u64,
     params: &Value,
     commands: &Sender<CommandMessage>,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     auto_approve: bool,
 ) {
     let options = params
@@ -933,7 +935,7 @@ fn truncate(text: &str, max_chars: usize) -> String {
         .collect()
 }
 
-fn tool_activity(update: &Value, events: &Sender<DriverEvent>, state: &mut AcpStreamState) {
+fn tool_activity(update: &Value, events: &impl DriverEventSink, state: &mut AcpStreamState) {
     let id = update
         .get("toolCallId")
         .and_then(Value::as_str)
@@ -1035,7 +1037,7 @@ mod tests {
     fn acp_session_against_a_real_agent() {
         let binary = crate::command_env::find_executable("cursor-agent")
             .expect("cursor-agent is not installed");
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let driver = AcpDriver::start(
             ProviderKind::Cursor,
             DriverStartOptions {
@@ -1309,7 +1311,7 @@ mod tests {
     fn acp_steering_against_a_real_agent(provider: ProviderKind, binary_name: &str) {
         let binary = crate::command_env::find_executable(binary_name)
             .unwrap_or_else(|| panic!("{binary_name} is not installed"));
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let driver = AcpDriver::start(
             provider,
             DriverStartOptions {

@@ -2,7 +2,7 @@ use super::*;
 
 fn start_driver(mut request: DriverStartRequest, cwd: PathBuf) -> anyhow::Result<PreparedDriver> {
     request.options.cwd = cwd;
-    let (event_tx, events) = unbounded();
+    let (event_tx, events) = driver::event_channel(request.event_wake);
     let handle = driver::start(request.provider, request.options, event_tx)?;
     Ok(PreparedDriver { handle, events })
 }
@@ -696,6 +696,7 @@ impl Waku {
         self.provider_model_discoveries.insert(provider);
         self.provider_model_discoveries_pending.insert(provider);
         let provider_probe_tx = self.provider_probe_tx.clone();
+        let event_wake = self.event_wake_tx.clone();
         if std::thread::Builder::new()
             .name(format!("waku-{}-model-discovery", provider.id()))
             .spawn(move || {
@@ -705,9 +706,13 @@ impl Waku {
                 if let Some(models) = crate::model_catalog::cached_models(provider) {
                     let mut cached = probe.clone();
                     cached.models = models;
-                    let _ = provider_probe_tx.send(cached);
+                    if provider_probe_tx.send(cached).is_ok() {
+                        signal_event_pump(&event_wake);
+                    }
                 }
-                let _ = provider_probe_tx.send(probe.discover_models());
+                if provider_probe_tx.send(probe.discover_models()).is_ok() {
+                    signal_event_pump(&event_wake);
+                }
             })
             .is_err()
         {
@@ -731,11 +736,14 @@ impl Waku {
                 continue;
             }
             let provider_version_tx = self.provider_version_tx.clone();
+            let event_wake = self.event_wake_tx.clone();
             if std::thread::Builder::new()
                 .name(format!("waku-{}-version-probe", provider.id()))
                 .spawn(move || {
                     let version = probe_provider_version(&path);
-                    let _ = provider_version_tx.send((provider, version));
+                    if provider_version_tx.send((provider, version)).is_ok() {
+                        signal_event_pump(&event_wake);
+                    }
                 })
                 .is_err()
             {
@@ -769,6 +777,7 @@ impl Waku {
         self.provider_detection_remaining = providers.len();
         let overrides = self.state.provider_binary_overrides.clone();
         let provider_detection_tx = self.provider_detection_tx.clone();
+        let event_wake = self.event_wake_tx.clone();
         let detect_providers = providers.clone();
         if std::thread::Builder::new()
             .name("waku-provider-detection".into())
@@ -778,7 +787,12 @@ impl Waku {
                         Some(binary) => crate::command_env::resolve_binary_override(binary),
                         None => crate::command_env::find_executable(provider.command()),
                     };
-                    let _ = provider_detection_tx.send((provider, path.is_some(), path));
+                    if provider_detection_tx
+                        .send((provider, path.is_some(), path))
+                        .is_ok()
+                    {
+                        signal_event_pump(&event_wake);
+                    }
                 }
             })
             .is_err()
@@ -1841,6 +1855,7 @@ impl Waku {
                 computer_use_enabled: self.state.computer_use_enabled,
                 provider_cursor: session.provider_cursor.clone(),
             },
+            event_wake: self.event_wake_tx.clone(),
         })
     }
 
@@ -1869,6 +1884,10 @@ impl Waku {
                     .unwrap_or_else(Instant::now),
             },
         );
+        // Startup can emit before the background task hands this receiver to
+        // the runtime map. Wake once after installation so those buffered
+        // events cannot be stranded behind an already-consumed edge.
+        signal_event_pump(&self.event_wake_tx);
         handle
     }
 
@@ -2284,6 +2303,42 @@ impl Waku {
     pub(super) fn collect_runtime_events(runtime: &mut SessionRuntime) {
         while let Ok(event) = runtime.events.try_recv() {
             runtime.pending_events.push_back(event);
+        }
+    }
+
+    pub(super) fn drain_event_pump(&mut self, cx: &mut Context<Self>) -> EventPumpSchedule {
+        // `|` on purpose: a busy provider must not starve the other result
+        // queues just because its own drain reported a change first.
+        if self.drain_driver_events(cx)
+            | self.drain_provider_probe_events()
+            | self.drain_provider_version_events()
+            | self.drain_provider_detection_events()
+            | self.drain_computer_permission_events()
+            | self.drain_plan_usage_events()
+        {
+            cx.notify();
+        }
+        if std::mem::take(&mut self.workspace_queries_stale) {
+            self.invalidate_workspace_queries(cx);
+        }
+        if std::mem::take(&mut self.composer_sources_stale) {
+            self.refresh_composer_sources(cx);
+        }
+        self.maybe_refresh_background_work(cx);
+        // A finished turn asks for a checkpoint from a handler with no
+        // `Context`; this is where that `git` work leaves the UI thread.
+        self.start_pending_checkpoint_captures(cx);
+
+        if self
+            .runtimes
+            .values()
+            .any(|runtime| !runtime.pending_events.is_empty() || runtime.stream_remeasure_pending)
+        {
+            EventPumpSchedule::StreamFrame
+        } else if let Some(delay) = self.background_output_refresh_delay() {
+            EventPumpSchedule::BackgroundOutput(delay)
+        } else {
+            EventPumpSchedule::Idle
         }
     }
 

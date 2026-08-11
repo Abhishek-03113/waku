@@ -16,7 +16,9 @@ use uuid::Uuid;
 
 use super::computer_use as computer_use_runtime;
 use crate::computer_use;
-use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
+use crate::driver::{
+    DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
+};
 use crate::model::{
     ActivityItem, ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
     BackgroundWorkKind, BackgroundWorkStatus, DriverEvent, InteractionMode, PermissionOption,
@@ -158,7 +160,7 @@ fn configure_computer_use_command(command: &mut Command, config: Option<&CodexCo
 }
 
 impl CodexDriver {
-    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+    pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
             cwd,
@@ -1122,7 +1124,7 @@ fn handle_codex_message(
     pending_forks: &Mutex<HashMap<u64, Sender<Result<String, String>>>>,
     pending_steers: &Mutex<HashMap<u64, String>>,
     background_rpcs: &Mutex<BackgroundRpcState>,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     stream_state: &mut CodexStreamState,
 ) {
     // JSON-RPC IDs are scoped to each peer, so an app-server request may use

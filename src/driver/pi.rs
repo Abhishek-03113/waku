@@ -12,7 +12,9 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::{activity, computer_use as computer_use_runtime};
-use crate::driver::{DriverControl, DriverStartOptions, SessionOptions};
+use crate::driver::{
+    DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
+};
 use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,7 +63,7 @@ fn configure_pi_computer_use_command(
 }
 
 impl PiDriver {
-    pub fn start(options: DriverStartOptions, events: Sender<DriverEvent>) -> anyhow::Result<Self> {
+    pub fn start(options: DriverStartOptions, events: DriverEventSender) -> anyhow::Result<Self> {
         let DriverStartOptions {
             binary,
             cwd,
@@ -808,7 +810,7 @@ fn handle_pi_message(
     value: Value,
     pending: &PendingResponses,
     commands: &Sender<CommandMessage>,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     state: &mut PiStreamState,
 ) {
     let event_type = value
@@ -992,7 +994,7 @@ fn handle_pi_message(
 
 fn emit_completed_message_fallback(
     message: Option<&Value>,
-    events: &Sender<DriverEvent>,
+    events: &impl DriverEventSink,
     state: &mut PiStreamState,
 ) {
     let Some(content) = message
@@ -1081,7 +1083,7 @@ mod tests {
     #[ignore = "requires an installed, authenticated pi"]
     fn pi_context_usage_against_the_real_rpc() {
         let binary = crate::command_env::find_executable("pi").expect("pi is not installed");
-        let (events, event_rx) = unbounded();
+        let (events, event_rx) = crate::driver::test_event_channel();
         let driver = PiDriver::start(
             DriverStartOptions {
                 binary,
