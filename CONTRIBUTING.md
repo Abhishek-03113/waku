@@ -27,6 +27,8 @@ Press `Ctrl-C`, or quit the app, to stop it.
 
 ## Making changes
 
+- Before starting work on anything larger than a bug fix, open an issue and
+  discuss the proposal first.
 - Keep changes focused and follow the existing Rust and GPUI conventions.
 - Keep filesystem, process, network, and other blocking work off the UI thread.
   Rendering and row-building paths must read data already held in memory.
