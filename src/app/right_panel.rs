@@ -1593,6 +1593,7 @@ impl Waku {
             self.right_panel_pending_tab_reveal = None;
             self.right_panel_pending_terminal_focus = None;
             self.right_panel_pending_browser_focus = None;
+            self.set_right_panel_visible(false, cx);
         }
         cx.notify();
     }
