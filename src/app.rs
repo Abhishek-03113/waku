@@ -120,6 +120,15 @@ const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_TOAST_DURATION: Duration = Duration::from_secs(5);
 const MINIMUM_TOAST_RESUME_DURATION: Duration = Duration::from_millis(800);
 const TOAST_ANIMATION_DURATION: Duration = Duration::from_millis(150);
+const TASK_NOTIFICATION_TAG_PREFIX: &str = "waku-task:";
+
+pub(crate) fn task_notification_tag(session_id: Uuid) -> String {
+    format!("{TASK_NOTIFICATION_TAG_PREFIX}{session_id}")
+}
+
+pub(crate) fn task_id_from_notification_tag(tag: &str) -> Option<Uuid> {
+    tag.strip_prefix(TASK_NOTIFICATION_TAG_PREFIX)?.parse().ok()
+}
 
 fn signal_event_pump(wake: &smol::channel::Sender<()>) {
     let _ = wake.try_send(());

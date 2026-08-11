@@ -8,6 +8,10 @@ fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
 }
 
 impl Waku {
+    pub(crate) fn open_task_from_notification(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        self.select_session(session_id, cx);
+    }
+
     pub(super) fn select_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
         self.state.selected_project = Some(project_id);
         self.create_session_for(project_id, self.state.last_provider, cx);

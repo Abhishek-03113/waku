@@ -77,6 +77,58 @@ pub fn reduce_motion_enabled() -> bool {
     false
 }
 
+/// Deliver an audible macOS notification. GPUI owns the notification-center
+/// delegate (and therefore click responses); Waku only supplies content here
+/// because GPUI's generic payload does not currently expose a sound field.
+#[cfg(target_os = "macos")]
+pub fn show_task_notification(tag: &str, title: &str, body: &str) {
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_foundation::{NSBundle, NSError, NSString};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
+        UNNotificationSound, UNUserNotificationCenter,
+    };
+
+    // UserNotifications raises an Objective-C exception for an executable
+    // outside an application bundle, including unit tests and `cargo run`.
+    if NSBundle::mainBundle().bundleIdentifier().is_none() {
+        return;
+    }
+
+    let tag = tag.to_owned();
+    let title = title.to_owned();
+    let body = body.to_owned();
+    let authorization = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
+        if !granted.as_bool() {
+            return;
+        }
+
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(&title));
+        content.setBody(&NSString::from_str(&body));
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+
+        // A nil trigger delivers immediately. The stable task tag replaces an
+        // older completion banner for the same task and comes back on click.
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str(&tag),
+            &content,
+            None,
+        );
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, None);
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            &authorization,
+        );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn show_task_notification(_: &str, _: &str, _: &str) {}
+
 #[cfg(target_os = "macos")]
 pub fn load_app_icon_for_bundle_id(bundle_id: &str) -> Option<std::sync::Arc<gpui::Image>> {
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};

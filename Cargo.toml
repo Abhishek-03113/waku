@@ -82,6 +82,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSArray",
+    "NSBundle",
     "NSData",
     "NSDictionary",
     "NSError",
@@ -92,6 +93,15 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSProcessInfo",
     "NSString",
     "NSURL",
+] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
 ] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "objc2-core-graphics"] }
 raw-window-handle = "0.6"
