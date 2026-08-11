@@ -64,9 +64,10 @@ quit/relaunch `Waku Debug.app` unless recovering a watcher that is confirmed to
 be unavailable.
 
 Debug builds use the app name `Waku Debug`, bundle identifier `sh.waku.dev`,
-and their own `Waku Debug/state.json` local data directory. Release builds use
-`Waku`, bundle identifier `sh.waku`, and `Waku/state.json`, so both apps can
-be installed and used without sharing state.
+and keep `app.db`, `state.json`, and `settings.json` in the checkout's ignored
+`temp/` directory. Release builds use `Waku`, bundle identifier `sh.waku`, keep
+app-managed data in the `Waku` Application Support directory, and read the
+user-editable settings file from `~/.waku/settings.json`.
 
 Running `cargo run` directly is useful for quick terminal debugging, but it
 launches a bare executable without the macOS app-bundle identity used by

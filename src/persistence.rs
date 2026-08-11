@@ -1,7 +1,9 @@
 //! Local state storage.
 //!
-//! Sessions and projects live in SQLite (`app.db`), settings in a readable
-//! `settings.json` beside it, and binary payloads in [`crate::blob_store`].
+//! Sessions and projects live in SQLite (`app.db`), app-managed UI state in
+//! `state.json`, user settings in a readable `settings.json`, and binary
+//! payloads in [`crate::blob_store`]. Debug builds keep both JSON files beside
+//! the database; release settings live at `~/.waku/settings.json`.
 //!
 //! A save writes only the rows whose contents changed, so a streaming turn
 //! costs a few kilobytes no matter how much history exists. Fields the sidebar
@@ -31,7 +33,7 @@ use crate::model::{
 use crate::theme::ThemePreference;
 
 const STATE_VERSION: u32 = 5;
-const OLDEST_SUPPORTED_STATE_VERSION: u32 = 1;
+const APP_STATE_VERSION: u32 = 1;
 const COMPOSER_DRAFTS_FILENAME: &str = "composer-drafts.json";
 
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
@@ -51,6 +53,10 @@ fn default_computer_use_enabled() -> bool {
 
 fn default_analytics_enabled() -> bool {
     true
+}
+
+fn default_provider() -> ProviderKind {
+    ProviderKind::Codex
 }
 
 fn default_sidebar_width() -> f32 {
@@ -227,58 +233,79 @@ impl ComposerDraftStore {
     }
 }
 
-/// Everything except projects and sessions. Small enough to rewrite wholesale
-/// on any change, so it lives in a single row.
+/// User-owned configuration.
+///
+/// This deliberately excludes navigation, panel geometry, and other values
+/// that the app changes as a side effect of ordinary use. Release builds keep
+/// this at `~/.waku/settings.json` so it can become a Zed-style editable config
+/// file without exposing app-managed state.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct AppSettings {
-    pub version: u32,
-    /// Random installation-scoped analytics identity. It is deliberately
-    /// unrelated to provider accounts, projects, or session content.
-    #[serde(default = "Uuid::new_v4")]
-    pub analytics_id: Uuid,
-    #[serde(default = "default_analytics_enabled")]
     pub analytics_enabled: bool,
-    pub selected_project: Option<Uuid>,
-    pub selected_session: Option<Uuid>,
-    pub last_provider: ProviderKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_service_tier: Option<String>,
-    #[serde(default)]
     pub favorite_models: Vec<FavoriteModel>,
-    #[serde(default)]
     pub theme: ThemePreference,
-    #[serde(default)]
     pub language: AppLanguage,
-    #[serde(default = "default_sidebar_visibility")]
-    pub sidebar_visible: bool,
-    #[serde(default = "default_right_panel_visibility")]
-    pub right_panel_visible: bool,
-    #[serde(default = "default_sidebar_width")]
-    pub sidebar_width: f32,
-    #[serde(default = "default_right_panel_width")]
-    pub right_panel_width: f32,
-    #[serde(default = "default_computer_use_enabled")]
     pub computer_use_enabled: bool,
-    #[serde(default)]
     pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
     /// Providers switched off for new sessions in the Providers settings.
-    #[serde(default)]
     pub disabled_providers: Vec<ProviderKind>,
     /// Per-provider binary overrides from the Providers settings; empty means
     /// detect from PATH.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
 }
 
-/// The legacy single-document format, still read once to migrate.
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            analytics_enabled: default_analytics_enabled(),
+            favorite_models: Vec::new(),
+            theme: ThemePreference::System,
+            language: AppLanguage::default(),
+            computer_use_enabled: default_computer_use_enabled(),
+            computer_use_allowed_apps: Vec::new(),
+            disabled_providers: Vec::new(),
+            provider_binary_overrides: HashMap::new(),
+        }
+    }
+}
+
+/// App-managed state that should never appear in the user settings file.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AppState {
+    app_state_version: u32,
+    /// Random installation-scoped analytics identity. It is deliberately
+    /// unrelated to provider accounts, projects, or session content.
+    #[serde(default = "Uuid::new_v4")]
+    analytics_id: Uuid,
+    #[serde(default)]
+    selected_project: Option<Uuid>,
+    #[serde(default)]
+    selected_session: Option<Uuid>,
+    #[serde(default = "default_provider")]
+    last_provider: ProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_service_tier: Option<String>,
+    #[serde(default = "default_sidebar_visibility")]
+    sidebar_visible: bool,
+    #[serde(default = "default_right_panel_visibility")]
+    right_panel_visible: bool,
+    #[serde(default = "default_sidebar_width")]
+    sidebar_width: f32,
+    #[serde(default = "default_right_panel_width")]
+    right_panel_width: f32,
+}
+
+/// The complete in-memory model hydrated from settings, app state, and SQLite.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PersistedState {
     pub version: u32,
-    /// Random installation-scoped analytics identity. See [`AppSettings`].
+    /// Random installation-scoped analytics identity. See [`AppState`].
     #[serde(default = "Uuid::new_v4")]
     pub analytics_id: Uuid,
     #[serde(default = "default_analytics_enabled")]
@@ -403,22 +430,10 @@ impl PersistedState {
 
     fn settings(&self) -> AppSettings {
         AppSettings {
-            version: STATE_VERSION,
-            analytics_id: self.analytics_id,
             analytics_enabled: self.analytics_enabled,
-            selected_project: self.selected_project,
-            selected_session: self.persistable_selected_session(),
-            last_provider: self.last_provider,
-            last_model: self.last_model.clone(),
-            last_reasoning_effort: self.last_reasoning_effort.clone(),
-            last_service_tier: self.last_service_tier.clone(),
             favorite_models: self.favorite_models.clone(),
             theme: self.theme,
             language: self.language,
-            sidebar_visible: self.sidebar_visible,
-            right_panel_visible: self.right_panel_visible,
-            sidebar_width: self.sidebar_width,
-            right_panel_width: self.right_panel_width,
             computer_use_enabled: self.computer_use_enabled,
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
             disabled_providers: self.disabled_providers.clone(),
@@ -426,27 +441,46 @@ impl PersistedState {
         }
     }
 
+    fn app_state(&self) -> AppState {
+        AppState {
+            app_state_version: APP_STATE_VERSION,
+            analytics_id: self.analytics_id,
+            selected_project: self.selected_project,
+            selected_session: self.persistable_selected_session(),
+            last_provider: self.last_provider,
+            last_model: self.last_model.clone(),
+            last_reasoning_effort: self.last_reasoning_effort.clone(),
+            last_service_tier: self.last_service_tier.clone(),
+            sidebar_visible: self.sidebar_visible,
+            right_panel_visible: self.right_panel_visible,
+            sidebar_width: self.sidebar_width,
+            right_panel_width: self.right_panel_width,
+        }
+    }
+
     fn apply_settings(&mut self, settings: AppSettings) {
-        self.version = STATE_VERSION;
-        self.analytics_id = settings.analytics_id;
         self.analytics_enabled = settings.analytics_enabled;
-        self.selected_project = settings.selected_project;
-        self.selected_session = settings.selected_session;
-        self.last_provider = settings.last_provider;
-        self.last_model = settings.last_model;
-        self.last_reasoning_effort = settings.last_reasoning_effort;
-        self.last_service_tier = settings.last_service_tier;
         self.favorite_models = settings.favorite_models;
         self.theme = settings.theme;
         self.language = settings.language;
-        self.sidebar_visible = settings.sidebar_visible;
-        self.right_panel_visible = settings.right_panel_visible;
-        self.sidebar_width = settings.sidebar_width;
-        self.right_panel_width = settings.right_panel_width;
         self.computer_use_enabled = settings.computer_use_enabled;
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
         self.disabled_providers = settings.disabled_providers;
         self.provider_binary_overrides = settings.provider_binary_overrides;
+    }
+
+    fn apply_app_state(&mut self, app_state: AppState) {
+        self.analytics_id = app_state.analytics_id;
+        self.selected_project = app_state.selected_project;
+        self.selected_session = app_state.selected_session;
+        self.last_provider = app_state.last_provider;
+        self.last_model = app_state.last_model;
+        self.last_reasoning_effort = app_state.last_reasoning_effort;
+        self.last_service_tier = app_state.last_service_tier;
+        self.sidebar_visible = app_state.sidebar_visible;
+        self.right_panel_visible = app_state.right_panel_visible;
+        self.sidebar_width = app_state.sidebar_width;
+        self.right_panel_width = app_state.right_panel_width;
     }
 
     /// A session only earns a row once it has started; drafts stay in memory.
@@ -784,12 +818,15 @@ struct Storage {
     written_messages: HashMap<Uuid, HashMap<Uuid, u64>>,
     saved_projects: u64,
     saved_settings: u64,
+    saved_app_state: u64,
 }
 
 pub struct StateStore {
     path: PathBuf,
-    /// Settings are a few hundred bytes and worth keeping hand-editable, so
-    /// they stay a plain JSON file beside the database.
+    /// App-managed navigation and layout state stays local to this database.
+    app_state_path: PathBuf,
+    /// Release settings are user-owned and shared from `~/.waku`; debug
+    /// settings stay in the checkout's isolated `temp/` directory.
     settings_path: PathBuf,
     storage: Mutex<Option<Storage>>,
     blobs: Arc<BlobStore>,
@@ -817,11 +854,25 @@ impl StateStore {
 
     pub fn new(path: PathBuf) -> Self {
         let directory = path.parent().unwrap_or_else(|| Path::new(".")).to_owned();
+        let settings_path = if cfg!(debug_assertions) {
+            directory.join("settings.json")
+        } else {
+            dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".waku")
+                .join("settings.json")
+        };
+        Self::with_settings_path(path, settings_path)
+    }
+
+    fn with_settings_path(path: PathBuf, settings_path: PathBuf) -> Self {
+        let directory = path.parent().unwrap_or_else(|| Path::new(".")).to_owned();
         let root = directory.join("blobs");
         crate::blob_store::set_shared_root(root.clone());
         let blobs = Arc::new(BlobStore::new(root));
         Self {
-            settings_path: directory.join("settings.json"),
+            app_state_path: directory.join("state.json"),
+            settings_path,
             path,
             storage: Mutex::new(None),
             blobs,
@@ -881,16 +932,29 @@ impl StateStore {
         state
     }
 
-    fn read_settings(&self) -> io::Result<(Option<AppSettings>, bool)> {
+    fn read_settings(&self) -> io::Result<Option<AppSettings>> {
         let Ok(bytes) = fs::read(&self.settings_path) else {
-            return Ok((None, true));
+            return Ok(None);
         };
-        let value = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(to_io_error)?;
-        let analytics_settings_missing =
-            value.get("analytics_id").is_none() || value.get("analytics_enabled").is_none();
-        serde_json::from_value(value)
-            .map(|settings| (Some(settings), analytics_settings_missing))
+        serde_json::from_slice(&bytes)
+            .map(Some)
             .map_err(to_io_error)
+    }
+
+    fn read_app_state(&self) -> io::Result<Option<AppState>> {
+        let Ok(bytes) = fs::read(&self.app_state_path) else {
+            return Ok(None);
+        };
+        // `state.json` used to be the pre-SQLite all-in-one store. Requiring a
+        // format-specific version key makes that document (and malformed
+        // app-managed state) safely reset instead of being migrated.
+        let Ok(app_state) = serde_json::from_slice::<AppState>(&bytes) else {
+            return Ok(None);
+        };
+        if app_state.app_state_version != APP_STATE_VERSION {
+            return Ok(None);
+        }
+        Ok(Some(app_state))
     }
 
     fn write_settings(&self, settings: &AppSettings) -> io::Result<()> {
@@ -903,24 +967,31 @@ impl StateStore {
         fs::rename(temporary, &self.settings_path)
     }
 
+    fn write_app_state(&self, app_state: &AppState) -> io::Result<()> {
+        if let Some(parent) = self.app_state_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_vec_pretty(app_state).map_err(to_io_error)?;
+        let temporary = self.app_state_path.with_extension("json.tmp");
+        fs::write(&temporary, data)?;
+        fs::rename(temporary, &self.app_state_path)
+    }
+
     pub fn load(&self) -> io::Result<PersistedState> {
         let connection = self.open()?;
         let mut state = PersistedState::empty();
 
-        // A missing settings file just means defaults; the database is still
-        // the source of truth for projects and sessions.
-        let (settings, analytics_settings_missing) = self.read_settings()?;
-        let from_version = settings
-            .as_ref()
-            .map_or(STATE_VERSION, |settings| settings.version);
-        if !(OLDEST_SUPPORTED_STATE_VERSION..=STATE_VERSION).contains(&from_version) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported Waku state version",
-            ));
-        }
+        // Missing JSON files mean defaults; the database remains the source of
+        // truth for projects and sessions.
+        let settings = self.read_settings()?;
+        let settings_missing = settings.is_none();
         if let Some(settings) = settings {
             state.apply_settings(settings);
+        }
+        let app_state = self.read_app_state()?;
+        let app_state_missing = app_state.is_none();
+        if let Some(app_state) = app_state {
+            state.apply_app_state(app_state);
         }
 
         let mut projects = connection
@@ -985,12 +1056,16 @@ impl StateStore {
         drop(sessions);
 
         state.migrate_loaded();
-        if analytics_settings_missing {
-            // Persist the random installation ID before the first event is
-            // sent. This is a tiny, one-time settings migration; failure must
-            // never discard otherwise valid project/session state.
-            let _ = self.write_settings(&state.settings());
-        }
+        let settings = state.settings();
+        let settings_are_saved = !settings_missing || self.write_settings(&settings).is_ok();
+        let app_state = state.app_state();
+        let app_state_is_saved = if app_state_missing {
+            // Persist the random installation ID before the first analytics
+            // event is sent. Failure must not discard valid database state.
+            self.write_app_state(&app_state).is_ok()
+        } else {
+            true
+        };
 
         *self.storage.lock() = Some(Storage {
             connection,
@@ -999,7 +1074,16 @@ impl StateStore {
             // are skeletons anyway, so the first save of one is a full write.
             written_messages: HashMap::new(),
             saved_projects: 0,
-            saved_settings: 0,
+            saved_settings: if settings_are_saved {
+                fingerprint(&serde_json::to_string(&settings).map_err(to_io_error)?)
+            } else {
+                0
+            },
+            saved_app_state: if app_state_is_saved {
+                fingerprint(&serde_json::to_string(&app_state).map_err(to_io_error)?)
+            } else {
+                0
+            },
         });
         Ok(state)
     }
@@ -1021,6 +1105,7 @@ impl StateStore {
                 written_messages: HashMap::new(),
                 saved_projects: 0,
                 saved_settings: 0,
+                saved_app_state: 0,
             });
         }
         let connection = &guard.as_ref().expect("storage opened above").connection;
@@ -1102,6 +1187,7 @@ impl StateStore {
                 written_messages: HashMap::new(),
                 saved_projects: 0,
                 saved_settings: 0,
+                saved_app_state: 0,
             });
         }
         let storage = guard.as_mut().expect("storage opened above");
@@ -1112,6 +1198,14 @@ impl StateStore {
         if settings_fingerprint != storage.saved_settings {
             self.write_settings(&settings)?;
             storage.saved_settings = settings_fingerprint;
+        }
+
+        let app_state = state.app_state();
+        let app_state_fingerprint =
+            fingerprint(&serde_json::to_string(&app_state).map_err(to_io_error)?);
+        if app_state_fingerprint != storage.saved_app_state {
+            self.write_app_state(&app_state)?;
+            storage.saved_app_state = app_state_fingerprint;
         }
 
         let transaction = storage
@@ -1585,7 +1679,7 @@ mod tests {
     }
 
     fn store_in(directory: &Path) -> StateStore {
-        StateStore::new(directory.join("app.db"))
+        StateStore::with_settings_path(directory.join("app.db"), directory.join("settings.json"))
     }
 
     /// `load` returns list-only sessions by design; tests that assert on
@@ -1611,48 +1705,54 @@ mod tests {
         assert!(state.sidebar_visible);
         assert!(!state.right_panel_visible);
 
-        let mut settings = serde_json::to_value(state.settings()).unwrap();
-        let settings = settings.as_object_mut().unwrap();
-        settings.remove("sidebar_visible");
-        settings.remove("right_panel_visible");
-        let restored: AppSettings = serde_json::from_value(settings.clone().into()).unwrap();
+        let mut app_state = serde_json::to_value(state.app_state()).unwrap();
+        let app_state = app_state.as_object_mut().unwrap();
+        app_state.remove("sidebar_visible");
+        app_state.remove("right_panel_visible");
+        let restored: AppState = serde_json::from_value(app_state.clone().into()).unwrap();
 
         assert!(restored.sidebar_visible);
         assert!(!restored.right_panel_visible);
     }
 
     #[test]
-    fn analytics_preferences_are_persisted_and_backfilled_for_existing_settings() {
+    fn analytics_preference_and_identity_use_their_respective_files() {
         let mut state = PersistedState::empty();
         state.analytics_enabled = false;
         let analytics_id = state.analytics_id;
         let mut settings = serde_json::to_value(state.settings()).unwrap();
 
         let restored: AppSettings = serde_json::from_value(settings.clone()).unwrap();
-        assert_eq!(restored.analytics_id, analytics_id);
         assert!(!restored.analytics_enabled);
+        assert!(settings.get("analytics_id").is_none());
 
-        settings.as_object_mut().unwrap().remove("analytics_id");
+        let app_state: AppState =
+            serde_json::from_value(serde_json::to_value(state.app_state()).unwrap()).unwrap();
+        assert_eq!(app_state.analytics_id, analytics_id);
+
         settings
             .as_object_mut()
             .unwrap()
             .remove("analytics_enabled");
         let backfilled: AppSettings = serde_json::from_value(settings).unwrap();
-        assert_ne!(backfilled.analytics_id, Uuid::nil());
         assert!(backfilled.analytics_enabled);
     }
 
     #[test]
-    fn analytics_preferences_are_backfilled_on_disk_during_load() {
+    fn missing_settings_and_app_state_are_created_during_load() {
         let directory = temporary_directory();
         let store = store_in(&directory);
         let restored = store.load().unwrap();
         let settings_path = directory.join("settings.json");
         let settings: serde_json::Value =
             serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        let app_state: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
 
-        assert_eq!(settings["analytics_id"], restored.analytics_id.to_string());
         assert_eq!(settings["analytics_enabled"], true);
+        assert!(settings.get("analytics_id").is_none());
+        assert_eq!(app_state["analytics_id"], restored.analytics_id.to_string());
+        assert!(app_state.get("analytics_enabled").is_none());
 
         fs::remove_dir_all(directory).ok();
     }
@@ -1670,6 +1770,36 @@ mod tests {
         let restored: AppSettings = serde_json::from_value(settings).unwrap();
 
         assert!(!restored.computer_use_enabled);
+    }
+
+    #[test]
+    fn settings_accept_a_partial_user_authored_document() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+
+        assert_eq!(settings.theme, ThemePreference::Dark);
+        assert_eq!(settings.language, AppLanguage::System);
+        assert!(settings.analytics_enabled);
+        assert!(!settings.computer_use_enabled);
+    }
+
+    #[test]
+    fn legacy_all_in_one_state_is_not_migrated() {
+        let directory = temporary_directory();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("state.json"),
+            r#"{"version":1,"sidebar_width":333.0,"right_panel_visible":true}"#,
+        )
+        .unwrap();
+
+        let restored = store_in(&directory).load().unwrap();
+        assert_eq!(restored.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+        assert!(!restored.right_panel_visible);
+
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(rewritten["app_state_version"], APP_STATE_VERSION);
+        fs::remove_dir_all(directory).ok();
     }
 
     #[test]
@@ -2098,16 +2228,27 @@ mod tests {
         let path = StateStore::default_path();
         assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("app.db")));
         let directory = path.parent().and_then(Path::file_name);
+        let store = StateStore::new(path.clone());
+        assert_eq!(store.app_state_path, path.with_file_name("state.json"));
 
         // Debug builds stay inside the checkout so development never writes to
-        // the installed app's data.
+        // the installed app's data, including settings.
         #[cfg(debug_assertions)]
         {
             assert_eq!(directory, Some(std::ffi::OsStr::new("temp")));
             assert!(path.starts_with(env!("CARGO_MANIFEST_DIR")));
+            assert_eq!(store.settings_path, path.with_file_name("settings.json"));
         }
         #[cfg(not(debug_assertions))]
-        assert_eq!(directory, Some(std::ffi::OsStr::new("Waku")));
+        {
+            assert_eq!(directory, Some(std::ffi::OsStr::new("Waku")));
+            assert_eq!(
+                store.settings_path,
+                dirs::home_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join(".waku/settings.json")
+            );
+        }
     }
 
     #[test]
@@ -2328,7 +2469,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_live_in_a_readable_json_file() {
+    fn settings_and_app_managed_state_live_in_separate_json_files() {
         let directory = temporary_directory();
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
@@ -2344,17 +2485,82 @@ mod tests {
             "settings are pretty-printed for editing"
         );
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["sidebar_width"], 301.0);
+        assert_eq!(value["theme"], "light");
         assert_eq!(value["language"], "simplified-chinese");
-        // Session history stays in the database, not in the settings file.
-        assert!(value.get("sessions").is_none());
-        assert!(value.get("projects").is_none());
+        for app_managed_key in [
+            "version",
+            "app_state_version",
+            "analytics_id",
+            "selected_project",
+            "selected_session",
+            "last_provider",
+            "last_model",
+            "last_reasoning_effort",
+            "last_service_tier",
+            "sidebar_visible",
+            "right_panel_visible",
+            "sidebar_width",
+            "right_panel_width",
+        ] {
+            assert!(
+                value.get(app_managed_key).is_none(),
+                "{app_managed_key} leaked into settings.json"
+            );
+        }
+
+        let app_state: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(app_state["sidebar_width"], 301.0);
+        assert_eq!(app_state["app_state_version"], APP_STATE_VERSION);
+        for setting_key in [
+            "analytics_enabled",
+            "favorite_models",
+            "theme",
+            "language",
+            "computer_use_enabled",
+            "computer_use_allowed_apps",
+            "disabled_providers",
+            "provider_binary_overrides",
+        ] {
+            assert!(
+                app_state.get(setting_key).is_none(),
+                "{setting_key} leaked into state.json"
+            );
+        }
 
         // A hand edit is picked up on the next load.
-        let edited = text.replace("301.0", "277.0");
+        let edited = text.replace("simplified-chinese", "english");
         fs::write(&settings, edited).unwrap();
-        assert_eq!(store_in(&directory).load().unwrap().sidebar_width, 277.0);
+        let restored = store_in(&directory).load().unwrap();
+        assert_eq!(restored.language, AppLanguage::English);
+        assert_eq!(restored.sidebar_width, 301.0);
 
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn app_state_changes_do_not_rewrite_settings() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        store.save(&mut state).unwrap();
+
+        let settings_path = directory.join("settings.json");
+        let mut user_document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        user_document["future_setting"] = serde_json::Value::Bool(true);
+        let user_document = serde_json::to_vec(&user_document).unwrap();
+        fs::write(&settings_path, &user_document).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        restored.sidebar_width = 333.0;
+        reopened.save(&mut restored).unwrap();
+
+        assert_eq!(fs::read(&settings_path).unwrap(), user_document);
+        let app_state: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(app_state["sidebar_width"], 333.0);
         fs::remove_dir_all(directory).ok();
     }
 
@@ -3015,15 +3221,15 @@ mod tests {
         session.service_tier = Some("fast".into());
         store.save(&mut state).unwrap();
 
-        // Drop the remembered selection from settings, as a file written before
-        // those fields existed would have.
-        let settings_path = directory.join("settings.json");
-        let mut settings: serde_json::Value =
-            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        // Drop the remembered selection from app state, as a file written
+        // before those fields existed would have.
+        let app_state_path = directory.join("state.json");
+        let mut app_state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&app_state_path).unwrap()).unwrap();
         for key in ["last_model", "last_reasoning_effort", "last_service_tier"] {
-            settings.as_object_mut().unwrap().remove(key);
+            app_state.as_object_mut().unwrap().remove(key);
         }
-        fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        fs::write(&app_state_path, serde_json::to_vec(&app_state).unwrap()).unwrap();
 
         let reopened = store_in(&directory);
         let mut restored = reopened.load().unwrap();
