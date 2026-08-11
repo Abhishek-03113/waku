@@ -159,7 +159,15 @@ Test by keeping an older build around, launching it, and choosing
   no embedded framework and also degrades to no updater. For UI-only testing,
   start the watcher with `WAKU_PREVIEW_UPDATE=1`; the sidebar immediately
   shows an available update and clicking it changes to the spinner without
-  contacting Sparkle or installing anything.
+  installing anything. The preview flag fakes only that sidebar result;
+  **Check for Updates…** still uses the embedded Sparkle framework and its
+  real standard window.
+- **Automatic and explicit checks have separate presentation.** Scheduled
+  checks stay silent until the sidebar update button appears. Choosing
+  **Check for Updates…** promotes an existing silent result into Sparkle's
+  standard updater window, or shows its checking progress while an automatic
+  check finishes. With no automatic session active, it starts Sparkle's
+  standard user-initiated check directly.
 - **First-run consent:** Sparkle shows its one-time "check automatically?"
   prompt on the second launch. The Settings → General toggle reads and writes
   the same persisted value.
