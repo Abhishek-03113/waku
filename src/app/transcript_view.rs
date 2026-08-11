@@ -1019,6 +1019,14 @@ impl Waku {
                             })
                             .map(|edit| edit.input.clone())
                     });
+                    let attachment_menus = (0..message.attachments.len())
+                        .map(|index| {
+                            self.menu_handle(
+                                format!("message-{}-attachment-{index}", message.id),
+                                cx,
+                            )
+                        })
+                        .collect();
                     let menu = self.menu_handle(format!("message-{}", message.id), cx);
                     let ctx = self.markdown_ctx(
                         format!("message-{}", message.id),
@@ -1045,6 +1053,7 @@ impl Waku {
                             assistant_message_action,
                             user_message_action,
                             message_edit_input,
+                            attachment_menus,
                             markdown: view,
                             ctx: &ctx,
                             menu,

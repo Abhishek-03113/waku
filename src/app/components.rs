@@ -338,6 +338,7 @@ pub(super) struct MessageRender<'a> {
     pub(super) assistant_message_action: Option<AssistantMessageAction>,
     pub(super) user_message_action: Option<UserMessageAction>,
     pub(super) message_edit_input: Option<Entity<ComposerInput>>,
+    pub(super) attachment_menus: Vec<ContextMenuHandle>,
     /// The parsed response body. `None` for user and system messages, which are
     /// shown verbatim rather than as markdown.
     pub(super) markdown: Option<&'a MarkdownView>,
@@ -350,6 +351,8 @@ pub(super) struct MessageRender<'a> {
 fn render_sent_message_attachments(
     message_id: Uuid,
     attachments: &[MessageAttachment],
+    attachment_menus: &[ContextMenuHandle],
+    waku: &gpui::WeakEntity<Waku>,
     theme: &Theme,
 ) -> Option<AnyElement> {
     if attachments.is_empty() {
@@ -362,6 +365,9 @@ fn render_sent_message_attachments(
         .justify_end()
         .gap(px(8.0));
     for (index, attachment) in attachments.iter().enumerate() {
+        let Some(menu) = attachment_menus.get(index) else {
+            continue;
+        };
         let icon_path = if attachment.is_dir {
             "icons/folder.svg"
         } else {
@@ -378,14 +384,56 @@ fn render_sent_message_attachments(
             .border_1()
             .border_color(theme.border)
             .bg(theme.inset)
+            .track_focus(menu.trigger_focus_handle())
+            .tab_index(0)
+            .focus_visible(|style| style.border_color(theme.accent))
             .tooltip(Tooltip::text(attachment.name.clone()));
         if attachment.is_image {
+            let preview_waku = waku.clone();
+            let key_waku = waku.clone();
+            let preview_path = attachment.path.clone();
+            let key_path = attachment.path.clone();
+            let preview_name = SharedString::from(attachment.name.clone());
+            let key_name = preview_name.clone();
+            let key_menu = menu.clone();
             tile = tile.child(
-                img(attachment.path.clone())
+                div()
+                    .id(SharedString::from(format!(
+                        "message-{message_id}-attachment-{index}-preview"
+                    )))
                     .size_full()
-                    .object_fit(ObjectFit::Cover),
+                    .cursor_default()
+                    .on_click(move |_, window, cx| {
+                        let _ = preview_waku.update(cx, |this, cx| {
+                            this.open_image_preview(
+                                preview_path.clone(),
+                                preview_name.clone(),
+                                window,
+                                cx,
+                            );
+                        });
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        img(attachment.path.clone())
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    ),
             );
+            tile = tile.on_key_down(move |event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                if matches!(key, "enter" | "space") {
+                    let _ = key_waku.update(cx, |this, cx| {
+                        this.open_image_preview(key_path.clone(), key_name.clone(), window, cx);
+                    });
+                    cx.stop_propagation();
+                } else if key == "f10" && event.keystroke.modifiers.shift {
+                    key_menu.open_context_menu(window, cx);
+                    cx.stop_propagation();
+                }
+            });
         } else {
+            let key_menu = menu.clone();
             tile = tile.child(
                 div()
                     .size_full()
@@ -406,8 +454,20 @@ fn render_sent_message_attachments(
                             .child(attachment.name.clone()),
                     ),
             );
+            tile = tile.on_key_down(move |event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "f10" && event.keystroke.modifiers.shift {
+                    key_menu.open_context_menu(window, cx);
+                    cx.stop_propagation();
+                }
+            });
         }
-        row = row.child(tile);
+        let reveal_path = attachment.path.clone();
+        row = row.child(context_menu(
+            tile,
+            SharedString::from(format!("message-{message_id}-attachment-{index}-menu")),
+            menu,
+            move |_| image_preview::attachment_menu_items(reveal_path.clone()),
+        ));
     }
     Some(row.into_any_element())
 }
@@ -423,6 +483,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         assistant_message_action,
         user_message_action,
         message_edit_input,
+        attachment_menus,
         markdown,
         ctx,
         menu,
@@ -450,9 +511,13 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 .items_end()
                 .gap(px(3.0))
                 .group(group_name.clone());
-            if let Some(attachments) =
-                render_sent_message_attachments(message_id, &message.attachments, theme)
-            {
+            if let Some(attachments) = render_sent_message_attachments(
+                message_id,
+                &message.attachments,
+                &attachment_menus,
+                &waku,
+                theme,
+            ) {
                 column = column.child(attachments);
             }
             if let Some(edit_input) = message_edit_input {

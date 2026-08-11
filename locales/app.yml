@@ -1838,6 +1838,18 @@ common.dismiss_notification:
   en: Dismiss notification
   zh-CN: 关闭通知
 
+common.reveal_in_finder:
+  en: Reveal in Finder
+  zh-CN: 在访达中显示
+
+attachments.close_preview:
+  en: Close image preview
+  zh-CN: 关闭图像预览
+
+attachments.preview_unavailable:
+  en: Image unavailable
+  zh-CN: 无法显示图像
+
 common.copy_named:
   en: Copy %{name}
   zh-CN: 复制%{name}

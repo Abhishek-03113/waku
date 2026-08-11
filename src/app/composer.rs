@@ -1535,6 +1535,7 @@ impl Waku {
             .flex_wrap()
             .gap(px(8.0));
         for (index, attachment) in self.composer_attachments.iter().enumerate() {
+            let menu = self.menu_handle(format!("composer-attachment-{index}-menu"), cx);
             let icon_path = if attachment.is_dir {
                 "icons/folder.svg"
             } else {
@@ -1550,12 +1551,34 @@ impl Waku {
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.inset)
+                .track_focus(menu.trigger_focus_handle())
+                .tab_index(0)
+                .focus_visible(|style| style.border_color(theme.accent))
                 .tooltip(Tooltip::text(format!("@{}", attachment.mention)));
             if attachment.is_image {
+                let preview_path = attachment.path.clone();
+                let preview_name = attachment.name.clone();
                 tile = tile.child(
-                    img(attachment.path.clone())
+                    div()
+                        .id(SharedString::from(format!(
+                            "composer-attachment-{index}-preview"
+                        )))
                         .size_full()
-                        .object_fit(ObjectFit::Cover),
+                        .cursor_default()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_image_preview(
+                                preview_path.clone(),
+                                preview_name.clone(),
+                                window,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            img(attachment.path.clone())
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        ),
                 );
             } else {
                 tile = tile.child(
@@ -1580,36 +1603,67 @@ impl Waku {
                         ),
                 );
             }
-            row = row.child(
-                tile.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "composer-attachment-remove-{index}"
-                        )))
-                        .absolute()
-                        .top(px(3.0))
-                        .right(px(3.0))
-                        .w(px(16.0))
-                        .h(px(16.0))
-                        .rounded(px(5.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_default()
-                        .bg(theme.canvas.opacity(0.8))
-                        .hover(|element| element.bg(theme.canvas.opacity(0.95)))
-                        .active(|element| element.opacity(0.8))
-                        .child(icon("icons/x.svg", 9.0, theme.text_secondary))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
+            let key_menu = menu.clone();
+            let key_path = attachment.path.clone();
+            let key_name = attachment.name.clone();
+            let is_image = attachment.is_image;
+            tile = tile.on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                if is_image && matches!(key, "enter" | "space") {
+                    this.open_image_preview(key_path.clone(), key_name.clone(), window, cx);
+                    cx.stop_propagation();
+                } else if key == "f10" && event.keystroke.modifiers.shift {
+                    key_menu.open_context_menu(window, cx);
+                    cx.stop_propagation();
+                }
+            }));
+            let tile = tile.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "composer-attachment-remove-{index}"
+                    )))
+                    .absolute()
+                    .top(px(3.0))
+                    .right(px(3.0))
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .tab_index(0)
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_default()
+                    .bg(theme.canvas.opacity(0.8))
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .hover(|element| element.bg(theme.canvas.opacity(0.95)))
+                    .active(|element| element.opacity(0.8))
+                    .child(icon("icons/x.svg", 9.0, theme.text_secondary))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if index < this.composer_attachments.len() {
+                            this.composer_attachments.remove(index);
+                            this.schedule_composer_draft_save(cx);
+                            cx.notify();
+                        }
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                             if index < this.composer_attachments.len() {
                                 this.composer_attachments.remove(index);
                                 this.schedule_composer_draft_save(cx);
                                 cx.notify();
                             }
-                        })),
-                ),
+                            cx.stop_propagation();
+                        }
+                    })),
             );
+            let reveal_path = attachment.path.clone();
+            row = row.child(context_menu(
+                tile,
+                SharedString::from(format!("composer-attachment-{index}-context-menu")),
+                &menu,
+                move |_| image_preview::attachment_menu_items(reveal_path.clone()),
+            ));
         }
         row
     }

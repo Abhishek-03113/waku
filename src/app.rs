@@ -951,6 +951,10 @@ pub struct Waku {
     /// Files dropped onto the composer, drawn as chips above the input and
     /// drained into the next submission.
     composer_attachments: Vec<ComposerAttachment>,
+    /// Window-modal expansion of an image attachment. The path is already
+    /// cached attachment metadata; render never probes the filesystem.
+    image_preview: Option<image_preview::ImagePreviewState>,
+    image_preview_generation: u64,
     /// Coalesced edge trigger for provider and background result queues. The
     /// payloads stay in their typed channels; this channel only wakes the UI.
     event_wake_tx: smol::channel::Sender<()>,
@@ -1208,6 +1212,7 @@ mod components;
 mod composer;
 mod drafts;
 mod file_search;
+mod image_preview;
 mod render;
 mod right_panel;
 mod runtime;
@@ -1228,6 +1233,7 @@ use background_work::{
 pub use command_palette::init as init_command_palette;
 pub use commit_dialog::init as init_commit_dialog_keys;
 use components::*;
+pub use image_preview::init as init_image_preview_keys;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
 use sidebar::{SessionDateGroup, SidebarRow};
@@ -2212,6 +2218,8 @@ impl Waku {
                 composer_sources_stale: false,
                 composer_autocomplete: autocomplete::AutocompleteUi::new(),
                 composer_attachments,
+                image_preview: None,
+                image_preview_generation: 0,
                 event_wake_tx,
                 runtimes: HashMap::new(),
                 background_work: HashMap::new(),
