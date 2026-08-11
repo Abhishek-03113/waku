@@ -402,7 +402,7 @@ fn work_status_icon(status: BackgroundWorkStatus) -> &'static str {
     }
 }
 
-fn background_summary_process_outcome_icon(
+fn background_summary_process_status_icon(
     kind: BackgroundWorkKind,
     status: BackgroundWorkStatus,
 ) -> Option<&'static str> {
@@ -414,9 +414,11 @@ fn background_summary_process_outcome_icon(
     }
 
     match status {
-        BackgroundWorkStatus::Completed | BackgroundWorkStatus::Failed => {
-            Some(work_status_icon(status))
-        }
+        BackgroundWorkStatus::Starting
+        | BackgroundWorkStatus::Running
+        | BackgroundWorkStatus::Monitoring
+        | BackgroundWorkStatus::Completed
+        | BackgroundWorkStatus::Failed => Some(work_status_icon(status)),
         _ => None,
     }
 }
@@ -1416,14 +1418,25 @@ fn render_background_summary_row(
         "background-summary-group-{}-{}",
         item.key.provider_id, item.key.kind as u8
     ));
-    let outcome = background_summary_process_outcome_icon(item.key.kind, item.status).map(|path| {
+    let status = background_summary_process_status_icon(item.key.kind, item.status).map(|_| {
         div()
-            .size(px(24.0))
-            .flex_none()
+            .absolute()
+            .inset_0()
             .flex()
             .items_center()
             .justify_center()
-            .child(icon(path, 12.0, work_status_color(item.status, *theme)))
+            .when(item.status.is_stoppable() && item.can_stop, |status| {
+                status.group_hover(group_name.clone(), |style| style.invisible())
+            })
+            .child(rendered_work_status_icon(
+                item.status,
+                12.0,
+                work_status_color(item.status, *theme),
+                SharedString::from(format!(
+                    "background-summary-spinner-{}-{}",
+                    item.key.provider_id, item.key.kind as u8
+                )),
+            ))
     });
     let stop = (item.status.is_stoppable() && item.can_stop).then(|| {
         let click_key = item.key.clone();
@@ -1447,7 +1460,13 @@ fn render_background_summary_row(
             .opacity(0.0)
             .group_hover(group_name.clone(), |style| style.opacity(1.0))
             .hover(|style| style.bg(theme.overlay_strong))
-            .focus_visible(|style| style.opacity(1.0).border_1().border_color(theme.accent))
+            .focus_visible(|style| {
+                style
+                    .opacity(1.0)
+                    .bg(theme.raised)
+                    .border_1()
+                    .border_color(theme.accent)
+            })
             .tooltip(Tooltip::text(tr!("background.stop")))
             .child(icon("icons/stop-filled.svg", 12.0, theme.text_tertiary))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1466,6 +1485,15 @@ fn render_background_summary_row(
                 }
             })
     });
+    let trailing = (status.is_some() || stop.is_some()).then(|| {
+        div()
+            .relative()
+            .size(px(24.0))
+            .flex_none()
+            .children(status)
+            .children(stop)
+    });
+    let is_process = item.key.kind != BackgroundWorkKind::Subagent;
     let open_key = item.key.clone();
     let key_key = open_key.clone();
     let click_handle = handle.clone();
@@ -1500,12 +1528,15 @@ fn render_background_summary_row(
                 .min_w_0()
                 .flex_1()
                 .truncate()
-                .text_size(px(13.5))
-                .text_color(theme.text)
+                .text_size(px(if is_process { 12.0 } else { 13.5 }))
+                .text_color(if is_process {
+                    theme.text_secondary
+                } else {
+                    theme.text
+                })
                 .child(item.title.clone()),
         )
-        .children(stop)
-        .children(outcome)
+        .children(trailing)
         .on_click(move |_, window, cx| {
             click_handle.close(window, cx);
             window.refresh();
@@ -1541,30 +1572,30 @@ mod tests {
     }
 
     #[test]
-    fn info_popover_uses_distinct_process_outcome_icons() {
+    fn info_popover_uses_distinct_process_status_icons() {
         assert_eq!(
-            background_summary_process_outcome_icon(
+            background_summary_process_status_icon(
                 BackgroundWorkKind::Process,
                 BackgroundWorkStatus::Completed,
             ),
             Some("icons/check.svg")
         );
         assert_eq!(
-            background_summary_process_outcome_icon(
+            background_summary_process_status_icon(
                 BackgroundWorkKind::Monitor,
                 BackgroundWorkStatus::Failed,
             ),
             Some("icons/x.svg")
         );
         assert_eq!(
-            background_summary_process_outcome_icon(
+            background_summary_process_status_icon(
                 BackgroundWorkKind::Process,
                 BackgroundWorkStatus::Running,
             ),
-            None
+            Some("icons/loader-circle.svg")
         );
         assert_eq!(
-            background_summary_process_outcome_icon(
+            background_summary_process_status_icon(
                 BackgroundWorkKind::Subagent,
                 BackgroundWorkStatus::Completed,
             ),
