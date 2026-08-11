@@ -373,6 +373,25 @@ fn work_status_icon(status: BackgroundWorkStatus) -> &'static str {
     }
 }
 
+fn background_summary_process_outcome_icon(
+    kind: BackgroundWorkKind,
+    status: BackgroundWorkStatus,
+) -> Option<&'static str> {
+    if !matches!(
+        kind,
+        BackgroundWorkKind::Process | BackgroundWorkKind::Monitor
+    ) {
+        return None;
+    }
+
+    match status {
+        BackgroundWorkStatus::Completed | BackgroundWorkStatus::Failed => {
+            Some(work_status_icon(status))
+        }
+        _ => None,
+    }
+}
+
 fn rendered_work_status_icon(
     status: BackgroundWorkStatus,
     size: f32,
@@ -1237,6 +1256,15 @@ fn render_background_summary_row(
         "background-summary-group-{}-{}",
         item.key.provider_id, item.key.kind as u8
     ));
+    let outcome = background_summary_process_outcome_icon(item.key.kind, item.status).map(|path| {
+        div()
+            .size(px(24.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon(path, 12.0, work_status_color(item.status, *theme)))
+    });
     let stop = (item.status.is_stoppable() && item.can_stop).then(|| {
         let click_key = item.key.clone();
         let click_weak = weak.clone();
@@ -1317,6 +1345,7 @@ fn render_background_summary_row(
                 .child(item.title.clone()),
         )
         .children(stop)
+        .children(outcome)
         .on_click(move |_, window, cx| {
             click_handle.close(window, cx);
             window.refresh();
@@ -1349,6 +1378,38 @@ mod tests {
         );
         item.background = background;
         item
+    }
+
+    #[test]
+    fn info_popover_uses_distinct_process_outcome_icons() {
+        assert_eq!(
+            background_summary_process_outcome_icon(
+                BackgroundWorkKind::Process,
+                BackgroundWorkStatus::Completed,
+            ),
+            Some("icons/check.svg")
+        );
+        assert_eq!(
+            background_summary_process_outcome_icon(
+                BackgroundWorkKind::Monitor,
+                BackgroundWorkStatus::Failed,
+            ),
+            Some("icons/x.svg")
+        );
+        assert_eq!(
+            background_summary_process_outcome_icon(
+                BackgroundWorkKind::Process,
+                BackgroundWorkStatus::Running,
+            ),
+            None
+        );
+        assert_eq!(
+            background_summary_process_outcome_icon(
+                BackgroundWorkKind::Subagent,
+                BackgroundWorkStatus::Completed,
+            ),
+            None
+        );
     }
 
     #[test]
