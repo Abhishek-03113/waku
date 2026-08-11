@@ -1,0 +1,803 @@
+_version: 1
+
+menu.about: "%{app} について"
+menu.check_for_updates: アップデートを確認…
+menu.settings: 設定…
+menu.quit: "%{app} を終了"
+menu.file: ファイル
+menu.new_task: 新規タスク
+menu.new_project: 新規プロジェクト…
+menu.edit: 編集
+menu.undo: 取り消す
+menu.redo: やり直す
+menu.cut: カット
+menu.copy: コピー
+menu.paste: ペースト
+menu.select_all: すべてを選択
+menu.view: 表示
+menu.command_palette: コマンドパレット…
+menu.toggle_sidebar: サイドバーの表示を切り替える
+menu.toggle_right_panel: 右パネルの表示を切り替える
+menu.focus_composer: 入力欄にフォーカスを移動
+menu.toggle_model_picker: モデル選択の表示を切り替える
+menu.toggle_usage_panel: 使用状況パネルの表示を切り替える
+menu.window: ウインドウ
+menu.toggle_fps_counter: FPS カウンターの表示を切り替える
+menu.close_window: ウインドウを閉じる
+
+updater.update: アップデート
+updater.checking: アップデートを確認中…
+updater.updating: アップデート中…
+updater.up_to_date: Waku は最新です
+updater.failed: "アップデートに失敗しました：%{error}"
+
+command_palette.placeholder: タスクを検索、またはコマンドを実行…
+command_palette.suggested: おすすめ
+command_palette.tasks: タスク
+command_palette.commands: コマンド
+command_palette.settings: 設定
+command_palette.new_task: 新規タスク
+command_palette.open_project: プロジェクトを開く…
+command_palette.choose_model: モデルを選択…
+command_palette.show_sidebar: サイドバーを表示
+command_palette.hide_sidebar: サイドバーを隠す
+command_palette.show_right_panel: 右パネルを表示
+command_palette.hide_right_panel: 右パネルを隠す
+command_palette.current: 現在
+command_palette.you: あなた
+command_palette.agent: エージェント
+command_palette.no_results: 一致するタスクやコマンドはありません
+command_palette.no_results_hint: タスク名、メッセージ、プロジェクト、設定、コマンドで検索してください
+
+language.title: 言語
+language.system: システム
+language.description: Waku 全体で使用する言語を選択します
+
+settings.general: 一般
+settings.appearance: 外観
+settings.providers: プロバイダー
+settings.usage: 使用状況
+settings.computer_use: コンピュータ操作
+settings.general_keywords: 一般 ローカル プロジェクト 会話 プライバシー 分析 テレメトリ 匿名 共有 アップデート 自動 バージョン
+settings.appearance_keywords: 外観 テーマ システム ライト ダーク 言語 英語 中国語 簡体字 日本語
+settings.providers_keywords: プロバイダー エージェント モデル CLI バージョン インストール 検出 claude codex cursor opencode amp grok pi
+settings.skills: スキル
+settings.skills_keywords: スキル ライブラリ エージェント 無効 有効 削除 claude codex cursor opencode pi amp 共有
+settings.usage_keywords: 使用状況 トークン コスト 支出 キャッシュ 日別 グラフ モデル 内訳 履歴 claude codex
+settings.computer_use_keywords: コンピュータ 操作 画面収録 アクセシビリティ アプリ 制御 codex
+settings.back: 戻る
+settings.search: 設定を検索
+settings.theme: テーマ
+settings.theme_description: システム、ライト、ダークのいずれかのテーマを選択します
+settings.theme_system: システム
+settings.theme_light: ライト
+settings.theme_dark: ダーク
+
+input.do_anything: 何でも依頼できます…
+input.search_models: モデルを検索…
+input.search_branches: ブランチを検索
+input.new_branch_name: 新しいブランチ名
+input.detected_automatically: 自動検出
+input.filter_projects: プロジェクトを絞り込む
+input.search_or_enter_address: 検索またはアドレスを入力
+input.find: 検索
+input.replace: 置換
+
+common.checking: 確認中…
+common.refresh: 更新
+common.recheck: 再確認
+common.reset: リセット
+common.revoke: 許可を解除
+
+settings.local_by_default: デフォルトでローカルに保存
+settings.local_by_default_description: プロジェクト、会話、設定はこの Mac に保存されます
+settings.automatic_updates: 自動アップデート
+settings.automatic_updates_description: バックグラウンドで新しいバージョンを確認し、インストールを案内します
+settings.share_anonymous_usage_data: 匿名の使用状況データを共有
+settings.share_anonymous_usage_data_description: 機能の利用状況と信頼性に関するデータを共有して、Waku の改善にご協力ください。プロンプト、回答、プロジェクト名、ファイルパスなどの個人データは一切含まれません
+
+providers.coding_agents: コーディングエージェント
+providers.description: Waku はこの Mac にインストールされたエージェントの CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
+providers.disabled_for_new_tasks: 新規タスクでは無効
+providers.model_count_one: "%{count} 個のモデル"
+providers.model_count_many: "%{count} 個のモデル"
+providers.not_detected_as: PATH 上に %{command} が見つかりません
+providers.using_override: PATH の自動検出ではなく %{path} を使用しています
+providers.invalid_override: このパスには実行可能なファイルがありません。空欄にすると PATH から自動検出します
+providers.detected_at: "%{path} で検出されました"
+providers.searches_path: Waku は PATH で %{command} を検出できませんでした
+providers.binary_path: 実行ファイルのパス
+providers.binary_path_description: Waku が %{provider} の起動に使用する実行ファイルです。Return キーで適用します。空欄にすると PATH から自動検出します
+providers.checked_just_now: たった今確認済み
+providers.checked_minutes_ago: "%{count} 分前に確認済み"
+providers.checked_hours_ago: "%{count} 時間前に確認済み"
+
+computer_use.allow_apps: Waku にアプリの操作を許可
+computer_use.availability: コンピュータ操作は Codex、OpenCode、Grok、Pi で利用できます
+computer_use.macos_access: macOS のアクセス権
+computer_use.helper_access: Waku の分離された操作ヘルパー %{helper} にアクセスを許可してください
+computer_use.screen_recording: 画面収録
+computer_use.screen_recording_description: 許可されたアプリのウインドウのみを取り込みます
+computer_use.accessibility: アクセシビリティ
+computer_use.accessibility_description: 承認後にポインタとキーボードのイベントを送信します
+computer_use.always_allowed_apps: 常に許可するアプリ
+computer_use.always_allowed_apps_description: Waku はこれらの許可をアプリの Bundle ID と署名チームに紐付けます
+computer_use.no_always_allowed_apps: 常に許可されているアプリはありません。タスクごとの許可はメモリにのみ保持されます
+computer_use.access_granted: アクセス許可済み
+computer_use.grant_access: アクセスを許可
+computer_use.permission_check_failed: コンピュータ操作の権限を確認できませんでした
+
+common.settings: 設定
+common.remove: 削除
+common.rename: 名前を変更
+
+session.new_task: 新規タスク
+
+sidebar.today: 今日
+sidebar.search: 検索
+sidebar.yesterday: 昨日
+sidebar.this_week: 今週
+sidebar.this_month: 今月
+sidebar.this_year: 今年
+sidebar.more: さらに前
+sidebar.working: 作業中 · %{elapsed}
+sidebar.just_now: たった今
+sidebar.minutes_ago: "%{count} 分前"
+sidebar.hours_ago: "%{count} 時間前"
+sidebar.days_ago: "%{count} 日前"
+sidebar.unknown_project: 不明なプロジェクト
+
+project.new_project: 新規プロジェクト…
+project.no_project: プロジェクトを使用しない
+project.no_project_name: プロジェクトなし
+project.choose_project: プロジェクトを選択
+project.project_lower: プロジェクト
+project.without_a_project: プロジェクトなし
+project.your_project: あなたのプロジェクト
+
+onboarding.open_project_to_begin: プロジェクトを開いて始めましょう
+onboarding.description: Waku は選択したフォルダでコーディングエージェントを実行します。コード、タスク、履歴はこの Mac に保存されます
+onboarding.open_project_folder: プロジェクトフォルダを開く…
+onboarding.what_should_we_build: 何を作りましょうか？
+onboarding.what_should_we_build_in: ""
+onboarding.question_mark: " で何を作りましょうか？"
+
+common.copied: コピーしました
+common.copy_message: メッセージをコピー
+common.copy_message_title: メッセージをコピー
+common.copy_selection: 選択範囲をコピー
+common.copy_to_composer: 入力欄にコピー
+common.copy_code: コードをコピー
+common.cancel: キャンセル
+common.send: 送信
+
+session.fork_task: タスクをフォーク
+session.fork_task_title: タスクをフォーク
+session.forking_task: タスクをフォーク中…
+session.forking_task_title: タスクをフォーク中…
+session.revert_to_here: ここまで戻す
+session.revert_to_here_title: ここまで戻す
+
+time.yesterday_at: 昨日 %{time}
+time.weekday_at: "%{weekday} %{time}"
+time.date_at: "%{month}月%{day}日 %{time}"
+time.full_date_at: "%{year}年%{month}月%{day}日 %{time}"
+time.monday: 月曜日
+time.tuesday: 火曜日
+time.wednesday: 水曜日
+time.thursday: 木曜日
+time.friday: 金曜日
+time.saturday: 土曜日
+time.sunday: 日曜日
+
+activity.count: "%{activity} %{count} 件"
+activity.running: 実行中：%{activities}
+activity.ran: 実行済み：%{activities}
+activity.arguments: 引数
+activity.output: 出力
+activity.image_output: 画像出力
+activity.search_for: "%{query} を検索"
+activity.searched_web: ウェブを検索しました
+activity.open_url: "%{url} を開く"
+activity.opened_web_page: ウェブページを開きました
+activity.find_in_url: "%{url} で %{pattern} を検索"
+activity.find_on_page: ページ内で %{pattern} を検索
+activity.search_within_url: "%{url} 内を検索"
+activity.searched_within_page: ウェブページ内を検索しました
+activity.browsed_page: "%{count} ページを閲覧しました"
+activity.browsed_pages: "%{count} ページを閲覧しました"
+activity.browsed_web: ウェブを閲覧しました
+activity.exit_code: "終了コード：%{code}"
+activity.output_with_exit_code: "%{output}\n\n終了コード：%{code}"
+activity.run_command: コマンドを実行
+activity.running_named_command: "%{command} を実行中"
+activity.ran_named_command: "%{command} を実行しました"
+activity.named_command_failed: "コマンドの実行に失敗しました：%{command}"
+activity.running_command: コマンドを実行中
+activity.ran_command: コマンドを実行しました
+activity.command_failed: コマンドの実行に失敗しました
+activity.edit_file: ファイルを編集
+activity.write_file: ファイルに書き込む
+activity.editing_named_file: "%{file} を編集中"
+activity.edited_named_file: "%{file} を編集しました"
+activity.edit_failed_named_file: "%{file} の編集に失敗しました"
+activity.editing_files: ファイルを編集中
+activity.edited_files: ファイルを編集しました
+activity.edit_failed: ファイルの編集に失敗しました
+activity.file_count: "%{count} 個のファイル"
+activity.read_file: ファイルを読み込む
+activity.reading_named_file: "%{file} を読み込み中"
+activity.read_named_file: "%{file} を読み込みました"
+activity.read_named_file_failed: "%{file} の読み込みに失敗しました"
+activity.reading_file: ファイルを読み込み中
+activity.read_file_completed: ファイルを読み込みました
+activity.read_file_failed: ファイルの読み込みに失敗しました
+activity.search_files: ファイルを検索
+activity.find_files: ファイルを探す
+activity.searching_files_for: "ファイル内で %{query} を検索中"
+activity.searched_files_for: "ファイル内で %{query} を検索しました"
+activity.file_search_failed_for: "ファイル内での %{query} の検索に失敗しました"
+activity.searching_files: ファイルを検索中
+activity.searched_files: ファイルを検索しました
+activity.file_search_failed: ファイルの検索に失敗しました
+activity.list_files: ファイル一覧を表示
+activity.listing_files_in: "%{directory} のファイル一覧を取得中"
+activity.listed_files_in: "%{directory} のファイル一覧を取得しました"
+activity.file_list_failed_in: "%{directory} のファイル一覧の取得に失敗しました"
+activity.listing_files: ファイル一覧を取得中
+activity.listed_files: ファイル一覧を取得しました
+activity.file_list_failed: ファイル一覧の取得に失敗しました
+activity.searching_web_for: "ウェブで %{query} を検索中"
+activity.searched_web_for: "ウェブで %{query} を検索しました"
+activity.web_search_failed_for: "ウェブでの %{query} の検索に失敗しました"
+activity.searching_web: ウェブを検索中
+activity.searched_the_web: ウェブを検索しました
+activity.web_search_failed: ウェブ検索に失敗しました
+activity.updating_plan: プランを更新中
+activity.updated_plan: プランを更新しました
+activity.plan_update_failed: プランの更新に失敗しました
+activity.activity: アクティビティ
+activity.tool: ツール
+activity.plan_updated: プランを更新しました
+activity.output_truncated: "\n\n… 出力は省略されました"
+activity.thought: 思考
+activity.thoughts: 思考
+activity.command: コマンド
+activity.commands: コマンド
+activity.file_edit: ファイル編集
+activity.file_edits: ファイル編集
+activity.file_read: ファイル読み込み
+activity.file_reads: ファイル読み込み
+activity.file_search: ファイル検索
+activity.file_searches: ファイル検索
+activity.file_list: ファイル一覧
+activity.file_lists: ファイル一覧
+activity.search: 検索
+activity.searches: 検索
+activity.plan_step: プランのステップ
+activity.plan_steps: プランのステップ
+activity.tool_call: ツール呼び出し
+activity.tool_calls: ツール呼び出し
+
+mode.build: 実装
+mode.plan: プラン
+mode.supervised: 監督モード
+mode.auto_accept_edits: 編集を自動承認
+mode.auto: 自動
+mode.full_access: フルアクセス
+mode.plan_description: 変更を加えずに調査してプランを作成します
+mode.supervised_description: コマンドの実行とファイル変更の前に確認します
+mode.auto_accept_edits_description: 編集は自動承認し、その他の操作は事前に確認します
+mode.auto_description: 通常の操作は AI レビュアーが承認し、リスクのある操作は事前に確認します
+mode.full_access_description: 確認なしでコマンドの実行と編集を許可します
+
+computer_use.allow_for_task: このタスクで許可
+computer_use.always_allow_app: このアプリを常に許可
+computer_use.allow_control: Waku に「%{app}」の操作を許可しますか？
+computer_use.screenshot_shared: このウインドウのスクリーンショットが、使用中の Codex モデルと共有されます
+computer_use.sensitive_action: この操作ではテキストの入力やキー操作が行われる可能性があります
+computer_use.bundle_id: "Bundle ID：%{id}"
+computer_use.no_bundle_id: このアプリには Bundle ID がないため、常に許可することはできません
+computer_use.stopped: 停止しました
+computer_use.controlling: 操作中
+computer_use.captured: キャプチャ済み
+computer_use.take_control: 操作を引き継ぐ
+computer_use.preparing_preview: プレビューを準備中…
+
+common.deny: 拒否
+
+permission.allow_once: 1 回だけ許可
+permission.allow_for_session: このセッションで許可
+permission.always_allow: 常に許可
+permission.a_tool: ツール
+permission.run_a_tool: ツールを実行
+permission.run_a_tool_lower: ツールを実行
+permission.blocked_path: "ブロックされたパス：%{path}"
+permission.agent_wants_to_run: エージェントが %{tool} を実行しようとしています
+permission.run_tool: "%{tool} を実行しますか？"
+permission.allow_named_permission: "%{permission} を許可しますか？"
+permission.agent_asks_for_named_permission: エージェントが %{permission} の権限を求めています
+permission.agent_asks_for_permission: エージェントが権限を求めています
+permission.agent_wants_to: エージェントが次の操作を実行しようとしています：%{action}
+
+common.close: 閉じる
+common.default: デフォルト
+
+models.none_found: モデルが見つかりません
+models.favorite_hint: モデルにスターを付けると、ここに固定できます
+models.loading: モデルを読み込み中…
+models.none_reported: このプロバイダーにモデルがありません
+models.standard: 標準
+models.reasoning: 推論レベル
+models.service_tier: サービスティア
+
+model_option.none: なし
+model_option.minimal: 最小
+model_option.low: 低
+model_option.medium: 中
+model_option.high: 高
+model_option.extra_high: 非常に高い
+model_option.max: 最大
+model_option.ultra: 超高
+model_option.auto: 自動
+model_option.fast: 高速
+model_option.amp_fast_description: 使用量が増える代わりに、Amp の高速な処理階層を使用します
+model_option.fast_description: 使用量が増える代わりに、応答を高速化します
+
+command_scope.project: プロジェクト
+command_scope.user: ユーザー
+command_scope.skill: スキル
+command_scope.builtin: 組み込み
+
+skills.search: スキルを検索…
+skills.count_one: 1 個のスキル
+skills.count_many: "%{count} 個のスキル"
+skills.count_disabled: "無効 %{count} 件"
+skills.filter_caption: "%{total} 件中 %{shown} 件を表示"
+skills.scanning: スキルフォルダをスキャン中…
+skills.no_match: 検索に一致するスキルはありません
+skills.section_user: ユーザー
+skills.source_shared: 共有
+skills.scope_user_detail: すべてのプロジェクトで利用可能
+skills.scope_in_project: "%{project} 内"
+skills.filter_all: すべてのスキル
+skills.select_placeholder: スキルを選択
+skills.detail_invoke: 呼び出し
+skills.detail_location: 場所
+skills.detail_contents: 内容
+skills.detail_updated: 更新日時
+skills.no_description: 説明なし
+skills.disabled_badge: 無効
+skills.file_count_one: 補助ファイル 1 件
+skills.file_count_many: "補助ファイル %{count} 件"
+skills.updated_just_now: たった今
+skills.updated_minutes: "%{count} 分前"
+skills.updated_hours: "%{count} 時間前"
+skills.updated_days: "%{count} 日前"
+skills.allowed_tools: ツール
+skills.duplicate_one: 同名のスキルが他の 1 か所にもあります — 最も限定的な場所にあるスキルが優先されます
+skills.duplicate_many: "同名のスキルが他の %{count} か所にもあります — 最も限定的な場所にあるスキルが優先されます"
+skills.open_file: SKILL.md を開く
+skills.reveal: Finder に表示
+skills.copy_path: パスをコピー
+skills.path_copied: パスをコピーしました
+skills.delete: 削除
+skills.confirm_delete: 削除を確認
+skills.deleted_toast: "「%{name}」をゴミ箱に移動しました"
+skills.delete_failed: "スキルを削除できませんでした：%{error}"
+skills.toggle_failed: "スキルを更新できませんでした：%{error}"
+skills.empty_title: スキルはまだありません
+skills.empty_description: スキルは SKILL.md を含むフォルダです。デプロイ手順やレビューチェックリストのように、どのエージェントでも読み込める再利用可能な指示をまとめられます。Claude Code、Codex、その他のエージェント向けにインストールされたスキルがここに表示され、/name で呼び出せます。
+
+commands.init_description: このプロジェクトの %{instructions_file} を作成または更新
+commands.review_description: このブランチの保留中の変更をレビュー
+commands.commit_description: 現在の変更をステージしてコミット
+commands.claude_compact: 会話を要約してコンテキストを空ける
+commands.claude_context: コンテキストウインドウの使用状況を表示
+commands.claude_cost: このセッションのトークン使用量とコストを表示
+commands.claude_init: プロジェクトを分析して CLAUDE.md を作成
+commands.claude_pr_comments: 現在の PR のレビューコメントを取得
+commands.claude_review: プルリクエストをレビュー
+commands.claude_security_review: 保留中の変更をセキュリティレビュー
+commands.claude_todos: 現在の TODO 項目を一覧表示
+
+composer.edit_in_composer: 入力欄で編集
+composer.queued_followups: キューに追加したフォローアップ
+composer.queued_followups_description: キューに追加したフォローアップ · 現在のターンが完了すると送信されます
+composer.preparing_task: タスクを準備中…
+composer.steer_turn: 実行中のターンに指示を追加（⌘↩）
+composer.queue_followup: フォローアップとしてキューに追加（⏎）
+
+branches.detached_head: Detached HEAD
+branches.search_project: "%{project} のブランチを検索"
+branches.switching: 切り替え中…
+branches.create_and_checkout: 新しいブランチを作成してチェックアウト
+branches.create_hint: Return キーで作成 · Esc キーでキャンセル
+branches.none_found: ブランチが見つかりません
+branches.create_and_checkout_ellipsis: 新しいブランチを作成してチェックアウト…
+branches.title: ブランチ
+
+workspace.work_in: 作業場所
+workspace.local: ローカル
+workspace.new_worktree: 新しいワークツリー
+workspace.workspace: ワークスペース
+workspace.worktree: ワークツリー
+
+terminal.starting: ターミナルを起動中…
+
+project.add_project: プロジェクトを追加
+
+session.stopped: 停止しました
+session.turn_completed: ターンが完了しました
+session.stopped_before_response: エージェントは回答を返す前に停止しました
+session.codex_exited_before_response: Codex app-server は回答を返す前に終了しました
+session.steer_rejected: エージェントに追加の指示を送れませんでした（%{error}）。メッセージはフォローアップとしてキューに追加されました
+session.agent_ran_out_of_context: このターンでエージェントのコンテキストが不足しました
+session.agent_declined_turn: エージェントはこのターンを辞退しました
+session.agent_stopped_reason: "エージェントが停止しました：%{reason}"
+
+errors.open_session: "そのタスクを開けませんでした：%{error}"
+errors.create_projectless_task: "~/.waku 内にタスクを作成できませんでした：%{error}"
+errors.save_projectless_migration: "プロジェクトなしタスクの移行を保存できませんでした：%{error}"
+errors.move_projectless_task: "以前のルート直下のプロジェクトなしタスクを ~/.waku 内に移動できませんでした：%{error}"
+errors.change_branch: "ブランチを変更できませんでした：%{error}"
+errors.capture_pre_turn_checkpoint: "ターン開始前のチェックポイントを取得できませんでした：%{error}"
+errors.capture_turn_checkpoint: "ターンのチェックポイントを取得できませんでした：%{error}"
+errors.save_local_state: "ローカルの状態を保存できませんでした：%{error}"
+errors.task_project_not_found: タスクのプロジェクトが見つかりませんでした
+errors.provider_native_session_unavailable: "%{provider} のネイティブセッションは利用できません"
+errors.provider_native_thread_unavailable: "%{provider} のネイティブスレッドは利用できません"
+errors.provider_native_cursor_unavailable: "%{provider} のネイティブセッションカーソルは利用できません"
+errors.provider_native_thread_cursor_unavailable: "%{provider} のネイティブスレッドカーソルは利用できません"
+errors.provider_waku_task_unavailable: "%{provider} の Waku タスクは利用できません"
+errors.provider_not_installed: "%{provider} はインストールされていません"
+errors.provider_not_found: "%{provider} はインストールされていないか、見つかりませんでした"
+errors.claude_fork_checkpoint_missing: Claude からフォーク用チェックポイントが返されませんでした
+errors.claude_turn_checkpoint_unavailable: "そのターンの Claude ネイティブチェックポイントは利用できません：%{error}"
+errors.pi_session_file_unavailable: Pi のネイティブセッションファイルは利用できません
+errors.fork_task: "タスクをフォークできませんでした：%{error}"
+errors.create_rewind_snapshot: "巻き戻し用の安全スナップショットを作成できませんでした：%{error}"
+errors.restore_checkpoint: "チェックポイントを復元できませんでした：%{error}"
+errors.restore_checkpoint_and_safety: "チェックポイントの復元に失敗し（%{error}）、安全スナップショットの復元にも失敗しました（%{restore_error}）。復旧用 ref は %{safety_ref} に保持されています"
+errors.rollback_rejected_workspace_restored: "プロバイダーがロールバックを拒否したため、ワークスペースを復元しました：%{error}"
+errors.rollback_and_safety_failed: "プロバイダーのロールバックに失敗し（%{error}）、安全スナップショットも復元できませんでした（%{restore_error}）。復旧用 ref は %{safety_ref} に保持されています"
+errors.no_session_selected: タスクが選択されていません
+errors.session_not_found: タスクが見つかりません
+errors.project_not_found: プロジェクトが見つかりません
+errors.prepare_task_project_not_found: タスクを準備できませんでした：プロジェクトが見つかりません
+errors.store_pasted_image: "ペーストした画像を添付できませんでした：%{error}"
+errors.create_worktree: "ワークツリーを作成できませんでした：%{error}"
+errors.prepared_runtime_unavailable: 準備したエージェントランタイムは利用できません
+errors.start_agent: "エージェントを起動できませんでした：%{error}"
+errors.provider_no_active_turn: "%{provider} には指示を追加できる実行中のターンがありません"
+errors.provider_transport_write: "%{provider} の通信への書き込みに失敗しました：%{error}"
+errors.provider_transport_write_short: "%{provider} の通信への書き込みに失敗しました"
+errors.provider_transport_read: "%{provider} の通信の読み込みに失敗しました：%{error}"
+errors.provider_invalid_json: "%{provider} から無効な JSON が送信されました：%{error}"
+errors.provider_exited: "%{provider} が %{status} で終了しました"
+errors.provider_rpc_exited: "%{provider} RPC が %{status} で終了しました"
+errors.read_provider_exit_status: "%{provider} の終了ステータスを読み取れませんでした：%{error}"
+errors.initialize_provider: "%{provider} を初期化できませんでした：%{error}"
+errors.provider_no_session_id: "%{provider} からセッション ID が返されませんでした"
+errors.provider_rejected_prompt_detail: "%{provider} がプロンプトを拒否しました：%{error}"
+errors.stop_provider: "%{provider} を停止できませんでした：%{error}"
+errors.switch_provider_model: "%{provider} のモデルを切り替えられませんでした：%{error}"
+errors.change_provider_thinking: "%{provider} の思考レベルを変更できませんでした：%{error}"
+errors.open_provider_session: "%{provider} のセッションを開けませんでした：%{error}"
+errors.select_model: "モデルを選択できませんでした：%{error}"
+errors.read_provider_event_stream: "%{provider} のイベントストリームを読み取れませんでした：%{error}"
+errors.answer_provider_permission: "%{provider} の権限リクエストに回答できませんでした：%{error}"
+errors.initialize_codex_app_server: Codex app-server を初期化できませんでした
+errors.register_computer_use_skill: Waku のコンピュータ操作スキルを Codex に登録できませんでした
+errors.codex_thread_open_incomplete: Codex はスレッドを開く処理を完了しませんでした
+errors.provider_receive_prompt: "%{provider} はプロンプトを受信できませんでした"
+errors.provider_start_turn: "%{provider} はターンを開始できませんでした"
+errors.provider_rejected_steer: "%{provider} が追加の指示を拒否しました：%{error}"
+errors.provider_stopped_receiving: "%{provider} はメッセージの受信を停止しました"
+errors.provider_initialize_session: "%{provider} はこのセッションを初期化できませんでした"
+errors.provider_rejected_prompt: "%{provider} は実行前にプロンプトを拒否しました"
+errors.provider_complete_turn: "%{provider} はこのターンを完了できませんでした"
+errors.pi_reported_error: Pi からエラーが報告されました
+
+session.response_unavailable: その回答は利用できなくなりました
+session.response_cannot_fork: その回答からは現在タスクをフォークできません
+session.response_fork_in_progress: フォーク元のタスクを削除する前に、タスクのフォークが完了するまでお待ちください
+session.response_cannot_copy: その回答を新しいタスクにコピーできませんでした
+session.forked_with_checkpoint_warning: "タスクをフォークしましたが、一部の Git チェックポイントをコピーできませんでした：%{error}"
+session.forked_from_response: この回答からタスクをフォークしました
+session.message_not_editable: そのメッセージは現在編集できません
+session.edited_message_empty: 編集したメッセージを空にはできません
+session.message_unavailable: そのメッセージは利用できなくなりました
+session.select_before_rewind: 会話を巻き戻す前にタスクを選択してください
+session.stop_before_rewind: 会話を巻き戻す前に現在のターンを停止してください
+session.provider_cannot_rewind: "%{provider} はまだネイティブの会話を安全にロールバックできません"
+session.pre_turn_checkpoint_missing: メッセージのターン開始前の Git チェックポイントがありません
+session.rewind_title: "%{title}（巻き戻し）"
+session.rewound: タスクをターン %{turn} の前まで巻き戻しました
+session.rewound_with_stale_refs: "タスクをターン %{turn} の前まで巻き戻しましたが、古い ref が残っています：%{error}"
+
+right_panel.browser: ブラウザ
+right_panel.terminal: ターミナル
+right_panel.files: ファイル
+right_panel.diff: レビュー
+right_panel.toggle: 右パネルの表示を切り替える
+right_panel.open_surface: パネルを開く
+right_panel.choose_surface: 右パネルに表示する内容を選択します
+right_panel.browser_description: ローカルアプリまたは URL を開きます
+right_panel.terminal_description: このワークスペースでシェルを起動します
+right_panel.files_description: ワークスペースのファイルを閲覧します
+right_panel.diff_description: ファイルの変更をレビューします
+right_panel.terminal_unavailable: ターミナルを利用できません
+right_panel.terminal_unavailable_description: ターミナルパネルをもう一度開くとシェルが起動します
+
+environment.title: 環境
+environment.summary: 環境とバックグラウンド作業
+environment.changes: 変更
+environment.commit_or_push: コミットまたはプッシュ
+environment.compare_branch: ブランチを比較
+
+commit.message_placeholder: コミットメッセージ（空欄の場合は自動生成）…
+commit.include_unstaged: ステージしていない変更を含める
+commit.commit: コミット
+commit.commit_and_push: コミットしてプッシュ
+commit.push: プッシュ
+commit.generating_message: コミットメッセージを生成中…
+commit.committing: コミット中…
+commit.committing_and_pushing: コミットしてプッシュ中…
+commit.pushing: プッシュ中…
+commit.no_task: コミットできるタスクがありません
+commit.no_workspace: このタスクにはワークスペースがありません
+commit.no_changes: コミットする変更はありません
+commit.agent_unavailable: 現在のエージェント CLI を利用できないため、コミットメッセージを生成できません
+commit.committed: 変更をコミットしました
+commit.committed_and_pushed: 変更をコミットしてプッシュしました
+commit.pushed: 変更をプッシュしました
+
+background.title: バックグラウンド
+background.description: エージェントが起動したプロセスとサブエージェントを確認します
+background.processes: バックグラウンドプロセス
+background.agents: サブエージェント
+background.process: プロセス
+background.monitor: モニター
+background.subagent: サブエージェント
+background.no_work: バックグラウンドの作業はありません
+background.no_work_description: 長時間実行されるコマンドとサブエージェントがここに表示されます。
+background.view: 表示
+background.stop: 停止
+background.stop_all: すべて停止
+background.stop_not_running: プロセスはすでに停止しています。
+background.output: 出力
+background.no_output: まだ出力はありません
+background.command: コマンド
+background.prompt: プロンプト
+background.cwd: 作業ディレクトリ
+background.role: ロール
+background.model: モデル
+background.latest_update: 最新の更新
+background.exit_code: 終了コード
+background.output_truncated: 以前の出力は省略されました
+background.process_count: "バックグラウンドプロセス %{count} 件"
+background.process_count_one: バックグラウンドプロセス 1 件
+background.agent_count: "サブエージェント %{count} 件"
+background.agent_count_one: サブエージェント 1 件
+background.status.starting: 起動中
+background.status.running: 実行中
+background.status.monitoring: 監視中
+background.status.stopping: 停止中
+background.status.completed: 完了
+background.status.failed: 失敗
+background.status.stopped: 停止
+background.status.lost: 切断
+
+files.unsaved_changes: 未保存の変更があります — ⌘S で保存
+files.no_project_open: プロジェクトが開かれていません
+files.no_project_open_description: プロジェクトを開くとファイルを閲覧できます
+files.no_project_is_open: 開いているプロジェクトはありません
+files.unable_to_edit: "このファイルを編集できません：%{error}"
+files.could_not_save_opening: "%{path} を保存できませんでした：まだ開いています"
+files.could_not_save_read_only: "%{path} を保存できませんでした：このファイルは編集できません"
+files.could_not_save: "%{path} を保存できませんでした：%{error}"
+
+diff.no_changes: 変更はありません
+diff.no_changes_description: このソースにはレビューするファイル変更がありません
+diff.filter_files: ファイルを絞り込む…
+diff.source_last_turn: 前回のターン
+diff.source_turn: ターン %{turn}
+diff.source_uncommitted: 未コミット
+diff.source_unstaged: 未ステージ
+diff.source_staged: ステージ済み
+diff.source_committed: コミット済み
+diff.source_branch: ブランチ
+diff.loading: 変更を読み込み中…
+diff.loading_description: レビュー用に一貫した Git スナップショットを取得しています
+diff.unavailable: 変更を利用できません
+diff.refresh: 変更を更新
+diff.refresh_failed: "変更を更新できませんでした：%{error}"
+diff.truncated: 大きな差分 · 先頭 50,000 行を表示
+diff.unmodified_lines: "未変更の行 %{count} 行"
+diff.expand_all_context: 未変更の行をすべて展開
+diff.expand_context: 未変更の行を展開 · Shift キーを押しながらクリックですべて展開
+diff.expand_context_above: 上の 100 行を表示 · Shift キーを押しながらクリックですべて表示
+diff.expand_context_below: 下の 100 行を表示 · Shift キーを押しながらクリックですべて表示
+
+browser.back: 戻る（⌘[）
+browser.forward: 進む（⌘]）
+browser.stop_loading: 読み込みを停止（Esc）
+browser.reload: 再読み込み（⌘R）
+browser.open_external: デフォルトのブラウザで開く
+browser.browse_web: ウェブを閲覧
+browser.start_hint: 上に URL または検索語句を入力してください — ⌘L でアドレスバーにフォーカス
+browser.unavailable: ブラウザを利用できません
+browser.requires_macos: ブラウザパネルは macOS でのみ利用できます
+
+find.bad_pattern: 無効なパターン
+find.no_results: 結果なし
+find.result_count: "%{total} 件中 %{current} 件目"
+find.match_case: 大文字と小文字を区別（⌥⌘C）
+find.match_whole_word: 単語単位で検索（⌥⌘W）
+find.use_regex: 正規表現を使用（⌥⌘R）
+find.previous_match: 前の一致項目（⇧Enter）
+find.next_match: 次の一致項目（Enter）
+find.close: 閉じる（Esc）
+find.replace: 置換（Enter）
+find.replace_all: すべて置換（⌥⌘Enter）
+find.toggle_replace: 置換欄の表示を切り替える
+
+common.dismiss_notification: 通知を閉じる
+common.reveal_in_finder: Finder に表示
+
+attachments.close_preview: 画像プレビューを閉じる
+attachments.preview_unavailable: 画像を表示できません
+
+common.copy_named: "%{name} をコピー"
+
+transcript.worked: 完了
+transcript.worked_for: 作業時間 %{duration}
+transcript.you_stopped_after: "%{duration} 後にタスクを停止しました"
+transcript.working_for: 作業中 · %{duration}
+transcript.thinking: 思考中
+transcript.thought_for: 思考時間 %{duration}
+transcript.changed_file: "%{count} 個のファイルを変更"
+transcript.changed_files: "%{count} 個のファイルを変更"
+transcript.review_changes: レビュー
+transcript.show_more_files: "さらに %{count} 個のファイルを表示"
+transcript.show_fewer_files: 表示するファイルを減らす
+transcript.showing_first_files: "%{total} 個中、先頭 %{count} 個を表示"
+
+duration.second: "%{count} 秒"
+duration.seconds: "%{count} 秒"
+duration.minute: "%{count} 分"
+duration.minutes: "%{count} 分"
+duration.hour: "%{count} 時間"
+duration.hours: "%{count} 時間"
+duration.seconds_short: "%{count}秒"
+duration.minutes_short: "%{count}分"
+duration.hours_short: "%{count}時間"
+duration.two_units: "%{first} %{second}"
+
+usage.scan_summary: "%{scanned} 件の会話記録をスキャン（対象期間外 %{skipped} 件）· 使用量レコード %{records} 件 · %{seconds} 秒"
+usage.daily: 日別
+usage.monthly: 月別
+usage.projects: プロジェクト
+usage.scanning: プロバイダーの会話記録をスキャン中…
+usage.rescan: プロバイダーの会話記録を再スキャン
+usage.range: "%{start}〜%{end}"
+usage.full_api_rate_note: "* API の通常料金で請求された場合"
+usage.sessions_summary: "%{count} セッションの入力、キャッシュ読み込み、出力の合計"
+usage.raw_token_cost: 元のトークンコスト
+usage.processed_tokens_upper: 処理済みトークン
+usage.cost_share: "コストの %{share} · %{tokens} トークン"
+usage.token_share: "トークンの %{share} · %{cost}"
+usage.no_activity_window: この期間のアクティビティはありません
+usage.cost_upper: コスト
+usage.tokens_upper: トークン
+usage.daily_cost: 日別コスト
+usage.daily_processed_tokens: 日別の処理済みトークン
+usage.model_upper: モデル
+usage.day_upper: 日付
+usage.breakdown: 内訳
+usage.no_projects_match: フィルタに一致するプロジェクトはありません
+usage.by_project: プロジェクト別
+usage.projects_caption: "%{projects} · %{tokens} トークン · %{sessions}"
+usage.projects_shown: "%{projects} 件中 %{shown} 件を表示"
+usage.percent_of_cost: "コストの %{share}"
+usage.token_count: "%{count} トークン"
+usage.last_active: 最終利用 %{date}
+usage.show_models: "%{models} の支出詳細を表示"
+usage.other_sessions: その他のセッション
+usage.rates_unavailable: モデルの料金を取得できないため、料金表が読み込まれるまでコストは未算出として表示されます
+usage.total: 合計
+usage.processed_tokens: 処理済みトークン
+usage.per_active_day: "アクティブな 1 日あたり %{count}"
+usage.cached_input: キャッシュ済み入力
+usage.observed_input_share: "実測入力の %{share}"
+usage.uncached_input: キャッシュなしの入力
+usage.cache_writes: "キャッシュ書き込み %{count}"
+usage.output: 出力
+usage.includes_reasoning: "うち推論 %{count}"
+usage.cache_savings: キャッシュによる節約
+usage.raw_cost_multiple: "元のトークンコストの %{multiple} 倍"
+usage.vs_full_input_rates: 通常の入力料金との比較
+usage.model: モデル
+usage.cost: コスト
+usage.share: 割合
+usage.tokens: トークン
+usage.day: 日付
+usage.cost_quality: コストの信頼度
+usage.provider_reported: プロバイダー報告値
+usage.model_priced: モデル料金から算出
+usage.unpriced: 未算出
+usage.no_activity_12_months: 過去 12 か月間のアクティビティはありません
+usage.last_12_months: 過去 12 か月
+usage.so_far: 現在まで
+usage.no_activity: アクティビティなし
+usage.models_by_spend: "%{models} · 支出順"
+usage.tokens_and_sessions: "%{tokens} トークン · %{sessions}"
+usage.month_caption: "%{tokens} トークン · %{sessions} · %{days}"
+usage.last_7_days: 過去 7 日間
+usage.last_30_days: 過去 30 日間
+usage.last_90_days: 過去 90 日間
+usage.this_month: 今月
+usage.last_month: 先月
+usage.custom: カスタム
+usage.project_one: "%{count} 個のプロジェクト"
+usage.project_many: "%{count} 個のプロジェクト"
+usage.session_one: "%{count} 件のセッション"
+usage.session_many: "%{count} 件のセッション"
+usage.model_one: "%{count} 個のモデル"
+usage.model_many: "%{count} 個のモデル"
+usage.active_day_one: "アクティブ %{count} 日"
+usage.active_day_many: "アクティブ %{count} 日"
+usage.refresh_failed: "使用状況の更新に失敗しました：%{error}"
+usage.context_used: コンテキストウインドウを %{percent}% 使用（⌘U）
+usage.shortcut: 使用状況（⌘U）
+usage.context_window: コンテキストウインドウ
+usage.plan_limits: プランの使用量上限
+usage.plan_limits_named: プランの使用量上限 · %{plan}
+usage.open_account_settings: アカウントの使用状況設定を開く
+usage.unavailable: 利用不可 — %{error}
+usage.usage_limit: 使用量の上限
+usage.hour_limit: "%{count} 時間の上限"
+usage.day_limit: "%{count} 日間の上限"
+usage.weekly_limit: 週間の上限
+usage.daily_limit: 1 日の上限
+usage.monthly_limit: 月間の上限
+usage.limit_suffix: の上限
+usage.scoped_limit: "%{period} · %{name}"
+usage.weekly_all_models: 週間 · すべてのモデル
+usage.weekly_model: 週間 · %{model}
+usage.resets_soon: まもなくリセット
+usage.resets_in_minutes: "%{count} 分後にリセット"
+usage.resets_in_hours: "%{count} 時間後にリセット"
+usage.resets_in_hours_minutes: "%{hours} 時間 %{minutes} 分後にリセット"
+usage.resets_date: "%{date} にリセット"
+
+usage_error.signin_cannot_read: "%{provider} のログイン情報では使用量を取得できません（HTTP %{status}）。%{provider} でタスクを 1 回実行すると更新されます"
+usage_error.rate_limited: 使用量 API は現在レート制限されています
+usage_error.http_status: 使用量 API から HTTP %{status} が返されました
+usage_error.invalid_json: 使用量 API から無効な JSON が返されました
+usage_error.no_home_directory: ホームディレクトリが見つかりません
+usage_error.read_file: "%{path} を読み込めませんでした"
+usage_error.codex_auth_invalid: Codex の auth.json は有効な JSON ではありません
+usage_error.codex_access_token_missing: Codex の auth.json にアクセストークンがありません。`codex login` を実行してください
+usage_error.no_rate_limit_windows: 使用量 API からレート制限期間が返されませんでした
+usage_error.start_grok_probe: "`grok agent stdio` を起動できませんでした"
+usage_error.grok_stdin_unavailable: Grok の標準入力を利用できません
+usage_error.grok_stdout_unavailable: Grok の標準出力を利用できません
+usage_error.start_grok_reader: Grok のプローブリーダーを起動できませんでした
+usage_error.grok_billing_timeout: Grok は時間内に課金リクエストへ応答しませんでした
+usage_error.grok_answered: "Grok からの応答：%{error}"
+usage_error.grok_no_billing_data: Grok から課金データが返されませんでした。`grok` を実行してログインしてください
+usage_error.claude_credentials_missing: キーチェーンにも ~/.claude にも Claude Code の認証情報がありません
+usage_error.run_security: /usr/bin/security を実行できませんでした
+usage_error.keychain_item_missing: キーチェーンに %{service} の項目がありません
+usage_error.claude_credentials_invalid: Claude Code の認証情報は有効な JSON ではありません
+usage_error.claude_oauth_missing: Claude Code の認証情報に claudeAiOauth の項目がありません
+usage_error.claude_access_token_missing: Claude Code の認証情報にアクセストークンがありません
+usage_error.run_curl: /usr/bin/curl を実行できませんでした
+usage_error.curl_stdin_unavailable: curl の標準入力を利用できません
+usage_error.configure_curl: curl に設定を渡せませんでした
+usage_error.curl_did_not_finish: curl がリクエストを完了しませんでした
+usage_error.curl_failed: "curl に失敗しました：%{error}"
+usage_error.unknown_error: 不明なエラー
+usage_error.curl_no_status: curl から HTTP ステータス行が返されませんでした

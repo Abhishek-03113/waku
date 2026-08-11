@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// The language preference Waku persists. `System` resolves to one of the two
+/// The language preference Waku persists. `System` resolves to one of the
 /// locales Waku deliberately ships today.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -8,16 +8,23 @@ pub enum AppLanguage {
     System,
     English,
     SimplifiedChinese,
+    Japanese,
 }
 
 impl AppLanguage {
-    pub const ALL: [Self; 3] = [Self::System, Self::English, Self::SimplifiedChinese];
+    pub const ALL: [Self; 4] = [
+        Self::System,
+        Self::English,
+        Self::SimplifiedChinese,
+        Self::Japanese,
+    ];
 
     pub fn locale(self) -> &'static str {
         match self.resolved() {
             Self::System => unreachable!("system language always resolves to a shipped locale"),
             Self::English => "en",
             Self::SimplifiedChinese => "zh-CN",
+            Self::Japanese => "ja",
         }
     }
 
@@ -28,6 +35,7 @@ impl AppLanguage {
             Self::System => translate("language.system"),
             Self::English => "English".to_owned(),
             Self::SimplifiedChinese => "简体中文".to_owned(),
+            Self::Japanese => "日本語".to_owned(),
         }
     }
 
@@ -46,6 +54,8 @@ impl AppLanguage {
         let locale = locale.replace('_', "-").to_ascii_lowercase();
         if locale == "zh-cn" || locale == "zh-sg" || locale.starts_with("zh-hans") {
             Self::SimplifiedChinese
+        } else if locale == "ja" || locale.starts_with("ja-") {
+            Self::Japanese
         } else {
             Self::English
         }
@@ -66,8 +76,12 @@ pub fn translate(key: &str) -> String {
     rust_i18n::t!(key).into_owned()
 }
 
-pub fn is_simplified_chinese() -> bool {
-    &*rust_i18n::locale() == "zh-CN"
+pub fn uses_east_asian_date_format() -> bool {
+    locale_uses_east_asian_date_format(&rust_i18n::locale())
+}
+
+fn locale_uses_east_asian_date_format(locale: &str) -> bool {
+    matches!(locale, "zh-CN" | "ja")
 }
 
 #[cfg(target_os = "macos")]
@@ -100,16 +114,19 @@ mod tests {
     fn language_locale_ids_are_supported() {
         assert_eq!(AppLanguage::English.locale(), "en");
         assert_eq!(AppLanguage::SimplifiedChinese.locale(), "zh-CN");
+        assert_eq!(AppLanguage::Japanese.locale(), "ja");
         let locales = rust_i18n::available_locales!();
-        assert_eq!(locales.len(), 2);
+        assert_eq!(locales.len(), 3);
         assert!(locales.iter().any(|locale| locale.as_ref() == "en"));
         assert!(locales.iter().any(|locale| locale.as_ref() == "zh-CN"));
+        assert!(locales.iter().any(|locale| locale.as_ref() == "ja"));
     }
 
     #[test]
     fn language_names_are_autonyms() {
         assert_eq!(AppLanguage::English.label(), "English");
         assert_eq!(AppLanguage::SimplifiedChinese.label(), "简体中文");
+        assert_eq!(AppLanguage::Japanese.label(), "日本語");
     }
 
     #[test]
@@ -119,7 +136,23 @@ mod tests {
             serde_json::to_string(&AppLanguage::System).unwrap(),
             r#""system""#
         );
-        assert!(matches!(AppLanguage::System.locale(), "en" | "zh-CN"));
+        assert!(matches!(
+            AppLanguage::System.locale(),
+            "en" | "zh-CN" | "ja"
+        ));
+    }
+
+    #[test]
+    fn japanese_system_locales_are_detected() {
+        assert_eq!(AppLanguage::from_locale_id("ja"), AppLanguage::Japanese);
+        assert_eq!(AppLanguage::from_locale_id("ja_JP"), AppLanguage::Japanese);
+    }
+
+    #[test]
+    fn japanese_and_simplified_chinese_use_east_asian_dates() {
+        assert!(locale_uses_east_asian_date_format("ja"));
+        assert!(locale_uses_east_asian_date_format("zh-CN"));
+        assert!(!locale_uses_east_asian_date_format("en"));
     }
 
     #[test]
@@ -155,6 +188,15 @@ mod tests {
         assert_eq!(
             &*rust_i18n::t!("session.rewound", locale = "zh-CN", turn = 3),
             "已回退到第 3 轮任务之前"
+        );
+        assert_eq!(&*rust_i18n::t!("settings.general", locale = "ja"), "一般");
+        assert_eq!(
+            &*rust_i18n::t!("computer_use.allow_control", locale = "ja", app = "Finder"),
+            "Waku に「Finder」の操作を許可しますか？"
+        );
+        assert_eq!(
+            &*rust_i18n::t!("session.rewound", locale = "ja", turn = 3),
+            "タスクをターン 3 の前まで巻き戻しました"
         );
     }
 

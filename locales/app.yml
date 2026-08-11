@@ -2,2303 +2,1553 @@ _version: 2
 
 menu.about:
   en: About %{app}
-  zh-CN: 关于 %{app}
 menu.check_for_updates:
   en: Check for Updates…
-  zh-CN: 检查更新…
 menu.settings:
   en: Settings…
-  zh-CN: 设置…
 menu.quit:
   en: Quit %{app}
-  zh-CN: 退出 %{app}
 menu.file:
   en: File
-  zh-CN: 文件
 menu.new_task:
   en: New Task
-  zh-CN: 新建任务
 menu.new_project:
   en: New Project…
-  zh-CN: 新建项目…
 menu.edit:
   en: Edit
-  zh-CN: 编辑
 menu.undo:
   en: Undo
-  zh-CN: 撤销
 menu.redo:
   en: Redo
-  zh-CN: 重做
 menu.cut:
   en: Cut
-  zh-CN: 剪切
 menu.copy:
   en: Copy
-  zh-CN: 复制
 menu.paste:
   en: Paste
-  zh-CN: 粘贴
 menu.select_all:
   en: Select All
-  zh-CN: 全选
 menu.view:
   en: View
-  zh-CN: 显示
 menu.command_palette:
   en: Command Palette…
-  zh-CN: 命令面板…
 menu.toggle_sidebar:
   en: Toggle Sidebar
-  zh-CN: 显示或隐藏侧边栏
 menu.toggle_right_panel:
   en: Toggle Right Panel
-  zh-CN: 显示或隐藏右侧面板
 menu.focus_composer:
   en: Focus Composer
-  zh-CN: 聚焦输入框
 menu.toggle_model_picker:
   en: Toggle Model Picker
-  zh-CN: 打开或关闭模型选择器
 menu.toggle_usage_panel:
   en: Toggle Usage Panel
-  zh-CN: 打开或关闭用量面板
 menu.window:
   en: Window
-  zh-CN: 窗口
 menu.toggle_fps_counter:
   en: Toggle FPS Counter
-  zh-CN: 显示或隐藏帧率
 menu.close_window:
   en: Close Window
-  zh-CN: 关闭窗口
 
 updater.update:
   en: Update
-  zh-CN: 更新
 updater.checking:
   en: Checking for updates…
-  zh-CN: 正在检查更新…
 updater.updating:
   en: Updating…
-  zh-CN: 正在更新…
 updater.up_to_date:
   en: Waku is up to date
-  zh-CN: Waku 已是最新版本
 updater.failed:
   en: "Update failed: %{error}"
-  zh-CN: "更新失败：%{error}"
 
 command_palette.placeholder:
   en: Search tasks or run a command…
-  zh-CN: 搜索任务或运行命令…
 command_palette.suggested:
   en: Suggested
-  zh-CN: 建议
 command_palette.tasks:
   en: Tasks
-  zh-CN: 任务
 command_palette.commands:
   en: Commands
-  zh-CN: 命令
 command_palette.settings:
   en: Settings
-  zh-CN: 设置
 command_palette.new_task:
   en: New task
-  zh-CN: 新建任务
 command_palette.open_project:
   en: Open project…
-  zh-CN: 打开项目…
 command_palette.choose_model:
   en: Choose model…
-  zh-CN: 选择模型…
 command_palette.show_sidebar:
   en: Show sidebar
-  zh-CN: 显示侧边栏
 command_palette.hide_sidebar:
   en: Hide sidebar
-  zh-CN: 隐藏侧边栏
 command_palette.show_right_panel:
   en: Show right panel
-  zh-CN: 显示右侧面板
 command_palette.hide_right_panel:
   en: Hide right panel
-  zh-CN: 隐藏右侧面板
 command_palette.current:
   en: Current
-  zh-CN: 当前
 command_palette.you:
   en: You
-  zh-CN: 你
 command_palette.agent:
   en: Agent
-  zh-CN: 助手
 command_palette.no_results:
   en: No matching tasks or commands
-  zh-CN: 未找到匹配的任务或命令
 command_palette.no_results_hint:
   en: Try a task title, message, project, setting, or command
-  zh-CN: 可尝试搜索任务标题、消息、项目、设置或命令
 
 language.title:
   en: Language
-  zh-CN: 语言
 language.system:
   en: System
-  zh-CN: 跟随系统
 language.description:
   en: Choose the language used throughout Waku
-  zh-CN: 选择 Waku 的界面语言
 
 settings.general:
   en: General
-  zh-CN: 通用
 settings.appearance:
   en: Appearance
-  zh-CN: 外观
 settings.providers:
   en: Providers
-  zh-CN: 模型服务商
 settings.usage:
   en: Usage
-  zh-CN: 用量
 settings.computer_use:
   en: Computer Use
-  zh-CN: 电脑操作
 settings.general_keywords:
   en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version
-  zh-CN: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
 settings.appearance_keywords:
   en: appearance theme system light dark language english chinese simplified
-  zh-CN: 外观 主题 系统 浅色 深色 语言 英语 中文 简体
 settings.providers_keywords:
   en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
-  zh-CN: 模型服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
 settings.skills:
   en: Skills
-  zh-CN: 技能
 settings.skills_keywords:
   en: skills skill library agent disable enable delete claude codex cursor opencode pi amp shared
-  zh-CN: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
 settings.usage_keywords:
   en: usage tokens cost spend cache daily chart model breakdown history claude codex
-  zh-CN: 用量 令牌 费用 支出 缓存 每日 图表 模型 明细 历史 claude codex
 settings.computer_use_keywords:
   en: computer use screen recording accessibility apps control codex
-  zh-CN: 电脑操作 屏幕录制 辅助功能 应用 控制 codex
 settings.back:
   en: Back
-  zh-CN: 返回
 settings.search:
   en: Search Settings
-  zh-CN: 搜索设置
 settings.theme:
   en: Theme
-  zh-CN: 主题
 settings.theme_description:
   en: Choose between system, light, or dark themes
-  zh-CN: 选择跟随系统、浅色或深色主题
 settings.theme_system:
   en: System
-  zh-CN: 跟随系统
 settings.theme_light:
   en: Light
-  zh-CN: 浅色
 settings.theme_dark:
   en: Dark
-  zh-CN: 深色
 
 input.do_anything:
   en: Do anything…
-  zh-CN: 交代任何任务…
 input.search_models:
   en: Search models…
-  zh-CN: 搜索模型…
 input.search_branches:
   en: Search branches
-  zh-CN: 搜索分支
 input.new_branch_name:
   en: New branch name
-  zh-CN: 新分支名称
 input.detected_automatically:
   en: Detected automatically
-  zh-CN: 自动检测
 input.filter_projects:
   en: Filter projects
-  zh-CN: 筛选项目
 input.search_or_enter_address:
   en: Search or enter address
-  zh-CN: 搜索或输入网址
 input.find:
   en: Find
-  zh-CN: 查找
 input.replace:
   en: Replace
-  zh-CN: 替换
 
 common.checking:
   en: Checking…
-  zh-CN: 正在检查…
 common.refresh:
   en: Refresh
-  zh-CN: 刷新
 common.recheck:
   en: Recheck
-  zh-CN: 重新检查
 common.reset:
   en: Reset
-  zh-CN: 重置
 common.revoke:
   en: Revoke
-  zh-CN: 撤销授权
 
 settings.local_by_default:
   en: Local by default
-  zh-CN: 默认存储在本地
 settings.local_by_default_description:
   en: Projects, conversations, and settings are stored on this Mac
-  zh-CN: 项目、对话和设置均存储在这台 Mac 上
 settings.automatic_updates:
   en: Automatic updates
-  zh-CN: 自动更新
 settings.automatic_updates_description:
   en: Check for new versions in the background and offer to install them
-  zh-CN: 在后台检查新版本，并在发现更新时提示安装
 settings.share_anonymous_usage_data:
   en: Share anonymous usage data
-  zh-CN: 分享匿名使用数据
 settings.share_anonymous_usage_data_description:
   en: Help improve Waku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other perosnal data are never included
-  zh-CN: 分享功能使用情况和可靠性数据，帮助改进 Waku。不会包含提示词、回复、项目名称、文件路径等个人信息
 
 providers.coding_agents:
   en: Coding agents
-  zh-CN: 编程智能体
 providers.description:
   en: Waku drives agent CLIs installed on this Mac. Install or sign in with each agent's own CLI, then refresh
-  zh-CN: Waku 调用安装在这台 Mac 上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
 providers.disabled_for_new_tasks:
   en: Disabled for new tasks
-  zh-CN: 已对新任务停用
 providers.model_count_one:
   en: "%{count} model"
-  zh-CN: "%{count} 个模型"
 providers.model_count_many:
   en: "%{count} models"
-  zh-CN: "%{count} 个模型"
 providers.not_detected_as:
   en: Not detected on PATH as %{command}
-  zh-CN: 未在 PATH 中找到 %{command}
 providers.using_override:
   en: Using %{path} instead of PATH detection
-  zh-CN: 正在使用 %{path}，不再从 PATH 自动检测
 providers.invalid_override:
   en: Nothing runnable at this path. Clear it to detect from PATH
-  zh-CN: 此路径下没有可执行文件。清空后可恢复从 PATH 自动检测
 providers.detected_at:
   en: Detected at %{path}
-  zh-CN: 已在 %{path} 检测到
 providers.searches_path:
   en: Waku did not detect %{command} in PATH
-  zh-CN: Waku 未在 PATH 中找到 %{command}
 providers.binary_path:
   en: Binary path
-  zh-CN: 可执行文件路径
 providers.binary_path_description:
   en: The executable Waku launches for %{provider}. Press Return to apply; leave empty to detect from PATH
-  zh-CN: Waku 用于启动 %{provider} 的可执行文件。按 Return 应用；留空则从 PATH 自动检测
 providers.checked_just_now:
   en: Checked just now
-  zh-CN: 刚刚检查过
 providers.checked_minutes_ago:
   en: Checked %{count}m ago
-  zh-CN: "%{count} 分钟前检查过"
 providers.checked_hours_ago:
   en: Checked %{count}h ago
-  zh-CN: "%{count} 小时前检查过"
 
 computer_use.allow_apps:
   en: Let Waku use apps
-  zh-CN: 允许 Waku 操作其他应用
 computer_use.availability:
   en: Computer Use is available with Codex, OpenCode, Grok, and Pi
-  zh-CN: Codex、OpenCode、Grok 和 Pi 支持电脑操作功能
 computer_use.macos_access:
   en: macOS access
-  zh-CN: macOS 权限
 computer_use.helper_access:
   en: Grant access to %{helper}, Waku's isolated control helper
-  zh-CN: 请向 Waku 的独立控制助手 %{helper} 授予权限
 computer_use.screen_recording:
   en: Screen Recording
-  zh-CN: 屏幕录制
 computer_use.screen_recording_description:
   en: Captures only the approved app window
-  zh-CN: 仅捕捉获准操作的应用窗口
 computer_use.accessibility:
   en: Accessibility
-  zh-CN: 辅助功能
 computer_use.accessibility_description:
   en: Posts pointer and keyboard events after approval
-  zh-CN: 获得批准后发送鼠标与键盘操作
 computer_use.always_allowed_apps:
   en: Always allowed apps
-  zh-CN: 始终允许的应用
 computer_use.always_allowed_apps_description:
   en: Waku pins these grants to the app's bundle ID and signing team
-  zh-CN: Waku 会将授权绑定到应用的 Bundle ID 和签名团队
 computer_use.no_always_allowed_apps:
   en: No apps are always allowed. Task-scoped grants stay in memory only
-  zh-CN: 尚未始终允许任何应用。仅限当前任务的授权只会保存在内存中
 computer_use.access_granted:
   en: Access Granted
-  zh-CN: 已授权
 computer_use.grant_access:
   en: Grant Access
-  zh-CN: 授予权限
 computer_use.permission_check_failed:
   en: Could not check Computer Use permissions
-  zh-CN: 无法检查电脑操作权限
 
 common.settings:
   en: Settings
-  zh-CN: 设置
 common.remove:
   en: Remove
-  zh-CN: 移除
 common.rename:
   en: Rename
-  zh-CN: 重命名
 
 session.new_task:
   en: New task
-  zh-CN: 新任务
 
 sidebar.today:
   en: Today
-  zh-CN: 今天
 sidebar.search:
   en: Search
-  zh-CN: 搜索
 sidebar.yesterday:
   en: Yesterday
-  zh-CN: 昨天
 sidebar.this_week:
   en: This Week
-  zh-CN: 本周
 sidebar.this_month:
   en: This Month
-  zh-CN: 本月
 sidebar.this_year:
   en: This Year
-  zh-CN: 今年
 sidebar.more:
   en: More
-  zh-CN: 更早
 sidebar.working:
   en: Working for %{elapsed}
-  zh-CN: 工作中 · %{elapsed}
 sidebar.just_now:
   en: just now
-  zh-CN: 刚刚
 sidebar.minutes_ago:
   en: "%{count}m"
-  zh-CN: "%{count} 分钟前"
 sidebar.hours_ago:
   en: "%{count}h"
-  zh-CN: "%{count} 小时前"
 sidebar.days_ago:
   en: "%{count}d"
-  zh-CN: "%{count} 天前"
 sidebar.unknown_project:
   en: Unknown project
-  zh-CN: 未知项目
 
 project.new_project:
   en: New project…
-  zh-CN: 新建项目…
 project.no_project:
   en: Don't work in a project
-  zh-CN: 不使用项目
 project.no_project_name:
   en: No project
-  zh-CN: 无项目
 project.choose_project:
   en: choose a project
-  zh-CN: 选择项目
 project.project_lower:
   en: project
-  zh-CN: 项目
 project.without_a_project:
   en: without a project
-  zh-CN: 不使用项目
 project.your_project:
   en: your project
-  zh-CN: 你的项目
 
 onboarding.open_project_to_begin:
   en: Open a project to begin
-  zh-CN: 打开一个项目即可开始
 onboarding.description:
   en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this Mac
-  zh-CN: Waku 会在你选择的文件夹中运行编程智能体。代码、任务和历史记录都保留在这台 Mac 上
 onboarding.open_project_folder:
   en: Open project folder…
-  zh-CN: 打开项目文件夹…
 onboarding.what_should_we_build:
   en: What should we build?
-  zh-CN: 想构建什么？
 onboarding.what_should_we_build_in:
   en: "What should we build in "
-  zh-CN: "想在 "
 onboarding.question_mark:
   en: "?"
-  zh-CN: " 中构建什么？"
 
 common.copied:
   en: Copied
-  zh-CN: 已复制
 common.copy_message:
   en: Copy message
-  zh-CN: 复制消息
 common.copy_message_title:
   en: Copy Message
-  zh-CN: 复制消息
 common.copy_selection:
   en: Copy Selection
-  zh-CN: 复制所选内容
 common.copy_to_composer:
   en: Copy to Composer
-  zh-CN: 复制到输入框
 common.copy_code:
   en: Copy Code
-  zh-CN: 复制代码
 common.cancel:
   en: Cancel
-  zh-CN: 取消
 common.send:
   en: Send
-  zh-CN: 发送
 
 session.fork_task:
   en: Fork task
-  zh-CN: 从此处派生任务
 session.fork_task_title:
   en: Fork Task
-  zh-CN: 从此处派生任务
 session.forking_task:
   en: Forking task…
-  zh-CN: 正在派生任务…
 session.forking_task_title:
   en: Forking Task…
-  zh-CN: 正在派生任务…
 session.revert_to_here:
   en: Revert to here
-  zh-CN: 回退到这里
 session.revert_to_here_title:
   en: Revert to Here
-  zh-CN: 回退到这里
 
 time.yesterday_at:
   en: Yesterday %{time}
-  zh-CN: 昨天 %{time}
 time.weekday_at:
   en: "%{weekday} %{time}"
-  zh-CN: "%{weekday} %{time}"
 time.date_at:
   en: "%{month}/%{day}, %{time}"
-  zh-CN: "%{month}月%{day}日 %{time}"
 time.full_date_at:
   en: "%{year}/%{month}/%{day}, %{time}"
-  zh-CN: "%{year}年%{month}月%{day}日 %{time}"
 time.monday:
   en: Monday
-  zh-CN: 周一
 time.tuesday:
   en: Tuesday
-  zh-CN: 周二
 time.wednesday:
   en: Wednesday
-  zh-CN: 周三
 time.thursday:
   en: Thursday
-  zh-CN: 周四
 time.friday:
   en: Friday
-  zh-CN: 周五
 time.saturday:
   en: Saturday
-  zh-CN: 周六
 time.sunday:
   en: Sunday
-  zh-CN: 周日
 
 activity.count:
   en: "%{count} %{activity}"
-  zh-CN: "%{count} 次%{activity}"
 activity.running:
   en: Running %{activities}
-  zh-CN: 正在执行：%{activities}
 activity.ran:
   en: Ran %{activities}
-  zh-CN: 已执行：%{activities}
 activity.arguments:
   en: Arguments
-  zh-CN: 参数
 activity.output:
   en: Output
-  zh-CN: 输出
 activity.image_output:
   en: Image output
-  zh-CN: 图片输出
 activity.search_for:
   en: Search for %{query}
-  zh-CN: 搜索：%{query}
 activity.searched_web:
   en: Searched the web
-  zh-CN: 已搜索网页
 activity.open_url:
   en: Open %{url}
-  zh-CN: 打开 %{url}
 activity.opened_web_page:
   en: Opened a web page
-  zh-CN: 已打开网页
 activity.find_in_url:
   en: Find %{pattern} in %{url}
-  zh-CN: 在 %{url} 中查找 %{pattern}
 activity.find_on_page:
   en: Find %{pattern} on the page
-  zh-CN: 在页面中查找 %{pattern}
 activity.search_within_url:
   en: Search within %{url}
-  zh-CN: 在 %{url} 中搜索
 activity.searched_within_page:
   en: Searched within a web page
-  zh-CN: 已在网页内搜索
 activity.browsed_page:
   en: Browsed %{count} page
-  zh-CN: 已浏览 %{count} 个页面
 activity.browsed_pages:
   en: Browsed %{count} pages
-  zh-CN: 已浏览 %{count} 个页面
 activity.browsed_web:
   en: Browsed the web
-  zh-CN: 已浏览网页
 activity.exit_code:
   en: "Exit code: %{code}"
-  zh-CN: "退出代码：%{code}"
 activity.output_with_exit_code:
   en: "%{output}\n\nExit code: %{code}"
-  zh-CN: "%{output}\n\n退出代码：%{code}"
 activity.run_command:
   en: Run command
-  zh-CN: 运行命令
 activity.running_named_command:
   en: Running %{command}
-  zh-CN: 正在运行 %{command}
 activity.ran_named_command:
   en: Ran %{command}
-  zh-CN: 已运行 %{command}
 activity.named_command_failed:
   en: "Command failed: %{command}"
-  zh-CN: "命令执行失败：%{command}"
 activity.running_command:
   en: Running command
-  zh-CN: 正在运行命令
 activity.ran_command:
   en: Ran command
-  zh-CN: 已运行命令
 activity.command_failed:
   en: Command failed
-  zh-CN: 命令执行失败
 activity.edit_file:
   en: Edit file
-  zh-CN: 编辑文件
 activity.write_file:
   en: Write file
-  zh-CN: 写入文件
 activity.editing_named_file:
   en: Editing %{file}
-  zh-CN: 正在编辑 %{file}
 activity.edited_named_file:
   en: Edited %{file}
-  zh-CN: 已编辑 %{file}
 activity.edit_failed_named_file:
   en: Failed to edit %{file}
-  zh-CN: 编辑 %{file} 失败
 activity.editing_files:
   en: Editing files
-  zh-CN: 正在编辑文件
 activity.edited_files:
   en: Edited files
-  zh-CN: 已编辑文件
 activity.edit_failed:
   en: Failed to edit files
-  zh-CN: 编辑文件失败
 activity.file_count:
   en: "%{count} files"
-  zh-CN: "%{count} 个文件"
 activity.read_file:
   en: Read file
-  zh-CN: 读取文件
 activity.reading_named_file:
   en: Reading %{file}
-  zh-CN: 正在读取 %{file}
 activity.read_named_file:
   en: Read %{file}
-  zh-CN: 已读取 %{file}
 activity.read_named_file_failed:
   en: Failed to read %{file}
-  zh-CN: 读取 %{file} 失败
 activity.reading_file:
   en: Reading file
-  zh-CN: 正在读取文件
 activity.read_file_completed:
   en: Read file
-  zh-CN: 已读取文件
 activity.read_file_failed:
   en: Failed to read file
-  zh-CN: 读取文件失败
 activity.search_files:
   en: Search files
-  zh-CN: 搜索文件
 activity.find_files:
   en: Find files
-  zh-CN: 查找文件
 activity.searching_files_for:
   en: Searching files for %{query}
-  zh-CN: 正在文件中搜索 %{query}
 activity.searched_files_for:
   en: Searched files for %{query}
-  zh-CN: 已在文件中搜索 %{query}
 activity.file_search_failed_for:
   en: Failed to search files for %{query}
-  zh-CN: 在文件中搜索 %{query} 失败
 activity.searching_files:
   en: Searching files
-  zh-CN: 正在搜索文件
 activity.searched_files:
   en: Searched files
-  zh-CN: 已搜索文件
 activity.file_search_failed:
   en: Failed to search files
-  zh-CN: 搜索文件失败
 activity.list_files:
   en: List files
-  zh-CN: 列出文件
 activity.listing_files_in:
   en: Listing files in %{directory}
-  zh-CN: 正在列出 %{directory} 中的文件
 activity.listed_files_in:
   en: Listed files in %{directory}
-  zh-CN: 已列出 %{directory} 中的文件
 activity.file_list_failed_in:
   en: Failed to list files in %{directory}
-  zh-CN: 无法列出 %{directory} 中的文件
 activity.listing_files:
   en: Listing files
-  zh-CN: 正在列出文件
 activity.listed_files:
   en: Listed files
-  zh-CN: 已列出文件
 activity.file_list_failed:
   en: Failed to list files
-  zh-CN: 无法列出文件
 activity.searching_web_for:
   en: Searching the web for %{query}
-  zh-CN: 正在网页中搜索 %{query}
 activity.searched_web_for:
   en: Searched the web for %{query}
-  zh-CN: 已在网页中搜索 %{query}
 activity.web_search_failed_for:
   en: Failed to search the web for %{query}
-  zh-CN: 在网页中搜索 %{query} 失败
 activity.searching_web:
   en: Searching the web
-  zh-CN: 正在搜索网页
 activity.searched_the_web:
   en: Searched the web
-  zh-CN: 已搜索网页
 activity.web_search_failed:
   en: Failed to search the web
-  zh-CN: 搜索网页失败
 activity.updating_plan:
   en: Updating plan
-  zh-CN: 正在更新计划
 activity.updated_plan:
   en: Updated plan
-  zh-CN: 已更新计划
 activity.plan_update_failed:
   en: Failed to update plan
-  zh-CN: 更新计划失败
 activity.activity:
   en: Activity
-  zh-CN: 操作
 activity.tool:
   en: Tool
-  zh-CN: 工具
 activity.plan_updated:
   en: Plan updated
-  zh-CN: 计划已更新
 activity.output_truncated:
   en: "\n\n… output truncated"
-  zh-CN: "\n\n… 输出已截断"
 activity.thought:
   en: thought
-  zh-CN: 思考
 activity.thoughts:
   en: thoughts
-  zh-CN: 思考
 activity.command:
   en: command
-  zh-CN: 命令
 activity.commands:
   en: commands
-  zh-CN: 命令
 activity.file_edit:
   en: file edit
-  zh-CN: 文件修改
 activity.file_edits:
   en: file edits
-  zh-CN: 文件修改
 activity.file_read:
   en: file read
-  zh-CN: 文件读取
 activity.file_reads:
   en: file reads
-  zh-CN: 文件读取
 activity.file_search:
   en: file search
-  zh-CN: 文件搜索
 activity.file_searches:
   en: file searches
-  zh-CN: 文件搜索
 activity.file_list:
   en: file listing
-  zh-CN: 文件列表
 activity.file_lists:
   en: file listings
-  zh-CN: 文件列表
 activity.search:
   en: search
-  zh-CN: 搜索
 activity.searches:
   en: searches
-  zh-CN: 搜索
 activity.plan_step:
   en: plan step
-  zh-CN: 计划步骤
 activity.plan_steps:
   en: plan steps
-  zh-CN: 计划步骤
 activity.tool_call:
   en: tool call
-  zh-CN: 工具调用
 activity.tool_calls:
   en: tool calls
-  zh-CN: 工具调用
 
 mode.build:
   en: Build
-  zh-CN: 构建
 mode.plan:
   en: Plan
-  zh-CN: 计划
 mode.supervised:
   en: Supervised
-  zh-CN: 监督模式
 mode.auto_accept_edits:
   en: Auto-accept edits
-  zh-CN: 自动接受修改
 mode.auto:
   en: Auto
-  zh-CN: 自动
 mode.full_access:
   en: Full access
-  zh-CN: 完全访问
 mode.plan_description:
   en: Inspect and plan without making changes
-  zh-CN: 仅检查并制定计划，不进行任何修改
 mode.supervised_description:
   en: Ask before commands and file changes
-  zh-CN: 执行命令或修改文件前先征求许可
 mode.auto_accept_edits_description:
   en: Auto-approve edits, ask before other actions
-  zh-CN: 自动批准文件修改，执行其他操作前先询问
 mode.auto_description:
   en: An AI reviewer approves routine actions; risky ones still ask
-  zh-CN: 由 AI 审核并批准常规操作；高风险操作仍会询问
 mode.full_access_description:
   en: Allow commands and edits without prompts
-  zh-CN: 无需确认即可执行命令和修改文件
 
 computer_use.allow_for_task:
   en: Allow for task
-  zh-CN: 本次任务允许
 computer_use.always_allow_app:
   en: Always allow app
-  zh-CN: 始终允许此应用
 computer_use.allow_control:
   en: Allow Waku to control %{app}?
-  zh-CN: 允许 Waku 控制“%{app}”吗？
 computer_use.screenshot_shared:
   en: A screenshot of this window will be shared with the active Codex model
-  zh-CN: 此窗口的截图将发送给当前使用的 Codex 模型
 computer_use.sensitive_action:
   en: This action can type text or press keys
-  zh-CN: 此操作可以输入文字或按下按键
 computer_use.bundle_id:
   en: "Bundle ID: %{id}"
-  zh-CN: "Bundle ID：%{id}"
 computer_use.no_bundle_id:
   en: This app has no bundle identifier, so it cannot be always allowed
-  zh-CN: 此应用没有 Bundle ID，因此无法设为始终允许
 computer_use.stopped:
   en: Stopped
-  zh-CN: 已停止
 computer_use.controlling:
   en: Controlling
-  zh-CN: 正在控制
 computer_use.captured:
   en: Captured
-  zh-CN: 已捕捉
 computer_use.take_control:
   en: Take Control
-  zh-CN: 接管
 computer_use.preparing_preview:
   en: Preparing preview…
-  zh-CN: 正在准备预览…
 
 common.deny:
   en: Deny
-  zh-CN: 拒绝
 permission.allow_once:
   en: Allow once
-  zh-CN: 仅允许一次
 permission.allow_for_session:
   en: Allow for session
-  zh-CN: 本次任务允许
 permission.always_allow:
   en: Always allow
-  zh-CN: 始终允许
 permission.a_tool:
   en: a tool
-  zh-CN: 某个工具
 permission.run_a_tool:
   en: Run a tool
-  zh-CN: 运行工具
 permission.run_a_tool_lower:
   en: run a tool
-  zh-CN: 运行工具
 permission.blocked_path:
   en: "Blocked path: %{path}"
-  zh-CN: "路径已被阻止：%{path}"
 permission.agent_wants_to_run:
   en: The agent wants to run %{tool}
-  zh-CN: 智能体想要运行 %{tool}
 permission.run_tool:
   en: Run %{tool}?
-  zh-CN: 是否运行 %{tool}？
 permission.allow_named_permission:
   en: Allow %{permission}?
-  zh-CN: 是否授予“%{permission}”权限？
 permission.agent_asks_for_named_permission:
   en: The agent is asking for the %{permission} permission
-  zh-CN: 智能体正在请求“%{permission}”权限
 permission.agent_asks_for_permission:
   en: The agent is asking for permission
-  zh-CN: 智能体正在请求权限
 permission.agent_wants_to:
   en: The agent wants to %{action}
-  zh-CN: 智能体想要执行“%{action}”
 common.close:
   en: Close
-  zh-CN: 关闭
 common.default:
   en: Default
-  zh-CN: 默认
 
 models.none_found:
   en: No models found
-  zh-CN: 未找到模型
 models.favorite_hint:
   en: Star a model to keep it here
-  zh-CN: 为模型加星标即可固定在这里
 models.loading:
   en: Loading models…
-  zh-CN: 正在加载模型…
 models.none_reported:
   en: No models reported by this provider
-  zh-CN: 此服务商未提供任何模型
 models.standard:
   en: Standard
-  zh-CN: 标准
 models.reasoning:
   en: Reasoning
-  zh-CN: 推理强度
 models.service_tier:
   en: Service Tier
-  zh-CN: 服务等级
 
 model_option.none:
   en: None
-  zh-CN: 无
 model_option.minimal:
   en: Minimal
-  zh-CN: 最低
 model_option.low:
   en: Low
-  zh-CN: 低
 model_option.medium:
   en: Medium
-  zh-CN: 中
 model_option.high:
   en: High
-  zh-CN: 高
 model_option.extra_high:
   en: Extra High
-  zh-CN: 极高
 model_option.max:
   en: Max
-  zh-CN: 最高
 model_option.ultra:
   en: Ultra
-  zh-CN: 超高
 model_option.auto:
   en: Auto
-  zh-CN: 自动
 model_option.fast:
   en: Fast
-  zh-CN: 快速
 model_option.amp_fast_description:
   en: Use Amp's faster serving tier at a higher usage rate
-  zh-CN: 使用 Amp 的快速服务等级，但会消耗更多用量
 model_option.fast_description:
   en: Faster responses at a higher usage rate
-  zh-CN: 更快获得回复，但会消耗更多用量
 
 command_scope.project:
   en: project
-  zh-CN: 项目
 command_scope.user:
   en: user
-  zh-CN: 用户
 command_scope.skill:
   en: skill
-  zh-CN: 技能
 command_scope.builtin:
   en: built-in
-  zh-CN: 内置
 
 skills.search:
   en: Search skills…
-  zh-CN: 搜索技能…
 skills.count_one:
   en: 1 skill
-  zh-CN: 1 个技能
 skills.count_many:
   en: "%{count} skills"
-  zh-CN: "%{count} 个技能"
 skills.count_disabled:
   en: "%{count} disabled"
-  zh-CN: "已禁用 %{count} 个"
 skills.filter_caption:
   en: "%{shown} of %{total} shown"
-  zh-CN: "显示 %{shown} / %{total} 个"
 skills.scanning:
   en: Scanning skill folders…
-  zh-CN: 正在扫描技能目录…
 skills.no_match:
   en: No skills match your search
-  zh-CN: 没有匹配的技能
 skills.section_user:
   en: User
-  zh-CN: 用户
 skills.source_shared:
   en: Shared
-  zh-CN: 共享
 skills.scope_user_detail:
   en: available in every project
-  zh-CN: 在所有项目中可用
 skills.scope_in_project:
   en: "in %{project}"
-  zh-CN: "位于 %{project}"
 skills.filter_all:
   en: All skills
-  zh-CN: 全部技能
 skills.select_placeholder:
   en: Select a skill
-  zh-CN: 选择一个技能
 skills.detail_invoke:
   en: Invoke
-  zh-CN: 调用
 skills.detail_location:
   en: Location
-  zh-CN: 位置
 skills.detail_contents:
   en: Contents
-  zh-CN: 内容
 skills.detail_updated:
   en: Updated
-  zh-CN: 更新
 skills.no_description:
   en: No description
-  zh-CN: 暂无描述
 skills.disabled_badge:
   en: Disabled
-  zh-CN: 已禁用
 skills.file_count_one:
   en: 1 supporting file
-  zh-CN: 1 个附属文件
 skills.file_count_many:
   en: "%{count} supporting files"
-  zh-CN: "%{count} 个附属文件"
 skills.updated_just_now:
   en: Just now
-  zh-CN: 刚刚
 skills.updated_minutes:
   en: "%{count}m ago"
-  zh-CN: "%{count} 分钟前"
 skills.updated_hours:
   en: "%{count}h ago"
-  zh-CN: "%{count} 小时前"
 skills.updated_days:
   en: "%{count}d ago"
-  zh-CN: "%{count} 天前"
 skills.allowed_tools:
   en: Tools
-  zh-CN: 工具
 skills.duplicate_one:
   en: Same name in 1 other location — the most specific copy wins
-  zh-CN: 另有 1 处同名技能 — 更具体的一份生效
 skills.duplicate_many:
   en: "Same name in %{count} other locations — the most specific copy wins"
-  zh-CN: "另有 %{count} 处同名技能 — 更具体的一份生效"
 skills.open_file:
   en: Open SKILL.md
-  zh-CN: 打开 SKILL.md
 skills.reveal:
   en: Reveal in Finder
-  zh-CN: 在访达中显示
 skills.copy_path:
   en: Copy Path
-  zh-CN: 拷贝路径
 skills.path_copied:
   en: Path copied
-  zh-CN: 已拷贝路径
 skills.delete:
   en: Delete
-  zh-CN: 删除
 skills.confirm_delete:
   en: Confirm delete
-  zh-CN: 确认删除
 skills.deleted_toast:
   en: "Moved “%{name}” to the Trash"
-  zh-CN: "已将“%{name}”移到废纸篓"
 skills.delete_failed:
   en: "Couldn’t delete the skill: %{error}"
-  zh-CN: "无法删除技能：%{error}"
 skills.toggle_failed:
   en: "Couldn’t update the skill: %{error}"
-  zh-CN: "无法更新技能：%{error}"
 skills.empty_title:
   en: No skills yet
-  zh-CN: 还没有技能
 skills.empty_description:
   en: A skill is a folder with a SKILL.md — reusable instructions any agent can load, like a deploy runbook or a review checklist. Skills installed for Claude Code, Codex, and every other agent show up here, invoked as /name.
-  zh-CN: 技能是一个包含 SKILL.md 的文件夹 — 任何智能体都能加载的可复用指令，例如部署手册或评审清单。为 Claude Code、Codex 等所有智能体安装的技能都会显示在这里，以 /名称 调用。
 
 commands.init_description:
   en: Create or update %{instructions_file} for this project
-  zh-CN: 为此项目创建或更新 %{instructions_file}
 commands.review_description:
   en: Review the pending changes on this branch
-  zh-CN: 审查当前分支中尚未合并的更改
 commands.commit_description:
   en: Stage and commit the current changes
-  zh-CN: 暂存并提交当前更改
 commands.claude_compact:
   en: Free up context by summarizing the conversation
-  zh-CN: 总结对话以释放上下文空间
 commands.claude_context:
   en: Show what is occupying the context window
-  zh-CN: 查看上下文窗口的占用情况
 commands.claude_cost:
   en: Show token usage and cost for this session
-  zh-CN: 查看当前任务的令牌用量与费用
 commands.claude_init:
   en: Analyze the project and write CLAUDE.md
-  zh-CN: 分析项目并编写 CLAUDE.md
 commands.claude_pr_comments:
   en: Fetch review comments for the current PR
-  zh-CN: 获取当前拉取请求的审查意见
 commands.claude_review:
   en: Review a pull request
-  zh-CN: 审查拉取请求
 commands.claude_security_review:
   en: Security review of the pending changes
-  zh-CN: 对尚未合并的更改进行安全审查
 commands.claude_todos:
   en: List the current todo items
-  zh-CN: 列出当前待办事项
 
 composer.edit_in_composer:
   en: Edit in composer
-  zh-CN: 在输入框中编辑
 composer.queued_followups:
   en: Queued follow-ups
-  zh-CN: 已排队的后续消息
 composer.queued_followups_description:
   en: Queued follow-ups · sends when the current turn finishes
-  zh-CN: 已排队的后续消息 · 当前回复结束后发送
 composer.preparing_task:
   en: Preparing task…
-  zh-CN: 正在准备任务…
 composer.steer_turn:
   en: Steer the running turn (⌘↩)
-  zh-CN: 补充当前任务（⌘↩）
 composer.queue_followup:
   en: Queue as follow-up (⏎)
-  zh-CN: 排队为后续消息（⏎）
 
 branches.detached_head:
   en: Detached HEAD
-  zh-CN: 游离 HEAD
 branches.search_project:
   en: Search %{project} branches
-  zh-CN: 搜索 %{project} 的分支
 branches.switching:
   en: Switching…
-  zh-CN: 正在切换…
 branches.create_and_checkout:
   en: Create and checkout new branch
-  zh-CN: 创建并切换到新分支
 branches.create_hint:
   en: Press Return to create · Esc to cancel
-  zh-CN: 按 Return 创建 · 按 Esc 取消
 branches.none_found:
   en: No branches found
-  zh-CN: 未找到分支
 branches.create_and_checkout_ellipsis:
   en: Create and checkout new branch…
-  zh-CN: 创建并切换到新分支…
 branches.title:
   en: Branches
-  zh-CN: 分支
 
 workspace.work_in:
   en: Work in
-  zh-CN: 工作位置
 workspace.local:
   en: Local
-  zh-CN: 本地
 workspace.new_worktree:
   en: New worktree
-  zh-CN: 新建工作树
 workspace.workspace:
   en: workspace
-  zh-CN: 工作区
 workspace.worktree:
   en: Worktree
-  zh-CN: 工作树
 
 terminal.starting:
   en: Starting terminal…
-  zh-CN: 正在启动终端…
 
 project.add_project:
   en: Add project
-  zh-CN: 添加项目
 
 session.stopped:
   en: Stopped
-  zh-CN: 已停止
 session.turn_completed:
   en: Turn completed
-  zh-CN: 任务已完成
 session.stopped_before_response:
   en: The agent stopped before returning a response
-  zh-CN: 智能体在返回回复前停止了
 session.codex_exited_before_response:
   en: Codex app-server exited before returning a response
-  zh-CN: Codex app-server 在返回回复前退出了
 session.steer_rejected:
   en: The agent couldn't be steered (%{error}); the message was queued as a follow-up
-  zh-CN: 无法向智能体补充指示（%{error}）；消息已排队，将作为后续消息发送
 session.agent_ran_out_of_context:
   en: The agent ran out of context for this turn
-  zh-CN: 智能体在本轮任务中耗尽了上下文空间
 session.agent_declined_turn:
   en: The agent declined this turn
-  zh-CN: 智能体拒绝执行本轮任务
 session.agent_stopped_reason:
   en: "The agent stopped: %{reason}"
-  zh-CN: "智能体已停止：%{reason}"
 
 errors.open_session:
   en: "Could not open that session: %{error}"
-  zh-CN: "无法打开该任务：%{error}"
 errors.create_projectless_task:
   en: "Could not create a task beneath ~/.waku: %{error}"
-  zh-CN: "无法在 ~/.waku 下创建任务：%{error}"
 errors.save_projectless_migration:
   en: "Could not save the projectless task migration: %{error}"
-  zh-CN: "无法保存无项目任务的迁移结果：%{error}"
 errors.move_projectless_task:
   en: "Could not move the old root-level projectless task beneath ~/.waku: %{error}"
-  zh-CN: "无法将旧的根目录无项目任务移至 ~/.waku：%{error}"
 errors.change_branch:
   en: "Could not change branch: %{error}"
-  zh-CN: "无法切换分支：%{error}"
 errors.capture_pre_turn_checkpoint:
   en: "Could not capture the pre-turn checkpoint: %{error}"
-  zh-CN: "无法创建任务开始前的检查点：%{error}"
 errors.capture_turn_checkpoint:
   en: "Could not capture the turn checkpoint: %{error}"
-  zh-CN: "无法创建本轮任务的检查点：%{error}"
 errors.save_local_state:
   en: "Could not save local state: %{error}"
-  zh-CN: "无法保存本地状态：%{error}"
 errors.task_project_not_found:
   en: The task's project could not be found
-  zh-CN: 找不到该任务所属的项目
 errors.provider_native_session_unavailable:
   en: "%{provider}'s native session is unavailable"
-  zh-CN: "%{provider} 的原生会话不可用"
 errors.provider_native_thread_unavailable:
   en: "%{provider}'s native thread is unavailable"
-  zh-CN: "%{provider} 的原生线程不可用"
 errors.provider_native_cursor_unavailable:
   en: "%{provider}'s native session cursor is unavailable"
-  zh-CN: "%{provider} 的原生会话位置不可用"
 errors.provider_native_thread_cursor_unavailable:
   en: "%{provider}'s native thread cursor is unavailable"
-  zh-CN: "%{provider} 的原生线程位置不可用"
 errors.provider_waku_task_unavailable:
   en: "%{provider}'s Waku task is unavailable"
-  zh-CN: "%{provider} 对应的 Waku 任务不可用"
 errors.provider_not_installed:
   en: "%{provider} is not installed"
-  zh-CN: "尚未安装 %{provider}"
 errors.provider_not_found:
   en: "%{provider} is not installed or could not be found"
-  zh-CN: "尚未安装 %{provider}，或无法找到该程序"
 errors.claude_fork_checkpoint_missing:
   en: Claude omitted the fork checkpoint
-  zh-CN: Claude 未返回派生任务所需的检查点
 errors.claude_turn_checkpoint_unavailable:
   en: "Claude's native checkpoint for that turn is unavailable: %{error}"
-  zh-CN: "Claude 中该轮任务的原生检查点不可用：%{error}"
 errors.pi_session_file_unavailable:
   en: Pi's native session file is unavailable
-  zh-CN: Pi 的原生会话文件不可用
 errors.fork_task:
   en: "Could not fork the task: %{error}"
-  zh-CN: "无法派生任务：%{error}"
 errors.create_rewind_snapshot:
   en: "Could not create a rewind safety snapshot: %{error}"
-  zh-CN: "无法创建回退前的安全快照：%{error}"
 errors.restore_checkpoint:
   en: "Could not restore the checkpoint: %{error}"
-  zh-CN: "无法恢复检查点：%{error}"
 errors.restore_checkpoint_and_safety:
   en: "Checkpoint restore failed (%{error}); safety restore also failed (%{restore_error}). Recovery ref retained at %{safety_ref}"
-  zh-CN: "检查点恢复失败（%{error}），安全快照也未能恢复（%{restore_error}）。恢复引用已保留在 %{safety_ref}"
 errors.rollback_rejected_workspace_restored:
   en: "The provider rejected the rollback, so the workspace was restored: %{error}"
-  zh-CN: "服务商拒绝回退，工作区已恢复：%{error}"
 errors.rollback_and_safety_failed:
   en: "Provider rollback failed (%{error}) and the safety snapshot could not be restored (%{restore_error}). Recovery ref retained at %{safety_ref}"
-  zh-CN: "服务商回退失败（%{error}），安全快照也未能恢复（%{restore_error}）。恢复引用已保留在 %{safety_ref}"
 errors.no_session_selected:
   en: No session selected
-  zh-CN: 尚未选择任务
 errors.session_not_found:
   en: Session not found
-  zh-CN: 找不到任务
 errors.project_not_found:
   en: Project not found
-  zh-CN: 找不到项目
 errors.prepare_task_project_not_found:
   en: "Could not prepare the task: project not found"
-  zh-CN: 无法准备任务：找不到项目
 errors.store_pasted_image:
   en: "Could not attach the pasted image: %{error}"
-  zh-CN: "无法添加粘贴的图片：%{error}"
 errors.create_worktree:
   en: "Could not create the worktree: %{error}"
-  zh-CN: "无法创建工作树：%{error}"
 errors.prepared_runtime_unavailable:
   en: The prepared agent runtime is unavailable
-  zh-CN: 已准备的智能体运行环境不可用
 errors.start_agent:
   en: "Could not start the agent: %{error}"
-  zh-CN: "无法启动智能体：%{error}"
 errors.provider_no_active_turn:
   en: "%{provider} has no active turn to steer"
-  zh-CN: "%{provider} 当前没有可补充指示的任务"
 errors.provider_transport_write:
   en: "%{provider} transport write failed: %{error}"
-  zh-CN: "%{provider} 通信写入失败：%{error}"
 errors.provider_transport_write_short:
   en: "%{provider} transport write failed"
-  zh-CN: "%{provider} 通信写入失败"
 errors.provider_transport_read:
   en: "%{provider} transport read failed: %{error}"
-  zh-CN: "%{provider} 通信读取失败：%{error}"
 errors.provider_invalid_json:
   en: "%{provider} sent invalid JSON: %{error}"
-  zh-CN: "%{provider} 发来了无效的 JSON：%{error}"
 errors.provider_exited:
   en: "%{provider} exited with %{status}"
-  zh-CN: "%{provider} 已退出（%{status}）"
 errors.provider_rpc_exited:
   en: "%{provider} RPC exited with %{status}"
-  zh-CN: "%{provider} RPC 已退出（%{status}）"
 errors.read_provider_exit_status:
   en: "Could not read %{provider} exit status: %{error}"
-  zh-CN: "无法读取 %{provider} 的退出状态：%{error}"
 errors.initialize_provider:
   en: "Could not initialize %{provider}: %{error}"
-  zh-CN: "无法初始化 %{provider}：%{error}"
 errors.provider_no_session_id:
   en: "%{provider} did not report a session ID"
-  zh-CN: "%{provider} 未返回会话 ID"
 errors.provider_rejected_prompt_detail:
   en: "%{provider} rejected the prompt: %{error}"
-  zh-CN: "%{provider} 拒绝了消息：%{error}"
 errors.stop_provider:
   en: "Could not stop %{provider}: %{error}"
-  zh-CN: "无法停止 %{provider}：%{error}"
 errors.switch_provider_model:
   en: "Could not switch the %{provider} model: %{error}"
-  zh-CN: "无法切换 %{provider} 模型：%{error}"
 errors.change_provider_thinking:
   en: "Could not change %{provider}'s thinking level: %{error}"
-  zh-CN: "无法更改 %{provider} 的思考强度：%{error}"
 errors.open_provider_session:
   en: "Could not open a %{provider} session: %{error}"
-  zh-CN: "无法打开 %{provider} 会话：%{error}"
 errors.select_model:
   en: "Could not select the model: %{error}"
-  zh-CN: "无法选择模型：%{error}"
 errors.read_provider_event_stream:
   en: "Could not read the %{provider} event stream: %{error}"
-  zh-CN: "无法读取 %{provider} 事件流：%{error}"
 errors.answer_provider_permission:
   en: "Could not answer %{provider}'s permission request: %{error}"
-  zh-CN: "无法响应 %{provider} 的权限请求：%{error}"
 errors.initialize_codex_app_server:
   en: Failed to initialize Codex app-server
-  zh-CN: 无法初始化 Codex app-server
 errors.register_computer_use_skill:
   en: Failed to register Waku Computer Use skill with Codex
-  zh-CN: 无法向 Codex 注册 Waku 电脑操作技能
 errors.codex_thread_open_incomplete:
   en: Codex did not finish opening its thread
-  zh-CN: Codex 未能完成线程打开操作
 errors.provider_receive_prompt:
   en: "%{provider} could not receive the prompt"
-  zh-CN: "%{provider} 未能接收消息"
 errors.provider_start_turn:
   en: "%{provider} could not start the turn"
-  zh-CN: "%{provider} 未能开始任务"
 errors.provider_rejected_steer:
   en: "%{provider} rejected the steer: %{error}"
-  zh-CN: "%{provider} 拒绝了补充指示：%{error}"
 errors.provider_stopped_receiving:
   en: "%{provider} stopped receiving messages"
-  zh-CN: "%{provider} 已停止接收消息"
 errors.provider_initialize_session:
   en: "%{provider} could not initialize this session"
-  zh-CN: "%{provider} 未能初始化此任务"
 errors.provider_rejected_prompt:
   en: "%{provider} rejected the prompt before it ran"
-  zh-CN: "%{provider} 在开始处理前拒绝了消息"
 errors.provider_complete_turn:
   en: "%{provider} could not complete this turn"
-  zh-CN: "%{provider} 未能完成本轮任务"
 errors.pi_reported_error:
   en: Pi reported an error
-  zh-CN: Pi 报告了错误
 
 session.response_unavailable:
   en: That response is no longer available
-  zh-CN: 该回复已不可用
 session.response_cannot_fork:
   en: That response cannot be forked right now
-  zh-CN: 目前无法从该回复派生任务
 session.response_fork_in_progress:
   en: Wait for the task fork to finish before removing its source task
-  zh-CN: 请等待任务派生完成后再移除原任务
 session.response_cannot_copy:
   en: That response could not be copied into a new task
-  zh-CN: 无法将该回复复制到新任务中
 session.forked_with_checkpoint_warning:
   en: "Forked task; some Git checkpoints could not be copied: %{error}"
-  zh-CN: "任务已派生，但部分 Git 检查点未能复制：%{error}"
 session.forked_from_response:
   en: Forked task from this response
-  zh-CN: 已从该回复派生新任务
 session.message_not_editable:
   en: That message is not editable right now
-  zh-CN: 目前无法编辑该消息
 session.edited_message_empty:
   en: The edited message cannot be empty
-  zh-CN: 编辑后的消息不能为空
 session.message_unavailable:
   en: That message is no longer available
-  zh-CN: 该消息已不可用
 session.select_before_rewind:
   en: Select the task before rewinding its conversation
-  zh-CN: 请先选择该任务，再回退对话
 session.stop_before_rewind:
   en: Stop the current turn before rewinding the conversation
-  zh-CN: 请先停止当前任务，再回退对话
 session.provider_cannot_rewind:
   en: "%{provider} cannot safely roll back its native conversation yet"
-  zh-CN: "%{provider} 目前还无法安全回退原生会话"
 session.pre_turn_checkpoint_missing:
   en: The message's pre-turn Git checkpoint is missing
-  zh-CN: 缺少该消息发送前的 Git 检查点
 session.rewind_title:
   en: "%{title} (rewind)"
-  zh-CN: "%{title}（回退）"
 session.rewound:
   en: Rewound to before turn %{turn}
-  zh-CN: 已回退到第 %{turn} 轮任务之前
 session.rewound_with_stale_refs:
   en: "Rewound to before turn %{turn}; stale refs remain: %{error}"
-  zh-CN: "已回退到第 %{turn} 轮任务之前，但仍有过期引用：%{error}"
 
 right_panel.browser:
   en: Browser
-  zh-CN: 浏览器
 right_panel.terminal:
   en: Terminal
-  zh-CN: 终端
 right_panel.files:
   en: Files
-  zh-CN: 文件
 right_panel.diff:
   en: Review
-  zh-CN: 审阅
 right_panel.toggle:
   en: Toggle right panel
-  zh-CN: 显示或隐藏右侧面板
 right_panel.open_surface:
   en: Open a surface
-  zh-CN: 打开一个面板
 right_panel.choose_surface:
   en: Choose what to show in the right panel
-  zh-CN: 选择要在右侧面板中显示的内容
 right_panel.browser_description:
   en: Open a local app or URL
-  zh-CN: 打开本地应用或网址
 right_panel.terminal_description:
   en: Start a shell in this workspace
-  zh-CN: 在此工作区中启动 Shell
 right_panel.files_description:
   en: Browse and read workspace files
-  zh-CN: 浏览并阅读工作区文件
 right_panel.diff_description:
   en: Review file changes
-  zh-CN: 查看已修改文件
 right_panel.terminal_unavailable:
   en: Terminal unavailable
-  zh-CN: 终端不可用
 right_panel.terminal_unavailable_description:
   en: Open the Terminal surface again to start a shell
-  zh-CN: 请重新打开终端面板以启动 Shell
 
 environment.title:
   en: Environment
-  zh-CN: 环境
 environment.summary:
   en: Environment and background work
-  zh-CN: 环境和后台工作
 environment.changes:
   en: Changes
-  zh-CN: 更改
 environment.commit_or_push:
   en: Commit or push
-  zh-CN: 提交或推送
 environment.compare_branch:
   en: Compare branch
-  zh-CN: 比较分支
 
 commit.message_placeholder:
   en: Commit message (leave blank to generate)…
-  zh-CN: 提交信息（留空以自动生成）…
 commit.include_unstaged:
   en: Include unstaged changes
-  zh-CN: 包含未暂存的更改
 commit.commit:
   en: Commit
-  zh-CN: 提交
 commit.commit_and_push:
   en: Commit and push
-  zh-CN: 提交并推送
 commit.push:
   en: Push
-  zh-CN: 推送
 commit.generating_message:
   en: Generating commit message…
-  zh-CN: 正在生成提交信息…
 commit.committing:
   en: Committing…
-  zh-CN: 正在提交…
 commit.committing_and_pushing:
   en: Committing and pushing…
-  zh-CN: 正在提交并推送…
 commit.pushing:
   en: Pushing…
-  zh-CN: 正在推送…
 commit.no_task:
   en: No task is available to commit
-  zh-CN: 没有可提交的任务
 commit.no_workspace:
   en: This task has no workspace
-  zh-CN: 当前任务没有工作区
 commit.no_changes:
   en: There are no changes to commit
-  zh-CN: 没有可提交的更改
 commit.agent_unavailable:
   en: The current agent CLI is unavailable, so it cannot generate a commit message
-  zh-CN: 当前智能体命令行不可用，无法生成提交信息
 commit.committed:
   en: Committed changes
-  zh-CN: 已提交更改
 commit.committed_and_pushed:
   en: Committed and pushed changes
-  zh-CN: 已提交并推送更改
 commit.pushed:
   en: Pushed changes
-  zh-CN: 已推送更改
 
 background.title:
   en: Background
-  zh-CN: 后台工作
 background.description:
   en: Inspect agent-started processes and subagents
-  zh-CN: 查看代理启动的进程和子代理
 background.processes:
   en: Background processes
-  zh-CN: 后台进程
 background.agents:
   en: Subagents
-  zh-CN: 子代理
 background.process:
   en: Process
-  zh-CN: 进程
 background.monitor:
   en: Monitor
-  zh-CN: 监控任务
 background.subagent:
   en: Subagent
-  zh-CN: 子代理
 background.no_work:
   en: No background work
-  zh-CN: 暂无后台工作
 background.no_work_description:
   en: Long-running commands and subagents will appear here.
-  zh-CN: 长时间运行的命令和子代理会显示在这里。
 background.view:
   en: View
-  zh-CN: 查看
 background.stop:
   en: Stop
-  zh-CN: 停止
 background.stop_all:
   en: Stop all
-  zh-CN: 全部停止
 background.stop_not_running:
   en: The process is no longer running.
-  zh-CN: 该进程已不再运行。
 background.output:
   en: Output
-  zh-CN: 输出
 background.no_output:
   en: No output yet
-  zh-CN: 暂无输出
 background.command:
   en: Command
-  zh-CN: 命令
 background.prompt:
   en: Prompt
-  zh-CN: 提示词
 background.cwd:
   en: Working directory
-  zh-CN: 工作目录
 background.role:
   en: Role
-  zh-CN: 角色
 background.model:
   en: Model
-  zh-CN: 模型
 background.latest_update:
   en: Latest update
-  zh-CN: 最新进展
 background.exit_code:
   en: Exit code
-  zh-CN: 退出代码
 background.output_truncated:
   en: Earlier output was truncated
-  zh-CN: 较早的输出已截断
 background.process_count:
   en: "%{count} background processes"
-  zh-CN: "%{count} 个后台进程"
 background.process_count_one:
   en: 1 background process
-  zh-CN: 1 个后台进程
 background.agent_count:
   en: "%{count} subagents"
-  zh-CN: "%{count} 个子代理"
 background.agent_count_one:
   en: 1 subagent
-  zh-CN: 1 个子代理
 background.status.starting:
   en: Starting
-  zh-CN: 正在启动
 background.status.running:
   en: Running
-  zh-CN: 正在运行
 background.status.monitoring:
   en: Monitoring
-  zh-CN: 正在监控
 background.status.stopping:
   en: Stopping
-  zh-CN: 正在停止
 background.status.completed:
   en: Completed
-  zh-CN: 已完成
 background.status.failed:
   en: Failed
-  zh-CN: 失败
 background.status.stopped:
   en: Stopped
-  zh-CN: 已停止
 background.status.lost:
   en: Disconnected
-  zh-CN: 已断开
 
 files.unsaved_changes:
   en: Unsaved changes — ⌘S to save
-  zh-CN: 有未保存的更改 — 按 ⌘S 保存
 files.no_project_open:
   en: No project open
-  zh-CN: 尚未打开项目
 files.no_project_open_description:
   en: Open a project to browse its files
-  zh-CN: 打开一个项目即可浏览其中的文件
 files.no_project_is_open:
   en: No project is open
-  zh-CN: 尚未打开项目
 files.unable_to_edit:
   en: "Unable to edit this file: %{error}"
-  zh-CN: "无法编辑此文件：%{error}"
 files.could_not_save_opening:
   en: "Could not save %{path}: still opening"
-  zh-CN: "无法保存 %{path}：文件仍在打开"
 files.could_not_save_read_only:
   en: "Could not save %{path}: file is not editable"
-  zh-CN: "无法保存 %{path}：文件不可编辑"
 files.could_not_save:
   en: "Could not save %{path}: %{error}"
-  zh-CN: "无法保存 %{path}：%{error}"
 
 diff.no_changes:
   en: No changes
-  zh-CN: 没有更改
 diff.no_changes_description:
   en: This source has no file changes to review
-  zh-CN: 此来源没有可审阅的文件更改
 diff.filter_files:
   en: Filter files…
-  zh-CN: 筛选文件…
 diff.source_last_turn:
   en: Last Turn
-  zh-CN: 上一轮
 diff.source_turn:
   en: Turn %{turn}
-  zh-CN: 第 %{turn} 轮
 diff.source_uncommitted:
   en: Uncommitted
-  zh-CN: 未提交
 diff.source_unstaged:
   en: Unstaged
-  zh-CN: 未暂存
 diff.source_staged:
   en: Staged
-  zh-CN: 已暂存
 diff.source_committed:
   en: Committed
-  zh-CN: 已提交
 diff.source_branch:
   en: Branch
-  zh-CN: 分支
 diff.loading:
   en: Loading changes…
-  zh-CN: 正在加载更改…
 diff.loading_description:
   en: Capturing a consistent Git snapshot for review
-  zh-CN: 正在捕获一致的 Git 快照以供审阅
 diff.unavailable:
   en: Changes unavailable
-  zh-CN: 无法查看更改
 diff.refresh:
   en: Refresh changes
-  zh-CN: 刷新更改
 diff.refresh_failed:
   en: "Could not refresh changes: %{error}"
-  zh-CN: "无法刷新更改：%{error}"
 diff.truncated:
   en: Large diff · showing first 50,000 lines
-  zh-CN: 大型差异 · 仅显示前 50,000 行
 diff.unmodified_lines:
   en: "%{count} unmodified lines"
-  zh-CN: "%{count} 行未更改"
 diff.expand_all_context:
   en: Expand all unmodified lines
-  zh-CN: 展开所有未更改的行
 diff.expand_context:
   en: Expand unmodified lines · Shift-click for all
-  zh-CN: 展开未更改的行 · 按住 Shift 点击可全部展开
 diff.expand_context_above:
   en: Show 100 lines above · Shift-click for all
-  zh-CN: 显示上方 100 行 · 按住 Shift 点击可全部展开
 diff.expand_context_below:
   en: Show 100 lines below · Shift-click for all
-  zh-CN: 显示下方 100 行 · 按住 Shift 点击可全部展开
 
 browser.back:
   en: Back (⌘[)
-  zh-CN: 后退（⌘[）
 browser.forward:
   en: Forward (⌘])
-  zh-CN: 前进（⌘]）
 browser.stop_loading:
   en: Stop loading (Esc)
-  zh-CN: 停止加载（Esc）
 browser.reload:
   en: Reload (⌘R)
-  zh-CN: 重新加载（⌘R）
 browser.open_external:
   en: Open in default browser
-  zh-CN: 在默认浏览器中打开
 browser.browse_web:
   en: Browse the web
-  zh-CN: 浏览网页
 browser.start_hint:
   en: Enter a URL or search above — ⌘L focuses the address bar
-  zh-CN: 在上方输入网址或搜索内容 — 按 ⌘L 聚焦地址栏
 browser.unavailable:
   en: Browser unavailable
-  zh-CN: 浏览器不可用
 browser.requires_macos:
   en: The browser surface requires macOS
-  zh-CN: 浏览器面板仅支持 macOS
 
 find.bad_pattern:
   en: Bad pattern
-  zh-CN: 表达式无效
 find.no_results:
   en: No results
-  zh-CN: 无结果
 find.result_count:
   en: "%{current} of %{total}"
-  zh-CN: "%{current} / %{total}"
 find.match_case:
   en: Match case (⌥⌘C)
-  zh-CN: 区分大小写（⌥⌘C）
 find.match_whole_word:
   en: Match whole word (⌥⌘W)
-  zh-CN: 全字匹配（⌥⌘W）
 find.use_regex:
   en: Use regular expression (⌥⌘R)
-  zh-CN: 使用正则表达式（⌥⌘R）
 find.previous_match:
   en: Previous match (⇧Enter)
-  zh-CN: 上一个匹配项（⇧Enter）
 find.next_match:
   en: Next match (Enter)
-  zh-CN: 下一个匹配项（Enter）
 find.close:
   en: Close (Esc)
-  zh-CN: 关闭（Esc）
 find.replace:
   en: Replace (Enter)
-  zh-CN: 替换（Enter）
 find.replace_all:
   en: Replace all (⌥⌘Enter)
-  zh-CN: 全部替换（⌥⌘Enter）
 find.toggle_replace:
   en: Toggle replace
-  zh-CN: 展开或收起替换栏
 
 common.dismiss_notification:
   en: Dismiss notification
-  zh-CN: 关闭通知
 
 common.reveal_in_finder:
   en: Reveal in Finder
-  zh-CN: 在访达中显示
 
 attachments.close_preview:
   en: Close image preview
-  zh-CN: 关闭图像预览
 
 attachments.preview_unavailable:
   en: Image unavailable
-  zh-CN: 无法显示图像
 
 common.copy_named:
   en: Copy %{name}
-  zh-CN: 复制%{name}
 
 transcript.worked:
   en: Worked
-  zh-CN: 已完成
 transcript.worked_for:
   en: Worked for %{duration}
-  zh-CN: 用时 %{duration}
 transcript.you_stopped_after:
   en: You stopped after %{duration}
-  zh-CN: 你在 %{duration} 后停止了任务
 transcript.working_for:
   en: Working for %{duration}
-  zh-CN: 已工作 %{duration}
 transcript.thinking:
   en: Thinking
-  zh-CN: 正在思考
 transcript.thought_for:
   en: Thought for %{duration}
-  zh-CN: 思考用时 %{duration}
 transcript.changed_file:
   en: Changed %{count} file
-  zh-CN: 更改了 %{count} 个文件
 transcript.changed_files:
   en: Changed %{count} files
-  zh-CN: 更改了 %{count} 个文件
 transcript.review_changes:
   en: Review
-  zh-CN: 查看
 transcript.show_more_files:
   en: Show %{count} more files
-  zh-CN: 再显示 %{count} 个文件
 transcript.show_fewer_files:
   en: Show fewer files
-  zh-CN: 收起文件列表
 transcript.showing_first_files:
   en: Showing first %{count} of %{total}
-  zh-CN: 仅显示前 %{count}/%{total} 个
 
 duration.second:
   en: "%{count} second"
-  zh-CN: "%{count} 秒"
 duration.seconds:
   en: "%{count} seconds"
-  zh-CN: "%{count} 秒"
 duration.minute:
   en: "%{count} minute"
-  zh-CN: "%{count} 分钟"
 duration.minutes:
   en: "%{count} minutes"
-  zh-CN: "%{count} 分钟"
 duration.hour:
   en: "%{count} hour"
-  zh-CN: "%{count} 小时"
 duration.hours:
   en: "%{count} hours"
-  zh-CN: "%{count} 小时"
 duration.seconds_short:
   en: "%{count}s"
-  zh-CN: "%{count} 秒"
 duration.minutes_short:
   en: "%{count}m"
-  zh-CN: "%{count} 分"
 duration.hours_short:
   en: "%{count}h"
-  zh-CN: "%{count} 小时"
 duration.two_units:
   en: "%{first} %{second}"
-  zh-CN: "%{first} %{second}"
 
 usage.scan_summary:
   en: Scanned %{scanned} transcripts (%{skipped} outside the window) · %{records} usage records · %{seconds}s
-  zh-CN: 已扫描 %{scanned} 份对话记录（%{skipped} 份不在所选时段内）· %{records} 条用量记录 · %{seconds} 秒
 usage.daily:
   en: Daily
-  zh-CN: 每日
 usage.monthly:
   en: Monthly
-  zh-CN: 每月
 usage.projects:
   en: Projects
-  zh-CN: 项目
 usage.scanning:
   en: Scanning provider transcripts…
-  zh-CN: 正在扫描服务商的对话记录…
 usage.rescan:
   en: Rescan provider transcripts
-  zh-CN: 重新扫描服务商的对话记录
 usage.range:
   en: "%{start} to %{end}"
-  zh-CN: "%{start}至%{end}"
 usage.full_api_rate_note:
   en: "* if billed at full API rate"
-  zh-CN: "* 按完整 API 费率估算"
 usage.sessions_summary:
   en: Input, cache reads and output across %{count} sessions
-  zh-CN: 汇总 %{count} 个任务的输入、缓存读取和输出
 usage.raw_token_cost:
   en: RAW TOKEN COST
-  zh-CN: 原始令牌费用
 usage.processed_tokens_upper:
   en: PROCESSED TOKENS
-  zh-CN: 已处理令牌
 usage.cost_share:
   en: "%{share} of cost · %{tokens} tokens"
-  zh-CN: 占费用的 %{share} · %{tokens} 个令牌
 usage.token_share:
   en: "%{share} of tokens · %{cost}"
-  zh-CN: 占令牌的 %{share} · %{cost}
 usage.no_activity_window:
   en: No activity in this window
-  zh-CN: 所选时段内没有活动
 usage.cost_upper:
   en: COST
-  zh-CN: 费用
 usage.tokens_upper:
   en: TOKENS
-  zh-CN: 令牌
 usage.daily_cost:
   en: Daily cost
-  zh-CN: 每日费用
 usage.daily_processed_tokens:
   en: Daily processed tokens
-  zh-CN: 每日已处理令牌
 usage.model_upper:
   en: MODEL
-  zh-CN: 模型
 usage.day_upper:
   en: DAY
-  zh-CN: 日期
 usage.breakdown:
   en: Breakdown
-  zh-CN: 明细
 usage.no_projects_match:
   en: No projects match the filter
-  zh-CN: 没有符合筛选条件的项目
 usage.by_project:
   en: By project
-  zh-CN: 按项目
 usage.projects_caption:
   en: "%{projects} · %{tokens} tokens · %{sessions}"
-  zh-CN: "%{projects} · %{tokens} 个令牌 · %{sessions}"
 usage.projects_shown:
   en: "%{shown} of %{projects} shown"
-  zh-CN: "共 %{projects}，当前显示 %{shown} 个"
 usage.percent_of_cost:
   en: "%{share} of cost"
-  zh-CN: 占费用的 %{share}
 usage.token_count:
   en: "%{count} tokens"
-  zh-CN: "%{count} 个令牌"
 usage.last_active:
   en: last active %{date}
-  zh-CN: 最后活跃于 %{date}
 usage.show_models:
   en: Show %{models} with spend details
-  zh-CN: 查看 %{models}的费用明细
 usage.other_sessions:
   en: Other sessions
-  zh-CN: 其他任务
 usage.rates_unavailable:
   en: Model rates are unavailable, so costs read as unpriced until the rate table loads
-  zh-CN: 模型费率暂不可用；费率表加载完成前，相关费用会显示为未定价
 usage.total:
   en: Total
-  zh-CN: 总计
 usage.processed_tokens:
   en: Processed tokens
-  zh-CN: 已处理令牌
 usage.per_active_day:
   en: "%{count} per active day"
-  zh-CN: 每个活跃日 %{count}
 usage.cached_input:
   en: Cached input
-  zh-CN: 缓存输入
 usage.observed_input_share:
   en: "%{share} of observed input"
-  zh-CN: 占已统计输入的 %{share}
 usage.uncached_input:
   en: Uncached input
-  zh-CN: 未缓存输入
 usage.cache_writes:
   en: "%{count} cache writes"
-  zh-CN: "%{count} 个缓存写入令牌"
 usage.output:
   en: Output
-  zh-CN: 输出
 usage.includes_reasoning:
   en: includes %{count} reasoning
-  zh-CN: 其中推理令牌 %{count}
 usage.cache_savings:
   en: Cache savings
-  zh-CN: 缓存节省
 usage.raw_cost_multiple:
   en: "%{multiple}x the raw token cost"
-  zh-CN: 相当于原始令牌费用的 %{multiple} 倍
 usage.vs_full_input_rates:
   en: vs full input rates
-  zh-CN: 与完整输入费率相比
 usage.model:
   en: Model
-  zh-CN: 模型
 usage.cost:
   en: Cost
-  zh-CN: 费用
 usage.share:
   en: Share
-  zh-CN: 占比
 usage.tokens:
   en: Tokens
-  zh-CN: 令牌
 usage.day:
   en: Day
-  zh-CN: 日期
 usage.cost_quality:
   en: Cost quality
-  zh-CN: 费用可信度
 usage.provider_reported:
   en: Provider reported
-  zh-CN: 服务商报告
 usage.model_priced:
   en: Model priced
-  zh-CN: 按模型定价
 usage.unpriced:
   en: Unpriced
-  zh-CN: 未定价
 usage.no_activity_12_months:
   en: No activity in the last 12 months
-  zh-CN: 过去 12 个月内没有活动
 usage.last_12_months:
   en: Last 12 months
-  zh-CN: 过去 12 个月
 usage.so_far:
   en: so far
-  zh-CN: 截至目前
 usage.no_activity:
   en: No activity
-  zh-CN: 没有活动
 usage.models_by_spend:
   en: "%{models} · by spend"
-  zh-CN: "%{models} · 按费用排序"
 usage.tokens_and_sessions:
   en: "%{tokens} tokens · %{sessions}"
-  zh-CN: "%{tokens} 个令牌 · %{sessions}"
 usage.month_caption:
   en: "%{tokens} tokens · %{sessions} · %{days}"
-  zh-CN: "%{tokens} 个令牌 · %{sessions} · %{days}"
 usage.last_7_days:
   en: Last 7 days
-  zh-CN: 过去 7 天
 usage.last_30_days:
   en: Last 30 days
-  zh-CN: 过去 30 天
 usage.last_90_days:
   en: Last 90 days
-  zh-CN: 过去 90 天
 usage.this_month:
   en: This month
-  zh-CN: 本月
 usage.last_month:
   en: Last month
-  zh-CN: 上月
 usage.custom:
   en: Custom
-  zh-CN: 自定义
 usage.project_one:
   en: "%{count} project"
-  zh-CN: "%{count} 个项目"
 usage.project_many:
   en: "%{count} projects"
-  zh-CN: "%{count} 个项目"
 usage.session_one:
   en: "%{count} session"
-  zh-CN: "%{count} 个任务"
 usage.session_many:
   en: "%{count} sessions"
-  zh-CN: "%{count} 个任务"
 usage.model_one:
   en: "%{count} model"
-  zh-CN: "%{count} 个模型"
 usage.model_many:
   en: "%{count} models"
-  zh-CN: "%{count} 个模型"
 usage.active_day_one:
   en: "%{count} active day"
-  zh-CN: "%{count} 个活跃日"
 usage.active_day_many:
   en: "%{count} active days"
-  zh-CN: "%{count} 个活跃日"
 
 usage.refresh_failed:
   en: "Usage refresh failed: %{error}"
-  zh-CN: "用量刷新失败：%{error}"
 usage.context_used:
   en: Context window %{percent}% used (⌘U)
-  zh-CN: 上下文窗口已使用 %{percent}%（⌘U）
 usage.shortcut:
   en: Usage (⌘U)
-  zh-CN: 用量（⌘U）
 usage.context_window:
   en: Context window
-  zh-CN: 上下文窗口
 usage.plan_limits:
   en: Plan usage limits
-  zh-CN: 套餐用量限额
 usage.plan_limits_named:
   en: Plan usage limits · %{plan}
-  zh-CN: 套餐用量限额 · %{plan}
 usage.open_account_settings:
   en: Open the account's usage settings
-  zh-CN: 打开账户用量设置
 usage.unavailable:
   en: Unavailable — %{error}
-  zh-CN: 不可用 — %{error}
 usage.usage_limit:
   en: Usage limit
-  zh-CN: 用量限额
 usage.hour_limit:
   en: "%{count}-hour limit"
-  zh-CN: "%{count} 小时限额"
 usage.day_limit:
   en: "%{count}-day limit"
-  zh-CN: "%{count} 天限额"
 usage.weekly_limit:
   en: Weekly limit
-  zh-CN: 每周限额
 usage.daily_limit:
   en: Daily limit
-  zh-CN: 每日限额
 usage.monthly_limit:
   en: Monthly limit
-  zh-CN: 每月限额
 usage.limit_suffix:
   en: " limit"
-  zh-CN: 限额
 usage.scoped_limit:
   en: "%{period} · %{name}"
-  zh-CN: "%{period} · %{name}"
 usage.weekly_all_models:
   en: Weekly · all models
-  zh-CN: 每周 · 所有模型
 usage.weekly_model:
   en: Weekly · %{model}
-  zh-CN: 每周 · %{model}
 usage.resets_soon:
   en: Resets soon
-  zh-CN: 即将重置
 usage.resets_in_minutes:
   en: Resets in %{count} min
-  zh-CN: "%{count} 分钟后重置"
 usage.resets_in_hours:
   en: Resets in %{count} hr
-  zh-CN: "%{count} 小时后重置"
 usage.resets_in_hours_minutes:
   en: Resets in %{hours} hr %{minutes} min
-  zh-CN: "%{hours} 小时 %{minutes} 分钟后重置"
 usage.resets_date:
   en: Resets %{date}
-  zh-CN: 将于 %{date} 重置
 
 usage_error.signin_cannot_read:
   en: "%{provider} sign-in can't read usage (HTTP %{status}). Running a %{provider} turn refreshes it"
-  zh-CN: "%{provider} 登录状态无法读取用量（HTTP %{status}）。运行一次 %{provider} 任务后即可刷新"
 usage_error.rate_limited:
   en: The usage endpoint is rate limited right now
-  zh-CN: 用量接口当前受到速率限制，请稍后再试
 usage_error.http_status:
   en: The usage endpoint answered HTTP %{status}
-  zh-CN: 用量接口返回了 HTTP %{status}
 usage_error.invalid_json:
   en: The usage endpoint returned invalid JSON
-  zh-CN: 用量接口返回了无效的 JSON
 usage_error.no_home_directory:
   en: No home directory
-  zh-CN: 找不到用户主目录
 usage_error.read_file:
   en: Failed to read %{path}
-  zh-CN: 无法读取 %{path}
 usage_error.codex_auth_invalid:
   en: Codex auth.json is not JSON
-  zh-CN: Codex auth.json 不是有效的 JSON
 usage_error.codex_access_token_missing:
   en: Codex auth.json has no access token; run `codex login`
-  zh-CN: Codex auth.json 中没有访问令牌；请运行 `codex login`
 usage_error.no_rate_limit_windows:
   en: The usage endpoint reported no rate-limit windows
-  zh-CN: 用量接口未返回任何速率限制周期
 usage_error.start_grok_probe:
   en: Failed to start `grok agent stdio`
-  zh-CN: 无法启动 `grok agent stdio`
 usage_error.grok_stdin_unavailable:
   en: Grok stdin is unavailable
-  zh-CN: Grok 的标准输入不可用
 usage_error.grok_stdout_unavailable:
   en: Grok stdout is unavailable
-  zh-CN: Grok 的标准输出不可用
 usage_error.start_grok_reader:
   en: Failed to start the Grok probe reader
-  zh-CN: 无法启动 Grok 探测读取器
 usage_error.grok_billing_timeout:
   en: Grok did not answer the billing request in time
-  zh-CN: Grok 未在规定时间内响应账单请求
 usage_error.grok_answered:
   en: "Grok answered: %{error}"
-  zh-CN: "Grok 返回：%{error}"
 usage_error.grok_no_billing_data:
   en: Grok reported no billing data; run `grok` to sign in
-  zh-CN: Grok 未返回账单数据；请运行 `grok` 登录
 usage_error.claude_credentials_missing:
   en: No Claude Code credentials in the keychain or ~/.claude
-  zh-CN: 钥匙串和 ~/.claude 中均未找到 Claude Code 凭据
 usage_error.run_security:
   en: Failed to run /usr/bin/security
-  zh-CN: 无法运行 /usr/bin/security
 usage_error.keychain_item_missing:
   en: The keychain has no %{service} item
-  zh-CN: 钥匙串中没有 %{service} 项目
 usage_error.claude_credentials_invalid:
   en: Claude Code credentials are not JSON
-  zh-CN: Claude Code 凭据不是有效的 JSON
 usage_error.claude_oauth_missing:
   en: Claude Code credentials have no claudeAiOauth entry
-  zh-CN: Claude Code 凭据中没有 claudeAiOauth 项
 usage_error.claude_access_token_missing:
   en: Claude Code credentials have no access token
-  zh-CN: Claude Code 凭据中没有访问令牌
 usage_error.run_curl:
   en: Failed to run /usr/bin/curl
-  zh-CN: 无法运行 /usr/bin/curl
 usage_error.curl_stdin_unavailable:
   en: curl stdin is unavailable
-  zh-CN: curl 的标准输入不可用
 usage_error.configure_curl:
   en: Failed to pass the configuration to curl
-  zh-CN: 无法向 curl 传递配置
 usage_error.curl_did_not_finish:
   en: curl did not finish
-  zh-CN: curl 未能完成请求
 usage_error.curl_failed:
   en: "curl failed: %{error}"
-  zh-CN: "curl 失败：%{error}"
 usage_error.unknown_error:
   en: unknown error
-  zh-CN: 未知错误
 usage_error.curl_no_status:
   en: curl returned no HTTP status line
-  zh-CN: curl 未返回 HTTP 状态行

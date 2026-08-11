@@ -64,7 +64,7 @@ fn format_message_time_at(created_at: u64, now: DateTime<Local>) -> String {
             let timestamp = timestamp.with_timezone(&Local);
             let message_date = timestamp.date_naive();
             let today = now.date_naive();
-            if crate::i18n::is_simplified_chinese() {
+            if crate::i18n::uses_east_asian_date_format() {
                 let time = timestamp.format("%H:%M").to_string();
                 if message_date >= today {
                     return time;
