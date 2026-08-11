@@ -133,6 +133,10 @@ impl AcpDriver {
         let computer_use = (provider == ProviderKind::Grok && computer_use_enabled)
             .then(|| super::support::HeadlessComputerUseRuntime::start(provider, events.clone()))
             .transpose()?;
+        let grok_title_home = computer_use
+            .as_ref()
+            .and_then(super::support::HeadlessComputerUseRuntime::grok_home)
+            .map(ToOwned::to_owned);
 
         let mut command = crate::command_env::command(&binary);
         command.args(&launch.args).current_dir(&cwd);
@@ -170,16 +174,19 @@ impl AcpDriver {
         // exactly while a steer is in flight, and only the last one to resolve
         // settles the merged turn.
         let prompt_requests = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let native_session_id = Arc::new(Mutex::new(None::<String>));
         let auto_approve = mode != RuntimeMode::Ask;
 
         let reader_pending = pending.clone();
         let reader_prompt = prompt_requests.clone();
         let reader_commands = commands.clone();
         let reader_events = events.clone();
+        let reader_session_id = native_session_id.clone();
         let reader_thread = thread::Builder::new()
             .name(format!("waku-{}-acp-reader", provider.id()))
             .spawn(move || {
                 let mut state = AcpStreamState::default();
+                let title_refresh = super::title_refresh::NativeTitleRefresh::default();
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     if line.trim().is_empty() {
                         continue;
@@ -187,7 +194,7 @@ impl AcpDriver {
                     let Ok(value) = serde_json::from_str::<Value>(&line) else {
                         continue;
                     };
-                    handle_message(
+                    let turn_result = handle_message(
                         value,
                         &reader_pending,
                         &reader_prompt,
@@ -196,12 +203,39 @@ impl AcpDriver {
                         auto_approve,
                         &mut state,
                     );
+                    if provider == ProviderKind::Grok
+                        && turn_result == Some(true)
+                        && let Some(session_id) = reader_session_id.lock().clone()
+                    {
+                        let grok_home = grok_title_home.clone();
+                        title_refresh.start(
+                            "waku-grok-title",
+                            vec![
+                                Duration::ZERO,
+                                Duration::from_millis(250),
+                                Duration::from_millis(750),
+                                Duration::from_millis(1_500),
+                                Duration::from_secs(3),
+                                Duration::from_secs(5),
+                                Duration::from_millis(7_500),
+                                Duration::from_secs(10),
+                            ],
+                            reader_events.clone(),
+                            move || match grok_home.as_deref() {
+                                Some(home) => {
+                                    crate::grok_session::generated_title_in(home, &session_id)
+                                }
+                                None => crate::grok_session::generated_title(&session_id),
+                            },
+                        );
+                    }
                 }
                 fail_pending(&reader_pending, "the ACP agent exited");
             })?;
 
         let writer_pending = pending.clone();
         let writer_prompt = prompt_requests;
+        let writer_session_id = native_session_id;
         let writer_events = events.clone();
         let provider_name = provider.display_name();
         thread::Builder::new()
@@ -301,6 +335,7 @@ impl AcpDriver {
                         return;
                     }
                 };
+                *writer_session_id.lock() = Some(session_id.clone());
                 let _ = writer_events.send(DriverEvent::Connected {
                     provider_cursor: Some(ProviderResumeCursor::from_session_id(
                         provider,
@@ -661,7 +696,7 @@ fn handle_message(
     events: &impl DriverEventSink,
     auto_approve: bool,
     state: &mut AcpStreamState,
-) {
+) -> Option<bool> {
     let id = value.get("id").and_then(Value::as_u64);
     let method = value.get("method").and_then(Value::as_str);
 
@@ -680,9 +715,9 @@ fn handle_message(
                 // merged turn keeps running under that newer request. Only the
                 // last open prompt settles the turn.
                 if settles {
-                    finish_turn(&value, events);
+                    return Some(finish_turn(&value, events));
                 }
-                return;
+                return None;
             }
         }
         let result = value
@@ -692,11 +727,11 @@ fn handle_message(
         if let Some(response) = pending.lock().remove(&id) {
             let _ = response.send(result);
         }
-        return;
+        return None;
     }
 
     let Some(method) = method else {
-        return;
+        return None;
     };
     let params = value.get("params").cloned().unwrap_or(Value::Null);
 
@@ -705,13 +740,13 @@ fn handle_message(
         if method == "session/request_permission" {
             request_permission(id, &params, commands, events, auto_approve);
         }
-        return;
+        return None;
     }
 
     if method != "session/update" {
         // Everything else on this channel is agent-private control traffic
         // (`_x.ai/*` and friends). It must never reach the transcript.
-        return;
+        return None;
     }
     let update = params.get("update").unwrap_or(&Value::Null);
     match update.get("sessionUpdate").and_then(Value::as_str) {
@@ -799,9 +834,10 @@ fn handle_message(
         // `user_message_chunk` is Waku's own prompt echoed back.
         _ => {}
     }
+    None
 }
 
-fn finish_turn(value: &Value, events: &impl DriverEventSink) {
+fn finish_turn(value: &Value, events: &impl DriverEventSink) -> bool {
     if let Some(error) = value
         .pointer("/error/data/message")
         .or_else(|| value.pointer("/error/message"))
@@ -812,14 +848,15 @@ fn finish_turn(value: &Value, events: &impl DriverEventSink) {
             success: false,
             summary: None,
         });
-        return;
+        return false;
     }
     let stop_reason = value
         .pointer("/result/stopReason")
         .and_then(Value::as_str)
         .unwrap_or("end_turn");
+    let success = matches!(stop_reason, "end_turn" | "cancelled");
     let _ = events.send(DriverEvent::TurnFinished {
-        success: matches!(stop_reason, "end_turn" | "cancelled"),
+        success,
         summary: match stop_reason {
             "end_turn" | "cancelled" => None,
             "max_tokens" => Some(tr!("session.agent_ran_out_of_context")),
@@ -827,6 +864,7 @@ fn finish_turn(value: &Value, events: &impl DriverEventSink) {
             other => Some(tr!("session.agent_stopped_reason", reason = other)),
         },
     });
+    success
 }
 
 fn request_permission(
@@ -1195,7 +1233,7 @@ mod tests {
             }
         });
 
-        handle_message(
+        let outcome = handle_message(
             permission.clone(),
             &pending,
             &prompt,
@@ -1204,6 +1242,7 @@ mod tests {
             false,
             &mut state,
         );
+        assert_eq!(outcome, None);
         let DriverEvent::Permission {
             request_id,
             options,
@@ -1220,9 +1259,10 @@ mod tests {
         assert_eq!(detail, "Not in allowlist: rm");
         assert!(command_rx.try_recv().is_err());
 
-        handle_message(
+        let outcome = handle_message(
             permission, &pending, &prompt, &commands, &events, true, &mut state,
         );
+        assert_eq!(outcome, None);
         let Ok(CommandMessage::Respond { option_id, .. }) = command_rx.try_recv() else {
             panic!("auto modes must answer without the user");
         };
@@ -1235,7 +1275,7 @@ mod tests {
         let (pending, prompt, commands, _command_rx, events, event_rx, mut state) = harness();
         prompt.lock().push(3);
 
-        handle_message(
+        let outcome = handle_message(
             json!({"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}),
             &pending,
             &prompt,
@@ -1244,6 +1284,7 @@ mod tests {
             true,
             &mut state,
         );
+        assert_eq!(outcome, Some(true));
 
         assert!(matches!(
             event_rx.try_recv().unwrap(),
@@ -1251,7 +1292,7 @@ mod tests {
         ));
         assert!(prompt.lock().is_empty());
         // A late duplicate must not settle a turn that already ended.
-        handle_message(
+        let duplicate = handle_message(
             json!({"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}),
             &pending,
             &prompt,
@@ -1260,6 +1301,7 @@ mod tests {
             true,
             &mut state,
         );
+        assert_eq!(duplicate, None);
         assert!(event_rx.try_recv().is_err());
     }
 
@@ -1271,7 +1313,7 @@ mod tests {
 
         // Cursor answers the superseded request `cancelled` the moment the
         // steering prompt lands; the merged turn must keep running.
-        handle_message(
+        let superseded = handle_message(
             json!({"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}),
             &pending,
             &prompt,
@@ -1280,6 +1322,7 @@ mod tests {
             true,
             &mut state,
         );
+        assert_eq!(superseded, None);
         assert!(
             event_rx.try_recv().is_err(),
             "a superseded prompt must not settle the merged turn"
@@ -1287,7 +1330,7 @@ mod tests {
         assert_eq!(*prompt.lock(), vec![4]);
 
         // The last open prompt is what settles it.
-        handle_message(
+        let outcome = handle_message(
             json!({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}),
             &pending,
             &prompt,
@@ -1296,6 +1339,7 @@ mod tests {
             true,
             &mut state,
         );
+        assert_eq!(outcome, Some(true));
         assert!(matches!(
             event_rx.try_recv().unwrap(),
             DriverEvent::TurnFinished { success: true, .. }
@@ -1405,7 +1449,7 @@ mod tests {
         prompt.lock().push(3);
 
         // Shape observed from `grok agent stdio` with an exhausted balance.
-        handle_message(
+        let outcome = handle_message(
             json!({"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"Internal error","data":{"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted","http_status":402}}}),
             &pending,
             &prompt,
@@ -1414,6 +1458,7 @@ mod tests {
             true,
             &mut state,
         );
+        assert_eq!(outcome, Some(false));
 
         assert!(matches!(
             event_rx.try_recv().unwrap(),

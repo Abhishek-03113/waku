@@ -24,6 +24,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, unbounded};
@@ -113,6 +114,9 @@ impl AmpDriver {
             None => (None, None),
         };
 
+        let title_binary = binary.clone();
+        let title_cwd = cwd.clone();
+        let reader_initial_thread_id = thread_id.clone();
         let mut command: Command = crate::command_env::command(&binary);
         command.current_dir(&cwd).args(amp_args(
             model.as_deref(),
@@ -157,7 +161,11 @@ impl AmpDriver {
         let reader_thread = thread::Builder::new()
             .name("waku-amp-reader".into())
             .spawn(move || {
-                let mut state = AmpStreamState::default();
+                let mut state = AmpStreamState {
+                    thread_id: reader_initial_thread_id,
+                    ..Default::default()
+                };
+                let title_refresh = super::title_refresh::NativeTitleRefresh::default();
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     if line.trim().is_empty() {
                         continue;
@@ -165,7 +173,18 @@ impl AmpDriver {
                     let Ok(value) = serde_json::from_str::<Value>(&line) else {
                         continue;
                     };
-                    handle_message(&value, &reader_events, &reader_turn, &mut state);
+                    if handle_message(&value, &reader_events, &reader_turn, &mut state)
+                        && let Some(thread_id) = state.thread_id.clone()
+                    {
+                        let binary = title_binary.clone();
+                        let cwd = title_cwd.clone();
+                        title_refresh.start(
+                            "waku-amp-title",
+                            vec![Duration::from_millis(500), Duration::from_secs(2)],
+                            reader_events.clone(),
+                            move || crate::amp_session::thread_title(&binary, &cwd, &thread_id),
+                        );
+                    }
                 }
             })?;
 
@@ -384,6 +403,7 @@ fn write_line(writer: &mut impl Write, value: &Value) -> std::io::Result<()> {
 #[derive(Default)]
 struct AmpStreamState {
     tools: HashMap<String, (ActivityKind, String)>,
+    thread_id: Option<String>,
 }
 
 fn handle_message(
@@ -391,10 +411,12 @@ fn handle_message(
     events: &impl DriverEventSink,
     turn_active: &Mutex<bool>,
     state: &mut AmpStreamState,
-) {
+) -> bool {
+    let mut turn_finished = false;
     match value.get("type").and_then(Value::as_str) {
         Some("system") if value.get("subtype").and_then(Value::as_str) == Some("init") => {
             if let Some(id) = value.get("session_id").and_then(Value::as_str) {
+                state.thread_id = Some(id.to_owned());
                 let _ = events.send(DriverEvent::Connected {
                     provider_cursor: Some(ProviderResumeCursor::Amp {
                         thread_id: id.to_owned(),
@@ -478,11 +500,12 @@ fn handle_message(
                     success: true,
                     summary: None,
                 });
+                turn_finished = true;
             }
         }
         Some("user") => {
             let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
-                return;
+                return false;
             };
             for block in content {
                 if block.get("type").and_then(Value::as_str) != Some("tool_result") {
@@ -523,6 +546,7 @@ fn handle_message(
         }
         _ => {}
     }
+    turn_finished
 }
 
 #[cfg(test)]
@@ -704,9 +728,11 @@ mod tests {
                 {"type":"text","text":"BANANA."}
             ],"stop_reason":"end_turn"}}),
         ];
-        for message in wire {
-            handle_message(&message, &events, &turn, &mut state);
-        }
+        let outcomes = wire
+            .into_iter()
+            .map(|message| handle_message(&message, &events, &turn, &mut state))
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes, [false, false, false, true]);
 
         let mut seen = Vec::new();
         while let Ok(event) = event_rx.try_recv() {

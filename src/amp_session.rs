@@ -42,6 +42,46 @@ pub fn prompt_with_fork_context(context: &str, prompt: &str) -> String {
     )
 }
 
+/// Amp does not put its generated thread title on the streaming channel. The
+/// native thread index is its authoritative metadata surface instead.
+pub fn thread_title(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Result<Option<String>> {
+    let output = crate::command_env::command(binary)
+        .args([
+            "threads",
+            "list",
+            "--json",
+            "--include-archived",
+            "--limit",
+            "100",
+        ])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .context("failed to read Amp thread metadata")?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        bail!("Amp could not list its threads: {}", detail.trim());
+    }
+    let threads: Value =
+        serde_json::from_slice(&output.stdout).context("Amp returned an invalid thread list")?;
+    Ok(title_from_thread_list(&threads, thread_id))
+}
+
+fn title_from_thread_list(threads: &Value, thread_id: &str) -> Option<String> {
+    threads.as_array()?.iter().find_map(|thread| {
+        (thread.get("id").and_then(Value::as_str) == Some(thread_id))
+            .then(|| {
+                thread
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_owned)
+            })
+            .flatten()
+    })
+}
+
 fn export_thread(binary: &Path, cwd: &Path, thread_id: &str) -> anyhow::Result<Value> {
     let output = crate::command_env::command(binary)
         .args(["threads", "export", thread_id])
@@ -254,5 +294,18 @@ mod tests {
     fn rejects_a_checkpoint_beyond_the_exported_thread() {
         let error = retain_through_turn(&[prompt(1, "one")], 2).unwrap_err();
         assert!(error.to_string().contains("only 1 native turns"));
+    }
+
+    #[test]
+    fn reads_the_generated_title_for_the_exact_amp_thread() {
+        let threads = json!([
+            {"id":"T-other","title":"Another task"},
+            {"id":"T-target","title":"  Fix streaming titles  "}
+        ]);
+        assert_eq!(
+            title_from_thread_list(&threads, "T-target").as_deref(),
+            Some("Fix streaming titles")
+        );
+        assert_eq!(title_from_thread_list(&threads, "T-missing"), None);
     }
 }

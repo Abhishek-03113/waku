@@ -501,6 +501,8 @@ struct ClaudeStreamState {
     /// turn's `modelUsage` map can be read for that model's context window
     /// rather than a subagent's.
     last_assistant_model: Option<String>,
+    /// Last title copied from Claude's native transcript metadata.
+    last_auto_title: Option<String>,
 }
 
 /// The context window of the model that served this turn, from the result
@@ -770,7 +772,9 @@ fn handle_claude_system(
         && let Some(item) = claude_task_item(subtype, value, state)
     {
         let task_id = item.key.provider_id.clone();
-        state.background_task_kinds.insert(task_id.clone(), item.key.kind);
+        state
+            .background_task_kinds
+            .insert(task_id.clone(), item.key.kind);
         if subtype == "task_started"
             && let Some(tool_use_id) = item.origin_activity_id.clone()
         {
@@ -787,7 +791,9 @@ fn handle_claude_system(
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
         {
-            state.task_descriptions.insert(task_id, description.to_owned());
+            state
+                .task_descriptions
+                .insert(task_id, description.to_owned());
         }
         let _ = events.send(DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(
             item,
@@ -826,23 +832,22 @@ fn forward_subagent_transcript(
             Some("tool_use") => {
                 let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
                 let input = block.get("input");
-                let subject = activity::input_title(input)
-                    .or_else(|| {
-                        input.and_then(|input| {
-                            [
-                                "command",
-                                "file_path",
-                                "path",
-                                "pattern",
-                                "query",
-                                "url",
-                                "description",
-                            ]
-                            .into_iter()
-                            .find_map(|key| input.get(key).and_then(Value::as_str))
-                            .and_then(one_line)
-                        })
-                    });
+                let subject = activity::input_title(input).or_else(|| {
+                    input.and_then(|input| {
+                        [
+                            "command",
+                            "file_path",
+                            "path",
+                            "pattern",
+                            "query",
+                            "url",
+                            "description",
+                        ]
+                        .into_iter()
+                        .find_map(|key| input.get(key).and_then(Value::as_str))
+                        .and_then(one_line)
+                    })
+                });
                 match subject {
                     Some(subject) => delta.push_str(&format!("› {name} · {subject}\n")),
                     None => delta.push_str(&format!("› {name}\n")),
@@ -1134,15 +1139,24 @@ fn handle_message(
             if !std::mem::take(&mut *turn_active.lock()) {
                 return;
             }
-            // Claude's own transcript is where a rewind checkpoint comes from,
-            // and it is only complete once the turn is.
-            if let Ok(Some(message_id)) = crate::claude_session::latest_message_id(session_id) {
-                let _ = events.send(DriverEvent::Connected {
-                    provider_cursor: Some(ProviderResumeCursor::Claude {
-                        session_id: session_id.to_owned(),
-                        resume_at: Some(message_id),
-                    }),
-                });
+            // Claude writes its generated title and rewind checkpoint to the
+            // same native transcript as the turn settles. Read it once, ahead
+            // of TurnFinished, so that event's forced save includes both.
+            if let Ok(metadata) = crate::claude_session::session_metadata(session_id) {
+                if let Some(title) = metadata.title
+                    && state.last_auto_title.as_deref() != Some(title.as_str())
+                {
+                    state.last_auto_title = Some(title.clone());
+                    let _ = events.send(DriverEvent::AutoTitleUpdated(Some(title)));
+                }
+                if let Some(message_id) = metadata.latest_message_id {
+                    let _ = events.send(DriverEvent::Connected {
+                        provider_cursor: Some(ProviderResumeCursor::Claude {
+                            session_id: session_id.to_owned(),
+                            resume_at: Some(message_id),
+                        }),
+                    });
+                }
             }
             let _ = events.send(DriverEvent::TurnFinished {
                 success: !failed,
@@ -1628,8 +1642,14 @@ mod tests {
             panic!("task_notification should settle the background item");
         };
         assert_eq!(settled.status, BackgroundWorkStatus::Completed);
-        assert!(settled.title.is_empty(), "the report must not become the title");
-        assert!(settled.detail.is_none(), "the report must not become the detail row");
+        assert!(
+            settled.title.is_empty(),
+            "the report must not become the title"
+        );
+        assert!(
+            settled.detail.is_none(),
+            "the report must not become the detail row"
+        );
         assert_eq!(
             settled.output.as_deref(),
             Some("I have a complete map.\n\n# Waku Right Panel\nDetails…"),
@@ -1748,7 +1768,11 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(deltas, ["Hello"], "subagent partials leaked or re-armed the fallback");
+        assert_eq!(
+            deltas,
+            ["Hello"],
+            "subagent partials leaked or re-armed the fallback"
+        );
     }
 
     #[test]

@@ -17,8 +17,13 @@ pub struct ForkedClaudeSession {
     pub message_ids: HashMap<String, String>,
 }
 
-pub fn latest_message_id(session_id: &str) -> anyhow::Result<Option<String>> {
-    latest_message_id_in(&projects_directory()?, session_id)
+pub struct ClaudeSessionMetadata {
+    pub latest_message_id: Option<String>,
+    pub title: Option<String>,
+}
+
+pub fn session_metadata(session_id: &str) -> anyhow::Result<ClaudeSessionMetadata> {
+    session_metadata_in(&projects_directory()?, session_id)
 }
 
 pub fn message_id_for_turn(session_id: &str, provider_turn_count: usize) -> anyhow::Result<String> {
@@ -119,19 +124,38 @@ fn active_chain(entries: &[Value]) -> Vec<&Map<String, Value>> {
     chain
 }
 
-fn latest_message_id_in(
+fn session_metadata_in(
     projects_directory: &Path,
     session_id: &str,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<ClaudeSessionMetadata> {
     let entries = read_entries(&find_session_file(projects_directory, session_id)?)?;
-    Ok(active_chain(&entries).iter().rev().find_map(|entry| {
+    let latest_message_id = active_chain(&entries).iter().rev().find_map(|entry| {
         matches!(
             entry.get("type").and_then(Value::as_str),
             Some("user" | "assistant")
         )
         .then(|| entry.get("uuid").and_then(Value::as_str).map(str::to_owned))
         .flatten()
-    }))
+    });
+    let title = entries.iter().filter_map(claude_title).last();
+    Ok(ClaudeSessionMetadata {
+        latest_message_id,
+        title,
+    })
+}
+
+fn claude_title(entry: &Value) -> Option<String> {
+    let field = match entry.get("type").and_then(Value::as_str) {
+        Some("ai-title") => "aiTitle",
+        Some("custom-title") => "customTitle",
+        _ => return None,
+    };
+    entry
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
 }
 
 fn message_id_for_turn_in(
@@ -373,6 +397,7 @@ mod tests {
         let source = project.join(format!("{SESSION}.jsonl"));
         let entries = [
             json!({"type":"user","uuid":USER_ONE,"parentUuid":null,"sessionId":SESSION,"timestamp":"2026-01-01T00:00:00.000Z","message":{"role":"user","content":"first"}}),
+            json!({"type":"ai-title","aiTitle":"Generated first task title","sessionId":SESSION}),
             json!({"type":"progress","uuid":PROGRESS,"parentUuid":USER_ONE,"sessionId":SESSION,"timestamp":"2026-01-01T00:00:01.000Z"}),
             json!({"type":"assistant","uuid":ASSISTANT_ONE,"parentUuid":PROGRESS,"sessionId":SESSION,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"tool_use"}]}}),
             json!({"type":"user","uuid":TOOL_RESULT,"parentUuid":ASSISTANT_ONE,"sessionId":SESSION,"timestamp":"2026-01-01T00:00:03.000Z","message":{"role":"user","content":[{"type":"tool_result"}]}}),
@@ -394,9 +419,11 @@ mod tests {
     fn finds_native_message_points_for_completed_turns() {
         let (root, _) = fixture();
         let projects = root.join("projects");
+        let metadata = session_metadata_in(&projects, SESSION).unwrap();
+        assert_eq!(metadata.latest_message_id.as_deref(), Some(ASSISTANT_THREE));
         assert_eq!(
-            latest_message_id_in(&projects, SESSION).unwrap().as_deref(),
-            Some(ASSISTANT_THREE)
+            metadata.title.as_deref(),
+            Some("Generated first task title")
         );
         assert_eq!(
             message_id_for_turn_in(&projects, SESSION, 1).unwrap(),
@@ -406,6 +433,22 @@ mod tests {
             message_id_for_turn_in(&projects, SESSION, 2).unwrap(),
             ASSISTANT_THREE
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn latest_native_title_wins() {
+        let (root, source) = fixture();
+        let mut file = OpenOptions::new().append(true).open(source).unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &json!({"type":"custom-title","customTitle":"Renamed provider task"}),
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+
+        let metadata = session_metadata_in(&root.join("projects"), SESSION).unwrap();
+        assert_eq!(metadata.title.as_deref(), Some("Renamed provider task"));
         fs::remove_dir_all(root).ok();
     }
 

@@ -17,6 +17,26 @@ use crate::model::ProviderResumeCursor;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub fn generated_title(session_id: &str) -> anyhow::Result<Option<String>> {
+    generated_title_in(&grok_home_directory()?, session_id)
+}
+
+pub fn generated_title_in(grok_home: &Path, session_id: &str) -> anyhow::Result<Option<String>> {
+    Uuid::parse_str(session_id).context("Grok returned an invalid session ID")?;
+    let summary_path = find_session_directory_in(grok_home, session_id)?.join("summary.json");
+    let summary: Value = serde_json::from_slice(
+        &fs::read(&summary_path)
+            .with_context(|| format!("could not read {}", summary_path.display()))?,
+    )
+    .context("Grok's session summary is invalid JSON")?;
+    Ok(summary
+        .get("generated_title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned))
+}
+
 pub fn fork_session_at_turn(
     binary: &Path,
     cwd: &Path,
@@ -76,11 +96,18 @@ fn fork_native_session(
 }
 
 fn find_session_directory(session_id: &str) -> anyhow::Result<PathBuf> {
-    let grok_home = std::env::var_os("GROK_HOME")
+    find_session_directory_in(&grok_home_directory()?, session_id)
+}
+
+fn grok_home_directory() -> anyhow::Result<PathBuf> {
+    std::env::var_os("GROK_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".grok")))
-        .ok_or_else(|| anyhow!("Grok's home directory could not be located"))?;
+        .ok_or_else(|| anyhow!("Grok's home directory could not be located"))
+}
+
+fn find_session_directory_in(grok_home: &Path, session_id: &str) -> anyhow::Result<PathBuf> {
     let sessions = grok_home.join("sessions");
     for entry in fs::read_dir(&sessions)
         .with_context(|| format!("could not read Grok sessions at {}", sessions.display()))?
@@ -327,5 +354,31 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("only 1 native turns"));
+    }
+
+    #[test]
+    fn reads_groks_generated_title_from_native_metadata() {
+        let root = std::env::temp_dir().join(format!("waku-grok-title-{}", Uuid::new_v4()));
+        let session_id = Uuid::new_v4().to_string();
+        let session = root
+            .join("sessions")
+            .join("%2Ftmp%2Fproject")
+            .join(&session_id);
+        fs::create_dir_all(&session).unwrap();
+        fs::write(
+            session.join("summary.json"),
+            serde_json::to_vec(&json!({
+                "generated_title": "  Fix provider task titles  ",
+                "session_summary": "A much longer summary"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            generated_title_in(&root, &session_id).unwrap().as_deref(),
+            Some("Fix provider task titles")
+        );
+        fs::remove_dir_all(root).ok();
     }
 }

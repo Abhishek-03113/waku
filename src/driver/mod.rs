@@ -7,6 +7,7 @@ mod computer_use;
 mod opencode;
 mod pi;
 mod support;
+mod title_refresh;
 
 use std::path::PathBuf;
 use std::sync::Arc;

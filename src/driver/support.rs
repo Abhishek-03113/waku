@@ -86,6 +86,13 @@ impl HeadlessComputerUseRuntime {
     pub(super) fn stop(&self) {
         self.runtime.stop();
     }
+
+    pub(super) fn grok_home(&self) -> Option<&Path> {
+        match &self.config {
+            HeadlessComputerUseConfig::Grok { grok_home, .. } => Some(grok_home),
+            HeadlessComputerUseConfig::OpenCode { .. } => None,
+        }
+    }
 }
 
 fn build_opencode_computer_use_config(
