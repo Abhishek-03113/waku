@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 const ENDPOINT: &str = "https://u.egoist.dev";
-const WEBSITE_ID: &str = "5dc2da71-cd6e-4862-8d60-e1cfb782f54f";
+const WEBSITE_ID: &str = "17e1f2bf-8844-4e44-a0e6-7ec7b1772eef";
 const EVENT_QUEUE_CAPACITY: usize = 128;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
