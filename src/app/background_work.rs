@@ -14,6 +14,23 @@ pub(super) struct BackgroundWorkRegistry {
     rendered_output: HashMap<BackgroundWorkKey, SharedString>,
     dirty_output: HashSet<BackgroundWorkKey>,
     last_output_cache_refresh: Option<Instant>,
+    output_viewports: HashMap<BackgroundWorkKey, BackgroundOutputViewport>,
+    selection: TranscriptSelection,
+}
+
+#[derive(Clone)]
+struct BackgroundOutputViewport {
+    scroll_handle: ScrollHandle,
+    scrollbar: Rc<ScrollbarState>,
+}
+
+impl Default for BackgroundOutputViewport {
+    fn default() -> Self {
+        Self {
+            scroll_handle: ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -87,6 +104,9 @@ impl BackgroundWorkRegistry {
             return;
         }
 
+        bound_output(&mut incoming);
+        self.output_viewports.entry(key.clone()).or_default();
+        let output_changed;
         if let Some(current) = self.items.get_mut(&incoming.key) {
             let preserve_stopping =
                 current.status == BackgroundWorkStatus::Stopping && incoming.status.is_stoppable();
@@ -98,9 +118,12 @@ impl BackgroundWorkRegistry {
             merge_option(&mut current.command, incoming.command);
             merge_option(&mut current.cwd, incoming.cwd);
             if let Some(output) = incoming.output {
+                output_changed = current.output.as_ref() != Some(&output)
+                    || current.output_truncated != incoming.output_truncated;
                 current.output = Some(output);
                 current.output_truncated = incoming.output_truncated;
-                bound_output(current);
+            } else {
+                output_changed = false;
             }
             merge_option(&mut current.duration_ms, incoming.duration_ms);
             merge_option(&mut current.exit_code, incoming.exit_code);
@@ -121,15 +144,11 @@ impl BackgroundWorkRegistry {
                 current.status = incoming.status;
             }
         } else {
-            bound_output(&mut incoming);
+            output_changed = incoming.output.is_some();
             self.order.push(incoming.key.clone());
             self.items.insert(incoming.key.clone(), incoming);
         }
-        if self
-            .items
-            .get(&key)
-            .is_some_and(|item| item.output.is_some())
-        {
+        if output_changed {
             self.dirty_output.insert(key);
         }
     }
@@ -141,6 +160,7 @@ impl BackgroundWorkRegistry {
         let Some(item) = self.items.get_mut(key) else {
             return;
         };
+        self.output_viewports.entry(key.clone()).or_default();
         item.output.get_or_insert_with(String::new).push_str(delta);
         item.updated_at_ms = unix_time_millis();
         bound_output(item);
@@ -193,6 +213,7 @@ impl BackgroundWorkRegistry {
         self.items.remove(key);
         self.rendered_output.remove(key);
         self.dirty_output.remove(key);
+        self.output_viewports.remove(key);
         self.order.retain(|entry| entry != key);
     }
 
@@ -282,6 +303,10 @@ impl BackgroundWorkRegistry {
             .collect()
     }
 
+    pub(super) fn selected_text(&self) -> Option<String> {
+        self.selection.selection.borrow().selected_text()
+    }
+
     fn refresh_output_cache(&mut self) -> bool {
         if self.dirty_output.is_empty()
             || self
@@ -294,7 +319,10 @@ impl BackgroundWorkRegistry {
         for key in dirty {
             if let Some(output) = self.items.get(&key).and_then(|item| item.output.as_deref()) {
                 self.rendered_output
-                    .insert(key, SharedString::from(strip_ansi(output)));
+                    .insert(key.clone(), SharedString::from(strip_ansi(output)));
+                if let Some(viewport) = self.output_viewports.get(&key) {
+                    viewport.scroll_handle.scroll_to_bottom();
+                }
             }
         }
         self.last_output_cache_refresh = Some(Instant::now());
@@ -757,11 +785,9 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let theme = Theme::current(cx);
-        let item = self
-            .state
-            .selected_session
-            .and_then(|session_id| self.background_work.get(&session_id))
-            .and_then(|registry| registry.items.get(key));
+        let session_id = self.state.selected_session;
+        let registry = session_id.and_then(|session_id| self.background_work.get(&session_id));
+        let item = registry.and_then(|registry| registry.items.get(key));
         let Some(item) = item else {
             return div()
                 .id("background-work-surface")
@@ -786,13 +812,73 @@ impl Waku {
                         ),
                 );
         };
-        let output = self
-            .state
-            .selected_session
-            .and_then(|session_id| self.background_work.get(&session_id))
+        let output = registry
             .and_then(|registry| registry.rendered_output.get(key))
             .cloned();
+        let output_viewport = registry
+            .and_then(|registry| registry.output_viewports.get(key))
+            .cloned()
+            .unwrap_or_default();
+        let selection = registry
+            .map(|registry| registry.selection.clone())
+            .unwrap_or_default();
         let status_color = work_status_color(item.status, theme);
+        let stop = session_id.and_then(|session_id| {
+            (item.status.is_stoppable() && item.can_stop).then(|| {
+                let focus = self.transcript_control_focus(
+                    format!(
+                        "background-surface-stop-{}-{}",
+                        item.key.provider_id, item.key.kind as u8
+                    ),
+                    cx,
+                );
+                let click_key = item.key.clone();
+                let click_weak = cx.entity().downgrade();
+                let key_key = item.key.clone();
+                let key_weak = cx.entity().downgrade();
+                div()
+                    .id(SharedString::from(format!(
+                        "background-surface-stop-{}-{}",
+                        item.key.provider_id, item.key.kind as u8
+                    )))
+                    .track_focus(&focus)
+                    .tab_index(0)
+                    .h(px(26.0))
+                    .px(px(9.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_default()
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_secondary)
+                    .hover(|style| style.bg(theme.danger.opacity(0.10)))
+                    .active(|style| style.bg(theme.danger.opacity(0.16)))
+                    .focus_visible(|style| style.border_color(theme.accent))
+                    .tooltip(Tooltip::text(tr!("background.stop")))
+                    .child(icon("icons/stop-filled.svg", 11.0, theme.danger))
+                    .child(tr!("background.stop"))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = click_weak.update(cx, |this, cx| {
+                            this.stop_background_work(session_id, click_key.clone(), cx);
+                        });
+                    })
+                    .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            let _ = key_weak.update(cx, |this, cx| {
+                                this.stop_background_work(session_id, key_key.clone(), cx);
+                            });
+                            cx.stop_propagation();
+                        }
+                    })
+            })
+        });
         let card = div()
             .w_full()
             .flex()
@@ -850,9 +936,16 @@ impl Waku {
                                     .child("·")
                                     .child(work_elapsed(item)),
                             ),
-                    ),
+                    )
+                    .when_some(stop, |header, stop| header.child(stop)),
             )
-            .child(self.render_background_work_detail(item, output, cx));
+            .child(self.render_background_work_detail(
+                item,
+                output,
+                output_viewport,
+                selection,
+                cx,
+            ));
         div()
             .id("background-work-surface")
             .tab_group()
@@ -867,6 +960,8 @@ impl Waku {
         &self,
         item: &BackgroundWorkItem,
         output: Option<SharedString>,
+        output_viewport: BackgroundOutputViewport,
+        selection: TranscriptSelection,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = Theme::current(cx);
@@ -912,6 +1007,26 @@ impl Waku {
             );
         }
         let output = output.unwrap_or_else(|| SharedString::from(tr!("background.no_output")));
+        let output_flat = md::render::flatten_plain(
+            output,
+            md::render::MONO_FAMILY,
+            FontWeight::NORMAL,
+            theme.text_secondary,
+        );
+        let output_text = md::render::selectable_flat_text(
+            &output_flat,
+            crate::md::selection::TextKey::new(
+                format!(
+                    "background-output-{}-{}",
+                    item.key.provider_id, item.key.kind as u8
+                ),
+                0,
+            ),
+            selection.clone(),
+            theme.code_wash,
+            theme.selection,
+            false,
+        );
         detail.child(
             div()
                 .border_t_1()
@@ -935,23 +1050,46 @@ impl Waku {
                 )
                 .child(
                     div()
-                        .id(SharedString::from(format!(
-                            "background-output-{}-{}",
-                            item.key.provider_id, item.key.kind as u8
-                        )))
+                        .relative()
                         .max_h(px(320.0))
-                        .overflow_y_scroll()
                         .rounded(px(6.0))
+                        .overflow_hidden()
                         .bg(theme.terminal)
-                        .p(px(8.0))
-                        .text_size(px(10.5))
-                        .line_height(px(15.0))
-                        .font_family(md::render::MONO_FAMILY)
-                        .text_color(theme.text_secondary)
-                        .child(output),
+                        .child(md::render::frame_reset(selection.clone()))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "background-output-scroll-{}-{}",
+                                    item.key.provider_id, item.key.kind as u8
+                                )))
+                                .max_h(px(320.0))
+                                .overflow_y_scroll()
+                                .track_scroll(&output_viewport.scroll_handle)
+                                .p(px(8.0))
+                                .text_size(px(10.5))
+                                .line_height(px(15.0))
+                                .font_family(md::render::MONO_FAMILY)
+                                .text_color(theme.text_secondary)
+                                .child(output_text),
+                        )
+                        .child(scrollbar::vertical(
+                            &output_viewport.scroll_handle,
+                            &output_viewport.scrollbar,
+                        ))
+                        .child(background_work_selection_input(selection)),
                 ),
         )
     }
+}
+
+fn background_work_selection_input(selection: TranscriptSelection) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, _, window, _| md::render::install_selection_input(window, &selection),
+    )
+    .absolute()
+    .w(px(0.0))
+    .h(px(0.0))
 }
 
 fn background_work_count_summary(processes: usize, agents: usize) -> String {
@@ -1503,6 +1641,18 @@ mod tests {
             .expect("new output should request one cache refresh");
         assert!(delay <= OUTPUT_CACHE_REFRESH_INTERVAL);
         assert!(!registry.refresh_output_cache());
+    }
+
+    #[test]
+    fn unchanged_process_snapshots_do_not_rebuild_output() {
+        let mut registry = BackgroundWorkRegistry::default();
+        let mut process = item("one", BackgroundWorkStatus::Running, true);
+        process.output = Some("same output".to_owned());
+        registry.upsert(process.clone());
+        assert!(registry.refresh_output_cache());
+
+        registry.upsert(process);
+        assert_eq!(registry.output_refresh_delay(), None);
     }
 
     #[test]

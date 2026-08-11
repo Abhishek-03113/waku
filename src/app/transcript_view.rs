@@ -280,6 +280,11 @@ impl Waku {
                 .right_panel_active_surface
                 .and_then(|index| self.right_panel_surfaces.get(index))
                 .is_some_and(|surface| matches!(surface, RightPanelSurface::Diff));
+        let reviewing_background_work = self.right_panel_visible
+            && self
+                .right_panel_active_surface
+                .and_then(|index| self.right_panel_surfaces.get(index))
+                .is_some_and(|surface| matches!(surface, RightPanelSurface::BackgroundWork { .. }));
         let selected = reviewing_diff
             .then(|| {
                 self.right_panel_diff_selection
@@ -288,6 +293,16 @@ impl Waku {
                     .selected_text()
             })
             .flatten()
+            .or_else(|| {
+                reviewing_background_work
+                    .then(|| {
+                        self.state
+                            .selected_session
+                            .and_then(|session_id| self.background_work.get(&session_id))
+                            .and_then(BackgroundWorkRegistry::selected_text)
+                    })
+                    .flatten()
+            })
             .or_else(|| self.toast_selection.selection.borrow().selected_text())
             .or_else(|| self.skills_selection.selection.borrow().selected_text())
             .or_else(|| self.transcript_selection.selection.borrow().selected_text());
