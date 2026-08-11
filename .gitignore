@@ -2,6 +2,7 @@ target
 .waku-cache
 .DS_Store
 *.log
+.env
 
 /dist
 node_modules

@@ -68,17 +68,19 @@ words, don't do it casually.
 
 ### 2. Developer ID signing + notarization
 
-Already configured on this Mac: the script signs as the team `GJE9R5VE87`
-Developer ID Application certificate and notarizes with the `NOTARY` keychain
-profile. On a fresh machine:
+Copy `.env.example` to `.env` and replace the signing and analytics
+placeholders. Bun loads these values before Cargo compiles the release, so the
+analytics endpoint and website ID are embedded in the executable. The script
+notarizes with the `NOTARY` keychain profile by default. On a fresh machine:
 
 ```sh
+cp .env.example .env
 xcrun notarytool store-credentials NOTARY \
-  --apple-id you@example.com --team-id GJE9R5VE87
+  --apple-id you@example.com --team-id YOUR_APPLE_TEAM_ID
 ```
 
-Override with `--signing-identity` / `WAKU_SIGNING_IDENTITY` and
-`--notary-profile` / `WAKU_NOTARY_PROFILE`.
+Override the environment with `--signing-identity`, or change the notary
+profile with `--notary-profile` / `WAKU_NOTARY_PROFILE`.
 
 ### 3. Cloudflare R2 bucket + domain  ← **still to do once**
 

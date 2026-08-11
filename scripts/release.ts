@@ -19,7 +19,6 @@ const executableName = "Waku";
 const jsReplExecutableName = "waku_js_repl";
 const computerUseHelperName = "Waku Computer Use";
 const packageName = "waku";
-const defaultSigningIdentity = "GJE9R5VE87";
 const defaultNotaryProfile = "NOTARY";
 const projectRoot = resolve(import.meta.dir, "..");
 
@@ -38,7 +37,7 @@ Options:
   --force                       Publish even if this version is already in R2
   --output <path>               DMG output path (default: dist/Waku-<version>.dmg)
   --signing-identity <name>     Developer ID Application identity selector
-                                (default: GJE9R5VE87; or WAKU_SIGNING_IDENTITY)
+                                (or WAKU_SIGNING_IDENTITY; required unless --adhoc)
   --notary-profile <name>       notarytool keychain profile
                                 (default: NOTARY; or WAKU_NOTARY_PROFILE)
   --build-number <number>       CFBundleVersion override (or WAKU_BUILD_NUMBER;
@@ -51,6 +50,9 @@ Options:
   --help                        Show this help
 
 Environment:
+  WAKU_SIGNING_IDENTITY         Developer ID Application identity selector
+  WAKU_ANALYTICS_ENDPOINT       analytics endpoint embedded at build time
+  WAKU_ANALYTICS_WEBSITE_ID     analytics website ID embedded at build time
   WAKU_R2_REMOTE                rclone remote name (default: r2)
   WAKU_R2_BUCKET                R2 bucket name (default: waku-releases)
   WAKU_DOWNLOAD_URL_PREFIX      base URL served by the bucket
@@ -132,14 +134,14 @@ const adhoc = values.adhoc ?? false;
 const skipNotarize = values["skip-notarize"] ?? false;
 const configuredSigningIdentity =
   values["signing-identity"] ?? process.env.WAKU_SIGNING_IDENTITY;
-const signingIdentity =
-  configuredSigningIdentity ?? defaultSigningIdentity;
 const notaryProfile =
   values["notary-profile"] ??
   process.env.WAKU_NOTARY_PROFILE ??
   defaultNotaryProfile;
 const explicitBuildNumber =
   values["build-number"] ?? process.env.WAKU_BUILD_NUMBER;
+const analyticsEndpoint = process.env.WAKU_ANALYTICS_ENDPOINT?.trim();
+const analyticsWebsiteId = process.env.WAKU_ANALYTICS_WEBSITE_ID?.trim();
 const localOnly = values.local ?? false;
 const force = values.force ?? false;
 // Publishing requires a Developer ID-signed, notarized DMG, so the flags that
@@ -157,8 +159,13 @@ const downloadUrlPrefix =
 const historyCount = Number(process.env.WAKU_HISTORY_COUNT ?? "15");
 const skipHistory = process.env.WAKU_NO_HISTORY === "1";
 
-if (adhoc && configuredSigningIdentity) {
+if (adhoc && values["signing-identity"]) {
   throw new Error("Use either --adhoc or --signing-identity, not both.");
+}
+if (!adhoc && !configuredSigningIdentity) {
+  throw new Error(
+    "Set WAKU_SIGNING_IDENTITY or pass --signing-identity (or use --adhoc).",
+  );
 }
 if (explicitBuildNumber && !/^\d+(?:\.\d+){0,2}$/.test(explicitBuildNumber)) {
   throw new Error(
@@ -167,6 +174,11 @@ if (explicitBuildNumber && !/^\d+(?:\.\d+){0,2}$/.test(explicitBuildNumber)) {
 }
 if (!Number.isSafeInteger(historyCount) || historyCount < 0) {
   throw new Error("WAKU_HISTORY_COUNT must be a non-negative integer.");
+}
+if (!values["skip-build"] && (!analyticsEndpoint || !analyticsWebsiteId)) {
+  throw new Error(
+    "Set WAKU_ANALYTICS_ENDPOINT and WAKU_ANALYTICS_WEBSITE_ID before building a release.",
+  );
 }
 
 for (const tool of [
@@ -364,7 +376,7 @@ if (
 let temporaryDirectory: string | undefined;
 let mountedDmg = false;
 let mountDirectory: string | undefined;
-const identity = adhoc ? "-" : signingIdentity!;
+const identity = adhoc ? "-" : configuredSigningIdentity!;
 
 try {
   if (values["skip-build"]) {
@@ -385,7 +397,7 @@ try {
       ? "Assembling the app bundle"
       : "Building and assembling the app bundle",
   );
-  await $`env WAKU_CODESIGN_IDENTITY=${identity} WAKU_SKIP_CARGO_BUILD=${values["skip-build"] ? "1" : "0"} ${join(projectRoot, "scripts", "bundle.sh")} release`;
+  await $`env WAKU_CODESIGN_IDENTITY=${identity} WAKU_ANALYTICS_ENDPOINT=${analyticsEndpoint ?? ""} WAKU_ANALYTICS_WEBSITE_ID=${analyticsWebsiteId ?? ""} WAKU_SKIP_CARGO_BUILD=${values["skip-build"] ? "1" : "0"} ${join(projectRoot, "scripts", "bundle.sh")} release`;
   for (const artifact of [
     join(contentsDirectory, "MacOS", executableName),
     bundledJsReplExecutable,

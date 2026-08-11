@@ -16,10 +16,18 @@ use rust_umami::{Client, Context};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-const ENDPOINT: &str = "https://u.egoist.dev";
-const WEBSITE_ID: &str = "17e1f2bf-8844-4e44-a0e6-7ec7b1772eef";
 const EVENT_QUEUE_CAPACITY: usize = 128;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(not(debug_assertions))]
+const ENDPOINT: Option<&str> = option_env!("WAKU_ANALYTICS_ENDPOINT");
+#[cfg(debug_assertions)]
+const ENDPOINT: Option<&str> = None;
+
+#[cfg(not(debug_assertions))]
+const WEBSITE_ID: Option<&str> = option_env!("WAKU_ANALYTICS_WEBSITE_ID");
+#[cfg(debug_assertions)]
+const WEBSITE_ID: Option<&str> = None;
 
 /// A cheap handle to the background analytics worker.
 #[derive(Clone)]
@@ -30,8 +38,8 @@ pub struct Analytics {
 }
 
 impl Analytics {
-    /// Starts analytics for release builds. Debug builds stay quiet unless
-    /// `WAKU_ENABLE_ANALYTICS=1`; any build can opt out with
+    /// Starts analytics only for release builds with configuration embedded
+    /// at compile time. Any build can opt out with
     /// `WAKU_DISABLE_ANALYTICS=1`.
     pub fn new(language: &'static str, distinct_id: Uuid, sharing_enabled: bool) -> Self {
         let (events, receiver) = sync_channel(EVENT_QUEUE_CAPACITY);
@@ -232,10 +240,10 @@ impl Event {
 }
 
 fn analytics_available() -> bool {
-    if env_flag("WAKU_DISABLE_ANALYTICS") {
-        return false;
-    }
-    !cfg!(debug_assertions) || env_flag("WAKU_ENABLE_ANALYTICS")
+    !cfg!(debug_assertions)
+        && !env_flag("WAKU_DISABLE_ANALYTICS")
+        && ENDPOINT.is_some_and(|value| !value.trim().is_empty())
+        && WEBSITE_ID.is_some_and(|value| !value.trim().is_empty())
 }
 
 fn env_flag(name: &str) -> bool {
@@ -253,6 +261,9 @@ fn run(
     distinct_id: Uuid,
     enabled: Arc<AtomicBool>,
 ) {
+    let (Some(endpoint), Some(website_id)) = (ENDPOINT, WEBSITE_ID) else {
+        return;
+    };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -264,7 +275,7 @@ fn run(
     // so enter the worker's runtime even though the builder itself is sync.
     let client = {
         let _runtime = runtime.enter();
-        Client::builder(ENDPOINT, WEBSITE_ID)
+        Client::builder(endpoint, website_id)
             .default_context(
                 Context::new()
                     .hostname("waku.sh")
@@ -303,10 +314,10 @@ fn run(
 mod tests {
     use super::*;
 
+    #[cfg(debug_assertions)]
     #[test]
-    fn client_configuration_targets_the_desktop_collection_endpoint() {
-        let client = Client::new(ENDPOINT, WEBSITE_ID).unwrap();
-        assert_eq!(client.endpoint().as_str(), "https://u.egoist.dev/api/send");
+    fn debug_builds_never_enable_analytics() {
+        assert!(!analytics_available());
     }
 
     #[test]
