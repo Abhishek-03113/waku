@@ -42,10 +42,7 @@ struct BackgroundSummaryEntry {
 
 #[derive(Clone)]
 struct EnvironmentSummary {
-    additions: u64,
-    deletions: u64,
     commit_status: Option<String>,
-    changes_focus: FocusHandle,
     commit_focus: FocusHandle,
     compare_focus: FocusHandle,
 }
@@ -718,11 +715,11 @@ impl Waku {
                 .filter(|(snapshot_path, _)| snapshot_path == path)
                 .map(|(_, snapshot)| snapshot)
         });
+        let change_counts = snapshot
+            .map(|snapshot| (snapshot.additions, snapshot.deletions))
+            .filter(|(additions, deletions)| *additions > 0 || *deletions > 0);
         let environment = Some(EnvironmentSummary {
-            additions: snapshot.map_or(0, |snapshot| snapshot.additions),
-            deletions: snapshot.map_or(0, |snapshot| snapshot.deletions),
             commit_status: self.commit_operation_status_label(),
-            changes_focus: self.transcript_control_focus("environment-summary-changes", cx),
             commit_focus: self.transcript_control_focus("environment-summary-commit", cx),
             compare_focus: self.transcript_control_focus("environment-summary-compare", cx),
         });
@@ -762,9 +759,63 @@ impl Waku {
                 summary
             }))
             .child(icon("icons/info.svg", 15.0, theme.text_tertiary));
+        let git_status = change_counts.map(|(additions, deletions)| {
+            let focus = self.transcript_control_focus("header-git-status", cx);
+            div()
+                .id("header-git-status")
+                .track_focus(&focus)
+                .tab_index(0)
+                .h(px(28.0))
+                .px(px(7.0))
+                .rounded(px(7.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .cursor_default()
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .focus_visible(|style| {
+                    style
+                        .bg(theme.overlay)
+                        .border_1()
+                        .border_color(theme.accent)
+                })
+                .hover(|style| style.bg(theme.overlay))
+                .active(|style| style.bg(theme.overlay_strong))
+                .when(additions > 0, |button| {
+                    button.child(
+                        div()
+                            .text_color(theme.success)
+                            .child(format!("+{additions}")),
+                    )
+                })
+                .when(deletions > 0, |button| {
+                    button.child(
+                        div()
+                            .text_color(theme.danger)
+                            .child(format!("-{deletions}")),
+                    )
+                })
+                .tooltip(Tooltip::text(tr!("environment.changes")))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.set_right_panel_diff_source(ReviewDiffSource::Uncommitted, cx);
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.set_right_panel_diff_source(ReviewDiffSource::Uncommitted, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .into_any_element()
+        });
         let entries = Rc::new(entries);
         let weak = cx.entity().downgrade();
-        popover(
+        let info = popover(
             trigger,
             &handle,
             MenuAlign::BelowRight,
@@ -778,7 +829,18 @@ impl Waku {
                     cx,
                 )
             },
-        )
+        );
+        div()
+            .id("header-environment-controls")
+            .tab_group()
+            .tab_stop(false)
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .children(git_status)
+            .child(info)
+            .into_any_element()
     }
 
     pub(super) fn render_background_work_surface(
@@ -1198,45 +1260,6 @@ fn render_environment_summary_section(
     weak: WeakEntity<Waku>,
     theme: &Theme,
 ) -> Div {
-    let changes_handle = handle.clone();
-    let changes_weak = weak.clone();
-    let changes = render_environment_action_row(
-        "environment-summary-changes",
-        &environment.changes_focus,
-        "icons/changes.svg",
-        tr!("environment.changes"),
-        true,
-        false,
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(13.0))
-                .font_weight(FontWeight::MEDIUM)
-                .child(
-                    div()
-                        .text_color(theme.success)
-                        .child(format!("+{}", environment.additions)),
-                )
-                .child(
-                    div()
-                        .text_color(theme.danger)
-                        .child(format!("-{}", environment.deletions)),
-                )
-                .into_any_element(),
-        ),
-        theme,
-        move |window, cx| {
-            changes_handle.close(window, cx);
-            window.refresh();
-            let _ = changes_weak.update(cx, |this, cx| {
-                this.set_right_panel_diff_source(ReviewDiffSource::Uncommitted, cx);
-            });
-        },
-    );
-
     let commit_handle = handle.clone();
     let commit_weak = weak.clone();
     let commit_pending = environment.commit_status.is_some();
@@ -1295,7 +1318,6 @@ fn render_environment_summary_section(
                 .text_color(theme.text_tertiary)
                 .child(tr!("environment.title")),
         )
-        .child(changes)
         .child(commit)
         .child(compare)
 }
