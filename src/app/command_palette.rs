@@ -1180,8 +1180,6 @@ impl Waku {
                 .h(px(card_height))
                 .overflow_hidden()
                 .rounded(px(15.0))
-                .border_1()
-                .border_color(theme.border_strong)
                 .bg(theme.raised)
                 .shadow_xl()
                 .relative()
