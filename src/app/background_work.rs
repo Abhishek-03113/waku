@@ -1527,7 +1527,8 @@ fn render_background_summary_row(
             div()
                 .min_w_0()
                 .flex_1()
-                .truncate()
+                .line_clamp(1)
+                .text_ellipsis()
                 .text_size(px(if is_process { 12.0 } else { 13.5 }))
                 .text_color(if is_process {
                     theme.text_secondary

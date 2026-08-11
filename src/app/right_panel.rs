@@ -2107,7 +2107,8 @@ impl Waku {
                         div()
                             .min_w_0()
                             .flex_1()
-                            .truncate()
+                            .line_clamp(1)
+                            .text_ellipsis()
                             .text_size(px(12.0))
                             .text_color(if active {
                                 theme.text
