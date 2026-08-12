@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.0.9]
+
 - Add OpenCode Go support in usage popover
 - Fix app icon
 - Fix Cursor model detection
