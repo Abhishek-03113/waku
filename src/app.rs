@@ -935,6 +935,7 @@ pub struct Waku {
     /// keyboard has not moved yet, so `enter` takes the first row.
     model_picker_highlight: Option<usize>,
     model_picker_scroll: ScrollHandle,
+    model_picker_scrollbar: Rc<ScrollbarState>,
     branch_search: Entity<ComposerInput>,
     branch_create_input: Entity<ComposerInput>,
     branch_picker_mode: BranchPickerMode,
@@ -2225,6 +2226,7 @@ impl Waku {
                 model_picker_tab,
                 model_picker_highlight: None,
                 model_picker_scroll: ScrollHandle::new(),
+                model_picker_scrollbar: ScrollbarState::new(),
                 branch_picker_mode: BranchPickerMode::Browse,
                 branch_picker_highlight: None,
                 branch_picker_list_state,
