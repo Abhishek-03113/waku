@@ -88,6 +88,12 @@ impl Waku {
             self.ensure_right_panel_terminals(cx);
         }
         self.reset_visible_state();
+        if session_changed {
+            // Each materialized worktree has its own cache entry. A task that
+            // finished while another session was selected could otherwise
+            // retain the clean snapshot captured before its agent made edits.
+            self.refresh_selected_branch_snapshot(cx);
+        }
         self.refresh_composer_sources(cx);
         self.reset_transcript_rows(self.transcript_row_count());
         self.save();
