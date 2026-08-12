@@ -823,9 +823,10 @@ impl Waku {
         if std::thread::Builder::new()
             .name("waku-provider-detection".into())
             .spawn(move || {
-                // Finder/Dock launches do not inherit the PATH assembled by
-                // the user's interactive shell. Resolve it here, away from
-                // the UI thread, before looking for nvm/fnm-managed CLIs.
+                // Finder/Dock launches do not inherit the environment
+                // assembled by the user's interactive shell. Resolve it here,
+                // away from the UI thread, before looking for nvm/fnm-managed
+                // CLIs and launching provider probes.
                 crate::command_env::refresh_from_default_shell();
                 for provider in detect_providers {
                     let path = match overrides.get(&provider) {

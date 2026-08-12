@@ -12,31 +12,31 @@ use std::time::{Duration, Instant};
 use std::ffi::CStr;
 #[cfg(target_os = "macos")]
 use std::mem::MaybeUninit;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(target_os = "macos")]
 use std::os::unix::process::CommandExt;
 
-const LOGIN_SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(5);
-const INTERACTIVE_SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(3);
-const SHELL_PATH_COMMAND: &str = "/usr/bin/printenv PATH > \"$WAKU_SHELL_PATH_CAPTURE_FILE\"";
+const LOGIN_SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(5);
+const INTERACTIVE_SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(3);
+const SHELL_ENV_COMMAND: &str = "/usr/bin/env -0 > \"$WAKU_SHELL_ENV_CAPTURE_FILE\"";
 
-static LOGIN_SHELL_PATH: OnceLock<RwLock<Option<OsString>>> = OnceLock::new();
-static SHELL_PATH_CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
+type ShellEnvironment = Vec<(OsString, OsString)>;
 
-/// Build a command with the executable search path a terminal-launched Waku
-/// normally inherits. Apps opened through LaunchServices only receive the
-/// system PATH, which is not enough for script-based CLIs whose shebang uses
-/// `/usr/bin/env` (for example, an npm-installed Codex launcher needs `node`).
-/// The cached interactive login-shell PATH comes first so nvm/fnm select the
-/// same runtime the user gets in a normal terminal.
+static LOGIN_SHELL_ENVIRONMENT: OnceLock<RwLock<Option<ShellEnvironment>>> = OnceLock::new();
+static SHELL_ENV_CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Build a command with the environment a terminal-launched Waku normally
+/// inherits. Apps opened through LaunchServices do not receive variables
+/// exported by the user's shell, including the PATH needed by script-based
+/// CLIs whose shebang uses `/usr/bin/env` (for example, an npm-installed Codex
+/// launcher needs `node`). Callers can add provider-specific overrides after
+/// this.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
-    if let Ok(path) = std::env::join_paths(executable_search_paths()) {
-        command.env("PATH", path);
-    }
+    command.envs(shell_environment());
     command
 }
 
@@ -161,36 +161,47 @@ pub fn executable_search_path() -> Option<std::ffi::OsString> {
     std::env::join_paths(executable_search_paths()).ok()
 }
 
-/// Resolve PATH through the user's interactive login shell and cache it for
+/// Resolve the user's interactive login-shell environment and cache it for
 /// provider discovery and every later child process. This starts a shell and
 /// must therefore only be called from a background thread.
 pub fn refresh_from_default_shell() -> bool {
-    let Some(path) = resolve_default_shell_path(LOGIN_SHELL_PATH_TIMEOUT) else {
+    let Some(environment) = resolve_default_shell_environment(LOGIN_SHELL_ENV_TIMEOUT) else {
         return false;
     };
-    *login_shell_path()
+    *login_shell_environment()
         .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(environment);
     true
 }
 
 fn executable_search_paths() -> Vec<PathBuf> {
     search_paths_from(
-        cached_login_shell_path().as_deref(),
+        cached_login_shell_variable(OsStr::new("PATH")).as_deref(),
         std::env::var_os("PATH").as_deref(),
         dirs::home_dir().as_deref(),
     )
 }
 
-fn login_shell_path() -> &'static RwLock<Option<OsString>> {
-    LOGIN_SHELL_PATH.get_or_init(|| RwLock::new(None))
+fn login_shell_environment() -> &'static RwLock<Option<ShellEnvironment>> {
+    LOGIN_SHELL_ENVIRONMENT.get_or_init(|| RwLock::new(None))
 }
 
-fn cached_login_shell_path() -> Option<OsString> {
-    login_shell_path()
+pub(crate) fn shell_environment() -> ShellEnvironment {
+    login_shell_environment()
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
+        .unwrap_or_default()
+}
+
+fn cached_login_shell_variable(name: &OsStr) -> Option<OsString> {
+    login_shell_environment()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()?
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, value)| value.clone())
 }
 
 fn search_paths_from(
@@ -225,7 +236,7 @@ fn search_paths_from(
     directories
 }
 
-fn resolve_default_shell_path(timeout: Duration) -> Option<OsString> {
+fn resolve_default_shell_environment(timeout: Duration) -> Option<ShellEnvironment> {
     let started_at = Instant::now();
     for shell in default_shell_candidates() {
         for shell_args in [["-i", "-l", "-c"].as_slice(), ["-l", "-c"].as_slice()] {
@@ -236,12 +247,14 @@ fn resolve_default_shell_path(timeout: Duration) -> Option<OsString> {
             // Leave part of the total budget for a non-interactive login-shell
             // fallback when an interactive rc file blocks or exits early.
             let attempt_timeout = if shell_args.first() == Some(&"-i") {
-                remaining.min(INTERACTIVE_SHELL_PATH_TIMEOUT)
+                remaining.min(INTERACTIVE_SHELL_ENV_TIMEOUT)
             } else {
                 remaining
             };
-            if let Some(path) = capture_shell_path(&shell, shell_args, attempt_timeout) {
-                return Some(path);
+            if let Some(environment) =
+                capture_shell_environment(&shell, shell_args, attempt_timeout)
+            {
+                return Some(environment);
             }
         }
     }
@@ -301,13 +314,17 @@ fn account_default_shell() -> Option<PathBuf> {
     }
 }
 
-fn capture_shell_path(shell: &Path, shell_args: &[&str], timeout: Duration) -> Option<OsString> {
-    let capture = ShellPathCapture::create()?;
+fn capture_shell_environment(
+    shell: &Path,
+    shell_args: &[&str],
+    timeout: Duration,
+) -> Option<ShellEnvironment> {
+    let capture = ShellEnvironmentCapture::create()?;
     let mut command = Command::new(shell);
     command
         .args(shell_args)
-        .arg(SHELL_PATH_COMMAND)
-        .env("WAKU_SHELL_PATH_CAPTURE_FILE", capture.path())
+        .arg(SHELL_ENV_COMMAND)
+        .env("WAKU_SHELL_ENV_CAPTURE_FILE", capture.path())
         // Match shell-env's safeguards for common interactive zsh setups so
         // an update prompt or tmux auto-start cannot consume the probe budget.
         .env("DISABLE_AUTO_UPDATE", "true")
@@ -323,17 +340,48 @@ fn capture_shell_path(shell: &Path, shell_args: &[&str], timeout: Duration) -> O
     if !wait_for_child(&mut child, timeout) {
         return None;
     }
-    let mut bytes = fs::read(capture.path()).ok()?;
-    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
-        bytes.pop();
-    }
-    if bytes.is_empty() {
-        return None;
-    }
-    #[cfg(target_os = "macos")]
-    return Some(OsString::from_vec(bytes));
-    #[cfg(not(target_os = "macos"))]
-    return String::from_utf8(bytes).ok().map(OsString::from);
+    parse_shell_environment(&fs::read(capture.path()).ok()?)
+}
+
+fn parse_shell_environment(bytes: &[u8]) -> Option<ShellEnvironment> {
+    let environment = bytes
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let separator = entry.iter().position(|byte| *byte == b'=')?;
+            if separator == 0 {
+                return None;
+            }
+            let name = os_string_from_bytes(&entry[..separator])?;
+            if is_shell_capture_variable(&name) {
+                return None;
+            }
+            let value = os_string_from_bytes(&entry[separator + 1..])?;
+            Some((name, value))
+        })
+        .collect::<Vec<_>>();
+    (!environment.is_empty()).then_some(environment)
+}
+
+fn is_shell_capture_variable(name: &OsStr) -> bool {
+    [
+        "WAKU_SHELL_ENV_CAPTURE_FILE",
+        "DISABLE_AUTO_UPDATE",
+        "ZSH_TMUX_AUTOSTARTED",
+        "ZSH_TMUX_AUTOSTART",
+    ]
+    .into_iter()
+    .any(|candidate| name == OsStr::new(candidate))
+}
+
+#[cfg(unix)]
+fn os_string_from_bytes(bytes: &[u8]) -> Option<OsString> {
+    Some(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn os_string_from_bytes(bytes: &[u8]) -> Option<OsString> {
+    String::from_utf8(bytes.to_vec()).ok().map(OsString::from)
 }
 
 fn wait_for_child(child: &mut Child, timeout: Duration) -> bool {
@@ -361,14 +409,14 @@ fn terminate_shell_capture(child: &mut Child) {
     let _ = child.wait();
 }
 
-struct ShellPathCapture(PathBuf);
+struct ShellEnvironmentCapture(PathBuf);
 
-impl ShellPathCapture {
+impl ShellEnvironmentCapture {
     fn create() -> Option<Self> {
         for _ in 0..16 {
-            let id = SHELL_PATH_CAPTURE_ID.fetch_add(1, Ordering::Relaxed);
+            let id = SHELL_ENV_CAPTURE_ID.fetch_add(1, Ordering::Relaxed);
             let path =
-                std::env::temp_dir().join(format!(".waku-shell-path-{}-{id}", std::process::id()));
+                std::env::temp_dir().join(format!(".waku-shell-env-{}-{id}", std::process::id()));
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(target_os = "macos")]
@@ -387,7 +435,7 @@ impl ShellPathCapture {
     }
 }
 
-impl Drop for ShellPathCapture {
+impl Drop for ShellEnvironmentCapture {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
@@ -512,15 +560,39 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn captures_path_from_a_shell_process() {
-        let id = SHELL_PATH_CAPTURE_ID.fetch_add(1, Ordering::Relaxed);
+    fn parses_null_delimited_environment_without_losing_value_contents() {
+        let environment = parse_shell_environment(
+            b"PATH=/Users/example/.fnm/current/bin:/usr/bin\0TOKEN=line one\nline two=rest\0EMPTY=\0WAKU_SHELL_ENV_CAPTURE_FILE=/tmp/capture\0",
+        )
+        .expect("parse shell environment");
+
+        assert_eq!(
+            environment,
+            vec![
+                (
+                    OsString::from("PATH"),
+                    OsString::from("/Users/example/.fnm/current/bin:/usr/bin"),
+                ),
+                (
+                    OsString::from("TOKEN"),
+                    OsString::from("line one\nline two=rest"),
+                ),
+                (OsString::from("EMPTY"), OsString::new()),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn captures_environment_from_a_shell_process() {
+        let id = SHELL_ENV_CAPTURE_ID.fetch_add(1, Ordering::Relaxed);
         let directory =
             std::env::temp_dir().join(format!("waku-command-env-test-{}-{id}", std::process::id()));
         fs::create_dir(&directory).expect("create shell fixture directory");
         let shell = directory.join("fake-shell");
         fs::write(
             &shell,
-            "#!/bin/sh\nprintf '%s\\n' '/Users/example/.fnm/current/bin:/usr/bin' > \"$WAKU_SHELL_PATH_CAPTURE_FILE\"\n",
+            "#!/bin/sh\n/usr/bin/printf 'PATH=/Users/example/.fnm/current/bin:/usr/bin\\000WAKU_TEST_TOKEN=from-shell\\000' > \"$WAKU_SHELL_ENV_CAPTURE_FILE\"\n",
         )
         .expect("write shell fixture");
         let mut permissions = fs::metadata(&shell)
@@ -529,11 +601,22 @@ mod tests {
         permissions.set_mode(0o700);
         fs::set_permissions(&shell, permissions).expect("make shell fixture executable");
 
-        let path = capture_shell_path(&shell, &["-i", "-l", "-c"], LOGIN_SHELL_PATH_TIMEOUT);
+        let environment =
+            capture_shell_environment(&shell, &["-i", "-l", "-c"], LOGIN_SHELL_ENV_TIMEOUT)
+                .expect("capture shell environment");
 
         assert_eq!(
-            path.as_deref(),
-            Some(OsStr::new("/Users/example/.fnm/current/bin:/usr/bin"))
+            environment,
+            vec![
+                (
+                    OsString::from("PATH"),
+                    OsString::from("/Users/example/.fnm/current/bin:/usr/bin"),
+                ),
+                (
+                    OsString::from("WAKU_TEST_TOKEN"),
+                    OsString::from("from-shell"),
+                ),
+            ]
         );
         let _ = fs::remove_file(shell);
         let _ = fs::remove_dir(directory);
