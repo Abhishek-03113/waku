@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.0.11]
+
 - Fix provider detection for CLIs installed through shell PATH managers such as
   nvm and fnm
 - Show models registered by Pi extensions
