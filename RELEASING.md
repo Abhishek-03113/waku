@@ -28,6 +28,11 @@ bun run release
 - Release automation: [`scripts/release.ts`](scripts/release.ts),
   [`scripts/appcast.ts`](scripts/appcast.ts),
   [`scripts/changelog.ts`](scripts/changelog.ts).
+- GitHub Actions: [`.github/workflows/release.yml`](.github/workflows/release.yml)
+  builds Linux (x86_64, arm64) and macOS archives on a `v*` tag and opens a
+  draft GitHub release;
+  [`.github/workflows/sync-release.yml`](.github/workflows/sync-release.yml)
+  copies published assets into the R2 bucket.
 
 ---
 
@@ -130,11 +135,49 @@ everything with immutable cache headers (the appcast itself stays
 Test by keeping an older build around, launching it, and choosing
 **Check for Updates…**.
 
+### GitHub draft release + R2 sync
+
+Pushing a `v*` tag (matching the `version` in `Cargo.toml`) runs the Release
+workflow. macOS CI runs `bun run release --local`, which signs, notarizes, and
+writes the same artifacts as a local release:
+
+- `Waku-<version>.dmg`
+- `Waku-<version>.zip`
+
+Linux CI adds:
+
+- `waku-<version>-x86_64-unknown-linux-gnu.tar.gz`
+- `waku-<version>-aarch64-unknown-linux-gnu.tar.gz`
+
+The workflow opens (or updates) a **draft** GitHub release with those files and
+the matching `CHANGELOG.md` section. Publishing the GitHub release syncs the
+assets to R2. The signed Sparkle appcast is still produced by a full
+`bun run release`.
+
+Publishing that GitHub release (or running **Sync release** from Actions)
+uploads the assets to the `waku-releases` R2 bucket. Configure these repository
+secrets first:
+
+| Secret | Purpose |
+| --- | --- |
+| `WAKU_ANALYTICS_ENDPOINT` | embedded in the macOS CI build |
+| `WAKU_ANALYTICS_WEBSITE_ID` | embedded in the macOS CI build |
+| `WAKU_SIGNING_IDENTITY` | Developer ID identity selector |
+| `APPLE_CERTIFICATE` | base64-encoded Developer ID Application `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | password for that `.p12` |
+| `APPLE_ID` | Apple ID used by `notarytool` |
+| `APPLE_APP_SPECIFIC_PASSWORD` | app-specific password for that Apple ID |
+| `APPLE_TEAM_ID` | Developer Team ID |
+| `R2_ACCOUNT_ID` | Cloudflare account id for the R2 API |
+| `R2_ACCESS_KEY_ID` | R2 Object Read & Write token |
+| `R2_SECRET_ACCESS_KEY` | matching secret |
+| `R2_BUCKET` | optional; defaults to `waku-releases` |
+
 ### Options
 
 | Flag / Env | Default | Purpose |
 | --- | --- | --- |
-| `--local` | — | build + notarize without publishing |
+| `--local` | — | build, notarize, and write the DMG + zip without publishing |
 | `--force` | — | re-publish a version that already exists in R2 |
 | `--adhoc`, `--skip-notarize` | — | local test builds (imply `--local`) |
 | `--skip-build` | — | reuse existing release binaries |
@@ -182,9 +225,9 @@ Test by keeping an older build around, launching it, and choosing
 - **Platform artifacts:** keep the bucket layout flat and platform-tagged by
   artifact name/extension — today's macOS names
   (`Waku-<v>.dmg`, `Waku-<v>.zip`, `appcast.xml`) must keep their URLs.
-  Linux source releases can produce `waku-<v>-<target>.tar.gz` with
-  `scripts/bundle-linux.sh`; publishing and automatic updates are not yet wired
-  into `bun run release`. Windows can later join with
+  Linux CI releases produce `waku-<v>-<target>.tar.gz` with
+  `scripts/bundle-linux.sh` and land in GitHub Releases, then R2 via the
+  sync workflow. Automatic Linux updates are not yet wired. Windows can later join with
   `Waku-<v>-Setup.exe` + `appcast-windows.xml` (WinSparkle reads the same
   appcast format). `src/updater.rs` is the per-platform seam, and everything
   mac-specific in the existing release pipeline lives behind the Darwin guard

@@ -33,7 +33,8 @@ releases), and uploads everything to Cloudflare R2 — the bucket behind
 https://releases.waku.sh. One-time setup lives in RELEASING.md.
 
 Options:
-  --local                       Build and notarize without publishing to R2
+  --local                       Build, notarize, and write the DMG + zip
+                                without publishing to R2
   --force                       Publish even if this version is already in R2
   --output <path>               DMG output path (default: dist/Waku-<version>.dmg)
   --signing-identity <name>     Developer ID Application identity selector
@@ -534,6 +535,10 @@ try {
     await $`xcrun stapler staple -v ${outputPath}`;
     await $`xcrun stapler validate -v ${outputPath}`;
     await $`spctl --assess --type open --context context:primary-signature --verbose=2 ${outputPath}`;
+    // Notarizing the DMG also notarized the app's code, so the same
+    // submission staples the app for the Sparkle archive.
+    logStep("Stapling the app for the update archive");
+    await $`xcrun stapler staple -v ${appBundle}`;
   } else if (adhoc) {
     console.warn(
       "\nCreated an ad-hoc signed DMG. It is suitable for local testing only.",
@@ -545,12 +550,12 @@ try {
     );
   }
 
-  if (publishing) {
-    // Notarizing the DMG also notarized the app's code, so the same
-    // submission staples the app for the Sparkle archive.
-    logStep("Stapling the app for the update archive");
-    await $`xcrun stapler staple -v ${appBundle}`;
+  const zipPath = resolve(projectRoot, "dist", zipName);
+  await mkdir(dirname(zipPath), { recursive: true });
+  logStep(`Packaging ${zipName}`);
+  await $`ditto -c -k --keepParent ${appBundle} ${zipPath}`;
 
+  if (publishing) {
     // A clean staging directory holds this release plus the recent history
     // generate_appcast needs to build binary deltas, and nothing else.
     const updatesDirectory = join(projectRoot, "dist", "updates");
@@ -601,8 +606,7 @@ try {
       );
     }
 
-    logStep(`Packaging ${zipName}`);
-    await $`ditto -c -k --keepParent ${appBundle} ${join(updatesDirectory, zipName)}`;
+    await $`ditto ${zipPath} ${join(updatesDirectory, zipName)}`;
 
     // Release notes: this version's CHANGELOG.md section ships next to the
     // archive as Waku-<version>.md; generate_appcast links it as the update's
@@ -647,6 +651,7 @@ try {
   }
 
   console.log(`\nDMG ready: ${outputPath}`);
+  console.log(`ZIP ready: ${zipPath}`);
 } finally {
   if (mountedDmg && mountDirectory) {
     const result = await $`diskutil eject ${mountDirectory}`.quiet().nothrow();
