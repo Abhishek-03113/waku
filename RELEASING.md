@@ -179,12 +179,13 @@ Test by keeping an older build around, launching it, and choosing
   validation requires the identities to match.
 - **Old archives stay in R2** so far-behind users can still be served; only
   the recent history is staged locally under `dist/updates/` (git-ignored).
-- **Future Windows/Linux support:** keep the bucket layout flat and
-  platform-tagged by artifact name/extension — today's macOS names
+- **Platform artifacts:** keep the bucket layout flat and platform-tagged by
+  artifact name/extension — today's macOS names
   (`Waku-<v>.dmg`, `Waku-<v>.zip`, `appcast.xml`) must keep their URLs.
-  Windows can join with `Waku-<v>-Setup.exe` + `appcast-windows.xml`
-  (WinSparkle reads the same appcast format), Linux with its own artifacts;
-  `src/updater.rs` is already the per-platform seam (the non-macOS stub is
-  where a WinSparkle/custom implementation slots in), and everything
-  mac-specific in the release pipeline lives behind the darwin guard in
-  `scripts/release.ts` plus `scripts/bundle.sh`.
+  Linux source releases can produce `waku-<v>-<target>.tar.gz` with
+  `scripts/bundle-linux.sh`; publishing and automatic updates are not yet wired
+  into `bun run release`. Windows can later join with
+  `Waku-<v>-Setup.exe` + `appcast-windows.xml` (WinSparkle reads the same
+  appcast format). `src/updater.rs` is the per-platform seam, and everything
+  mac-specific in the existing release pipeline lives behind the Darwin guard
+  in `scripts/release.ts` plus `scripts/bundle.sh`.
