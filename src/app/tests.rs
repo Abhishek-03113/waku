@@ -1709,6 +1709,7 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
         installed: true,
         path: Some(std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new(model, model)],
+        agent_presets: Vec::new(),
     };
     let probes = [
         probe(ProviderKind::Claude, "claude-sonnet-5"),
@@ -1797,6 +1798,7 @@ fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
         installed,
         path: installed.then(|| std::path::PathBuf::from(format!("/bin/{}", provider.id()))),
         models: vec![ProviderModel::new("model", "model")],
+        agent_presets: Vec::new(),
     };
     let probes = [
         probe(ProviderKind::Claude, true),
