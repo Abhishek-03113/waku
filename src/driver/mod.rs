@@ -4,6 +4,7 @@ mod amp;
 mod claude;
 mod codex;
 mod computer_use;
+mod deepseek;
 mod opencode;
 mod pi;
 mod support;
@@ -195,6 +196,7 @@ pub fn start(
         ProviderKind::Cursor | ProviderKind::Grok => {
             Arc::new(acp::AcpDriver::start(provider, options, events)?)
         }
+        ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),
         // OpenCode's own server is its real API, and it is what exposes
         // interactive permission requests.
         ProviderKind::OpenCode => Arc::new(opencode::OpenCodeDriver::start(options, events)?),

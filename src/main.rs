@@ -31,6 +31,8 @@ mod command_env;
 mod composer_complete;
 mod computer_use;
 mod cursor_session;
+mod deepseek_pool;
+mod deepseek_session;
 mod driver;
 mod git_branch;
 mod git_commit;

@@ -66,6 +66,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::Cursor => {
             vec![ProviderModel::new("auto", tr!("model_option.auto")).default()]
         }
+        // Harness reports its account/configuration-specific catalog from its
+        // Host. An invented fallback would make unavailable routes selectable.
+        ProviderKind::DeepSeek => Vec::new(),
         ProviderKind::OpenCode => Vec::new(),
         ProviderKind::Grok => {
             vec![ProviderModel::new("grok-build", "Grok Build").default()]
@@ -87,6 +90,7 @@ pub fn discover_models(provider: ProviderKind, binary: &Path) -> Vec<ProviderMod
         // version-gated list used by T3 Code.
         ProviderKind::Claude => Vec::new(),
         ProviderKind::Cursor => discover_cursor_models(binary),
+        ProviderKind::DeepSeek => discover_deepseek_models(binary),
         ProviderKind::OpenCode => discover_opencode_models(binary),
         ProviderKind::Grok => discover_grok_models(binary),
         ProviderKind::Pi => discover_pi_models(binary),
@@ -221,6 +225,86 @@ fn discover_opencode_models(binary: &Path) -> Vec<ProviderModel> {
         return Vec::new();
     };
     parse_opencode_models(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn discover_deepseek_models(binary: &Path) -> Vec<ProviderModel> {
+    let Ok(server) = crate::deepseek_pool::acquire(binary) else {
+        return Vec::new();
+    };
+    let Ok(catalog) = server.rpc("llm.models", json!({})) else {
+        return Vec::new();
+    };
+    parse_deepseek_model_catalog(&catalog)
+}
+
+fn parse_deepseek_model_catalog(catalog: &Value) -> Vec<ProviderModel> {
+    catalog
+        .get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|group| {
+            let provider_id = group
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty());
+            let provider_name = group
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty());
+            let models = group.get("models").and_then(Value::as_array);
+            provider_id
+                .zip(provider_name)
+                .zip(models)
+                .into_iter()
+                .flat_map(|((provider_id, provider_name), models)| {
+                    models.iter().filter_map(move |value| {
+                        let model_id = value
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.trim().is_empty())?;
+                        let name = value
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.trim().is_empty())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| display_name_from_slug(model_id));
+                        let mut model =
+                            ProviderModel::new(format!("{provider_id}/{model_id}"), name)
+                                .sub_provider(provider_name);
+                        if let Some(reasoning) = value.get("reasoning") {
+                            model.reasoning_efforts = reasoning
+                                .get("efforts")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|effort| {
+                                    let id = effort.get("id").and_then(Value::as_str)?;
+                                    let name = effort
+                                        .get("name")
+                                        .and_then(Value::as_str)
+                                        .filter(|name| !name.trim().is_empty())
+                                        .unwrap_or(id);
+                                    Some(
+                                        ProviderModelOption::new(id, name).description(
+                                            effort
+                                                .get("description")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or_default(),
+                                        ),
+                                    )
+                                })
+                                .collect();
+                            model.default_reasoning_effort = reasoning
+                                .get("defaultEffort")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                        }
+                        Some(model)
+                    })
+                })
+        })
+        .collect()
 }
 
 fn parse_opencode_models(output: &str) -> Vec<ProviderModel> {
@@ -810,6 +894,56 @@ mod tests {
         assert_eq!(models[1].id, "github-copilot/gpt-5.4");
         assert_eq!(models[1].name, "GPT-5.4");
         assert_eq!(models[1].sub_provider.as_deref(), Some("Github Copilot"));
+    }
+
+    #[test]
+    fn parses_deepseek_host_model_groups_and_reasoning() {
+        let models = parse_deepseek_model_catalog(&json!({
+            "groups": [
+                {
+                    "id": "deepseek-official",
+                    "name": "DeepSeek",
+                    "models": [
+                        {
+                            "id": "deepseek-chat",
+                            "name": "DeepSeek Chat",
+                            "reasoning": {
+                                "efforts": [
+                                    {"id": "off", "name": "Off"},
+                                    {"id": "high", "name": "High", "description": "Think longer"}
+                                ],
+                                "defaultEffort": "off"
+                            }
+                        }
+                    ]
+                },
+                {"id": "empty", "name": "Empty", "models": []}
+            ],
+            "failures": []
+        }));
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "deepseek-official/deepseek-chat");
+        assert_eq!(models[0].name, "DeepSeek Chat");
+        assert_eq!(models[0].sub_provider.as_deref(), Some("DeepSeek"));
+        assert_eq!(models[0].reasoning_efforts[1].id, "high");
+        assert_eq!(
+            models[0].reasoning_efforts[1].description.as_deref(),
+            Some("Think longer")
+        );
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("off"));
+    }
+
+    #[test]
+    #[ignore = "requires an installed DeepSeek Harness"]
+    fn installed_deepseek_harness_reports_models() {
+        let binary =
+            crate::command_env::find_executable("dsh").expect("DeepSeek Harness is not installed");
+        let models = discover_deepseek_models(&binary);
+        assert!(
+            !models.is_empty(),
+            "the installed DeepSeek Harness reported no models"
+        );
     }
 
     #[test]

@@ -1773,6 +1773,20 @@ fn switched_off_providers_leave_the_picker_except_for_their_locked_session() {
 }
 
 #[test]
+fn model_picker_subtitle_deduplicates_the_provider_name() {
+    use super::composer::model_picker_subtitle;
+
+    assert_eq!(
+        model_picker_subtitle(ProviderKind::DeepSeek, Some("DeepSeek")),
+        "DeepSeek"
+    );
+    assert_eq!(
+        model_picker_subtitle(ProviderKind::DeepSeek, Some("OpenAI")),
+        "OpenAI · DeepSeek"
+    );
+}
+
+#[test]
 fn tab_cycle_walks_favorites_then_usable_providers_in_rail_order() {
     use super::ModelPickerTab;
     use super::composer::visible_picker_tabs;

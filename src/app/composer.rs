@@ -800,10 +800,7 @@ impl Waku {
                     let select_popover = popover.clone();
                     let favorite_model_id = model.id.clone();
                     let favorite_weak = weak.clone();
-                    let subtitle = model.sub_provider.as_deref().map_or_else(
-                        || kind.short_name().to_owned(),
-                        |sub_provider| format!("{sub_provider} · {}", kind.short_name()),
-                    );
+                    let subtitle = model_picker_subtitle(kind, model.sub_provider.as_deref());
                     rows = rows.child(
                         div()
                             .id(SharedString::from(format!(
@@ -2763,6 +2760,15 @@ pub(super) fn visible_picker_tabs(
         (installed && allowed).then_some(ModelPickerTab::Provider(kind))
     }));
     tabs
+}
+
+pub(super) fn model_picker_subtitle(provider: ProviderKind, sub_provider: Option<&str>) -> String {
+    let provider_name = provider.short_name();
+    match sub_provider.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) if name.eq_ignore_ascii_case(provider_name) => provider_name.to_owned(),
+        Some(name) => format!("{name} · {provider_name}"),
+        None => provider_name.to_owned(),
+    }
 }
 
 /// The models the picker lists, in display order.

@@ -12,17 +12,19 @@ pub enum ProviderKind {
     #[default]
     Codex,
     Cursor,
+    DeepSeek,
     OpenCode,
     Grok,
     Pi,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Amp,
         Self::Claude,
         Self::Codex,
         Self::Cursor,
+        Self::DeepSeek,
         Self::OpenCode,
         Self::Grok,
         Self::Pi,
@@ -34,6 +36,7 @@ impl ProviderKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
+            Self::DeepSeek => "deepseek",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
@@ -46,6 +49,7 @@ impl ProviderKind {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor CLI",
+            Self::DeepSeek => "DeepSeek Harness",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok Build",
             Self::Pi => "Pi",
@@ -58,6 +62,7 @@ impl ProviderKind {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
+            Self::DeepSeek => "DeepSeek",
             Self::OpenCode => "OpenCode",
             Self::Grok => "Grok",
             Self::Pi => "Pi",
@@ -72,6 +77,7 @@ impl ProviderKind {
             // Cursor documents `agent` as its primary command, but that name is
             // shared by other CLIs. The backward-compatible alias is unambiguous.
             Self::Cursor => "cursor-agent",
+            Self::DeepSeek => "dsh",
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Pi => "pi",
@@ -85,6 +91,7 @@ impl ProviderKind {
                 | Self::Claude
                 | Self::Codex
                 | Self::Cursor
+                | Self::DeepSeek
                 | Self::OpenCode
                 | Self::Grok
                 | Self::Pi
@@ -98,6 +105,7 @@ impl ProviderKind {
                 | Self::Claude
                 | Self::Codex
                 | Self::Cursor
+                | Self::DeepSeek
                 | Self::OpenCode
                 | Self::Grok
                 | Self::Pi
@@ -107,7 +115,7 @@ impl ProviderKind {
     pub fn supports_model_discovery(self) -> bool {
         matches!(
             self,
-            Self::Codex | Self::Cursor | Self::OpenCode | Self::Grok | Self::Pi
+            Self::Codex | Self::Cursor | Self::DeepSeek | Self::OpenCode | Self::Grok | Self::Pi
         )
     }
 }
@@ -140,6 +148,9 @@ pub enum ProviderResumeCursor {
     OpenCode {
         session_id: String,
     },
+    DeepSeek {
+        session_id: String,
+    },
     Grok {
         session_id: String,
     },
@@ -166,6 +177,7 @@ impl ProviderResumeCursor {
                 session_id: id,
                 fork_context: None,
             },
+            ProviderKind::DeepSeek => Self::DeepSeek { session_id: id },
             ProviderKind::OpenCode => Self::OpenCode { session_id: id },
             ProviderKind::Grok => Self::Grok { session_id: id },
             ProviderKind::Pi => Self::Pi {
@@ -181,6 +193,7 @@ impl ProviderResumeCursor {
             Self::Claude { .. } => ProviderKind::Claude,
             Self::Codex { .. } => ProviderKind::Codex,
             Self::Cursor { .. } => ProviderKind::Cursor,
+            Self::DeepSeek { .. } => ProviderKind::DeepSeek,
             Self::OpenCode { .. } => ProviderKind::OpenCode,
             Self::Grok { .. } => ProviderKind::Grok,
             Self::Pi { .. } => ProviderKind::Pi,
@@ -192,6 +205,7 @@ impl ProviderResumeCursor {
             Self::Amp { thread_id, .. } => thread_id,
             Self::Claude { session_id, .. }
             | Self::Cursor { session_id, .. }
+            | Self::DeepSeek { session_id }
             | Self::OpenCode { session_id }
             | Self::Grok { session_id }
             | Self::Pi { session_id, .. } => session_id,
@@ -2535,6 +2549,17 @@ mod tests {
                 1,
             ),
             (
+                ProviderKind::DeepSeek,
+                serde_json::json!({
+                    "path": "src/deepseek.rs",
+                    "oldText": "old",
+                    "newText": "new\nmore"
+                }),
+                "src/deepseek.rs",
+                2,
+                1,
+            ),
+            (
                 ProviderKind::OpenCode,
                 serde_json::json!({
                     "filePath": "src/opencode.rs",
@@ -2692,6 +2717,7 @@ mod tests {
         assert_eq!(ProviderKind::Claude.id(), "claude");
         assert_eq!(ProviderKind::Codex.command(), "codex");
         assert_eq!(ProviderKind::Cursor.command(), "cursor-agent");
+        assert_eq!(ProviderKind::DeepSeek.command(), "dsh");
         assert_eq!(ProviderKind::OpenCode.command(), "opencode");
         assert_eq!(ProviderKind::Grok.command(), "grok");
         assert_eq!(ProviderKind::Pi.command(), "pi");
@@ -2704,6 +2730,7 @@ mod tests {
             ProviderKind::Claude,
             ProviderKind::Codex,
             ProviderKind::Cursor,
+            ProviderKind::DeepSeek,
             ProviderKind::OpenCode,
             ProviderKind::Grok,
             ProviderKind::Pi,
@@ -2719,6 +2746,7 @@ mod tests {
         assert!(!ProviderKind::Claude.supports_model_discovery());
         assert!(ProviderKind::Codex.supports_model_discovery());
         assert!(ProviderKind::Cursor.supports_model_discovery());
+        assert!(ProviderKind::DeepSeek.supports_model_discovery());
         assert!(ProviderKind::OpenCode.supports_model_discovery());
         assert!(ProviderKind::Grok.supports_model_discovery());
         assert!(ProviderKind::Pi.supports_model_discovery());
