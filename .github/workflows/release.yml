@@ -192,6 +192,7 @@ jobs:
           WAKU_SIGNING_IDENTITY: ${{ secrets.WAKU_SIGNING_IDENTITY }}
           WAKU_ANALYTICS_ENDPOINT: ${{ secrets.WAKU_ANALYTICS_ENDPOINT }}
           WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: bun run release --local
 
       - uses: actions/upload-artifact@v4
@@ -200,6 +201,7 @@ jobs:
           path: |
             dist/Waku-*.dmg
             dist/Waku-*.zip
+            dist/appcast.xml
           if-no-files-found: error
 
   draft-release:
@@ -244,3 +246,4 @@ jobs:
             artifacts/*.tar.gz
             artifacts/*.dmg
             artifacts/*.zip
+            artifacts/appcast.xml

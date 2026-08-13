@@ -62,6 +62,7 @@ Environment:
   WAKU_NO_HISTORY=1             skip pulling prior archives (no deltas)
   SPARKLE_BIN                   Sparkle tools dir (default: the bundle.sh cache
                                 under .waku-cache/sparkle)
+  SPARKLE_PRIVATE_KEY           Sparkle EdDSA private key (otherwise keychain)
 
 Before the first production release:
   xcrun notarytool store-credentials NOTARY   # notarization credentials
@@ -555,83 +556,84 @@ try {
   logStep(`Packaging ${zipName}`);
   await $`ditto -c -k --keepParent ${appBundle} ${zipPath}`;
 
-  if (publishing) {
-    // A clean staging directory holds this release plus the recent history
-    // generate_appcast needs to build binary deltas, and nothing else.
-    const updatesDirectory = join(projectRoot, "dist", "updates");
-    await rm(updatesDirectory, { force: true, recursive: true });
-    await mkdir(updatesDirectory, { recursive: true });
+  // A clean staging directory holds this release plus, when publishing, the
+  // recent history generate_appcast needs to build binary deltas.
+  const updatesDirectory = join(projectRoot, "dist", "updates");
+  await rm(updatesDirectory, { force: true, recursive: true });
+  await mkdir(updatesDirectory, { recursive: true });
 
-    if (!skipHistory) {
-      logStep(
-        `Selecting the ${historyCount} most recent archives from R2 (for deltas)`,
-      );
-      type RemoteFile = { Name: string; IsDir: boolean };
-      const remoteFiles = JSON.parse(
-        await $`rclone lsjson ${r2Destination} ${rcloneFlags} --files-only --include ${"*.zip"} --include ${"appcast.xml"}`
-          .quiet()
-          .text(),
-      ) as RemoteFile[];
-      const archivePattern = new RegExp(`^${appName}-.+\\.zip$`);
-      const archiveVersion = (name: string) =>
-        name.slice(appName.length + 1, -".zip".length);
-      const versionOrder = new Intl.Collator("en", { numeric: true });
-      const recentArchives = remoteFiles
-        .filter(
-          ({ Name, IsDir }) =>
-            !IsDir && archivePattern.test(Name) && Name !== zipName,
-        )
-        .sort((a, b) =>
-          versionOrder.compare(archiveVersion(b.Name), archiveVersion(a.Name)),
-        )
-        .slice(0, historyCount)
-        .map(({ Name }) => Name);
-      const historyFiles = [
-        ...(remoteFiles.some(({ Name }) => Name === "appcast.xml")
-          ? ["appcast.xml"]
-          : []),
-        ...recentArchives,
-      ];
-      if (historyFiles.length > 0) {
-        const includeFlags = historyFiles.flatMap((name) => [
-          "--include",
-          `/${name}`,
-        ]);
-        await $`rclone copy ${r2Destination} ${updatesDirectory} ${rcloneFlags} ${includeFlags}`;
-      }
-      console.log(
-        recentArchives.length > 0
-          ? `Pulled ${recentArchives.join(", ")}`
-          : "No prior archives found.",
-      );
+  if (publishing && !skipHistory) {
+    logStep(
+      `Selecting the ${historyCount} most recent archives from R2 (for deltas)`,
+    );
+    type RemoteFile = { Name: string; IsDir: boolean };
+    const remoteFiles = JSON.parse(
+      await $`rclone lsjson ${r2Destination} ${rcloneFlags} --files-only --include ${"*.zip"} --include ${"appcast.xml"}`
+        .quiet()
+        .text(),
+    ) as RemoteFile[];
+    const archivePattern = new RegExp(`^${appName}-.+\\.zip$`);
+    const archiveVersion = (name: string) =>
+      name.slice(appName.length + 1, -".zip".length);
+    const versionOrder = new Intl.Collator("en", { numeric: true });
+    const recentArchives = remoteFiles
+      .filter(
+        ({ Name, IsDir }) =>
+          !IsDir && archivePattern.test(Name) && Name !== zipName,
+      )
+      .sort((a, b) =>
+        versionOrder.compare(archiveVersion(b.Name), archiveVersion(a.Name)),
+      )
+      .slice(0, historyCount)
+      .map(({ Name }) => Name);
+    const historyFiles = [
+      ...(remoteFiles.some(({ Name }) => Name === "appcast.xml")
+        ? ["appcast.xml"]
+        : []),
+      ...recentArchives,
+    ];
+    if (historyFiles.length > 0) {
+      const includeFlags = historyFiles.flatMap((name) => [
+        "--include",
+        `/${name}`,
+      ]);
+      await $`rclone copy ${r2Destination} ${updatesDirectory} ${rcloneFlags} ${includeFlags}`;
     }
+    console.log(
+      recentArchives.length > 0
+        ? `Pulled ${recentArchives.join(", ")}`
+        : "No prior archives found.",
+    );
+  }
 
-    await $`ditto ${zipPath} ${join(updatesDirectory, zipName)}`;
+  await $`ditto ${zipPath} ${join(updatesDirectory, zipName)}`;
 
-    // Release notes: this version's CHANGELOG.md section ships next to the
-    // archive as Waku-<version>.md; generate_appcast links it as the update's
-    // release notes, which Sparkle renders in the prompt.
-    const changelogFile = Bun.file(join(projectRoot, "CHANGELOG.md"));
-    if (await changelogFile.exists()) {
-      const notes = extractReleaseNotes(await changelogFile.text(), version);
-      if (notes) {
-        await Bun.write(
-          join(updatesDirectory, `${appName}-${version}.md`),
-          `${notes}\n`,
-        );
-        console.log(`Attached release notes for ${version}.`);
-      } else {
-        console.log(
-          `No "${version}" section in CHANGELOG.md — releasing without notes.`,
-        );
-      }
+  // Release notes: this version's CHANGELOG.md section ships next to the
+  // archive as Waku-<version>.md; generate_appcast links it as the update's
+  // release notes, which Sparkle renders in the prompt.
+  const changelogFile = Bun.file(join(projectRoot, "CHANGELOG.md"));
+  if (await changelogFile.exists()) {
+    const notes = extractReleaseNotes(await changelogFile.text(), version);
+    if (notes) {
+      await Bun.write(
+        join(updatesDirectory, `${appName}-${version}.md`),
+        `${notes}\n`,
+      );
+      console.log(`Attached release notes for ${version}.`);
     } else {
-      console.log("No CHANGELOG.md — releasing without notes.");
+      console.log(
+        `No "${version}" section in CHANGELOG.md — releasing without notes.`,
+      );
     }
+  } else {
+    console.log("No CHANGELOG.md — releasing without notes.");
+  }
 
-    logStep("Generating the signed appcast");
-    await generateAppcast(updatesDirectory, downloadUrlPrefix);
+  logStep("Generating the signed appcast");
+  await generateAppcast(updatesDirectory, downloadUrlPrefix);
+  await $`ditto ${join(updatesDirectory, "appcast.xml")} ${join(projectRoot, "dist", "appcast.xml")}`;
 
+  if (publishing) {
     // Archives and the DMG are immutable once published → cache forever.
     // appcast.xml changes every release → keep it fresh so update checks are
     // never served stale.

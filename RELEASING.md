@@ -143,6 +143,7 @@ writes the same artifacts as a local release:
 
 - `Waku-<version>.dmg`
 - `Waku-<version>.zip`
+- `appcast.xml` (Sparkle-signed)
 
 Linux CI adds:
 
@@ -151,8 +152,7 @@ Linux CI adds:
 
 The workflow opens (or updates) a **draft** GitHub release with those files and
 the matching `CHANGELOG.md` section. Publishing the GitHub release syncs the
-assets to R2. The signed Sparkle appcast is still produced by a full
-`bun run release`.
+assets — including the signed `appcast.xml` — to R2.
 
 Publishing that GitHub release (or running **Sync release** from Actions)
 uploads the assets to the `waku-releases` R2 bucket. Configure these repository
@@ -168,6 +168,7 @@ secrets first:
 | `APPLE_ID` | Apple ID used by `notarytool` |
 | `APPLE_APP_SPECIFIC_PASSWORD` | app-specific password for that Apple ID |
 | `APPLE_TEAM_ID` | Developer Team ID |
+| `SPARKLE_PRIVATE_KEY` | EdDSA private key for `generate_appcast` |
 | `R2_ACCOUNT_ID` | Cloudflare account id for the R2 API |
 | `R2_ACCESS_KEY_ID` | R2 Object Read & Write token |
 | `R2_SECRET_ACCESS_KEY` | matching secret |
