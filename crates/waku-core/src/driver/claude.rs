@@ -97,6 +97,20 @@ fn permission_mode(mode: RuntimeMode, interaction_mode: InteractionMode) -> &'st
     }
 }
 
+/// The model id to hand the CLI for a session's context-window choice.
+///
+/// Claude Code serves 200K by default and reaches its 1M window through a
+/// `[1m]` suffix on the model id rather than a flag, so the window travels with
+/// `--model` and with mid-session `set_model` requests.
+fn wire_model(model: Option<&str>, context_window: Option<&str>) -> Option<String> {
+    let model = model?;
+    if context_window == Some("1m") && !model.ends_with("[1m]") {
+        Some(format!("{model}[1m]"))
+    } else {
+        Some(model.to_owned())
+    }
+}
+
 fn configure_stream_command(
     command: &mut Command,
     mode: RuntimeMode,
@@ -140,6 +154,7 @@ impl ClaudeDriver {
             model,
             reasoning_effort,
             service_tier: _,
+            context_window,
             agent_preset: _,
             computer_use_enabled: _,
             provider_cursor,
@@ -166,7 +181,8 @@ impl ClaudeDriver {
         let mut command = crate::command_env::command(&binary);
         command.current_dir(&cwd);
         configure_stream_command(&mut command, mode, interaction_mode);
-        if let Some(model) = model.as_deref() {
+        let launch_model = wire_model(model.as_deref(), context_window.as_deref());
+        if let Some(model) = launch_model.as_deref() {
             command.args(["--model", model]);
         }
         if let Some(effort) = reasoning_effort.as_deref() {
@@ -253,7 +269,7 @@ impl ClaudeDriver {
             .spawn(move || {
                 let mut stdin = stdin;
                 let mut next_request_id = 0_u64;
-                let mut current_model = model;
+                let mut current_model = launch_model;
                 while let Ok(message) = command_rx.recv() {
                     let written = match message {
                         CommandMessage::Prompt(text) => {
@@ -384,10 +400,17 @@ impl ClaudeDriver {
                             )
                         }
                         CommandMessage::Options(options) => {
-                            if options.model == current_model {
+                            // The window rides on the model id, so switching it
+                            // is the same `set_model` round trip as switching
+                            // models — verified accepted by the CLI (2.1.228).
+                            let next_model = wire_model(
+                                options.model.as_deref(),
+                                options.context_window.as_deref(),
+                            );
+                            if next_model == current_model {
                                 continue;
                             }
-                            current_model = options.model;
+                            current_model = next_model;
                             let Some(model) = current_model.as_deref() else {
                                 continue;
                             };
@@ -1461,6 +1484,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
+                context_window: None,
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
@@ -1529,6 +1553,7 @@ mod tests {
                 model: Some("claude-haiku-4-5-20251001".into()),
                 reasoning_effort: None,
                 service_tier: None,
+                context_window: None,
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,

@@ -249,6 +249,7 @@ pub struct WireDriverStartOptions {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
+    pub context_window: Option<String>,
     pub agent_preset: Option<String>,
     pub computer_use_enabled: bool,
     pub provider_cursor: Option<Value>,
@@ -262,6 +263,7 @@ pub struct WireSessionOptions {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
+    pub context_window: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]

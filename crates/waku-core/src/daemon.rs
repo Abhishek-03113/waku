@@ -573,6 +573,7 @@ impl Backend for WakuBackend {
                     model: options.model,
                     reasoning_effort: options.reasoning_effort,
                     service_tier: options.service_tier,
+                    context_window: options.context_window,
                     agent_preset: options.agent_preset,
                     computer_use_enabled: options.computer_use_enabled,
                     provider_cursor: options
@@ -684,6 +685,7 @@ fn merge_stale_session_metadata(existing: &mut AgentSession, incoming: AgentSess
         existing.interaction_mode = incoming.interaction_mode;
         existing.reasoning_effort = incoming.reasoning_effort;
         existing.service_tier = incoming.service_tier;
+        existing.context_window = incoming.context_window;
         existing.agent_preset = incoming.agent_preset;
         existing.updated_at = incoming.updated_at;
         existing.last_reply_at = incoming.last_reply_at.or(existing.last_reply_at);
@@ -1099,6 +1101,7 @@ impl WakuBackend {
                 model: source.model.clone(),
                 reasoning_effort: source.reasoning_effort.clone(),
                 service_tier: source.service_tier.clone(),
+                context_window: source.context_window.clone(),
                 agent_preset: source.agent_preset.clone(),
                 computer_use_enabled: false,
                 provider_cursor: source.provider_cursor.clone(),
@@ -1249,6 +1252,7 @@ impl WakuBackend {
                 model: source.model.clone(),
                 reasoning_effort: source.reasoning_effort.clone(),
                 service_tier: source.service_tier.clone(),
+                context_window: source.context_window.clone(),
                 agent_preset: source.agent_preset.clone(),
                 computer_use_enabled: false,
                 provider_cursor: source.provider_cursor.clone(),
@@ -1492,6 +1496,7 @@ fn handle_driver_command(
                     model: options.model,
                     reasoning_effort: options.reasoning_effort,
                     service_tier: options.service_tier,
+                    context_window: options.context_window,
                 }),
             });
         }

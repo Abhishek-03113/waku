@@ -2474,12 +2474,21 @@ impl Waku {
                     model.service_tiers.iter().any(|option| option.id == *tier)
                 })
         });
+        let context_window = session.context_window.clone().filter(|window| {
+            model_metadata.is_some_and(|model| {
+                model
+                    .context_windows
+                    .iter()
+                    .any(|option| option.id == *window)
+            })
+        });
         SessionOptions {
             mode: session.runtime_mode,
             interaction_mode: session.interaction_mode,
             model,
             reasoning_effort,
             service_tier,
+            context_window,
         }
     }
 
@@ -2604,6 +2613,7 @@ impl Waku {
             model,
             reasoning_effort,
             service_tier,
+            context_window,
         } = self.session_options(&session);
         Ok(DriverStartRequest {
             session_id: session.id,
@@ -2616,6 +2626,7 @@ impl Waku {
                 model,
                 reasoning_effort,
                 service_tier,
+                context_window,
                 agent_preset,
                 computer_use_enabled: cfg!(target_os = "macos") && self.state.computer_use_enabled,
                 provider_cursor: session.provider_cursor.clone(),

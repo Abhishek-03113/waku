@@ -166,7 +166,7 @@ impl Waku {
             self.store_selected_right_panel_state();
         }
         self.state.selected_session = Some(session_id);
-        if let Some((project_id, provider, model, reasoning_effort, service_tier)) =
+        if let Some((project_id, provider, model, reasoning_effort, service_tier, context_window)) =
             self.selected_session().map(|session| {
                 (
                     session.project_id,
@@ -174,6 +174,7 @@ impl Waku {
                     session.model.clone(),
                     session.reasoning_effort.clone(),
                     session.service_tier.clone(),
+                    session.context_window.clone(),
                 )
             })
         {
@@ -182,6 +183,7 @@ impl Waku {
             self.state.last_model = model;
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
+            self.state.last_context_window = context_window;
         }
         if self
             .selected_session()
@@ -794,20 +796,26 @@ impl Waku {
     }
 
     fn remember_selected_model_traits(&mut self) {
-        let Some((provider, model, reasoning_effort, service_tier)) =
+        let Some((provider, model, reasoning_effort, service_tier, context_window)) =
             self.selected_session().and_then(|session| {
                 Some((
                     session.provider,
                     self.model_for_session(session)?.to_owned(),
                     session.reasoning_effort.clone(),
                     session.service_tier.clone(),
+                    session.context_window.clone(),
                 ))
             })
         else {
             return;
         };
-        self.state
-            .remember_model_traits(provider, &model, reasoning_effort, service_tier);
+        self.state.remember_model_traits(
+            provider,
+            &model,
+            reasoning_effort,
+            service_tier,
+            context_window,
+        );
     }
 
     pub(super) fn choose_model(
@@ -829,7 +837,8 @@ impl Waku {
         };
 
         self.remember_selected_model_traits();
-        let (reasoning_effort, service_tier) = self.state.model_traits_for(provider, &model);
+        let (reasoning_effort, service_tier, context_window) =
+            self.state.model_traits_for(provider, &model);
         if let Some(session) = self.selected_session_mut() {
             session.provider = provider;
             session.model = Some(model.clone());
@@ -838,10 +847,12 @@ impl Waku {
             }
             session.reasoning_effort.clone_from(&reasoning_effort);
             session.service_tier.clone_from(&service_tier);
+            session.context_window.clone_from(&context_window);
             self.state.last_provider = provider;
             self.state.last_model = Some(model);
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
+            self.state.last_context_window = context_window;
             self.model_picker_tab = ModelPickerTab::Provider(provider);
             // A different provider is a different binary and protocol; only a
             // model change within one provider can be applied in session.
@@ -978,6 +989,20 @@ impl Waku {
             let session_id = session.id;
             session.service_tier = Some(tier.clone());
             self.state.last_service_tier = Some(tier);
+            self.remember_selected_model_traits();
+            self.apply_session_options(session_id, cx);
+            self.save();
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_context_window(&mut self, window: String, cx: &mut Context<Self>) {
+        if let Some(session) = self.selected_session_mut()
+            && session.context_window.as_deref() != Some(window.as_str())
+        {
+            let session_id = session.id;
+            session.context_window = Some(window.clone());
+            self.state.last_context_window = Some(window);
             self.remember_selected_model_traits();
             self.apply_session_options(session_id, cx);
             self.save();

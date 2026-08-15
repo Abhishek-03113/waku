@@ -16,6 +16,7 @@ describe('composer preferences', () => {
         model: 'gpt-5.6-sol',
         reasoning_effort: 'high',
         service_tier: 'fast',
+        context_window: '1m',
       },
     )
     writeComposerPreferences(storage, 'ws://first', remembered)
@@ -25,10 +26,12 @@ describe('composer preferences', () => {
       lastModel: 'gpt-5.6-sol',
       lastReasoningEffort: 'high',
       lastServiceTier: 'fast',
+      lastContextWindow: '1m',
     })
     expect(rememberedModelTraits(remembered, 'codex', 'gpt-5.6-sol')).toEqual({
       reasoningEffort: 'high',
       serviceTier: 'fast',
+      contextWindow: '1m',
     })
     expect(readComposerPreferences(storage, 'ws://second').lastModel).toBeNull()
   })

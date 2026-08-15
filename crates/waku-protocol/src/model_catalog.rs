@@ -41,14 +41,15 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         })
         .collect(),
         ProviderKind::Claude => vec![
-            claude_reasoning_model("claude-fable-5", "Claude Fable 5"),
-            claude_reasoning_model("claude-opus-5", "Claude Opus 5"),
-            claude_reasoning_model("claude-opus-4-8", "Claude Opus 4.8"),
-            claude_reasoning_model("claude-opus-4-7", "Claude Opus 4.7"),
-            claude_reasoning_model("claude-opus-4-6", "Claude Opus 4.6"),
+            claude_long_context(claude_ultracode_model("claude-fable-5", "Claude Fable 5")),
+            claude_long_context(claude_ultracode_model("claude-opus-5", "Claude Opus 5")),
+            claude_long_context(claude_ultracode_model("claude-opus-4-8", "Claude Opus 4.8")),
+            claude_long_context(claude_ultracode_model("claude-opus-4-7", "Claude Opus 4.7")),
+            claude_long_context(claude_reasoning_model("claude-opus-4-6", "Claude Opus 4.6")),
             claude_reasoning_model("claude-opus-4-5", "Claude Opus 4.5"),
-            claude_reasoning_model("claude-sonnet-5", "Claude Sonnet 5").default(),
-            claude_reasoning_model("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            claude_long_context(claude_ultracode_model("claude-sonnet-5", "Claude Sonnet 5"))
+                .default(),
+            claude_long_context(claude_reasoning_model("claude-sonnet-4-6", "Claude Sonnet 4.6")),
             ProviderModel::new("claude-haiku-4-5", "Claude Haiku 4.5"),
         ],
         ProviderKind::Cursor => {
@@ -86,6 +87,7 @@ fn reasoning_effort_label(effort: &str) -> String {
         "xhigh" => tr!("model_option.extra_high"),
         "max" => tr!("model_option.max"),
         "ultra" => tr!("model_option.ultra"),
+        "ultracode" => tr!("model_option.ultracode"),
         other => other.replace(['-', '_'], " "),
     }
 }
@@ -101,5 +103,27 @@ fn claude_reasoning_model(id: &str, name: &str) -> ProviderModel {
     ProviderModel::new(id, name).reasoning(
         reasoning_options(["low", "medium", "high", "xhigh", "max"]),
         "high",
+    )
+}
+
+/// Mirrors the daemon catalog: `ultracode` resolves to xhigh plus standing
+/// dynamic-workflow orchestration, so it is only offered on xhigh-capable
+/// models.
+fn claude_ultracode_model(id: &str, name: &str) -> ProviderModel {
+    ProviderModel::new(id, name).reasoning(
+        reasoning_options(["low", "medium", "high", "xhigh", "max", "ultracode"]),
+        "high",
+    )
+}
+
+/// Mirrors the daemon catalog: the 1M window is opt-in behind a `[1m]` model-id
+/// suffix the CLI refuses on its older models.
+fn claude_long_context(model: ProviderModel) -> ProviderModel {
+    model.context_windows(
+        [
+            ProviderModelOption::new("200k", tr!("model_option.context_200k")),
+            ProviderModelOption::new("1m", tr!("model_option.context_1m")),
+        ],
+        "200k",
     )
 }

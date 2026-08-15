@@ -609,6 +609,7 @@ export function createSession(
     interaction_mode: 'build',
     reasoning_effort: null,
     service_tier: null,
+    context_window: null,
     agent_preset: null,
     status: 'idle',
     created_at: now,

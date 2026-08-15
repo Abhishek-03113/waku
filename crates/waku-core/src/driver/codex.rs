@@ -187,6 +187,7 @@ impl CodexDriver {
             model,
             reasoning_effort,
             service_tier,
+            context_window: _,
             agent_preset: _,
             computer_use_enabled,
             provider_cursor,
@@ -2387,6 +2388,7 @@ mod tests {
             model: Some(model.to_owned()),
             reasoning_effort: None,
             service_tier: None,
+            context_window: None,
         }
     }
 

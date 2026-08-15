@@ -27,6 +27,7 @@ const probe: ProviderProbeResult = {
     is_default: true,
     reasoning_efforts: [],
     service_tiers: [],
+    context_windows: [],
   }],
   agent_presets: [],
   version: '1.2.3',

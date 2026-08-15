@@ -885,6 +885,8 @@ models.reasoning:
   en: Reasoning
 models.service_tier:
   en: Service Tier
+models.context_window:
+  en: Context Window
 
 model_option.none:
   en: None
@@ -902,6 +904,12 @@ model_option.max:
   en: Max
 model_option.ultra:
   en: Ultra
+model_option.ultracode:
+  en: Ultracode
+model_option.context_200k:
+  en: 200K
+model_option.context_1m:
+  en: 1M
 model_option.auto:
   en: Auto
 model_option.fast:

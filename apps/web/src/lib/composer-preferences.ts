@@ -7,6 +7,7 @@ type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
 export interface RememberedModelTraits {
   reasoningEffort: string | null
   serviceTier: string | null
+  contextWindow: string | null
 }
 
 export interface ComposerPreferences {
@@ -14,6 +15,7 @@ export interface ComposerPreferences {
   lastModel: string | null
   lastReasoningEffort: string | null
   lastServiceTier: string | null
+  lastContextWindow: string | null
   modelTraits: Record<string, RememberedModelTraits>
 }
 
@@ -22,6 +24,7 @@ const DEFAULT_PREFERENCES: ComposerPreferences = {
   lastModel: null,
   lastReasoningEffort: null,
   lastServiceTier: null,
+  lastContextWindow: null,
   modelTraits: {},
 }
 
@@ -81,22 +84,28 @@ export function writeComposerPreferences(
 
 export function rememberComposerSession(
   preferences: ComposerPreferences,
-  session: Pick<AgentSession, 'provider' | 'model' | 'reasoning_effort' | 'service_tier'>,
+  session: Pick<
+    AgentSession,
+    'provider' | 'model' | 'reasoning_effort' | 'service_tier' | 'context_window'
+  >,
 ): ComposerPreferences {
   if (!session.model) return preferences
   const reasoningEffort = session.reasoning_effort ?? null
   const serviceTier = session.service_tier ?? null
+  const contextWindow = session.context_window ?? null
   return {
     ...preferences,
     lastProvider: session.provider,
     lastModel: session.model,
     lastReasoningEffort: reasoningEffort,
     lastServiceTier: serviceTier,
+    lastContextWindow: contextWindow,
     modelTraits: {
       ...preferences.modelTraits,
       [modelKey(session.provider, session.model)]: {
         reasoningEffort,
         serviceTier,
+        contextWindow,
       },
     },
   }
@@ -120,8 +129,11 @@ function parsePreferences(value: unknown): ComposerPreferences {
       if (!isRecord(traits)) continue
       const reasoningEffort = nullableString(traits.reasoningEffort)
       const serviceTier = nullableString(traits.serviceTier)
+      // Written before context windows existed: treat a missing one as unset
+      // rather than dropping the whole entry.
+      const contextWindow = nullableString(traits.contextWindow) ?? null
       if (reasoningEffort !== undefined && serviceTier !== undefined) {
-        modelTraits[key] = { reasoningEffort, serviceTier }
+        modelTraits[key] = { reasoningEffort, serviceTier, contextWindow }
       }
     }
   }
@@ -130,6 +142,7 @@ function parsePreferences(value: unknown): ComposerPreferences {
     lastModel: nullableString(value.lastModel) ?? null,
     lastReasoningEffort: nullableString(value.lastReasoningEffort) ?? null,
     lastServiceTier: nullableString(value.lastServiceTier) ?? null,
+    lastContextWindow: nullableString(value.lastContextWindow) ?? null,
     modelTraits,
   }
 }

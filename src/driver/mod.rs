@@ -30,6 +30,7 @@ pub(crate) fn start_remote(
             model: options.model,
             reasoning_effort: options.reasoning_effort,
             service_tier: options.service_tier,
+            context_window: options.context_window,
             agent_preset: options.agent_preset,
             computer_use_enabled: options.computer_use_enabled,
             provider_cursor: options
@@ -233,6 +234,7 @@ impl DriverControl for RemoteDriverControl {
                 model: options.model,
                 reasoning_effort: options.reasoning_effort,
                 service_tier: options.service_tier,
+                context_window: options.context_window,
             })
         })();
         let Ok(options) = options else {

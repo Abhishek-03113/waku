@@ -12,6 +12,7 @@ const model = (id: string): ProviderModel => ({
   is_default: false,
   reasoning_efforts: [],
   service_tiers: [],
+  context_windows: [],
 })
 
 describe('model picker presentation', () => {

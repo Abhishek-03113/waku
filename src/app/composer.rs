@@ -1364,7 +1364,10 @@ impl Waku {
         let theme = Theme::current(cx);
         let session = self.selected_session()?;
         let model = self.model_metadata_for_session(session)?;
-        if model.reasoning_efforts.is_empty() && model.service_tiers.is_empty() {
+        if model.reasoning_efforts.is_empty()
+            && model.service_tiers.is_empty()
+            && model.context_windows.is_empty()
+        {
             return None;
         }
 
@@ -1416,11 +1419,47 @@ impl Waku {
                 .map(|option| option.label.clone())
                 .unwrap_or_else(|| selected_tier.clone())
         };
+        let selected_window = session
+            .context_window
+            .as_deref()
+            .filter(|selected| {
+                model
+                    .context_windows
+                    .iter()
+                    .any(|option| option.id == *selected)
+            })
+            .or(model.default_context_window.as_deref())
+            .or_else(|| {
+                model
+                    .context_windows
+                    .first()
+                    .map(|option| option.id.as_str())
+            })
+            .map(str::to_owned);
+        // A non-default window changes what the session costs and how much it
+        // can hold, so it reads on the chip rather than only inside the menu.
+        let window_label = selected_window
+            .as_deref()
+            .filter(|selected| model.default_context_window.as_deref() != Some(selected))
+            .and_then(|selected| {
+                model
+                    .context_windows
+                    .iter()
+                    .find(|option| option.id == selected)
+                    .map(|option| option.label.clone())
+            });
+
         let fast = selected_tier == "fast" || tier_label.eq_ignore_ascii_case("fast");
-        let trigger_label = effort_label.unwrap_or_else(|| tier_label.clone());
+        let trigger_label = match (effort_label.unwrap_or_else(|| tier_label.clone()), window_label)
+        {
+            (label, Some(window)) => format!("{label} · {window}"),
+            (label, None) => label,
+        };
         let reasoning_efforts = model.reasoning_efforts.clone();
         let default_effort = model.default_reasoning_effort.clone();
         let service_tiers = model.service_tiers.clone();
+        let context_windows = model.context_windows.clone();
+        let default_window = model.default_context_window.clone();
         let default_tier = model
             .default_service_tier
             .clone()
@@ -1487,6 +1526,27 @@ impl Waku {
                                 move |_, cx| {
                                     let _ = weak.update(cx, |this, cx| {
                                         this.set_service_tier(tier.clone(), cx);
+                                    });
+                                },
+                            ),
+                        );
+                    }
+                }
+                if !context_windows.is_empty() {
+                    if !reasoning_efforts.is_empty() || !service_tiers.is_empty() {
+                        items.push(MenuItem::Separator);
+                    }
+                    items.push(MenuItem::Header(tr!("models.context_window").into()));
+                    for option in context_windows.clone() {
+                        let weak = weak.clone();
+                        let window = option.id;
+                        let is_default = default_window.as_deref() == Some(window.as_str());
+                        let selected = selected_window.as_deref() == Some(window.as_str());
+                        items.push(
+                            traits_choice(theme, option.label, is_default, selected).on_click(
+                                move |_, cx| {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.set_context_window(window.clone(), cx);
                                     });
                                 },
                             ),

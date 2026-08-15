@@ -74,6 +74,7 @@ impl PiDriver {
             model,
             reasoning_effort,
             service_tier: _,
+            context_window: _,
             agent_preset: _,
             computer_use_enabled,
             provider_cursor,
@@ -1096,6 +1097,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
+                context_window: None,
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
@@ -1158,6 +1160,7 @@ mod tests {
             model: Some("anthropic/claude-opus-5".to_owned()),
             reasoning_effort: Some("high".to_owned()),
             service_tier: None,
+            context_window: None,
         };
 
         assert!(driver.apply_options(options(RuntimeMode::FullAccess, InteractionMode::Build)));

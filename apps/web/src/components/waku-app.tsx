@@ -833,6 +833,7 @@ export function WakuApp() {
       model: preferences.lastModel,
       reasoning_effort: preferences.lastReasoningEffort,
       service_tier: preferences.lastServiceTier,
+      context_window: preferences.lastContextWindow,
     }
   }
 

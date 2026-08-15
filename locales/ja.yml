@@ -456,6 +456,7 @@ models.remove_favorite: お気に入りから削除
 models.standard: 標準
 models.reasoning: 推論レベル
 models.service_tier: サービスティア
+models.context_window: コンテキストウィンドウ
 
 model_option.none: なし
 model_option.minimal: 最小
@@ -465,6 +466,9 @@ model_option.high: 高
 model_option.extra_high: 非常に高い
 model_option.max: 最大
 model_option.ultra: 超高
+model_option.ultracode: Ultracode
+model_option.context_200k: 200K
+model_option.context_1m: 1M
 model_option.auto: 自動
 model_option.fast: 高速
 model_option.amp_fast_description: 使用量が増える代わりに、Amp の高速な処理階層を使用します

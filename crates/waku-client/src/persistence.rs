@@ -68,6 +68,8 @@ pub struct RememberedModelTraits {
     reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window: Option<String>,
 }
 
 /// Remote composer-draft proxy. Draft bytes and attachments remain owned by
@@ -227,6 +229,8 @@ struct AppState {
     last_reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_context_window: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     remembered_model_traits: Vec<RememberedModelTraits>,
     #[serde(default = "default_sidebar_visibility")]
@@ -257,6 +261,8 @@ pub struct PersistedState {
     pub last_reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_context_window: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remembered_model_traits: Vec<RememberedModelTraits>,
     #[serde(default)]
@@ -318,6 +324,7 @@ impl PersistedState {
             last_model: None,
             last_reasoning_effort: None,
             last_service_tier: None,
+            last_context_window: None,
             remembered_model_traits: Vec::new(),
             favorite_models: Vec::new(),
             theme: ThemePreference::System,
@@ -356,6 +363,9 @@ impl PersistedState {
                 .reasoning_effort
                 .clone_from(&self.last_reasoning_effort);
             session.service_tier.clone_from(&self.last_service_tier);
+            session
+                .context_window
+                .clone_from(&self.last_context_window);
         }
         session
     }
@@ -366,12 +376,13 @@ impl PersistedState {
         model: &str,
         reasoning_effort: Option<String>,
         service_tier: Option<String>,
+        context_window: Option<String>,
     ) {
         let existing = self
             .remembered_model_traits
             .iter()
             .position(|traits| traits.provider == provider && traits.model == model);
-        if reasoning_effort.is_none() && service_tier.is_none() {
+        if reasoning_effort.is_none() && service_tier.is_none() && context_window.is_none() {
             if let Some(index) = existing {
                 self.remembered_model_traits.remove(index);
             }
@@ -381,12 +392,14 @@ impl PersistedState {
             let traits = &mut self.remembered_model_traits[index];
             traits.reasoning_effort = reasoning_effort;
             traits.service_tier = service_tier;
+            traits.context_window = context_window;
         } else {
             self.remembered_model_traits.push(RememberedModelTraits {
                 provider,
                 model: model.to_owned(),
                 reasoning_effort,
                 service_tier,
+                context_window,
             });
         }
     }
@@ -395,11 +408,17 @@ impl PersistedState {
         &self,
         provider: ProviderKind,
         model: &str,
-    ) -> (Option<String>, Option<String>) {
+    ) -> (Option<String>, Option<String>, Option<String>) {
         self.remembered_model_traits
             .iter()
             .find(|traits| traits.provider == provider && traits.model == model)
-            .map(|traits| (traits.reasoning_effort.clone(), traits.service_tier.clone()))
+            .map(|traits| {
+                (
+                    traits.reasoning_effort.clone(),
+                    traits.service_tier.clone(),
+                    traits.context_window.clone(),
+                )
+            })
             .unwrap_or_default()
     }
 
@@ -441,6 +460,7 @@ impl PersistedState {
             last_model: self.last_model.clone(),
             last_reasoning_effort: self.last_reasoning_effort.clone(),
             last_service_tier: self.last_service_tier.clone(),
+            last_context_window: self.last_context_window.clone(),
             remembered_model_traits: self.remembered_model_traits.clone(),
             sidebar_visible: self.sidebar_visible,
             right_panel_visible: self.right_panel_visible,
@@ -465,6 +485,7 @@ impl PersistedState {
         self.last_model = app_state.last_model;
         self.last_reasoning_effort = app_state.last_reasoning_effort;
         self.last_service_tier = app_state.last_service_tier;
+        self.last_context_window = app_state.last_context_window;
         self.remembered_model_traits = app_state.remembered_model_traits;
         self.sidebar_visible = app_state.sidebar_visible;
         self.right_panel_visible = app_state.right_panel_visible;
@@ -545,6 +566,9 @@ impl PersistedState {
         }
         if self.last_service_tier.is_none() {
             self.last_service_tier = session.service_tier;
+        }
+        if self.last_context_window.is_none() {
+            self.last_context_window = session.context_window;
         }
     }
 }

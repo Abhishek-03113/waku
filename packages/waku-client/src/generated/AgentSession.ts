@@ -29,6 +29,10 @@ auto_title?: string | null, project_id: string,
  */
 workspace?: SessionWorkspace, provider: ProviderKind, model?: string | null, runtime_mode: RuntimeMode, interaction_mode: InteractionMode, reasoning_effort?: string | null, service_tier?: string | null,
 /**
+ * Selected context window, when the provider exposes more than one.
+ */
+context_window?: string | null,
+/**
  * Provider-owned agent composition selected before the first turn.
  * Currently populated by DeepSeek Harness; unlike Build/Plan, Harness
  * locks this value once conversation history exists.

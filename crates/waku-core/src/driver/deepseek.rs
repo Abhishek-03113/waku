@@ -106,6 +106,7 @@ impl DeepSeekDriver {
             model,
             reasoning_effort,
             service_tier,
+            context_window: _,
             agent_preset,
             computer_use_enabled: _,
             provider_cursor,
@@ -169,6 +170,7 @@ impl DeepSeekDriver {
             model,
             reasoning_effort,
             service_tier,
+            context_window: None,
         };
         apply_session_options(
             &server,

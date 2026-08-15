@@ -95,7 +95,10 @@ const MODEL_OPTION_KEYS: Record<string, string> = {
   extraHigh: 'model_option.extra_high',
   extra_high: 'model_option.extra_high',
   max: 'model_option.max',
+  '200k': 'model_option.context_200k',
+  '1m': 'model_option.context_1m',
   ultra: 'model_option.ultra',
+  ultracode: 'model_option.ultracode',
   auto: 'model_option.auto',
   fast: 'model_option.fast',
 }
@@ -1208,7 +1211,9 @@ function ModelTraitsControl({
   returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
-  if (!model.reasoning_efforts.length && !model.service_tiers.length) return null
+  if (!model.reasoning_efforts.length && !model.service_tiers.length && !model.context_windows.length) {
+    return null
+  }
   const effort = session.reasoning_effort
     && model.reasoning_efforts.some((option) => option.id === session.reasoning_effort)
     ? session.reasoning_effort
@@ -1223,6 +1228,15 @@ function ModelTraitsControl({
     ? t('models.standard')
     : modelOptionLabel(tier, model.service_tiers.find((option) => option.id === tier)?.label ?? tier, t)
   const fast = tier === 'fast' || tierLabel.toLowerCase() === 'fast'
+  const contextWindow = session.context_window
+    && model.context_windows.some((option) => option.id === session.context_window)
+    ? session.context_window
+    : model.default_context_window ?? model.context_windows[0]?.id ?? null
+  // A non-default window changes cost and capacity, so it reads on the trigger.
+  const windowOption = contextWindow && contextWindow !== model.default_context_window
+    ? model.context_windows.find((option) => option.id === contextWindow)
+    : undefined
+  const windowLabel = windowOption && modelOptionLabel(windowOption.id, windowOption.label, t)
   const items: ControlMenuItem[] = [
     ...model.reasoning_efforts.map((option) => ({
       id: `effort-${option.id}`,
@@ -1252,13 +1266,22 @@ function ModelTraitsControl({
         onSelect: () => onPatch({ service_tier: option.id }),
       })),
     ] : []),
+    ...model.context_windows.map((option) => ({
+      id: `context-${option.id}`,
+      section: t('models.context_window'),
+      label: modelOptionLabel(option.id, option.label, t),
+      description: option.description ?? undefined,
+      suffix: model.default_context_window === option.id ? t('common.default') : undefined,
+      selected: contextWindow === option.id,
+      onSelect: () => onPatch({ context_window: option.id }),
+    })),
   ]
   return (
     <ControlMenu
       caret={false}
       icon={fast ? 'zap' : undefined}
       items={items}
-      label={effortLabel ?? tierLabel}
+      label={windowLabel ? `${effortLabel ?? tierLabel} · ${windowLabel}` : effortLabel ?? tierLabel}
       menuClassName="w-56"
       returnFocus={returnFocus}
     />

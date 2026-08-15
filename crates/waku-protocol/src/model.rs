@@ -326,6 +326,13 @@ pub struct ProviderModel {
     pub service_tiers: Vec<ProviderModelOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_service_tier: Option<String>,
+    /// Context window sizes the provider exposes as a per-session choice.
+    /// Claude Code keeps its 1M window opt-in behind a model-id suffix, so the
+    /// window is a trait of the session rather than of the model.
+    #[serde(default)]
+    pub context_windows: Vec<ProviderModelOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_context_window: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -416,6 +423,8 @@ impl ProviderModel {
             default_reasoning_effort: None,
             service_tiers: Vec::new(),
             default_service_tier: None,
+            context_windows: Vec::new(),
+            default_context_window: None,
         }
     }
 
@@ -446,6 +455,16 @@ impl ProviderModel {
     ) -> Self {
         self.service_tiers = tiers.into_iter().collect();
         self.default_service_tier = Some(default.into());
+        self
+    }
+
+    pub fn context_windows(
+        mut self,
+        windows: impl IntoIterator<Item = ProviderModelOption>,
+        default: impl Into<String>,
+    ) -> Self {
+        self.context_windows = windows.into_iter().collect();
+        self.default_context_window = Some(default.into());
         self
     }
 }
@@ -759,6 +778,9 @@ pub struct AgentSession {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
+    /// Selected context window, when the provider exposes more than one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<String>,
     /// Provider-owned agent composition selected before the first turn.
     /// Currently populated by DeepSeek Harness; unlike Build/Plan, Harness
     /// locks this value once conversation history exists.
@@ -832,6 +854,7 @@ impl AgentSession {
             interaction_mode: InteractionMode::Build,
             reasoning_effort: None,
             service_tier: None,
+            context_window: None,
             agent_preset: None,
             status: SessionStatus::Idle,
             created_at: now,
@@ -868,6 +891,7 @@ impl AgentSession {
             interaction_mode: InteractionMode::default(),
             reasoning_effort: None,
             service_tier: None,
+            context_window: None,
             agent_preset: None,
             status: self.status,
             created_at: self.created_at,

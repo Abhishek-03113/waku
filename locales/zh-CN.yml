@@ -431,6 +431,7 @@ models.remove_favorite: 从收藏中移除
 models.standard: 标准
 models.reasoning: 推理强度
 models.service_tier: 服务等级
+models.context_window: 上下文窗口
 model_option.none: 无
 model_option.minimal: 最低
 model_option.low: 低
@@ -439,6 +440,9 @@ model_option.high: 高
 model_option.extra_high: 极高
 model_option.max: 最高
 model_option.ultra: 超高
+model_option.ultracode: Ultracode
+model_option.context_200k: 200K
+model_option.context_1m: 1M
 model_option.auto: 自动
 model_option.fast: 快速
 model_option.amp_fast_description: 使用 Amp 的快速服务等级，但会消耗更多用量
