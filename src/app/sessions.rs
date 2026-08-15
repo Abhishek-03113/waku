@@ -488,6 +488,34 @@ impl Waku {
         self.save();
     }
 
+    /// Mirror the live window frame into persisted state; disk waits for the
+    /// app-quit save (any other `save` carries the frame along for free).
+    /// macOS reports a zoomed window as `Windowed` with screen-filling bounds,
+    /// so while maximized (and while fullscreen) the last floating frame is
+    /// kept as the restore size — and the display it was captured on — and
+    /// only the flag advances.
+    pub(super) fn capture_window_state(&mut self, window: &Window, cx: &App) {
+        // Bounds also change when the OS relocates the window — a monitor
+        // unplugged, a display asleep. Those moves are not the user's; like
+        // Zed, only capture while the window is the active one.
+        if !window.is_window_active() {
+            return;
+        }
+        let previous = self.state.window_state;
+        let display = window.display(cx).and_then(|display| display.uuid().ok());
+        self.state.window_state = Some(match window.window_bounds() {
+            WindowBounds::Fullscreen(restore) => {
+                previous.unwrap_or_else(|| persisted_window_state(restore, false, display))
+            }
+            WindowBounds::Maximized(restore) => persisted_window_state(restore, true, display),
+            WindowBounds::Windowed(bounds) if window.is_maximized() => PersistedWindowState {
+                maximized: true,
+                ..previous.unwrap_or_else(|| persisted_window_state(bounds, true, display))
+            },
+            WindowBounds::Windowed(bounds) => persisted_window_state(bounds, false, display),
+        });
+    }
+
     pub(super) fn effective_panel_widths(&self, window: &Window) -> (f32, f32) {
         fitted_panel_widths(
             f32::from(window.viewport_size().width),

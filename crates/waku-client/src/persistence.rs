@@ -190,6 +190,24 @@ fn collect_composer_draft_changes(
     }
 }
 
+/// Last observed main-window frame in logical pixels. GPUI window bounds are
+/// relative to the display the window sits on, so the frame only means
+/// something together with `display` — the stable display UUID (Zed persists
+/// the same pair; display *ids* renumber across reboots and replugs). While
+/// the window is maximized or fullscreen these bounds keep the floating frame
+/// the window returns to, not the screen-filling one.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PersistedWindowState {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub maximized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<Uuid>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -241,6 +259,8 @@ struct AppState {
     sidebar_width: f32,
     #[serde(default = "default_right_panel_width")]
     right_panel_width: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_state: Option<PersistedWindowState>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -281,6 +301,8 @@ pub struct PersistedState {
     pub sidebar_width: f32,
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_state: Option<PersistedWindowState>,
     #[serde(default = "default_computer_use_enabled")]
     pub computer_use_enabled: bool,
     #[serde(default)]
@@ -334,6 +356,7 @@ impl PersistedState {
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
+            window_state: None,
             computer_use_enabled: false,
             computer_use_allowed_apps: Vec::new(),
             disabled_providers: Vec::new(),
@@ -466,6 +489,7 @@ impl PersistedState {
             right_panel_visible: self.right_panel_visible,
             sidebar_width: self.sidebar_width,
             right_panel_width: self.right_panel_width,
+            window_state: self.window_state,
         }
     }
 
@@ -491,6 +515,7 @@ impl PersistedState {
         self.right_panel_visible = app_state.right_panel_visible;
         self.sidebar_width = app_state.sidebar_width;
         self.right_panel_width = app_state.right_panel_width;
+        self.window_state = app_state.window_state;
     }
 
     fn persistable_selected_session(&self) -> Option<Uuid> {
@@ -587,6 +612,23 @@ fn default_app_settings_path() -> PathBuf {
     }
 }
 
+fn default_app_state_path() -> PathBuf {
+    StateStore::default_path().with_file_name("state.json")
+}
+
+fn read_app_state_file(path: &Path) -> Option<AppState> {
+    let bytes = fs::read(path).ok()?;
+    let app_state = serde_json::from_slice::<AppState>(&bytes).ok()?;
+    (app_state.app_state_version == APP_STATE_VERSION).then_some(app_state)
+}
+
+/// Read the last persisted window frame ahead of the full state load. The
+/// main window opens before the daemon connection and `StateStore` exist, and
+/// `WindowOptions` needs its frame at `open_window` time.
+pub fn load_window_state() -> Option<PersistedWindowState> {
+    read_app_state_file(&default_app_state_path())?.window_state
+}
+
 fn default_legacy_settings_paths() -> Vec<PathBuf> {
     if cfg!(debug_assertions) {
         vec![StateStore::default_path().with_file_name("settings.json")]
@@ -676,13 +718,11 @@ impl StateStore {
     }
 
     pub fn remote(daemon: DaemonSupervisor) -> Self {
-        let path = Self::default_path();
-        let directory = path.parent().unwrap_or_else(|| Path::new(".")).to_owned();
         Self {
-            app_state_path: directory.join("state.json"),
+            app_state_path: default_app_state_path(),
             app_settings_path: default_app_settings_path(),
             legacy_settings_paths: default_legacy_settings_paths(),
-            path,
+            path: Self::default_path(),
             daemon,
             remote_default_cwd: Mutex::new(None),
             task_state_loaded: AtomicBool::new(false),
@@ -774,7 +814,7 @@ impl StateStore {
         if let Some(settings) = self.read_app_settings()? {
             state.apply_app_settings(settings);
         }
-        let app_state = self.read_app_state()?;
+        let app_state = read_app_state_file(&self.app_state_path);
         let app_state_missing = app_state.is_none();
         if let Some(app_state) = app_state {
             state.apply_app_state(app_state);
@@ -864,19 +904,6 @@ impl StateStore {
         source
             .map(|(bytes, _)| serde_json::from_slice(&bytes).map_err(to_io_error))
             .transpose()
-    }
-
-    fn read_app_state(&self) -> io::Result<Option<AppState>> {
-        let Ok(bytes) = fs::read(&self.app_state_path) else {
-            return Ok(None);
-        };
-        let Ok(app_state) = serde_json::from_slice::<AppState>(&bytes) else {
-            return Ok(None);
-        };
-        if app_state.app_state_version != APP_STATE_VERSION {
-            return Ok(None);
-        }
-        Ok(Some(app_state))
     }
 
     fn write_app_settings(&self, settings: &AppSettings) -> io::Result<()> {

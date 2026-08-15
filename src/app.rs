@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local, Utc};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClipboardEntry, ClipboardItem, Context, Div, Entity,
-    ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClipboardEntry, ClipboardItem, Context, Div,
+    Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, NavigationDirection, ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle,
-    SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window, canvas, div,
-    ease_out_quint, fill, font, img, linear_color_stop, linear_gradient, list, point, prelude::*,
-    pulsating_between, px, rgb,
+    SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window, WindowBounds, canvas,
+    div, ease_out_quint, fill, font, img, linear_color_stop, linear_gradient, list, point,
+    prelude::*, pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
@@ -54,7 +54,7 @@ use crate::ui::tooltip::Tooltip;
 use crate::browser::BrowserView;
 use crate::persistence::{
     ComposerDraftStore, ComposerDrafts, DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH,
-    PersistedState, StateStore,
+    PersistedState, PersistedWindowState, StateStore,
 };
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
@@ -398,6 +398,21 @@ fn sanitize_panel_width(width: f32, default: f32, min: f32, max: f32) -> f32 {
         width.clamp(min, max)
     } else {
         default
+    }
+}
+
+fn persisted_window_state(
+    bounds: Bounds<Pixels>,
+    maximized: bool,
+    display: Option<Uuid>,
+) -> PersistedWindowState {
+    PersistedWindowState {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
+        maximized,
+        display,
     }
 }
 
@@ -1904,6 +1919,17 @@ impl Waku {
         );
         state.sidebar_width = sidebar_width;
         state.right_panel_width = right_panel_width;
+        // First launch has no persisted frame yet; seed from the freshly
+        // opened window so an immediate zoom or fullscreen still has a
+        // floating frame to restore to. The bounds observer keeps it current
+        // from here.
+        if state.window_state.is_none() {
+            state.window_state = Some(persisted_window_state(
+                window.bounds(),
+                false,
+                window.display(cx).and_then(|display| display.uuid().ok()),
+            ));
+        }
         crate::theme::apply_theme_preference(state.theme, window, cx);
         crate::platform::set_sidebar_material_width(window, sidebar_width);
         let project_paths = state
@@ -2138,6 +2164,11 @@ impl Waku {
             })
             .detach();
 
+            cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+                this.capture_window_state(window, cx);
+            })
+            .detach();
+
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
                 if window.is_window_active() {
                     this.reload_clean_right_panel_file_editors(cx);
@@ -2259,6 +2290,14 @@ impl Waku {
                 async move {
                     let _ = save.await;
                 }
+            })
+            .detach();
+
+            // Window-frame changes are only mirrored in memory; the quit save
+            // is what lands the final position and size on disk.
+            cx.on_app_quit(|this, _| {
+                this.save();
+                async {}
             })
             .detach();
 
