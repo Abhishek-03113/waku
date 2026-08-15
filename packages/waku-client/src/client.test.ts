@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { WakuClient, WakuRpcError, daemonUrl, type WebSocketLike } from "./client";
+import { PROTOCOL_VERSION } from "./generated";
 
 class FakeSocket implements WebSocketLike {
   readyState = 0;
@@ -59,7 +60,7 @@ async function connect(client: WakuClient, sockets: FakeSocket[]): Promise<FakeS
   const connected = client.connect();
   const socket = sockets.at(-1)!;
   socket.open();
-  socket.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
+  socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
   await connected;
   return socket;
 }
@@ -72,12 +73,12 @@ describe("WakuClient", () => {
     socket.open();
     expect(JSON.parse(socket.sent[0]!)).toEqual({
       type: "hello",
-      protocolVersion: 2,
+      protocolVersion: PROTOCOL_VERSION,
       token: "secret",
       clientId: "00000000-0000-4000-8000-000000000001",
       resumeFrom: [],
     });
-    socket.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
+    socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await connected;
 
     const response = client.request({ type: "getSettings" });
@@ -96,7 +97,7 @@ describe("WakuClient", () => {
     const connected = client.connect();
     const active = sockets[0] ?? socket;
     active.open();
-    active.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
+    active.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await connected;
 
     const response = client.request({ type: "getSettings" });
@@ -114,7 +115,7 @@ describe("WakuClient", () => {
     const firstConnection = client.connect();
     const first = sockets[0]!;
     first.open();
-    first.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
+    first.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await firstConnection;
 
     const received: number[] = [];
@@ -138,7 +139,7 @@ describe("WakuClient", () => {
     expect(JSON.parse(second.sent[0]!).resumeFrom).toEqual([
       { sessionId: "session", runtimeId: "runtime", epoch: "epoch-one", sequence: 4 },
     ]);
-    second.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
+    second.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await secondConnection;
   });
 
@@ -151,7 +152,7 @@ describe("WakuClient", () => {
     const secondConnection = client.connect();
     const second = sockets[1]!;
     second.open();
-    second.receive({ type: "hello", protocolVersion: 2, daemonVersion: "test" });
+    second.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await expect(secondConnection).resolves.toBeUndefined();
   });
 
