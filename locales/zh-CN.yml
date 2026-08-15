@@ -279,6 +279,7 @@ activity.action_search: 搜索
 activity.action_list: 列出
 activity.action_plan: 计划
 activity.action_use: 使用
+activity.ask_questions: 提问
 activity.arguments: 参数
 activity.output: 输出
 activity.image_output: 图片输出

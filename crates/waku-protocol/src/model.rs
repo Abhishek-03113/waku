@@ -2202,7 +2202,11 @@ fn fallback_activity_display_target(kind: ActivityKind, title: &str) -> Option<S
 }
 
 pub fn is_generic_activity_title(kind: ActivityKind, title: &str) -> bool {
-    if ActivityKind::from_tool_name(title) == kind {
+    // Classification falling back to `Tool` only means the name is not one of
+    // the semantic kinds above. It does not make the provider-supplied tool
+    // name generic: otherwise every unknown tool (for example
+    // `AskUserQuestion`) loses its identity in the transcript.
+    if kind != ActivityKind::Tool && ActivityKind::from_tool_name(title) == kind {
         return true;
     }
     match kind {
@@ -2216,6 +2220,7 @@ pub fn is_generic_activity_title(kind: ActivityKind, title: &str) -> bool {
         }
         ActivityKind::FileList => title == tr!("activity.list_files"),
         ActivityKind::Plan => title == tr!("activity.plan_updated"),
+        ActivityKind::Tool => title.eq_ignore_ascii_case("tool") || title == tr!("activity.tool"),
         _ => false,
     }
 }
@@ -2907,6 +2912,19 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn fallback_tool_names_are_not_treated_as_generic_titles() {
+        assert!(!is_generic_activity_title(
+            ActivityKind::Tool,
+            "AskUserQuestion"
+        ));
+        assert!(!is_generic_activity_title(
+            ActivityKind::Tool,
+            "mcp__threads__create_thread"
+        ));
+        assert!(is_generic_activity_title(ActivityKind::Tool, "Tool"));
     }
 
     #[test]

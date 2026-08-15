@@ -159,13 +159,16 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
         ? t ? t('activity.plan_update_failed') : 'Failed to update plan'
         : t ? t('activity.updated_plan') : 'Updated plan'
     case 'tool':
-      return target ?? activity.title
+      return activityToolDisplayName(activity, t)
     case 'reasoning':
       return activity.title
   }
 }
 
 export function activityActionLabel(activity: ActivityItem, t?: Translator) {
+  if (isAskUserQuestion(activity)) {
+    return t ? t('activity.ask_questions') : 'Ask questions'
+  }
   const key = activity.kind === 'reasoning'
     ? 'activity.action_think'
     : activity.kind === 'command'
@@ -180,7 +183,7 @@ export function activityActionLabel(activity: ActivityItem, t?: Translator) {
               ? 'activity.action_list'
               : activity.kind === 'plan'
                 ? 'activity.action_plan'
-                : 'activity.action_use'
+                : 'activity.tool'
   if (t) return t(key)
   return {
     'activity.action_think': 'Think',
@@ -190,7 +193,7 @@ export function activityActionLabel(activity: ActivityItem, t?: Translator) {
     'activity.action_search': 'Search',
     'activity.action_list': 'List',
     'activity.action_plan': 'Plan',
-    'activity.action_use': 'Use',
+    'activity.tool': 'Tool',
   }[key]!
 }
 
@@ -225,7 +228,10 @@ export function activityRowDetail(activity: ActivityItem, t?: Translator) {
     case 'plan':
       return customTitle
     case 'tool':
-      return activity.display_target?.trim() || customTitle
+      if (isAskUserQuestion(activity)) return ''
+      return activity.display_target?.trim() || !isGenericActivityTitle(activity)
+        ? activityToolDisplayName(activity, t)
+        : ''
   }
 }
 
@@ -560,6 +566,37 @@ function activityNounKey(kind: ActivityItem['kind'], count: number) {
 
 function pathName(path: string) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path
+}
+
+function toolNameLeaf(name: string) {
+  const namespaceLeaf = name.trim().split('__').at(-1) ?? name.trim()
+  return namespaceLeaf.split(/[:./]/).at(-1) ?? namespaceLeaf
+}
+
+function isAskUserQuestion(activity: ActivityItem) {
+  return activity.kind === 'tool'
+    && toolNameLeaf(activity.title).replace(/[\s_-]+/g, '').toLocaleLowerCase() === 'askuserquestion'
+}
+
+function humanizeToolName(name: string) {
+  const trimmed = name.trim()
+  if (/\s/.test(trimmed)) return trimmed
+  const display = toolNameLeaf(trimmed)
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z\d])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
+    .trim()
+  return display ? display[0]!.toLocaleUpperCase() + display.slice(1) : 'Tool'
+}
+
+function activityToolDisplayName(activity: ActivityItem, t?: Translator) {
+  if (isAskUserQuestion(activity)) {
+    return t ? t('activity.ask_questions') : 'Ask questions'
+  }
+  const target = activity.display_target?.trim()
+  if (target) return target
+  if (!isGenericActivityTitle(activity)) return humanizeToolName(activity.title)
+  return t ? t('activity.tool') : 'Tool'
 }
 
 function isGenericActivityTitle(activity: ActivityItem) {

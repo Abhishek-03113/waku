@@ -297,6 +297,7 @@ activity.action_search: 検索
 activity.action_list: 一覧
 activity.action_plan: 計画
 activity.action_use: 使用
+activity.ask_questions: 質問する
 activity.arguments: 引数
 activity.output: 出力
 activity.image_output: 画像出力

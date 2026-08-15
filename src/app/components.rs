@@ -937,6 +937,79 @@ pub(super) fn activity_header_title(
     activity_summary(activities)
 }
 
+fn tool_name_leaf(name: &str) -> &str {
+    let name = name.trim();
+    let leaf = name.rsplit("__").next().unwrap_or(name);
+    leaf.rsplit([':', '.', '/']).next().unwrap_or(leaf)
+}
+
+fn is_ask_user_question(activity: &ActivityItem) -> bool {
+    activity.kind == crate::model::ActivityKind::Tool
+        && tool_name_leaf(&activity.title)
+            .chars()
+            .filter(|character| !matches!(*character, '_' | '-' | ' '))
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+            == "askuserquestion"
+}
+
+fn humanize_tool_name(name: &str) -> String {
+    let name = name.trim();
+    if name.chars().any(char::is_whitespace) {
+        return name.to_owned();
+    }
+
+    let leaf = tool_name_leaf(name);
+    let characters = leaf.chars().collect::<Vec<_>>();
+    let mut display = String::with_capacity(leaf.len() + 4);
+    for (index, character) in characters.iter().copied().enumerate() {
+        if matches!(character, '_' | '-') {
+            if !display.ends_with(' ') {
+                display.push(' ');
+            }
+            continue;
+        }
+        let previous = index.checked_sub(1).and_then(|index| characters.get(index));
+        let next = characters.get(index + 1);
+        let starts_word = character.is_ascii_uppercase()
+            && previous.is_some_and(|previous| {
+                previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase()
+                        && next.is_some_and(|next| next.is_ascii_lowercase()))
+            });
+        if starts_word && !display.ends_with(' ') {
+            display.push(' ');
+        }
+        display.push(character);
+    }
+
+    let display = display.trim();
+    let mut characters = display.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+        .unwrap_or_else(|| tr!("activity.tool"))
+}
+
+fn activity_tool_display_name(activity: &ActivityItem) -> String {
+    if is_ask_user_question(activity) {
+        return tr!("activity.ask_questions");
+    }
+    if let Some(target) = activity
+        .display_target
+        .as_deref()
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+    {
+        return target.to_owned();
+    }
+    if !crate::model::is_generic_activity_title(activity.kind, &activity.title) {
+        return humanize_tool_name(&activity.title);
+    }
+    tr!("activity.tool")
+}
+
 pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
     use crate::model::ActivityKind;
 
@@ -1080,10 +1153,7 @@ pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
                 (true, true) => tr!("activity.plan_update_failed"),
             }
         }
-        ActivityKind::Tool => activity
-            .display_target
-            .clone()
-            .unwrap_or_else(|| activity.title.clone()),
+        ActivityKind::Tool => activity_tool_display_name(activity),
         ActivityKind::Reasoning => activity.title.clone(),
     }
 }
@@ -1099,7 +1169,8 @@ pub(super) fn activity_action_label(activity: &ActivityItem) -> String {
         ActivityKind::FileSearch | ActivityKind::Search => tr!("activity.action_search"),
         ActivityKind::FileList => tr!("activity.action_list"),
         ActivityKind::Plan => tr!("activity.action_plan"),
-        ActivityKind::Tool => tr!("activity.action_use"),
+        ActivityKind::Tool if is_ask_user_question(activity) => tr!("activity.ask_questions"),
+        ActivityKind::Tool => tr!("activity.tool"),
     }
 }
 
@@ -1140,11 +1211,17 @@ pub(super) fn activity_row_detail(activity: &ActivityItem, reasoning_live: bool)
             |query| tr!("activity.search_for", query = query),
         ),
         ActivityKind::Plan => custom_title().unwrap_or_default(),
-        ActivityKind::Tool => activity
-            .display_target
-            .clone()
-            .or_else(custom_title)
-            .unwrap_or_default(),
+        ActivityKind::Tool if is_ask_user_question(activity) => String::new(),
+        ActivityKind::Tool => {
+            let has_name = activity
+                .display_target
+                .as_deref()
+                .is_some_and(|target| !target.trim().is_empty())
+                || !crate::model::is_generic_activity_title(activity.kind, &activity.title);
+            has_name
+                .then(|| activity_tool_display_name(activity))
+                .unwrap_or_default()
+        }
     }
 }
 
@@ -1513,6 +1590,46 @@ mod message_time_tests {
 
         assert_eq!(activity_display_title(&titled), "Inspect Helium browser");
         assert_eq!(activity_display_title(&untitled), "Js");
+    }
+
+    #[test]
+    fn generic_tool_rows_keep_a_humanized_provider_name() {
+        let named = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "mcp__threads__create_thread",
+            None,
+            true,
+        );
+        let unnamed = ActivityItem::new(
+            Some("tool-2".into()),
+            crate::model::ActivityKind::Tool,
+            "Tool",
+            None,
+            true,
+        );
+
+        assert_eq!(activity_action_label(&named), "Tool");
+        assert_eq!(activity_row_detail(&named, false), "Create thread");
+        assert_eq!(activity_display_title(&named), "Create thread");
+        assert_eq!(activity_action_label(&unnamed), "Tool");
+        assert_eq!(activity_row_detail(&unnamed, false), "");
+    }
+
+    #[test]
+    fn ask_user_question_has_a_purpose_specific_label() {
+        let activity = ActivityItem::new(
+            Some("tool-1".into()),
+            crate::model::ActivityKind::Tool,
+            "AskUserQuestion",
+            None,
+            true,
+        )
+        .with_arguments(Some(r#"{"questions":[]}"#.into()));
+
+        assert_eq!(activity_action_label(&activity), "Ask questions");
+        assert_eq!(activity_row_detail(&activity, false), "");
+        assert_eq!(activity_display_title(&activity), "Ask questions");
     }
 
     #[test]

@@ -576,6 +576,8 @@ activity.action_plan:
   en: Plan
 activity.action_use:
   en: Use
+activity.ask_questions:
+  en: Ask questions
 activity.arguments:
   en: Arguments
 activity.output:

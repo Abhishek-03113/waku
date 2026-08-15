@@ -57,6 +57,30 @@ describe('desktop transcript language', () => {
     expect(activityRowDetail(command)).toBe('git log --oneline -15')
   })
 
+  test('keeps generic tool names and labels AskUserQuestion by purpose', () => {
+    const named = {
+      ...activity('tool', true),
+      title: 'mcp__threads__create_thread',
+    }
+    const question = {
+      ...activity('tool', true),
+      title: 'AskUserQuestion',
+    }
+    const unnamed = {
+      ...activity('tool', true),
+      title: 'Tool',
+    }
+
+    expect(activityActionLabel(named)).toBe('Tool')
+    expect(activityRowDetail(named)).toBe('Create thread')
+    expect(activityDisplayTitle(named)).toBe('Create thread')
+    expect(activityActionLabel(unnamed)).toBe('Tool')
+    expect(activityRowDetail(unnamed)).toBe('')
+    expect(activityActionLabel(question)).toBe('Ask questions')
+    expect(activityRowDetail(question)).toBe('')
+    expect(activityDisplayTitle(question)).toBe('Ask questions')
+  })
+
   test('derives the same provider-neutral activity titles as desktop', () => {
     expect(activityDisplayTitle({
       ...activity('fileChange', true),
