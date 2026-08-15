@@ -1112,6 +1112,10 @@ impl Waku {
                                 .max_h(px(320.0))
                                 .overflow_y_scroll()
                                 .track_scroll(&output_viewport.scroll_handle)
+                                .on_scroll_wheel({
+                                    let scroll = output_viewport.scroll_handle.clone();
+                                    move |_, _, cx| contain_scroll(&scroll, cx)
+                                })
                                 .p(px(8.0))
                                 .text_size(px(10.5))
                                 .line_height(px(15.0))

@@ -1950,6 +1950,7 @@ impl Waku {
                                 .py(px(8.0))
                                 .children(markdown)
                                 .on_scroll_wheel(move |_, window, cx| {
+                                    contain_scroll(&wheel_scroll, cx);
                                     let scroll = wheel_scroll.clone();
                                     let follow_tail = wheel_follow_tail.clone();
                                     window.defer(cx, move |_, _| {
@@ -2107,6 +2108,7 @@ impl Waku {
                                                 &ctx,
                                             ))
                                             .on_scroll_wheel(move |_, window, cx| {
+                                                contain_scroll(&wheel_scroll, cx);
                                                 let scroll = wheel_scroll.clone();
                                                 let follow_tail = wheel_follow_tail.clone();
                                                 window.defer(cx, move |_, _| {
