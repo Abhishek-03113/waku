@@ -68,6 +68,7 @@ import {
 import { usePrimaryShortcut } from '@/lib/platform'
 import { agentPresetDescription, agentPresetLabel } from '@/lib/agent-preset-presentation'
 import { isProjectlessProject, projectDisplayName } from '@/lib/project-presentation'
+import type { PendingUserInput } from '@/lib/event-reducer'
 import { useRuntime } from '@/lib/runtime-context'
 import { sessionHasStarted } from '@/lib/sidebar-presentation'
 import { cn } from '@/lib/utils'
@@ -153,9 +154,11 @@ export function Composer({
     steerPrompt,
     cancel,
     respond,
+    respondUserInput,
     saveSession,
     removeQueuedMessage,
     permissions,
+    userInputs,
     runtimes,
   } = useRuntime()
   const probe = useProviderProbe(session.provider)
@@ -188,6 +191,7 @@ export function Composer({
   const escapeStopTarget = `${session.id}:${runningTurnId ?? ''}`
   const escapeStopArmed = busy && isEscapeStopArmed(escapeStopArm, escapeStopTarget, Date.now())
   const permission = permissions[session.id]
+  const userInput = userInputs[session.id]
   const runtime = runtimes[session.id]
   const selectedModel = probe.data?.models.find((model) => model.id === session.model)
     ?? probe.data?.models.find((model) => model.is_default)
@@ -540,7 +544,7 @@ export function Composer({
           }
         />
 
-        {permission && (
+        {permission && !userInput && (
           <section className="mb-2 rounded-xl border border-[color:var(--warning)]/30 bg-card p-3 shadow-lg">
             <div className="text-[13px] font-medium">{permission.title}</div>
             {permission.detail && (
@@ -566,6 +570,17 @@ export function Composer({
               ))}
             </div>
           </section>
+        )}
+
+        {userInput && (
+          <UserInputPanel
+            input={userInput}
+            onSubmit={(answers) => respondUserInput(
+              session.id,
+              userInput.requestId,
+              answers,
+            )}
+          />
         )}
 
         <div className="relative">
@@ -825,6 +840,172 @@ export function Composer({
         </div>
       </div>
     </div>
+  )
+}
+
+function UserInputPanel({
+  input,
+  onSubmit,
+}: {
+  input: PendingUserInput
+  onSubmit: (answers: Array<{ questionId: string; answers: string[] }>) => Promise<void>
+}) {
+  const { t } = useI18n()
+  const [questionIndex, setQuestionIndex] = useState(0)
+  const [selections, setSelections] = useState<Record<string, string[]>>({})
+  const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({})
+  const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    setQuestionIndex(0)
+    setSelections({})
+    setCustomAnswers({})
+    setSubmitting(false)
+  }, [input.requestId])
+
+  const question = input.questions[questionIndex]
+  if (!question) return null
+  const selected = selections[question.id] ?? []
+  const custom = customAnswers[question.id] ?? ''
+  const canContinue = Boolean(custom.trim() || selected.length)
+  const last = questionIndex + 1 === input.questions.length
+
+  function select(label: string) {
+    setCustomAnswers((current) => ({ ...current, [question.id]: '' }))
+    setSelections((current) => {
+      const previous = current[question.id] ?? []
+      return {
+        ...current,
+        [question.id]: question.multiSelect
+          ? previous.includes(label)
+            ? previous.filter((answer) => answer !== label)
+            : [...previous, label]
+          : [label],
+      }
+    })
+  }
+
+  function setCustom(value: string) {
+    setCustomAnswers((current) => ({ ...current, [question.id]: value }))
+    if (value.trim()) {
+      setSelections((current) => ({ ...current, [question.id]: [] }))
+    }
+  }
+
+  async function advance() {
+    if (!canContinue || submitting) return
+    if (!last) {
+      setQuestionIndex((current) => current + 1)
+      return
+    }
+    setSubmitting(true)
+    try {
+      await onSubmit(input.questions.map((item) => {
+        const custom = customAnswers[item.id]?.trim()
+        return {
+          questionId: item.id,
+          answers: custom ? [custom] : selections[item.id] ?? [],
+        }
+      }))
+    } catch (error) {
+      toast.error(errorMessage(error))
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <section className="mb-2 w-full rounded-[13px] border bg-card px-3.5 pb-2.5 pt-3">
+      <div className="flex items-center gap-2">
+        <div className="text-[11px] font-semibold text-[var(--text-tertiary)]">
+          {question.header}
+        </div>
+        {input.questions.length > 1 && (
+          <div className="flex h-[18px] items-center rounded-[5px] bg-muted/50 px-1.5 text-[10px] font-medium tabular-nums text-[var(--text-tertiary)]">
+            {t('user_input.progress', {
+              current: questionIndex + 1,
+              total: input.questions.length,
+            })}
+          </div>
+        )}
+      </div>
+      <p className="mt-1.5 whitespace-pre-wrap text-[13px] font-medium leading-[18px]">
+        {question.question}
+      </p>
+      {!!question.options.length && (
+        <div className="mt-2.5 grid gap-1" role={question.multiSelect ? 'group' : 'radiogroup'}>
+          {question.options.map((option) => {
+            const checked = selected.includes(option.label)
+            return (
+              <button
+                aria-checked={checked}
+                className={cn(
+                  'flex min-h-9 w-full items-center gap-2 rounded-lg border border-transparent bg-muted/40 px-2.5 py-1.5 text-left outline-none transition-colors hover:border-border hover:bg-muted/60 focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/30',
+                  checked && 'border-primary/35 bg-primary/[0.08]',
+                )}
+                key={option.label}
+                role={question.multiSelect ? 'checkbox' : 'radio'}
+                type="button"
+                onClick={() => select(option.label)}
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[12px] font-medium">{option.label}</span>
+                  {option.description && option.description !== option.label && (
+                    <span className="mt-0.5 block text-[10.5px] leading-[15px] text-[var(--text-tertiary)]">
+                      {option.description}
+                    </span>
+                  )}
+                </span>
+                {checked && <WakuIcon className="size-3 shrink-0 text-primary" name="check" />}
+              </button>
+            )
+          })}
+        </div>
+      )}
+      <div
+        className={cn(
+          'mt-1 flex h-[34px] items-center gap-2 rounded-lg border border-transparent bg-muted/40 px-2.5 focus-within:border-ring',
+          custom.trim() && 'border-primary/35 bg-primary/[0.06]',
+        )}
+      >
+        <WakuIcon
+          className={cn('size-3 shrink-0 text-[var(--text-ghost)]', custom.trim() && 'text-primary')}
+          name="pencil"
+        />
+        <input
+          className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-[var(--text-ghost)]"
+          placeholder={t('user_input.other_placeholder')}
+          value={custom}
+          onChange={(event) => setCustom(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+              event.preventDefault()
+              void advance()
+            }
+          }}
+        />
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        {questionIndex > 0 && (
+          <Button
+            className="h-7 px-2 text-[11px]"
+            size="sm"
+            variant="ghost"
+            onClick={() => setQuestionIndex((value) => value - 1)}
+          >
+            {t('user_input.back')}
+          </Button>
+        )}
+        <div className="flex-1" />
+        <Button
+          className="h-7 px-2.5 text-[11px]"
+          disabled={!canContinue || submitting}
+          size="sm"
+          onClick={() => void advance()}
+        >
+          {last ? t('user_input.submit') : t('user_input.next')}
+        </Button>
+      </div>
+    </section>
   )
 }
 

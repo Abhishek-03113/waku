@@ -1126,6 +1126,7 @@ impl Waku {
                             )
                         })
                         .collect();
+                    let attachments_can_reveal = !self.daemon.is_remote();
                     let menu = self.menu_handle(format!("message-{}", message.id), cx);
                     let metrics = if message.role == MessageRole::User {
                         MarkdownMetrics::USER_MESSAGE
@@ -1157,6 +1158,7 @@ impl Waku {
                             message_edit_input,
                             attachment_menus,
                             attachment_images,
+                            attachments_can_reveal,
                             markdown: view,
                             ctx: &ctx,
                             menu,

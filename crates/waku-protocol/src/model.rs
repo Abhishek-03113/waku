@@ -1556,6 +1556,13 @@ pub enum DriverEvent {
         detail: String,
         options: Vec<PermissionOption>,
     },
+    /// Structured questions the provider needs answered before it can
+    /// continue the active turn. Unlike a permission, this is never
+    /// auto-approved: the content itself has to come from the user.
+    UserInputRequested {
+        request_id: String,
+        questions: Vec<UserInputQuestion>,
+    },
     ComputerUseUpdated(crate::computer_use::ComputerUseState),
     /// The provider accepted a steering message into the running turn.
     SteerAccepted {
@@ -1770,6 +1777,33 @@ pub struct PermissionOption {
     pub id: String,
     pub label: String,
     pub allow: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<UserInputOption>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputAnswer {
+    pub question_id: String,
+    pub answers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]

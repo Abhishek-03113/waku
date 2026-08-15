@@ -193,6 +193,17 @@ impl DriverControl for RemoteDriverControl {
         });
     }
 
+    fn respond_user_input(
+        &self,
+        request_id: String,
+        answers: Vec<waku_protocol::model::UserInputAnswer>,
+    ) {
+        self.notify(waku_client::Command::RespondUserInput {
+            request_id,
+            answers,
+        });
+    }
+
     fn run_computer_tool(&self, request: ComputerToolRequest) {
         self.notify(waku_client::Command::RunComputerTool {
             request: waku_client::WireComputerToolRequest {

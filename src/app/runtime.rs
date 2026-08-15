@@ -2413,6 +2413,7 @@ impl Waku {
             runtime.stream_remeasure_pending = false;
             runtime.stream_phase = None;
             runtime.pending_permission = None;
+            runtime.pending_user_input = None;
             runtime.pending_computer_approval = None;
         }
         self.invalidate_checkpoint_refs();
@@ -2641,6 +2642,7 @@ impl Waku {
                 stream_phase: None,
                 stream_remeasure_pending: false,
                 pending_permission: None,
+                pending_user_input: None,
                 pending_computer_approval: None,
                 computer_use_previews: Vec::new(),
                 computer_session_grants: HashSet::new(),
@@ -3072,6 +3074,7 @@ impl Waku {
             runtime.stream_remeasure_pending = false;
             runtime.stream_phase = None;
             runtime.pending_permission = None;
+            runtime.pending_user_input = None;
             runtime.pending_computer_approval = None;
             runtime.last_active_at = Instant::now();
         }

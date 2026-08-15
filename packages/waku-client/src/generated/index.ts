@@ -83,6 +83,7 @@ export type { TurnStatus } from "./TurnStatus";
 export type { UsageHistory } from "./UsageHistory";
 export type { UsageProvider } from "./UsageProvider";
 export type { UsageWindow } from "./UsageWindow";
+export type { UserInputAnswer } from "./UserInputAnswer";
 export type { WireComputerToolRequest } from "./WireComputerToolRequest";
 export type { WireDriverEvent } from "./WireDriverEvent";
 export type { WireDriverStartOptions } from "./WireDriverStartOptions";

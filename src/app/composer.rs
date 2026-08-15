@@ -27,6 +27,9 @@ impl Waku {
     // ── Permission ─────────────────────────────────────────────────────────
 
     pub(super) fn render_permission(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if let Some(input) = self.selected_runtime()?.pending_user_input.clone() {
+            return Some(self.render_user_input(input, cx));
+        }
         if let Some(permission) = self.selected_runtime()?.pending_computer_approval.as_ref() {
             return Some(self.render_computer_permission(permission, cx));
         }
@@ -116,6 +119,290 @@ impl Waku {
                     )
                     .child(buttons),
             ),
+        )
+    }
+
+    fn render_user_input(&self, pending: PendingUserInput, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let Some(question) = pending.current_question().cloned() else {
+            return div();
+        };
+        let selected = pending
+            .selections
+            .get(&question.id)
+            .cloned()
+            .unwrap_or_default();
+        let has_custom = pending
+            .custom_answers
+            .get(&question.id)
+            .is_some_and(|answer| !answer.trim().is_empty());
+        let can_continue = has_custom || !selected.is_empty();
+        let is_last = pending.question_index + 1 == pending.questions.len();
+        let request_id = pending.request_id.clone();
+        let question_index = pending.question_index;
+        let mut options = div().mt(px(9.0)).flex().flex_col().gap(px(4.0));
+        for (index, option) in question.options.iter().enumerate() {
+            let is_selected = selected.iter().any(|answer| answer == &option.label);
+            let click_label = option.label.clone();
+            let key_label = option.label.clone();
+            let focus = self.transcript_control_focus(
+                format!("user-input-{request_id}-{question_index}-option-{index}"),
+                cx,
+            );
+            options = options.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-input-{request_id}-{question_index}-option-{index}"
+                    )))
+                    .track_focus(&focus)
+                    .tab_index(0)
+                    .tab_stop(true)
+                    .min_h(px(36.0))
+                    .px(px(10.0))
+                    .py(px(5.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(if is_selected {
+                        theme.accent.opacity(0.34)
+                    } else {
+                        theme.border.opacity(0.0)
+                    })
+                    .bg(if is_selected {
+                        theme.accent.opacity(0.08)
+                    } else {
+                        theme.overlay
+                    })
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .cursor_default()
+                    .focus_visible(|style| style.border_color(theme.accent))
+                    .when(!is_selected, |row| {
+                        row.hover(|style| style.border_color(theme.border).bg(theme.overlay_strong))
+                    })
+                    .active(|style| style.opacity(0.85))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(option.label.clone())),
+                            )
+                            .children(option.description.as_ref().map(|description| {
+                                div()
+                                    .mt(px(1.0))
+                                    .text_size(px(10.0))
+                                    .line_height(px(13.0))
+                                    .text_color(theme.text_secondary)
+                                    .whitespace_normal()
+                                    .child(SharedString::from(description.clone()))
+                            })),
+                    )
+                    .when(is_selected, |row| {
+                        row.child(icon("icons/check.svg", 12.0, theme.accent))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_user_input_option(click_label.clone(), cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.select_user_input_option(key_label.clone(), cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            );
+        }
+
+        let next_focus = self.transcript_control_focus(
+            format!("user-input-{request_id}-{question_index}-continue"),
+            cx,
+        );
+        let back = (question_index > 0).then(|| {
+            let focus = self.transcript_control_focus(
+                format!("user-input-{request_id}-{question_index}-back"),
+                cx,
+            );
+            div()
+                .id(SharedString::from(format!(
+                    "user-input-{request_id}-{question_index}-back"
+                )))
+                .track_focus(&focus)
+                .tab_index(0)
+                .tab_stop(true)
+                .h(px(26.0))
+                .px(px(8.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .cursor_default()
+                .text_size(px(10.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_tertiary)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .hover(|style| style.bg(theme.overlay).text_color(theme.text_secondary))
+                .active(|style| style.opacity(0.8))
+                .child(tr!("user_input.back"))
+                .on_click(cx.listener(|this, _, _, cx| this.previous_user_input(cx)))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.previous_user_input(cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        });
+        let continue_button = div()
+            .id(SharedString::from(format!(
+                "user-input-{request_id}-{question_index}-continue"
+            )))
+            .track_focus(&next_focus)
+            .tab_index(0)
+            .tab_stop(can_continue)
+            .h(px(26.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .cursor_default()
+            .text_size(px(10.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .bg(if can_continue {
+                theme.inverse
+            } else {
+                theme.overlay
+            })
+            .text_color(if can_continue {
+                theme.on_inverse
+            } else {
+                theme.text_ghost
+            })
+            .when(can_continue, |button| {
+                button
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .hover(|style| style.opacity(0.9))
+                    .active(|style| style.opacity(0.8))
+                    .on_click(cx.listener(|this, _, _, cx| this.advance_user_input(cx)))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.advance_user_input(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            })
+            .child(if is_last {
+                tr!("user_input.submit")
+            } else {
+                tr!("user_input.next")
+            });
+
+        let progress = (pending.questions.len() > 1).then(|| {
+            div()
+                .h(px(18.0))
+                .px(px(6.0))
+                .rounded(px(5.0))
+                .bg(theme.overlay)
+                .flex()
+                .items_center()
+                .text_size(px(9.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_tertiary)
+                .child(tr!(
+                    "user_input.progress",
+                    current = question_index + 1,
+                    total = pending.questions.len()
+                ))
+        });
+
+        div().flex_none().px(px(20.0)).pb(px(8.0)).child(
+            div()
+                .id(SharedString::from(format!("user-input-{request_id}")))
+                .w_full()
+                .max_w(px(CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .px(px(14.0))
+                .pt(px(12.0))
+                .pb(px(10.0))
+                .rounded(px(13.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.composer)
+                .tab_index(0)
+                .tab_group()
+                .tab_stop(false)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_tertiary)
+                                .child(SharedString::from(question.header.clone())),
+                        )
+                        .children(progress),
+                )
+                .child(
+                    div()
+                        .mt(px(5.0))
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .whitespace_normal()
+                        .child(SharedString::from(question.question.clone())),
+                )
+                .children((!question.options.is_empty()).then_some(options))
+                .child(
+                    div()
+                        .mt(px(if question.options.is_empty() {
+                            9.0
+                        } else {
+                            4.0
+                        }))
+                        .h(px(34.0))
+                        .px(px(10.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(if has_custom {
+                            theme.accent.opacity(0.34)
+                        } else {
+                            theme.border.opacity(0.0)
+                        })
+                        .bg(if has_custom {
+                            theme.accent.opacity(0.06)
+                        } else {
+                            theme.overlay
+                        })
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .text_size(px(11.5))
+                        .line_height(px(16.0))
+                        .child(icon(
+                            "icons/pencil.svg",
+                            11.0,
+                            if has_custom {
+                                theme.accent
+                            } else {
+                                theme.text_ghost
+                            },
+                        ))
+                        .child(self.user_input_answer.clone()),
+                )
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .flex()
+                        .items_center()
+                        .children(back)
+                        .child(div().flex_1())
+                        .child(continue_button),
+                ),
         )
     }
 

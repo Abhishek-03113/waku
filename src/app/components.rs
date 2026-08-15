@@ -367,6 +367,11 @@ pub(super) struct MessageRender<'a> {
     pub(super) message_edit_input: Option<Entity<ComposerInput>>,
     pub(super) attachment_menus: Vec<ContextMenuHandle>,
     pub(super) attachment_images: Vec<Option<Arc<gpui::Image>>>,
+    /// Captured from the selected daemon before the virtualized row is built.
+    /// A row is laid out while the root `Waku` entity is already updating, so
+    /// it must not read that entity again just to decide whether Finder reveal
+    /// is available.
+    pub(super) attachments_can_reveal: bool,
     /// The parsed human or assistant body. System messages remain verbatim.
     pub(super) markdown: Option<&'a MarkdownView>,
     pub(super) ctx: &'a MarkdownCtx<'a>,
@@ -380,9 +385,9 @@ fn render_sent_message_attachments(
     attachments: &[MessageAttachment],
     attachment_menus: &[ContextMenuHandle],
     attachment_images: &[Option<Arc<gpui::Image>>],
+    can_reveal: bool,
     waku: &gpui::WeakEntity<Waku>,
     theme: &Theme,
-    cx: &App,
 ) -> Option<AnyElement> {
     if attachments.is_empty() {
         return None;
@@ -393,9 +398,6 @@ fn render_sent_message_attachments(
         .flex_wrap()
         .justify_end()
         .gap(px(8.0));
-    let daemon_remote = waku
-        .upgrade()
-        .is_some_and(|waku| waku.read(cx).daemon.is_remote());
     for (index, attachment) in attachments.iter().enumerate() {
         let Some(menu) = attachment_menus.get(index) else {
             continue;
@@ -406,7 +408,6 @@ fn render_sent_message_attachments(
             right_panel::file_icon_for_path(&attachment.mention)
         };
         let attachment_image = attachment_images.get(index).and_then(|image| image.clone());
-        let can_reveal = !daemon_remote;
         let mut tile = div()
             .id(SharedString::from(format!(
                 "message-{message_id}-attachment-{index}"
@@ -562,6 +563,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         message_edit_input,
         attachment_menus,
         attachment_images,
+        attachments_can_reveal,
         markdown,
         ctx,
         menu,
@@ -594,9 +596,9 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 &message.attachments,
                 &attachment_menus,
                 &attachment_images,
+                attachments_can_reveal,
                 &waku,
                 theme,
-                cx,
             ) {
                 column = column.child(attachments);
             }

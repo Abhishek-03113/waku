@@ -29,7 +29,8 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor, RuntimeMode,
+    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor,
+    RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
 };
 use crate::opencode_pool::PooledServer;
 use crate::opencode_session::{
@@ -43,6 +44,10 @@ enum CommandMessage {
     Respond {
         request_id: String,
         option_id: String,
+    },
+    RespondUserInput {
+        request_id: String,
+        answers: Vec<UserInputAnswer>,
     },
     Shutdown,
 }
@@ -426,6 +431,28 @@ impl OpenCodeDriver {
                                 )));
                             }
                         }
+                        CommandMessage::RespondUserInput {
+                            request_id,
+                            answers,
+                        } => {
+                            let path =
+                                format!("/question/{}/reply", encode_path_segment(&request_id));
+                            let answers = answers
+                                .into_iter()
+                                .map(|answer| answer.answers)
+                                .collect::<Vec<_>>();
+                            if let Err(error) = worker_server.request(
+                                "POST",
+                                &path,
+                                Some(&json!({"answers": answers})),
+                            ) {
+                                let _ = worker_events.send(DriverEvent::Error(tr!(
+                                    "errors.answer_provider_question",
+                                    provider = "OpenCode",
+                                    error = error
+                                )));
+                            }
+                        }
                         CommandMessage::Shutdown => break,
                     }
                 }
@@ -479,6 +506,13 @@ impl DriverControl for OpenCodeDriver {
                 option_id,
             });
         }
+    }
+
+    fn respond_user_input(&self, request_id: String, answers: Vec<UserInputAnswer>) {
+        let _ = self.commands.send(CommandMessage::RespondUserInput {
+            request_id,
+            answers,
+        });
     }
 
     fn apply_options(&self, options: SessionOptions) -> bool {
@@ -868,9 +902,87 @@ fn handle_event(
                 &state.permissions,
             );
         }
+        "question.asked" => request_user_input(properties, events),
+        "question.replied" | "question.rejected" => {}
         // `session.created`, `session.diff`, and the plugin/catalog/reference
         // chatter are not transcript content.
         _ => {}
+    }
+}
+
+fn request_user_input(properties: &Value, events: &impl DriverEventSink) {
+    let Some(request_id) = properties.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let questions = properties
+        .get("questions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, question)| {
+            let text = question.get("question").and_then(Value::as_str)?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let header = question
+                .get("header")
+                .and_then(Value::as_str)
+                .filter(|header| !header.trim().is_empty())
+                .unwrap_or("Question");
+            let slug = header
+                .trim()
+                .to_ascii_lowercase()
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+                        character
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>();
+            let slug = slug.trim_matches('-');
+            let id = if slug.is_empty() {
+                format!("question-{index}")
+            } else {
+                format!("question-{index}-{slug}")
+            };
+            let options = question
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| {
+                    let label = option.get("label").and_then(Value::as_str)?.trim();
+                    (!label.is_empty()).then(|| UserInputOption {
+                        label: label.to_owned(),
+                        description: option
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|description| !description.is_empty())
+                            .map(str::to_owned),
+                    })
+                })
+                .collect();
+            Some(UserInputQuestion {
+                id,
+                header: header.to_owned(),
+                question: text.to_owned(),
+                options,
+                multi_select: question
+                    .get("multiple")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect::<Vec<_>>();
+    if !questions.is_empty() {
+        let _ = events.send(DriverEvent::UserInputRequested {
+            request_id: request_id.to_owned(),
+            questions,
+        });
     }
 }
 
@@ -1091,6 +1203,39 @@ mod tests {
             Mutex::new(true),
             OpenCodeStreamState::default(),
         )
+    }
+
+    #[test]
+    fn question_events_preserve_multiple_selection_and_option_copy() {
+        let (events, event_rx) = unbounded();
+        request_user_input(
+            &json!({
+                "id": "question-request",
+                "sessionID": "session-1",
+                "questions": [{
+                    "header": "Files",
+                    "question": "Which files should change?",
+                    "multiple": true,
+                    "options": [{
+                        "label": "Source",
+                        "description": "Update implementation files"
+                    }]
+                }]
+            }),
+            &events,
+        );
+
+        let DriverEvent::UserInputRequested {
+            request_id,
+            questions,
+        } = event_rx.try_recv().unwrap()
+        else {
+            panic!("OpenCode question.asked must use the structured question event");
+        };
+        assert_eq!(request_id, "question-request");
+        assert_eq!(questions[0].id, "question-0-files");
+        assert!(questions[0].multi_select);
+        assert_eq!(questions[0].options[0].label, "Source");
     }
 
     /// Drives a real `opencode serve` through the actual driver. Ignored by

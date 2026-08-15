@@ -522,6 +522,11 @@ commands.claude_todos: 現在の TODO 項目を一覧表示
 composer.edit_in_composer: 入力欄で編集
 composer.queued_followups: キューに追加したフォローアップ
 composer.queued_followups_description: キューに追加したフォローアップ · 現在のターンが完了すると送信されます
+user_input.other_placeholder: 別の回答を入力
+user_input.back: 戻る
+user_input.next: 次へ
+user_input.submit: 送信
+user_input.progress: "%{current} / %{total}"
 composer.preparing_task: タスクを準備中…
 composer.steer_turn: 実行中のターンに指示を追加（%{shortcut}）
 composer.queue_followup: フォローアップとしてキューに追加（⏎）
@@ -635,6 +640,7 @@ errors.open_provider_session: "%{provider} のセッションを開けません�
 errors.select_model: "モデルを選択できませんでした：%{error}"
 errors.read_provider_event_stream: "%{provider} のイベントストリームを読み取れませんでした：%{error}"
 errors.answer_provider_permission: "%{provider} の権限リクエストに回答できませんでした：%{error}"
+errors.answer_provider_question: "%{provider} の質問に回答できませんでした：%{error}"
 errors.initialize_codex_app_server: Codex app-server を初期化できませんでした
 errors.register_computer_use_skill: Waku のコンピュータ操作スキルを Codex に登録できませんでした
 errors.codex_thread_open_incomplete: Codex はスレッドを開く処理を完了しませんでした

@@ -16,9 +16,21 @@ export interface PendingPermission {
   options: Array<{ id: string; label: string; allow: boolean }>
 }
 
+export interface PendingUserInput {
+  requestId: string
+  questions: Array<{
+    id: string
+    header: string
+    question: string
+    options: Array<{ label: string; description?: string }>
+    multiSelect: boolean
+  }>
+}
+
 export interface RuntimeEventResult {
   session: AgentSession
   permission?: PendingPermission | null
+  userInput?: PendingUserInput | null
   settled: boolean
   removeRuntime: boolean
   error?: string
@@ -138,6 +150,17 @@ export function reduceRuntimeEvent(
       session.status = 'waiting'
       break
     }
+    case 'userInputRequested': {
+      const value = asRecord(payload)
+      if (!acceptsTurnOutput(session) || !value || typeof value.requestId !== 'string') break
+      const questions = Array.isArray(value.questions)
+        ? value.questions.map(asUserInputQuestion).filter((question) => question !== null)
+        : []
+      if (!questions.length) break
+      result.userInput = { requestId: value.requestId, questions }
+      session.status = 'waiting'
+      break
+    }
     case 'usageUpdated': {
       const value = asRecord(payload)
       if (!value) break
@@ -162,6 +185,7 @@ export function reduceRuntimeEvent(
         clock,
       )
       result.permission = null
+      result.userInput = null
       break
     }
     case 'error': {
@@ -193,6 +217,7 @@ export function reduceRuntimeEvent(
         clock,
       )
       result.permission = null
+      result.userInput = null
       result.removeRuntime = true
       break
     default:
@@ -201,6 +226,32 @@ export function reduceRuntimeEvent(
 
   session.updated_at = clock.nowSeconds()
   return result
+}
+
+function asUserInputQuestion(value: unknown): PendingUserInput['questions'][number] | null {
+  const question = asRecord(value)
+  if (!question || typeof question.id !== 'string' || typeof question.question !== 'string') {
+    return null
+  }
+  return {
+    id: question.id,
+    header: typeof question.header === 'string' ? question.header : 'Question',
+    question: question.question,
+    options: Array.isArray(question.options)
+      ? question.options.flatMap((value) => {
+          const option = asRecord(value)
+          return option && typeof option.label === 'string'
+            ? [{
+                label: option.label,
+                ...(typeof option.description === 'string'
+                  ? { description: option.description }
+                  : {}),
+              }]
+            : []
+        })
+      : [],
+    multiSelect: question.multiSelect === true,
+  }
 }
 
 function appendText(session: AgentSession, delta: string, clock: ReducerClock) {

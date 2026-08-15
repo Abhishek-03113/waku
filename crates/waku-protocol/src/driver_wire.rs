@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::WireDriverEvent;
 use crate::computer_use::{ComputerTarget, ComputerUsePhase, ComputerUseState};
-use crate::model::{ActivityKind, DriverEvent, PermissionOption};
+use crate::model::{ActivityKind, DriverEvent, PermissionOption, UserInputQuestion};
 
 pub fn decode_enum<T: DeserializeOwned>(value: &str) -> anyhow::Result<T> {
     serde_json::from_value(Value::String(value.to_owned()))
@@ -67,6 +67,16 @@ pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
                 "title": title,
                 "detail": detail,
                 "options": options,
+            }),
+        ),
+        DriverEvent::UserInputRequested {
+            request_id,
+            questions,
+        } => (
+            "userInputRequested",
+            json!({
+                "requestId": request_id,
+                "questions": questions,
             }),
         ),
         DriverEvent::ComputerUseUpdated(state) => (
@@ -137,6 +147,13 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
                 options: permission.options,
             }
         }
+        "userInputRequested" => {
+            let request: UserInputWire = serde_json::from_value(payload)?;
+            DriverEvent::UserInputRequested {
+                request_id: request.request_id,
+                questions: request.questions,
+            }
+        }
         "computerUseUpdated" => {
             let state: ComputerUseWire = serde_json::from_value(payload)?;
             DriverEvent::ComputerUseUpdated(ComputerUseState {
@@ -199,6 +216,13 @@ struct PermissionWire {
     options: Vec<PermissionOption>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserInputWire {
+    request_id: String,
+    questions: Vec<UserInputQuestion>,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ComputerUseWire {
@@ -230,4 +254,40 @@ struct UsageWire {
 struct TurnFinishedWire {
     success: bool,
     summary: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{UserInputOption, UserInputQuestion};
+
+    #[test]
+    fn structured_user_input_round_trips_through_the_daemon_wire() {
+        let wire = event_to_wire(DriverEvent::UserInputRequested {
+            request_id: "request-1".into(),
+            questions: vec![UserInputQuestion {
+                id: "deployment".into(),
+                header: "Environment".into(),
+                question: "Where should this deploy?".into(),
+                options: vec![UserInputOption {
+                    label: "Preview".into(),
+                    description: Some("Create a preview deployment".into()),
+                }],
+                multi_select: false,
+            }],
+        })
+        .unwrap();
+        assert_eq!(wire.kind, "userInputRequested");
+
+        let DriverEvent::UserInputRequested {
+            request_id,
+            questions,
+        } = event_from_wire(wire).unwrap()
+        else {
+            panic!("the event changed variants during its wire round trip");
+        };
+        assert_eq!(request_id, "request-1");
+        assert_eq!(questions[0].id, "deployment");
+        assert_eq!(questions[0].options[0].label, "Preview");
+    }
 }

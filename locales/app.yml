@@ -1012,6 +1012,16 @@ composer.queued_followups:
   en: Queued follow-ups
 composer.queued_followups_description:
   en: Queued follow-ups · sends when the current turn finishes
+user_input.other_placeholder:
+  en: Type another answer
+user_input.back:
+  en: Back
+user_input.next:
+  en: Next
+user_input.submit:
+  en: Submit
+user_input.progress:
+  en: "%{current} of %{total}"
 composer.preparing_task:
   en: Preparing task…
 composer.steer_turn:
@@ -1232,6 +1242,8 @@ errors.read_provider_event_stream:
   en: "Could not read the %{provider} event stream: %{error}"
 errors.answer_provider_permission:
   en: "Could not answer %{provider}'s permission request: %{error}"
+errors.answer_provider_question:
+  en: "Could not answer %{provider}'s question: %{error}"
 errors.initialize_codex_app_server:
   en: Failed to initialize Codex app-server
 errors.register_computer_use_skill:

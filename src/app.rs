@@ -35,7 +35,7 @@ use crate::model::{
     DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole,
     PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
     QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
-    TurnStatus, compact_path, unix_time, unix_time_millis,
+    TurnStatus, UserInputAnswer, UserInputQuestion, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -759,6 +759,7 @@ struct SessionRuntime {
     stream_phase: Option<StreamPhase>,
     stream_remeasure_pending: bool,
     pending_permission: Option<PendingPermission>,
+    pending_user_input: Option<PendingUserInput>,
     pending_computer_approval: Option<PendingComputerApproval>,
     /// Back-to-front stack of window previews captured during the active turn.
     computer_use_previews: Vec<ComputerUsePreview>,
@@ -769,6 +770,56 @@ struct SessionRuntime {
     /// Background-process snapshots are provider IPC. Keep the polling clock
     /// on the runtime so switching tasks never creates duplicate probes.
     last_background_refresh_at: Instant,
+}
+
+#[derive(Clone)]
+struct PendingUserInput {
+    request_id: String,
+    questions: Vec<UserInputQuestion>,
+    question_index: usize,
+    selections: HashMap<String, Vec<String>>,
+    custom_answers: HashMap<String, String>,
+}
+
+impl PendingUserInput {
+    fn new(request_id: String, questions: Vec<UserInputQuestion>) -> Self {
+        Self {
+            request_id,
+            questions,
+            question_index: 0,
+            selections: HashMap::new(),
+            custom_answers: HashMap::new(),
+        }
+    }
+
+    fn current_question(&self) -> Option<&UserInputQuestion> {
+        self.questions.get(self.question_index)
+    }
+
+    fn answers(&self) -> Vec<UserInputAnswer> {
+        self.questions
+            .iter()
+            .map(|question| {
+                let custom = self
+                    .custom_answers
+                    .get(&question.id)
+                    .map(|answer| answer.trim())
+                    .filter(|answer| !answer.is_empty());
+                UserInputAnswer {
+                    question_id: question.id.clone(),
+                    answers: custom.map_or_else(
+                        || {
+                            self.selections
+                                .get(&question.id)
+                                .cloned()
+                                .unwrap_or_default()
+                        },
+                        |answer| vec![answer.to_owned()],
+                    ),
+                }
+            })
+            .collect()
+    }
 }
 
 struct ComputerUsePreview {
@@ -870,6 +921,7 @@ pub struct Waku {
     /// without consulting the environment or account database in a frame.
     home_directory: Option<PathBuf>,
     composer: Entity<ComposerInput>,
+    user_input_answer: Entity<ComposerInput>,
     /// Drafts are independent of transcript persistence: started tasks key by
     /// session id, while blank New Task pages key by project id.
     composer_drafts: ComposerDrafts,
@@ -1647,6 +1699,11 @@ impl Waku {
         });
 
         let composer = cx.new(|cx| ComposerInput::new(window, cx));
+        let user_input_answer = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("user_input.other_placeholder"))
+        });
         let command_palette_search = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -2054,6 +2111,21 @@ impl Waku {
             )
             .detach();
 
+            cx.subscribe(
+                &user_input_answer,
+                |this: &mut Self, input, event: &ComposerEvent, cx| match event {
+                    ComposerEvent::Submit(answer) | ComposerEvent::SubmitSteer(answer) => {
+                        this.submit_user_input_custom_answer(answer.clone(), cx);
+                    }
+                    ComposerEvent::Edited => {
+                        let answer = input.read(cx).content().to_owned();
+                        this.update_user_input_custom_answer(answer, cx);
+                    }
+                    ComposerEvent::Focus | ComposerEvent::BackspaceOnEmpty => {}
+                },
+            )
+            .detach();
+
             // Clipboard images and Finder file copies are attachment payloads,
             // not text paths. The input owns representation priority; Waku
             // owns durable staging and composer/session state.
@@ -2316,6 +2388,7 @@ impl Waku {
                 store,
                 home_directory,
                 composer,
+                user_input_answer,
                 composer_drafts,
                 composer_draft_store,
                 composer_draft_save_generation: 0,

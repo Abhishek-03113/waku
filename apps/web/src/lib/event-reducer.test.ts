@@ -120,6 +120,36 @@ describe('reduceRuntimeEvent', () => {
     expect(permission.permission).toBeUndefined()
   })
 
+  test('surfaces structured provider questions and clears them when the turn settles', () => {
+    const requested = reduceRuntimeEvent(
+      runningSession(),
+      event('userInputRequested', {
+        requestId: 'question-request',
+        questions: [{
+          id: 'deployment',
+          header: 'Environment',
+          question: 'Where should this deploy?',
+          options: [{ label: 'Preview', description: 'Create a preview deployment' }],
+          multiSelect: false,
+        }],
+      }),
+      clock,
+    )
+
+    expect(requested.session.status).toBe('waiting')
+    expect(requested.userInput?.questions[0]).toMatchObject({
+      id: 'deployment',
+      options: [{ label: 'Preview' }],
+    })
+
+    const settled = reduceRuntimeEvent(
+      requested.session,
+      event('turnFinished', { success: true, summary: null }),
+      clock,
+    )
+    expect(settled.userInput).toBeNull()
+  })
+
   test('keeps the provider error when a working runtime exits', () => {
     let session = apply(runningSession(), 'turnStarted', null)
     const errored = reduceRuntimeEvent(session, event('error', 'provider exploded'), clock)

@@ -24,7 +24,8 @@ use crate::driver::{
 use crate::model::{
     ActivityItem, ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
     BackgroundWorkKind, BackgroundWorkStatus, DriverEvent, InteractionMode, PermissionOption,
-    ProviderResumeCursor, RuntimeMode, unix_time_millis,
+    ProviderResumeCursor, RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
+    unix_time_millis,
 };
 
 const DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN: &str =
@@ -45,6 +46,10 @@ enum CommandMessage {
     Respond {
         request_id: String,
         option_id: String,
+    },
+    RespondUserInput {
+        request_id: String,
+        answers: Vec<UserInputAnswer>,
     },
     Rollback {
         turns: usize,
@@ -488,6 +493,21 @@ impl CodexDriver {
                                 "result": {"decision": option_id}
                             })
                         }
+                        CommandMessage::RespondUserInput {
+                            request_id,
+                            answers,
+                        } => {
+                            let answers = answers
+                                .into_iter()
+                                .map(|answer| {
+                                    (answer.question_id, json!({"answers": answer.answers}))
+                                })
+                                .collect::<serde_json::Map<_, _>>();
+                            json!({
+                                "id": parse_rpc_id(&request_id),
+                                "result": {"answers": answers}
+                            })
+                        }
                         CommandMessage::Rollback { turns, response } => {
                             let Some(thread_id) = wait_for_thread_id(&writer_thread_id) else {
                                 let _ = response
@@ -860,6 +880,13 @@ impl DriverControl for CodexDriver {
         let _ = self.commands.send(CommandMessage::Respond {
             request_id,
             option_id,
+        });
+    }
+
+    fn respond_user_input(&self, request_id: String, answers: Vec<UserInputAnswer>) {
+        let _ = self.commands.send(CommandMessage::RespondUserInput {
+            request_id,
+            answers,
         });
     }
 
@@ -1744,6 +1771,15 @@ fn handle_codex_message(
                 let _ = events.send(DriverEvent::Error(format!("{name}: {message}")));
             }
         }
+        "item/tool/requestUserInput" if value.get("id").is_some() => {
+            let questions = codex_user_input_questions(&params);
+            if !questions.is_empty() {
+                let _ = events.send(DriverEvent::UserInputRequested {
+                    request_id: rpc_id_string(value.get("id").unwrap()),
+                    questions,
+                });
+            }
+        }
         method if value.get("id").is_some() && method.contains("requestApproval") => {
             let request_id = rpc_id_string(value.get("id").unwrap());
             let (title, detail) = approval_copy(method, &params);
@@ -1772,6 +1808,62 @@ fn handle_codex_message(
         }
         _ => {}
     }
+}
+
+fn codex_user_input_questions(params: &Value) -> Vec<UserInputQuestion> {
+    params
+        .get("questions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, question)| {
+            let text = question.get("question").and_then(Value::as_str)?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let id = question
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("question-{index}"));
+            let header = question
+                .get("header")
+                .and_then(Value::as_str)
+                .filter(|header| !header.trim().is_empty())
+                .unwrap_or("Question")
+                .to_owned();
+            let options = question
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| {
+                    let label = option.get("label").and_then(Value::as_str)?.trim();
+                    (!label.is_empty()).then(|| UserInputOption {
+                        label: label.to_owned(),
+                        description: option
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|description| !description.is_empty())
+                            .map(str::to_owned),
+                    })
+                })
+                .collect();
+            Some(UserInputQuestion {
+                id,
+                header,
+                question: text.to_owned(),
+                options,
+                // Codex's current request schema is single-select. Keeping
+                // this explicit lets the shared UI support providers that do
+                // ask for multiple choices without changing the wire shape.
+                multi_select: false,
+            })
+        })
+        .collect()
 }
 
 /// Map an `account/rateLimits/updated` snapshot into the panel's plan rows.
@@ -2167,6 +2259,32 @@ fn is_visible_stderr_notice(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_current_app_server_user_input_questions() {
+        let questions = codex_user_input_questions(&json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "item-1",
+            "questions": [{
+                "id": "deployment",
+                "header": "Environment",
+                "question": "Where should this deploy?",
+                "options": [{
+                    "label": "Preview",
+                    "description": "Create a preview deployment"
+                }],
+                "isOther": true,
+                "isSecret": false
+            }]
+        }));
+
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].id, "deployment");
+        assert_eq!(questions[0].header, "Environment");
+        assert_eq!(questions[0].options[0].label, "Preview");
+        assert!(!questions[0].multi_select);
+    }
 
     #[test]
     fn normalizes_structured_and_plain_codex_titles() {

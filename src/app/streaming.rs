@@ -340,6 +340,21 @@ impl Waku {
                     }
                 }
             }
+            DriverEvent::UserInputRequested {
+                request_id,
+                questions,
+            } => {
+                if self.accepts_turn_output(session_id) && !questions.is_empty() {
+                    runtime.pending_user_input = Some(PendingUserInput::new(request_id, questions));
+                    if self.state.selected_session == Some(session_id) {
+                        self.user_input_answer
+                            .update(cx, |input, cx| input.clear(cx));
+                    }
+                    if let Some(session) = self.state.session_mut(session_id) {
+                        session.status = SessionStatus::Waiting;
+                    }
+                }
+            }
             DriverEvent::ComputerUseUpdated(state) => {
                 if self.accepts_turn_output(session_id) {
                     Self::upsert_computer_use_preview(runtime, state);
@@ -538,6 +553,7 @@ impl Waku {
                     },
                 );
                 runtime.pending_permission = None;
+                runtime.pending_user_input = None;
                 runtime.pending_computer_approval = None;
                 runtime.driver.cancel_computer_use();
                 // The agent may have edited files or switched branches, so the
@@ -605,6 +621,7 @@ impl Waku {
                 self.complete_turn_blocks(session_id);
                 runtime.stream_phase = None;
                 runtime.pending_permission = None;
+                runtime.pending_user_input = None;
                 runtime.pending_computer_approval = None;
                 runtime.driver.cancel_computer_use();
                 runtime.computer_use_previews.clear();

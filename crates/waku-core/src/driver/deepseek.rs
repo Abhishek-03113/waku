@@ -24,7 +24,7 @@ use crate::driver::{
 use crate::model::{
     ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKind,
     BackgroundWorkStatus, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor,
-    ReportedCommand, RuntimeMode,
+    ReportedCommand, RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
 };
 
 enum CommandMessage {
@@ -34,6 +34,10 @@ enum CommandMessage {
     Respond {
         request_id: String,
         option_id: String,
+    },
+    RespondUserInput {
+        request_id: String,
+        answers: Vec<UserInputAnswer>,
     },
     ApplyOptions(SessionOptions),
     Shutdown,
@@ -46,9 +50,13 @@ enum PendingInteraction {
     },
     Question {
         rpc_id: String,
-        question_id: String,
-        answers: HashMap<String, String>,
+        questions: Vec<DeepSeekPendingQuestion>,
     },
+}
+
+struct DeepSeekPendingQuestion {
+    id: String,
+    option_labels: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -278,6 +286,13 @@ impl DriverControl for DeepSeekDriver {
         });
     }
 
+    fn respond_user_input(&self, request_id: String, answers: Vec<UserInputAnswer>) {
+        let _ = self.commands.send(CommandMessage::RespondUserInput {
+            request_id,
+            answers,
+        });
+    }
+
     fn apply_options(&self, options: SessionOptions) -> bool {
         self.commands
             .send(CommandMessage::ApplyOptions(options))
@@ -445,26 +460,36 @@ fn handle_command(
                         "outcome": if option_id == "allow" { "allowed-once" } else { "rejected" },
                     }),
                 ),
-                PendingInteraction::Question {
-                    rpc_id,
-                    question_id,
-                    answers,
-                } => match answers.get(&option_id) {
-                    Some(answer) => server.respond(
-                        &rpc_id,
-                        json!({
-                            "sessionId": session_id,
-                            "answer": {
-                                "answers": [{"id": question_id, "selected": [answer]}]
-                            }
-                        }),
-                    ),
-                    None => server.reject_response(&rpc_id, "the selected answer is unavailable"),
-                },
+                PendingInteraction::Question { rpc_id, .. } => server.reject_response(
+                    &rpc_id,
+                    "a structured question requires a structured answer",
+                ),
             };
             if let Err(error) = response {
                 let _ = events.send(DriverEvent::Error(format!(
                     "DeepSeek Harness rejected the interaction response: {error}"
+                )));
+            }
+        }
+        CommandMessage::RespondUserInput {
+            request_id,
+            answers,
+        } => {
+            let Some(PendingInteraction::Question { rpc_id, questions }) =
+                state.pending.remove(&request_id)
+            else {
+                return true;
+            };
+            let answers = deepseek_question_answers(&questions, &answers);
+            if let Err(error) = server.respond(
+                &rpc_id,
+                json!({
+                    "sessionId": session_id,
+                    "answer": {"answers": answers}
+                }),
+            ) {
+                let _ = events.send(DriverEvent::Error(format!(
+                    "DeepSeek Harness rejected the question response: {error}"
                 )));
             }
         }
@@ -490,6 +515,38 @@ fn handle_command(
         CommandMessage::Shutdown => return false,
     }
     true
+}
+
+fn deepseek_question_answers(
+    questions: &[DeepSeekPendingQuestion],
+    answers: &[UserInputAnswer],
+) -> Vec<Value> {
+    questions
+        .iter()
+        .map(|question| {
+            let submitted = answers
+                .iter()
+                .find(|answer| answer.question_id == question.id)
+                .map(|answer| answer.answers.as_slice())
+                .unwrap_or_default();
+            let selected = submitted
+                .iter()
+                .filter(|answer| question.option_labels.contains(answer.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let custom = submitted
+                .iter()
+                .filter(|answer| !question.option_labels.contains(answer.as_str()))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut answer = json!({"id": question.id, "selected": selected});
+            if !custom.is_empty() {
+                answer["custom"] = Value::String(custom);
+            }
+            answer
+        })
+        .collect()
 }
 
 fn handle_envelope(
@@ -922,75 +979,86 @@ fn handle_question_request(
     let Some(questions) = payload.get("questions").and_then(Value::as_array) else {
         return;
     };
-    let supported = questions.len() == 1
-        && !questions[0]
-            .get("multiSelect")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        && questions[0]
-            .get("options")
-            .and_then(Value::as_array)
-            .is_some_and(|options| !options.is_empty());
-    if !supported {
-        let message = "Waku currently supports one single-select Harness question at a time";
-        let _ = server.reject_response(rpc_id, message);
-        let _ = events.send(DriverEvent::Error(message.into()));
-        return;
-    }
-
-    let question = &questions[0];
-    let question_id = question
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or(rpc_id)
-        .to_owned();
-    let approve_label = question.pointer("/intent/approve").and_then(Value::as_str);
-    let mut answers = HashMap::new();
-    let options = question
-        .get("options")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+    let mut pending_questions = Vec::new();
+    let visible_questions = questions
+        .iter()
         .enumerate()
-        .filter_map(|(index, option)| {
-            let label = option.get("label").and_then(Value::as_str)?.to_owned();
-            let id = format!("answer-{index}");
-            answers.insert(id.clone(), label.clone());
-            Some(PermissionOption {
+        .filter_map(|(index, question)| {
+            let text = question
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if text.is_empty() {
+                return None;
+            }
+            let id = question
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("question-{index}"));
+            let options = question
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| {
+                    let label = option.get("label").and_then(Value::as_str)?.trim();
+                    (!label.is_empty()).then(|| UserInputOption {
+                        label: label.to_owned(),
+                        description: option
+                            .get("description")
+                            .or_else(|| option.get("detail"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|description| !description.is_empty())
+                            .map(str::to_owned),
+                    })
+                })
+                .collect::<Vec<_>>();
+            pending_questions.push(DeepSeekPendingQuestion {
+                id: id.clone(),
+                option_labels: options.iter().map(|option| option.label.clone()).collect(),
+            });
+            let detail = question
+                .get("detail")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty());
+            Some(UserInputQuestion {
                 id,
-                allow: approve_label.is_none_or(|approve| approve == label),
-                label,
+                header: question
+                    .get("header")
+                    .and_then(Value::as_str)
+                    .filter(|header| !header.trim().is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("Question {}", index + 1)),
+                question: detail
+                    .map(|detail| format!("{text}\n\n{detail}"))
+                    .unwrap_or_else(|| text.to_owned()),
+                options,
+                multi_select: question
+                    .get("multiSelect")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
         })
         .collect::<Vec<_>>();
+    if visible_questions.is_empty() {
+        let _ = server.reject_response(rpc_id, "the question request contained no questions");
+        return;
+    }
     state.pending.insert(
         rpc_id.to_owned(),
         PendingInteraction::Question {
             rpc_id: rpc_id.to_owned(),
-            question_id,
-            answers,
+            questions: pending_questions,
         },
     );
-    let title = question
-        .get("header")
-        .or_else(|| question.get("question"))
-        .and_then(Value::as_str)
-        .unwrap_or("DeepSeek Harness question")
-        .to_owned();
-    let detail = [
-        question.get("question").and_then(Value::as_str),
-        question.get("detail").and_then(Value::as_str),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|text| !text.trim().is_empty())
-    .collect::<Vec<_>>()
-    .join("\n\n");
-    let _ = events.send(DriverEvent::Permission {
+    let _ = events.send(DriverEvent::UserInputRequested {
         request_id: rpc_id.to_owned(),
-        title,
-        detail,
-        options,
+        questions: visible_questions,
     });
 
     // Keep the argument intentionally used: every answer includes the exact
@@ -1370,6 +1438,26 @@ fn fetch_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn question_answers_separate_provider_options_from_custom_text() {
+        let questions = vec![DeepSeekPendingQuestion {
+            id: "files".into(),
+            option_labels: ["Source".to_owned(), "Tests".to_owned()]
+                .into_iter()
+                .collect(),
+        }];
+        let answers = deepseek_question_answers(
+            &questions,
+            &[UserInputAnswer {
+                question_id: "files".into(),
+                answers: vec!["Source".into(), "Also update docs".into()],
+            }],
+        );
+
+        assert_eq!(answers[0]["selected"], json!(["Source"]));
+        assert_eq!(answers[0]["custom"], "Also update docs");
+    }
 
     fn harness() -> (
         Sender<DriverEvent>,

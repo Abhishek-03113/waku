@@ -32,7 +32,7 @@ use crate::driver::{
 use crate::model::{
     ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey, BackgroundWorkKind,
     BackgroundWorkStatus, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor,
-    RuntimeMode, unix_time_millis,
+    RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion, unix_time_millis,
 };
 
 enum CommandMessage {
@@ -42,6 +42,11 @@ enum CommandMessage {
     Respond {
         request_id: String,
         option_id: String,
+    },
+    RespondUserInput {
+        request_id: String,
+        input: Value,
+        answers: Vec<UserInputAnswer>,
     },
     Options(SessionOptions),
     StopBackgroundWork {
@@ -73,6 +78,7 @@ fn stop_task_request(request_id: u64, task_id: &str) -> Value {
 
 pub struct ClaudeDriver {
     commands: Sender<CommandMessage>,
+    pending_user_inputs: Arc<Mutex<HashMap<String, Value>>>,
     mode: RuntimeMode,
     interaction_mode: InteractionMode,
 }
@@ -204,17 +210,20 @@ impl ClaudeDriver {
         let auto_approve = mode != RuntimeMode::Ask;
         let turn_active = Arc::new(Mutex::new(false));
         let pending_task_stops = Arc::new(Mutex::new(HashMap::<String, BackgroundWorkKey>::new()));
+        let pending_user_inputs = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
 
         let reader_events = events.clone();
         let reader_commands = commands.clone();
         let reader_turn = turn_active.clone();
         let reader_session = session_id.clone();
         let reader_pending_task_stops = pending_task_stops.clone();
+        let reader_pending_user_inputs = pending_user_inputs.clone();
         let reader_thread = thread::Builder::new()
             .name("waku-claude-reader".into())
             .spawn(move || {
                 let mut state = ClaudeStreamState {
                     pending_task_stops: reader_pending_task_stops,
+                    pending_user_inputs: reader_pending_user_inputs,
                     ..ClaudeStreamState::default()
                 };
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -328,6 +337,52 @@ impl ClaudeDriver {
                                 }),
                             )
                         }
+                        CommandMessage::RespondUserInput {
+                            request_id,
+                            input,
+                            answers,
+                        } => {
+                            let mut answer_values = serde_json::Map::new();
+                            for answer in answers {
+                                let multi_select = input
+                                    .get("questions")
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .find(|question| {
+                                        question.get("question").and_then(Value::as_str)
+                                            == Some(answer.question_id.as_str())
+                                    })
+                                    .and_then(|question| question.get("multiSelect"))
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false);
+                                let value = if multi_select {
+                                    json!(answer.answers)
+                                } else {
+                                    Value::String(
+                                        answer.answers.into_iter().next().unwrap_or_default(),
+                                    )
+                                };
+                                answer_values.insert(answer.question_id, value);
+                            }
+                            write_line(
+                                &mut stdin,
+                                &json!({
+                                    "type": "control_response",
+                                    "response": {
+                                        "subtype": "success",
+                                        "request_id": request_id,
+                                        "response": {
+                                            "behavior": "allow",
+                                            "updatedInput": {
+                                                "questions": input.get("questions").cloned().unwrap_or(Value::Array(Vec::new())),
+                                                "answers": answer_values
+                                            }
+                                        }
+                                    }
+                                }),
+                            )
+                        }
                         CommandMessage::Options(options) => {
                             if options.model == current_model {
                                 continue;
@@ -416,6 +471,7 @@ impl ClaudeDriver {
 
         Ok(Self {
             commands,
+            pending_user_inputs,
             mode,
             interaction_mode,
         })
@@ -449,6 +505,17 @@ impl DriverControl for ClaudeDriver {
         let _ = self.commands.send(CommandMessage::Respond {
             request_id,
             option_id,
+        });
+    }
+
+    fn respond_user_input(&self, request_id: String, answers: Vec<UserInputAnswer>) {
+        let Some(input) = self.pending_user_inputs.lock().remove(&request_id) else {
+            return;
+        };
+        let _ = self.commands.send(CommandMessage::RespondUserInput {
+            request_id,
+            input,
+            answers,
         });
     }
 
@@ -501,6 +568,7 @@ struct ClaudeStreamState {
     /// settle notification's summary would only duplicate it.
     streamed_task_output: HashSet<String>,
     pending_task_stops: Arc<Mutex<HashMap<String, BackgroundWorkKey>>>,
+    pending_user_inputs: Arc<Mutex<HashMap<String, Value>>>,
     /// Model of the latest main-thread assistant message, so the settled
     /// turn's `modelUsage` map can be read for that model's context window
     /// rather than a subagent's.
@@ -920,7 +988,9 @@ fn handle_message(
         }
         Some("control_request") => {
             if value.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool") {
-                request_permission(value, events, commands, auto_approve);
+                if !request_user_input(value, events, state) {
+                    request_permission(value, events, commands, auto_approve);
+                }
             }
         }
         Some("control_response") => {
@@ -1195,6 +1265,84 @@ fn handle_message(
     }
 }
 
+fn request_user_input(
+    value: &Value,
+    events: &impl DriverEventSink,
+    state: &ClaudeStreamState,
+) -> bool {
+    let request = value.get("request").unwrap_or(&Value::Null);
+    if request.get("tool_name").and_then(Value::as_str) != Some("AskUserQuestion") {
+        return false;
+    }
+    let Some(request_id) = value.get("request_id").and_then(Value::as_str) else {
+        return true;
+    };
+    let input = request.get("input").cloned().unwrap_or(Value::Null);
+    let questions = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, question)| {
+            let text = question
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if text.is_empty() {
+                return None;
+            }
+            let options = question
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| {
+                    let label = option.get("label").and_then(Value::as_str)?.trim();
+                    (!label.is_empty()).then(|| UserInputOption {
+                        label: label.to_owned(),
+                        description: option
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|description| !description.is_empty())
+                            .map(str::to_owned),
+                    })
+                })
+                .collect();
+            Some(UserInputQuestion {
+                // Claude's SDK resolves answers by the complete question text.
+                id: text.to_owned(),
+                header: question
+                    .get("header")
+                    .and_then(Value::as_str)
+                    .filter(|header| !header.trim().is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("Question {}", index + 1)),
+                question: text.to_owned(),
+                options,
+                multi_select: question
+                    .get("multiSelect")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect::<Vec<_>>();
+    if questions.is_empty() {
+        return true;
+    }
+    state
+        .pending_user_inputs
+        .lock()
+        .insert(request_id.to_owned(), input);
+    let _ = events.send(DriverEvent::UserInputRequested {
+        request_id: request_id.to_owned(),
+        questions,
+    });
+    true
+}
+
 fn request_permission(
     value: &Value,
     events: &impl DriverEventSink,
@@ -1452,6 +1600,7 @@ mod tests {
         let (commands, command_rx) = unbounded();
         let driver = ClaudeDriver {
             commands,
+            pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Build,
         };
@@ -1983,6 +2132,45 @@ mod tests {
         };
         assert_eq!(option_id, "allow");
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ask_user_question_is_never_treated_as_an_auto_approvable_permission() {
+        let (events, event_rx, commands, command_rx, turn, mut state) = harness();
+        let request = json!({
+            "type": "control_request",
+            "request_id": "ask-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {
+                    "questions": [{
+                        "header": "Environment",
+                        "question": "Where should this deploy?",
+                        "options": [{
+                            "label": "Preview",
+                            "description": "Create a preview deployment"
+                        }],
+                        "multiSelect": false
+                    }]
+                }
+            }
+        });
+
+        // Even Full Access cannot invent an answer to a content question.
+        handle_message(&request, "s", &events, &commands, &turn, true, &mut state);
+        let DriverEvent::UserInputRequested {
+            request_id,
+            questions,
+        } = event_rx.try_recv().unwrap()
+        else {
+            panic!("AskUserQuestion must reach the structured question UI");
+        };
+        assert_eq!(request_id, "ask-1");
+        assert_eq!(questions[0].id, "Where should this deploy?");
+        assert_eq!(questions[0].options[0].label, "Preview");
+        assert!(command_rx.try_recv().is_err());
+        assert!(state.pending_user_inputs.lock().contains_key("ask-1"));
     }
 
     #[test]

@@ -1463,6 +1463,10 @@ fn handle_driver_command(
             request_id,
             option_id,
         } => driver.respond(request_id, option_id),
+        Command::RespondUserInput {
+            request_id,
+            answers,
+        } => driver.respond_user_input(request_id, answers),
         Command::RunComputerTool { request } => {
             driver.run_computer_tool(crate::computer_use::ComputerToolRequest {
                 call_id: request.call_id,
@@ -1611,6 +1615,16 @@ fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
                 "options": options,
             }),
         ),
+        DriverEvent::UserInputRequested {
+            request_id,
+            questions,
+        } => (
+            "userInputRequested",
+            json!({
+                "requestId": request_id,
+                "questions": questions,
+            }),
+        ),
         DriverEvent::ComputerUseUpdated(state) => (
             "computerUseUpdated",
             serde_json::to_value(ComputerUseWire {
@@ -1679,6 +1693,13 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
                 options: permission.options,
             }
         }
+        "userInputRequested" => {
+            let request: UserInputWire = serde_json::from_value(payload)?;
+            DriverEvent::UserInputRequested {
+                request_id: request.request_id,
+                questions: request.questions,
+            }
+        }
         "computerUseUpdated" => {
             let state: ComputerUseWire = serde_json::from_value(payload)?;
             DriverEvent::ComputerUseUpdated(ComputerUseState {
@@ -1739,6 +1760,13 @@ struct PermissionWire {
     title: String,
     detail: String,
     options: Vec<PermissionOption>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserInputWire {
+    request_id: String,
+    questions: Vec<crate::model::UserInputQuestion>,
 }
 
 #[derive(Deserialize, Serialize)]

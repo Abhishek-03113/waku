@@ -6,16 +6,16 @@ use super::runtime::merge_remote_session_catalog;
 use super::settings::visible_settings_pages;
 use super::{
     ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget,
-    NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, SessionNavigation, StreamDeltaKind,
-    TranscriptRowKind::*, active_navigation_turn_index, append_text_delta_to_session,
-    assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
-    changed_files_inline_message_index, compact_driver_error, disclosure_leading_space,
-    fenced_code, fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
-    format_worked_duration, format_working_elapsed, maintain_transcript_anchor,
-    message_starts_followup_turn, navigation_preview_snippet, navigation_rail_fade_visibility,
-    navigation_rail_height, navigation_rail_scale, paused_toast_duration,
-    pop_complete_stream_chunk, pop_stream_chunk, push_transcript_activity, session_is_reapable,
-    should_refresh_branch_after_activity, should_show_navigation_rail,
+    NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, PendingUserInput, SessionNavigation,
+    StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
+    append_text_delta_to_session, assistant_response_footer, assistant_response_footer_index,
+    assistant_response_footer_time, changed_files_inline_message_index, compact_driver_error,
+    disclosure_leading_space, fenced_code, fitted_file_tree_width, fitted_panel_widths,
+    folded_transcript_row_kinds, format_worked_duration, format_working_elapsed,
+    maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
+    navigation_rail_fade_visibility, navigation_rail_height, navigation_rail_scale,
+    paused_toast_duration, pop_complete_stream_chunk, pop_stream_chunk, push_transcript_activity,
+    session_is_reapable, should_refresh_branch_after_activity, should_show_navigation_rail,
     should_show_scroll_to_bottom, stream_backlog_should_flush, take_stream_prefix,
     task_id_from_notification_tag, task_notification_tag, transcript_anchor_end_space,
     transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
@@ -26,8 +26,47 @@ use crate::git_branch::BranchEntry;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointFile, CheckpointStatus,
     DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, RuntimeEventCursor,
-    SessionStatus, TranscriptBlock, TurnStatus,
+    SessionStatus, TranscriptBlock, TurnStatus, UserInputOption, UserInputQuestion,
 };
+
+#[test]
+fn structured_user_input_preserves_question_order_and_custom_answer_precedence() {
+    let questions = vec![
+        UserInputQuestion {
+            id: "environment".into(),
+            header: "Environment".into(),
+            question: "Where should this deploy?".into(),
+            options: vec![UserInputOption {
+                label: "Preview".into(),
+                description: None,
+            }],
+            multi_select: false,
+        },
+        UserInputQuestion {
+            id: "notes".into(),
+            header: "Notes".into(),
+            question: "Anything else?".into(),
+            options: Vec::new(),
+            multi_select: false,
+        },
+    ];
+    let mut pending = PendingUserInput::new("request-1".into(), questions);
+    pending
+        .selections
+        .insert("environment".into(), vec!["Preview".into()]);
+    pending
+        .selections
+        .insert("notes".into(), vec!["stale choice".into()]);
+    pending
+        .custom_answers
+        .insert("notes".into(), "Use the EU region".into());
+
+    let answers = pending.answers();
+    assert_eq!(answers[0].question_id, "environment");
+    assert_eq!(answers[0].answers, ["Preview"]);
+    assert_eq!(answers[1].question_id, "notes");
+    assert_eq!(answers[1].answers, ["Use the EU region"]);
+}
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
     collections::{HashSet, VecDeque},

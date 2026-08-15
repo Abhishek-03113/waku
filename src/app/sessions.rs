@@ -191,6 +191,7 @@ impl Waku {
         }
         if session_changed {
             self.restore_selected_composer_draft(cx);
+            self.sync_user_input_answer(cx);
             self.restore_right_panel_state(session_id, cx);
         } else {
             self.ensure_right_panel_terminals(cx);
@@ -1045,6 +1046,7 @@ impl Waku {
         if let Some(runtime) = runtime.as_mut() {
             runtime.stream_phase = None;
             runtime.pending_permission = None;
+            runtime.pending_user_input = None;
             runtime.pending_computer_approval = None;
             runtime.computer_use_previews.clear();
         }
@@ -1131,6 +1133,177 @@ impl Waku {
         }
         if let Some(session) = self.selected_session_mut() {
             session.status = SessionStatus::Working;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn sync_user_input_answer(&mut self, cx: &mut Context<Self>) {
+        let answer = self
+            .selected_runtime()
+            .and_then(|runtime| runtime.pending_user_input.as_ref())
+            .and_then(|pending| {
+                pending
+                    .current_question()
+                    .map(|question| (pending, question))
+            })
+            .and_then(|(pending, question)| pending.custom_answers.get(&question.id))
+            .cloned()
+            .unwrap_or_default();
+        self.user_input_answer
+            .update(cx, |input, cx| input.set_content(answer, cx));
+    }
+
+    pub(super) fn update_user_input_custom_answer(
+        &mut self,
+        answer: impl AsRef<str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let Some(pending) = self
+            .runtimes
+            .get_mut(&session_id)
+            .and_then(|runtime| runtime.pending_user_input.as_mut())
+        else {
+            return;
+        };
+        let Some(question_id) = pending
+            .current_question()
+            .map(|question| question.id.clone())
+        else {
+            return;
+        };
+        let answer = answer.as_ref().to_owned();
+        if answer.trim().is_empty() {
+            pending.custom_answers.remove(&question_id);
+        } else {
+            pending.custom_answers.insert(question_id.clone(), answer);
+            pending.selections.remove(&question_id);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn submit_user_input_custom_answer(
+        &mut self,
+        answer: String,
+        cx: &mut Context<Self>,
+    ) {
+        if answer.trim().is_empty() {
+            return;
+        }
+        self.update_user_input_custom_answer(answer, cx);
+        self.advance_user_input(cx);
+    }
+
+    pub(super) fn select_user_input_option(&mut self, label: String, cx: &mut Context<Self>) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let Some(pending) = self
+            .runtimes
+            .get_mut(&session_id)
+            .and_then(|runtime| runtime.pending_user_input.as_mut())
+        else {
+            return;
+        };
+        let Some((question_id, multi_select)) = pending
+            .current_question()
+            .map(|question| (question.id.clone(), question.multi_select))
+        else {
+            return;
+        };
+        let selected = pending.selections.entry(question_id.clone()).or_default();
+        if multi_select {
+            if let Some(index) = selected.iter().position(|answer| answer == &label) {
+                selected.remove(index);
+            } else {
+                selected.push(label);
+            }
+        } else {
+            selected.clear();
+            selected.push(label);
+        }
+        if selected.is_empty() {
+            pending.selections.remove(&question_id);
+        }
+        pending.custom_answers.remove(&question_id);
+        self.user_input_answer
+            .update(cx, |input, cx| input.clear(cx));
+        cx.notify();
+    }
+
+    pub(super) fn previous_user_input(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let Some(pending) = self
+            .runtimes
+            .get_mut(&session_id)
+            .and_then(|runtime| runtime.pending_user_input.as_mut())
+        else {
+            return;
+        };
+        if pending.question_index == 0 {
+            return;
+        }
+        pending.question_index -= 1;
+        self.sync_user_input_answer(cx);
+        cx.notify();
+    }
+
+    pub(super) fn advance_user_input(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.state.selected_session else {
+            return;
+        };
+        let should_submit = {
+            let Some(pending) = self
+                .runtimes
+                .get_mut(&session_id)
+                .and_then(|runtime| runtime.pending_user_input.as_mut())
+            else {
+                return;
+            };
+            let Some(question) = pending.current_question() else {
+                return;
+            };
+            let answered = pending
+                .custom_answers
+                .get(&question.id)
+                .is_some_and(|answer| !answer.trim().is_empty())
+                || pending
+                    .selections
+                    .get(&question.id)
+                    .is_some_and(|answers| !answers.is_empty());
+            if !answered {
+                return;
+            }
+            if pending.question_index + 1 < pending.questions.len() {
+                pending.question_index += 1;
+                false
+            } else {
+                true
+            }
+        };
+
+        if should_submit {
+            let Some(runtime) = self.runtimes.get_mut(&session_id) else {
+                return;
+            };
+            let Some(pending) = runtime.pending_user_input.take() else {
+                return;
+            };
+            let answers = pending.answers();
+            runtime
+                .driver
+                .respond_user_input(pending.request_id, answers);
+            if let Some(session) = self.state.session_mut(session_id) {
+                session.status = SessionStatus::Working;
+            }
+            self.user_input_answer
+                .update(cx, |input, cx| input.clear(cx));
+        } else {
+            self.sync_user_input_answer(cx);
         }
         cx.notify();
     }

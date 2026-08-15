@@ -7,6 +7,7 @@ import type {
   Project,
   ProviderProbe,
   SequencedEvent,
+  UserInputAnswer,
 } from '@waku/client'
 import {
   createContext,
@@ -42,6 +43,7 @@ import {
 import {
   reduceRuntimeEvent,
   type PendingPermission,
+  type PendingUserInput,
 } from './event-reducer'
 
 interface RuntimeSummary {
@@ -104,6 +106,7 @@ type BackgroundWorkEvent =
 interface RuntimeContextValue {
   runtimes: Record<string, RuntimeSummary>
   permissions: Record<string, PendingPermission | undefined>
+  userInputs: Record<string, PendingUserInput | undefined>
   backgroundWork: Record<string, BackgroundWorkItem[]>
   responseForks: Record<string, number | undefined>
   messageRewinds: Record<string, number | undefined>
@@ -124,6 +127,11 @@ interface RuntimeContextValue {
   closeSession: (sessionId: string) => Promise<void>
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<void>
   respond: (sessionId: string, requestId: string, optionId: string) => Promise<void>
+  respondUserInput: (
+    sessionId: string,
+    requestId: string,
+    answers: UserInputAnswer[],
+  ) => Promise<void>
   refreshBackgroundWork: (sessionId: string) => Promise<void>
   stopBackgroundWork: (sessionId: string, item: BackgroundWorkItem) => Promise<void>
   forkSessionFromResponse: (
@@ -169,6 +177,9 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [runtimes, setRuntimes] = useState<Record<string, RuntimeSummary>>({})
   const [permissions, setPermissions] = useState<
     Record<string, PendingPermission | undefined>
+  >({})
+  const [userInputs, setUserInputs] = useState<
+    Record<string, PendingUserInput | undefined>
   >({})
   const [backgroundWork, setBackgroundWork] = useState<Record<string, BackgroundWorkItem[]>>({})
   const [responseForks, setResponseForks] = useState<Record<string, number | undefined>>({})
@@ -503,6 +514,12 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           setPermissions((previous) => ({
             ...previous,
             [session.id]: result.permission ?? undefined,
+          }))
+        }
+        if (result.userInput !== undefined) {
+          setUserInputs((previous) => ({
+            ...previous,
+            [session.id]: result.userInput ?? undefined,
           }))
         }
         if (result.error) toast.error(result.error)
@@ -846,6 +863,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       saveGenerations.current.delete(sessionId)
       pendingSteers.current.delete(sessionId)
       setPermissions((current) => removeRecordKey(current, sessionId))
+      setUserInputs((current) => removeRecordKey(current, sessionId))
       setBackgroundWork((current) => removeRecordKey(current, sessionId))
     },
     [client, phase, removeRuntime],
@@ -862,6 +880,26 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         runtime.runtimeId,
       )
       setPermissions((current) => ({ ...current, [sessionId]: undefined }))
+      const key = config && daemonKeys.session(config.address, sessionId)
+      if (key) {
+        const session = queryClient.getQueryData<AgentSession>(key)
+        if (session) cacheSession({ ...session, status: 'working' })
+      }
+    },
+    [client, config, queryClient, cacheSession],
+  )
+
+  const respondUserInput = useCallback(
+    async (sessionId: string, requestId: string, answers: UserInputAnswer[]) => {
+      if (!client) throw new Error(translate(localeRef.current, 'errors.daemon_disconnected'))
+      const runtime = entries.current.get(sessionId)
+      if (!runtime) throw new Error(translate(localeRef.current, 'errors.no_live_runtime'))
+      await client.request(
+        { type: 'respondUserInput', requestId, answers },
+        sessionId,
+        runtime.runtimeId,
+      )
+      setUserInputs((current) => ({ ...current, [sessionId]: undefined }))
       const key = config && daemonKeys.session(config.address, sessionId)
       if (key) {
         const session = queryClient.getQueryData<AgentSession>(key)
@@ -1042,6 +1080,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     messageRewindsInFlight.current.clear()
     setRuntimes({})
     setPermissions({})
+    setUserInputs({})
     setBackgroundWork({})
     setResponseForks({})
     setMessageRewinds({})
@@ -1058,6 +1097,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const value: RuntimeContextValue = {
     runtimes,
     permissions,
+    userInputs,
     backgroundWork,
     responseForks,
     messageRewinds,
@@ -1068,6 +1108,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     closeSession,
     removeQueuedMessage,
     respond,
+    respondUserInput,
     refreshBackgroundWork,
     stopBackgroundWork,
     forkSessionFromResponse,

@@ -492,6 +492,11 @@ commands.claude_todos: 列出当前待办事项
 composer.edit_in_composer: 在输入框中编辑
 composer.queued_followups: 已排队的后续消息
 composer.queued_followups_description: 已排队的后续消息 · 当前回复结束后发送
+user_input.other_placeholder: 输入其他回答
+user_input.back: 上一步
+user_input.next: 下一步
+user_input.submit: 提交
+user_input.progress: "%{current} / %{total}"
 composer.preparing_task: 正在准备任务…
 composer.steer_turn: 向本轮补充指示（%{shortcut}）
 composer.queue_followup: 排队为后续消息（⏎）
@@ -599,6 +604,7 @@ errors.open_provider_session: "无法打开 %{provider} 会话：%{error}"
 errors.select_model: "无法选择模型：%{error}"
 errors.read_provider_event_stream: "无法读取 %{provider} 事件流：%{error}"
 errors.answer_provider_permission: "无法响应 %{provider} 的权限请求：%{error}"
+errors.answer_provider_question: "无法回答 %{provider} 的问题：%{error}"
 errors.initialize_codex_app_server: 无法初始化 Codex app-server
 errors.register_computer_use_skill: 无法向 Codex 注册 Waku 电脑操作技能
 errors.codex_thread_open_incomplete: Codex 未能完成线程打开操作
