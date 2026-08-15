@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import type { ActivityItem, AgentSession } from '@waku/client'
 import {
+  activityActionLabel,
   activityDisclosureSections,
   activityDisplayTitle,
   activityFileChangeStats,
   activityHeaderTitle,
   activityPreview,
+  activityRowDetail,
   activitySummary,
   activityTextRows,
   assistantResponseFooters,
@@ -51,6 +53,8 @@ describe('desktop transcript language', () => {
     command.complete = true
     expect(activityHeaderTitle(activities, true)).toBe('Ran git log --oneline -15')
     expect(activityHeaderTitle(activities, false)).toBe('Ran 1 thought · 1 command')
+    expect(activityActionLabel(command)).toBe('Run')
+    expect(activityRowDetail(command)).toBe('git log --oneline -15')
   })
 
   test('derives the same provider-neutral activity titles as desktop', () => {
@@ -65,6 +69,18 @@ describe('desktop transcript language', () => {
       display_target: 'bun test',
     })).toBe('Running bun test')
     expect(activityDisplayTitle({
+      ...activity('command', true),
+      title: 'Run command',
+      display_target: 'python3 analyze.py',
+      display_description: 'Analyze color statistics',
+    })).toBe('Ran command: Analyze color statistics')
+    expect(activityDisplayTitle({
+      ...activity('command', false),
+      title: 'Run command',
+      display_target: 'python3 analyze.py',
+      display_description: 'Analyze color statistics',
+    })).toBe('Running command: Analyze color statistics')
+    expect(activityDisplayTitle({
       ...activity('fileRead', true),
       title: 'Read file',
       display_target: '/tmp/README.md',
@@ -73,7 +89,7 @@ describe('desktop transcript language', () => {
 
   test('keeps activity arguments and output in separate disclosure sections', () => {
     const item = {
-      ...activity('command', true),
+      ...activity('tool', true),
       arguments: '{"cmd":"bun test"}',
       output: '12 pass',
       detail: 'Completed',
@@ -84,6 +100,20 @@ describe('desktop transcript language', () => {
     ])
     expect(activityPreview({ ...item, detail: 'failed', output: '\npermission denied\nmore' }))
       .toBe('permission denied')
+  })
+
+  test('shows only the normalized command and output for command details', () => {
+    const item = {
+      ...activity('command', true),
+      arguments: 'bun test',
+      display_target: 'bun test',
+      output: '12 pass',
+      detail: 'Completed',
+    }
+    expect(activityDisclosureSections(item)).toEqual([
+      { kind: 'command', label: 'Command', content: 'bun test' },
+      { kind: 'output', label: 'Output', content: '12 pass' },
+    ])
   })
 
   test('shows file edit stats only when every settled edit has counts', () => {
@@ -257,6 +287,7 @@ function activity(kind: ActivityItem['kind'], complete: boolean): ActivityItem {
     title: kind,
     detail: null,
     display_target: null,
+    display_description: null,
     output: null,
     failed: false,
     complete,

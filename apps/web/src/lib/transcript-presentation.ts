@@ -117,6 +117,18 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
         : directory ? `Listed files in ${directory}` : 'Listed files'
     }
     case 'command':
+      if (activity.display_description?.trim()) {
+        if (!activity.complete) return t
+          ? t('activity.running_described_command', { description: activity.display_description })
+          : `Running command: ${activity.display_description}`
+        return activity.failed
+          ? t
+            ? t('activity.described_command_failed', { description: activity.display_description })
+            : `Command failed: ${activity.display_description}`
+          : t
+            ? t('activity.ran_described_command', { description: activity.display_description })
+            : `Ran command: ${activity.display_description}`
+      }
       if (target) {
         if (!activity.complete) return t ? t('activity.running_named_command', { command: target }) : `Running ${target}`
         return activity.failed
@@ -153,14 +165,86 @@ export function activityDisplayTitle(activity: ActivityItem, t?: Translator) {
   }
 }
 
+export function activityActionLabel(activity: ActivityItem, t?: Translator) {
+  const key = activity.kind === 'reasoning'
+    ? 'activity.action_think'
+    : activity.kind === 'command'
+      ? 'activity.action_run'
+      : activity.kind === 'fileChange'
+        ? 'activity.action_edit'
+        : activity.kind === 'fileRead'
+          ? 'activity.action_read'
+          : activity.kind === 'fileSearch' || activity.kind === 'search'
+            ? 'activity.action_search'
+            : activity.kind === 'fileList'
+              ? 'activity.action_list'
+              : activity.kind === 'plan'
+                ? 'activity.action_plan'
+                : 'activity.action_use'
+  if (t) return t(key)
+  return {
+    'activity.action_think': 'Think',
+    'activity.action_run': 'Run',
+    'activity.action_edit': 'Edit',
+    'activity.action_read': 'Read',
+    'activity.action_search': 'Search',
+    'activity.action_list': 'List',
+    'activity.action_plan': 'Plan',
+    'activity.action_use': 'Use',
+  }[key]!
+}
+
+export function activityRowDetail(activity: ActivityItem, t?: Translator) {
+  const customTitle = !isGenericActivityTitle(activity) ? activity.title : ''
+  switch (activity.kind) {
+    case 'reasoning':
+      return reasoningTitle(activity, t)
+    case 'command':
+      return activity.display_description?.trim() || activity.display_target?.trim() || customTitle
+    case 'fileChange': {
+      const changes = activity.file_changes ?? []
+      if (changes.length === 1) return pathName(changes[0]!.path)
+      if (changes.length > 1) return t
+        ? t('activity.file_count', { count: changes.length })
+        : `${changes.length} files`
+      return customTitle
+    }
+    case 'fileRead':
+    case 'fileList':
+      return activity.display_target?.trim()
+        ? pathName(activity.display_target)
+        : customTitle
+    case 'fileSearch':
+      return activityDisplayTitle(activity, t)
+    case 'search':
+      return activity.display_target?.trim()
+        ? t
+          ? t('activity.search_for', { query: activity.display_target })
+          : `Search for ${activity.display_target}`
+        : customTitle
+    case 'plan':
+      return customTitle
+    case 'tool':
+      return activity.display_target?.trim() || customTitle
+  }
+}
+
 export type ActivityDisclosureSection = {
-  kind: 'arguments' | 'output' | 'detail'
+  kind: 'command' | 'arguments' | 'output' | 'detail'
   label: string | null
   content: string
 }
 
 export function activityDisclosureSections(activity: ActivityItem, t?: Translator): ActivityDisclosureSection[] {
   const sections: ActivityDisclosureSection[] = []
+  if (activity.kind === 'command') {
+    const command = activity.arguments?.trim() || activity.display_target?.trim()
+    const output = activity.output?.trim()
+    if (command) sections.push({ kind: 'command', label: t ? t('activity.command_detail') : 'Command', content: command })
+    if (output) sections.push({ kind: 'output', label: t ? t('activity.output') : 'Output', content: output })
+    else if (activity.image_urls?.length) sections.push({ kind: 'output', label: t ? t('activity.output') : 'Output', content: '' })
+    return sections
+  }
   const argumentsText = activity.arguments?.trim()
   const output = activity.output?.trim()
   if (argumentsText) sections.push({ kind: 'arguments', label: t ? t('activity.arguments') : 'Arguments', content: argumentsText })

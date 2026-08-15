@@ -744,6 +744,7 @@ impl Waku {
         // Block parses are keyed by position within the session, so they would
         // be read as another session's blocks.
         self.activity_markdown.borrow_mut().clear();
+        self.activity_scroll_viewports.borrow_mut().clear();
         self.menus.borrow_mut().clear();
         self.message_edit = None;
         self.hide_toast();

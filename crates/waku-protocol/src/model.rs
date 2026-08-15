@@ -1853,6 +1853,11 @@ pub struct ActivityItem {
     /// directory, or command). The row builder only formats this cached value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_target: Option<String>,
+    /// Human-authored command description prepared from native tool input.
+    /// This stays separate from `display_target` so the UI can prefer a short
+    /// label without discarding the raw command used by detail views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_description: Option<String>,
     /// Native model reasoning carried by the same ordered activity stream as
     /// tool work. Generic provider `think` tools can still use the ordinary
     /// activity fields and leave this empty.
@@ -1883,6 +1888,7 @@ impl ActivityItem {
             complete,
             file_changes: Vec::new(),
             display_target,
+            display_description: None,
             reasoning: None,
         }
     }
@@ -1909,6 +1915,7 @@ impl ActivityItem {
 
     pub fn with_output(mut self, output: Option<String>) -> Self {
         self.output = output;
+        self.refresh_command_output();
         self
     }
 
@@ -1945,9 +1952,19 @@ impl ActivityItem {
                 }
             }
         }
+        if self.kind == ActivityKind::Command {
+            self.arguments = self
+                .arguments
+                .take()
+                .and_then(normalize_command_activity_command);
+            if let Some(command) = self.arguments.as_deref() {
+                self.display_target = Some(compact_activity_target(command));
+            }
+        }
         if self.display_target.is_none() {
             self.display_target = fallback_activity_display_target(self.kind, &self.title);
         }
+        self.refresh_command_output();
     }
 
     fn refresh_activity_metadata_from_value(&mut self, source: &serde_json::Value) {
@@ -1961,7 +1978,217 @@ impl ActivityItem {
         if let Some(target) = extract_activity_display_target(self.kind, source) {
             self.display_target = Some(target);
         }
+        if self.kind == ActivityKind::Command
+            && let Some(description) = find_activity_string(source, &["description"], 0)
+        {
+            self.display_description = Some(compact_activity_target(&description));
+        }
     }
+
+    fn refresh_command_output(&mut self) {
+        if self.kind == ActivityKind::Command {
+            self.output = self
+                .output
+                .take()
+                .and_then(normalize_command_activity_output);
+        }
+    }
+}
+
+fn normalize_command_activity_command(source: String) -> Option<String> {
+    let source = source.trim();
+    if source.is_empty() {
+        return None;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(source) else {
+        return Some(source.to_owned());
+    };
+    match &value {
+        serde_json::Value::String(command) => non_empty_activity_text(command),
+        serde_json::Value::Array(parts) if parts.iter().all(|part| part.as_str().is_some()) => {
+            non_empty_activity_text(
+                &parts
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        }
+        serde_json::Value::Object(_) => {
+            find_activity_string(&value, &["command", "cmd", "script"], 0)
+                .and_then(|command| non_empty_activity_text(&command))
+        }
+        _ => Some(source.to_owned()),
+    }
+}
+
+fn normalize_command_activity_output(output: String) -> Option<String> {
+    let output = output.trim();
+    if output.is_empty() {
+        return None;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return Some(output.to_owned());
+    };
+    if !is_command_output_envelope(&value) {
+        return Some(output.to_owned());
+    }
+    command_output_envelope_text(&value, 0)
+}
+
+fn non_empty_activity_text(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn is_command_output_envelope(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.contains_key("aggregatedOutput")
+        || object.contains_key("structuredContent")
+        || object.contains_key("stdout")
+        || object.contains_key("stderr")
+        || object.contains_key("toolCallId")
+        || object.contains_key("tool_call_id")
+    {
+        return true;
+    }
+    let output_field = object.contains_key("content")
+        || object.contains_key("result")
+        || object.contains_key("output");
+    if output_field && (object.contains_key("isError") || object.contains_key("is_error")) {
+        return true;
+    }
+    let item_type = object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| {
+            value
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        });
+    if item_type.as_deref().is_some_and(|item_type| {
+        matches!(
+            item_type,
+            "toolresult" | "tooloutput" | "commandresult" | "commandoutput" | "result" | "text"
+        )
+    }) {
+        return true;
+    }
+    object
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            !items.is_empty()
+                && items.iter().all(|item| {
+                    item.as_object().is_some_and(|item| {
+                        item.get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some()
+                    })
+                })
+        })
+}
+
+fn command_output_envelope_text(value: &serde_json::Value, depth: usize) -> Option<String> {
+    if depth > 6 {
+        return None;
+    }
+    match value {
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            if let Ok(nested) = serde_json::from_str::<serde_json::Value>(text)
+                && is_command_output_envelope(&nested)
+            {
+                return command_output_envelope_text(&nested, depth + 1);
+            }
+            Some(text.to_owned())
+        }
+        serde_json::Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter(|item| !is_command_output_image(item))
+                .filter_map(|item| command_output_content_text(item, depth + 1))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            non_empty_activity_text(&text)
+        }
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+                return object
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(non_empty_activity_text);
+            }
+            if let Some(structured) = object
+                .get("structuredContent")
+                .filter(|value| !value.is_null())
+            {
+                return serde_json::to_string_pretty(structured)
+                    .ok()
+                    .and_then(|text| non_empty_activity_text(&text));
+            }
+            if let Some(output) = object
+                .get("aggregatedOutput")
+                .and_then(serde_json::Value::as_str)
+                .and_then(non_empty_activity_text)
+            {
+                return Some(output);
+            }
+            let streams = ["stdout", "stderr"]
+                .into_iter()
+                .filter_map(|key| {
+                    object
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(non_empty_activity_text)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(streams) = non_empty_activity_text(&streams) {
+                return Some(streams);
+            }
+            ["content", "result", "output", "message", "text"]
+                .into_iter()
+                .find_map(|key| {
+                    object
+                        .get(key)
+                        .filter(|value| !value.is_null())
+                        .and_then(|value| command_output_content_text(value, depth + 1))
+                })
+        }
+        serde_json::Value::Null => None,
+        value => non_empty_activity_text(&value.to_string()),
+    }
+}
+
+fn command_output_content_text(value: &serde_json::Value, depth: usize) -> Option<String> {
+    if is_command_output_envelope(value) || value.is_array() || value.is_string() {
+        return command_output_envelope_text(value, depth);
+    }
+    if is_command_output_image(value) {
+        return None;
+    }
+    serde_json::to_string_pretty(value)
+        .ok()
+        .and_then(|text| non_empty_activity_text(&text))
+}
+
+fn is_command_output_image(value: &serde_json::Value) -> bool {
+    let item_type = value.get("type").and_then(serde_json::Value::as_str);
+    let mime = value
+        .get("mime")
+        .or_else(|| value.get("mimeType"))
+        .or_else(|| value.get("mime_type"))
+        .and_then(serde_json::Value::as_str);
+    matches!(item_type, Some("image" | "inputImage"))
+        || (item_type == Some("file") && mime.is_some_and(|mime| mime.starts_with("image/")))
 }
 
 fn fallback_activity_display_target(kind: ActivityKind, title: &str) -> Option<String> {
@@ -2726,6 +2953,75 @@ mod tests {
                 "{kind:?}"
             );
         }
+
+        let described = ActivityItem::new(None, ActivityKind::Command, "bash", None, false)
+            .with_arguments(Some(
+                serde_json::json!({
+                    "command": "python3 analyze.py",
+                    "description": "Analyze color statistics"
+                })
+                .to_string(),
+            ));
+        assert_eq!(
+            described.display_description.as_deref(),
+            Some("Analyze color statistics")
+        );
+        assert_eq!(described.arguments.as_deref(), Some("python3 analyze.py"));
+    }
+
+    #[test]
+    fn command_output_unwraps_provider_results_without_rewriting_real_output() {
+        let wrapped = serde_json::json!({
+            "type": "tool-result",
+            "toolCallId": "call-1",
+            "content": [{
+                "type": "text",
+                "text": "first line\n{\"actual\":\"command json\"}"
+            }],
+            "isError": false
+        })
+        .to_string();
+        let activity = ActivityItem::new(None, ActivityKind::Command, "bash", None, true)
+            .with_arguments(Some(
+                serde_json::json!({
+                    "command": "printf output",
+                    "description": "Print output"
+                })
+                .to_string(),
+            ))
+            .with_output(Some(wrapped));
+
+        assert_eq!(activity.arguments.as_deref(), Some("printf output"));
+        assert_eq!(
+            activity.output.as_deref(),
+            Some("first line\n{\"actual\":\"command json\"}")
+        );
+
+        let json_output = r#"{"content":"this came from the command"}"#;
+        let activity = ActivityItem::new(None, ActivityKind::Command, "bash", None, true)
+            .with_output(Some(json_output.to_owned()));
+        assert_eq!(activity.output.as_deref(), Some(json_output));
+    }
+
+    #[test]
+    fn legacy_command_metadata_is_normalized_on_refresh() {
+        let mut activity = ActivityItem::new(None, ActivityKind::Command, "bash", None, true);
+        activity.arguments =
+            Some(r#"{"command":"git status","description":"Check status"}"#.into());
+        activity.output = Some(
+            r#"{"type":"tool-result","content":[{"type":"text","text":"clean"}],"isError":false}"#
+                .into(),
+        );
+
+        activity.refresh_activity_metadata();
+
+        assert_eq!(activity.arguments.as_deref(), Some("git status"));
+        assert_eq!(activity.display_target.as_deref(), Some("git status"));
+        assert_eq!(
+            activity.display_description.as_deref(),
+            Some("Check status")
+        );
+        assert_eq!(activity.output.as_deref(), Some("clean"));
     }
 
     #[test]

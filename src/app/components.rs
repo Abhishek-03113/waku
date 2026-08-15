@@ -1018,6 +1018,25 @@ pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
             }
         }
         ActivityKind::Command => {
+            if let Some(description) = activity.display_description.as_deref() {
+                return match (activity.complete, activity.failed) {
+                    (false, _) => {
+                        tr!(
+                            "activity.running_described_command",
+                            description = description
+                        )
+                    }
+                    (true, false) => {
+                        tr!("activity.ran_described_command", description = description)
+                    }
+                    (true, true) => {
+                        tr!(
+                            "activity.described_command_failed",
+                            description = description
+                        )
+                    }
+                };
+            }
             if let Some(command) = activity.display_target.as_deref() {
                 return match (activity.complete, activity.failed) {
                     (false, _) => tr!("activity.running_named_command", command = command),
@@ -1066,6 +1085,66 @@ pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
             .clone()
             .unwrap_or_else(|| activity.title.clone()),
         ActivityKind::Reasoning => activity.title.clone(),
+    }
+}
+
+pub(super) fn activity_action_label(activity: &ActivityItem) -> String {
+    use crate::model::ActivityKind;
+
+    match activity.kind {
+        ActivityKind::Reasoning => tr!("activity.action_think"),
+        ActivityKind::Command => tr!("activity.action_run"),
+        ActivityKind::FileChange => tr!("activity.action_edit"),
+        ActivityKind::FileRead => tr!("activity.action_read"),
+        ActivityKind::FileSearch | ActivityKind::Search => tr!("activity.action_search"),
+        ActivityKind::FileList => tr!("activity.action_list"),
+        ActivityKind::Plan => tr!("activity.action_plan"),
+        ActivityKind::Tool => tr!("activity.action_use"),
+    }
+}
+
+pub(super) fn activity_row_detail(activity: &ActivityItem, reasoning_live: bool) -> String {
+    use crate::model::ActivityKind;
+
+    let custom_title = || {
+        (!crate::model::is_generic_activity_title(activity.kind, &activity.title))
+            .then(|| activity.title.clone())
+    };
+    match activity.kind {
+        ActivityKind::Reasoning => activity.reasoning.as_ref().map_or_else(
+            || activity.title.clone(),
+            |reasoning| reasoning_activity_title(reasoning, reasoning_live),
+        ),
+        ActivityKind::Command => activity
+            .display_description
+            .clone()
+            .or_else(|| activity.display_target.clone())
+            .or_else(custom_title)
+            .unwrap_or_default(),
+        ActivityKind::FileChange => match activity.file_changes.as_slice() {
+            [change] => change.display_name().to_owned(),
+            changes if !changes.is_empty() => {
+                tr!("activity.file_count", count = changes.len())
+            }
+            _ => custom_title().unwrap_or_default(),
+        },
+        ActivityKind::FileRead | ActivityKind::FileList => activity
+            .display_target
+            .as_deref()
+            .map(activity_path_name)
+            .or_else(custom_title)
+            .unwrap_or_default(),
+        ActivityKind::FileSearch => activity_display_title(activity),
+        ActivityKind::Search => activity.display_target.as_deref().map_or_else(
+            || custom_title().unwrap_or_default(),
+            |query| tr!("activity.search_for", query = query),
+        ),
+        ActivityKind::Plan => custom_title().unwrap_or_default(),
+        ActivityKind::Tool => activity
+            .display_target
+            .clone()
+            .or_else(custom_title)
+            .unwrap_or_default(),
     }
 }
 
@@ -1118,6 +1197,7 @@ pub(super) fn activity_file_change_stats(activity: &ActivityItem) -> Option<(u64
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ActivityDisclosureSectionKind {
+    Command,
     Arguments,
     Output,
     Detail,
@@ -1126,6 +1206,7 @@ pub(super) enum ActivityDisclosureSectionKind {
 impl ActivityDisclosureSectionKind {
     pub(super) fn id(self) -> &'static str {
         match self {
+            Self::Command => "command",
             Self::Arguments => "arguments",
             Self::Output => "output",
             Self::Detail => "detail",
@@ -1134,6 +1215,7 @@ impl ActivityDisclosureSectionKind {
 
     pub(super) fn label(self) -> Option<String> {
         match self {
+            Self::Command => Some(tr!("activity.command_detail")),
             Self::Arguments => Some(tr!("activity.arguments")),
             Self::Output => Some(tr!("activity.output")),
             Self::Detail => None,
@@ -1151,6 +1233,37 @@ pub(super) fn activity_disclosure_sections(
     activity: &ActivityItem,
 ) -> Vec<ActivityDisclosureSection> {
     let mut sections = Vec::new();
+    if activity.kind == ActivityKind::Command {
+        if let Some(command) = activity
+            .arguments
+            .as_deref()
+            .or(activity.display_target.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(ActivityDisclosureSection {
+                kind: ActivityDisclosureSectionKind::Command,
+                content: command.to_owned(),
+            });
+        }
+        if let Some(output) = activity
+            .output
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(ActivityDisclosureSection {
+                kind: ActivityDisclosureSectionKind::Output,
+                content: output.to_owned(),
+            });
+        } else if !activity.image_urls.is_empty() {
+            sections.push(ActivityDisclosureSection {
+                kind: ActivityDisclosureSectionKind::Output,
+                content: String::new(),
+            });
+        }
+        return sections;
+    }
     if let Some(arguments) = activity
         .arguments
         .as_deref()
@@ -1345,6 +1458,39 @@ mod message_time_tests {
     }
 
     #[test]
+    fn command_disclosure_shows_only_the_command_and_output() {
+        let activity = ActivityItem::new(
+            Some("command-1".into()),
+            crate::model::ActivityKind::Command,
+            "bash",
+            Some("Completed".into()),
+            true,
+        )
+        .with_arguments(Some(
+            r#"{"command":"git status --short","description":"Check status"}"#.into(),
+        ))
+        .with_output(Some("clean".into()));
+
+        assert_eq!(
+            activity_disclosure_sections(&activity),
+            vec![
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Command,
+                    content: "git status --short".into(),
+                },
+                ActivityDisclosureSection {
+                    kind: ActivityDisclosureSectionKind::Output,
+                    content: "clean".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            activity_disclosure_text(&activity).as_deref(),
+            Some("Command\ngit status --short\n\nOutput\nclean")
+        );
+    }
+
+    #[test]
     fn activity_display_title_prefers_the_human_facing_tool_argument() {
         let titled = ActivityItem::new(
             Some("tool-1".into()),
@@ -1403,6 +1549,11 @@ mod message_time_tests {
         assert_eq!(
             activity_header_title(&activities, false, None),
             "Ran 1 thought · 1 command"
+        );
+        assert_eq!(activity_action_label(&activities[1]), "Run");
+        assert_eq!(
+            activity_row_detail(&activities[1], false),
+            "git log --oneline -15"
         );
     }
 
@@ -1514,7 +1665,7 @@ mod message_time_tests {
 
     #[test]
     fn command_web_search_and_plan_titles_include_their_state() {
-        let command = ActivityItem::new(
+        let mut command = ActivityItem::new(
             Some("command-1".into()),
             crate::model::ActivityKind::Command,
             "bash",
@@ -1528,7 +1679,15 @@ mod message_time_tests {
             })
             .to_string(),
         ));
-        assert_eq!(activity_display_title(&command), "Ran cargo test activity");
+        assert_eq!(
+            activity_display_title(&command),
+            "Ran command: Run focused tests"
+        );
+        command.complete = false;
+        assert_eq!(
+            activity_display_title(&command),
+            "Running command: Run focused tests"
+        );
 
         let web_search = ActivityItem::new(
             Some("search-1".into()),

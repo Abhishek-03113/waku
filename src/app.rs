@@ -30,12 +30,13 @@ use crate::git_branch::BranchSnapshot;
 use crate::input::{ComposerAttachmentPaste, ComposerEvent, ComposerInput};
 use crate::md;
 use crate::model::{
-    ActivityItem, AgentSession, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
-    BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus, ContextUsage,
-    DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole,
-    PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
-    QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
-    TurnStatus, UserInputAnswer, UserInputQuestion, compact_path, unix_time, unix_time_millis,
+    ActivityItem, ActivityKind, AgentSession, BackgroundWorkEvent, BackgroundWorkItem,
+    BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus,
+    ContextUsage, DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment,
+    MessageRole, PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe,
+    ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
+    SessionWorkspace, TranscriptBlock, TurnStatus, UserInputAnswer, UserInputQuestion,
+    compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -900,6 +901,27 @@ struct PendingSessionActivation {
     transition: SessionActivationTransition,
 }
 
+#[derive(Clone)]
+struct ActivityScrollViewport {
+    scroll_handle: ScrollHandle,
+    scrollbar: Rc<ScrollbarState>,
+    follow_tail: Rc<Cell<bool>>,
+    last_scrolled: Rc<Cell<Option<Pixels>>>,
+    last_max_offset: Rc<Cell<Option<Pixels>>>,
+}
+
+impl Default for ActivityScrollViewport {
+    fn default() -> Self {
+        Self {
+            scroll_handle: ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
+            follow_tail: Rc::new(Cell::new(true)),
+            last_scrolled: Rc::new(Cell::new(None)),
+            last_max_offset: Rc::new(Cell::new(None)),
+        }
+    }
+}
+
 pub struct Waku {
     /// Owns the headless provider process for exactly as long as the desktop
     /// app entity. Debug builds can replace it independently after a rebuild;
@@ -1327,6 +1349,9 @@ pub struct Waku {
     message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
     /// Parsed markdown for reasoning activities, keyed by stable activity id.
     activity_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// Independent capped viewports for expanded thoughts and command output.
+    /// Keeping these stable preserves scroll position through virtualization.
+    activity_scroll_viewports: RefCell<HashMap<Uuid, ActivityScrollViewport>>,
     /// One allocation for every transcript markdown context to share. The
     /// callback knows about the active workspace; the renderer deliberately
     /// does not.
@@ -2615,6 +2640,7 @@ impl Waku {
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),
                 activity_markdown: RefCell::new(HashMap::new()),
+                activity_scroll_viewports: RefCell::new(HashMap::new()),
                 markdown_link_handler,
                 transcript_selection: TranscriptSelection::default(),
                 toast_selection: TranscriptSelection::default(),

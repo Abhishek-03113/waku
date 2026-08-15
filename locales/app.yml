@@ -560,6 +560,22 @@ activity.named_content:
   en: "%{name} content"
 activity.ran:
   en: Ran %{activities}
+activity.action_think:
+  en: Think
+activity.action_run:
+  en: Run
+activity.action_edit:
+  en: Edit
+activity.action_read:
+  en: Read
+activity.action_search:
+  en: Search
+activity.action_list:
+  en: List
+activity.action_plan:
+  en: Plan
+activity.action_use:
+  en: Use
 activity.arguments:
   en: Arguments
 activity.output:
@@ -600,6 +616,12 @@ activity.ran_named_command:
   en: Ran %{command}
 activity.named_command_failed:
   en: "Command failed: %{command}"
+activity.running_described_command:
+  en: "Running command: %{description}"
+activity.ran_described_command:
+  en: "Ran command: %{description}"
+activity.described_command_failed:
+  en: "Command failed: %{description}"
 activity.running_command:
   en: Running command
 activity.ran_command:
@@ -700,6 +722,8 @@ activity.thoughts:
   en: thoughts
 activity.command:
   en: command
+activity.command_detail:
+  en: Command
 activity.commands:
   en: commands
 activity.file_edit:

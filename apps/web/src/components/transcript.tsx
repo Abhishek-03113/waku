@@ -5,7 +5,7 @@ import type {
   ReviewDiffSource,
 } from '@waku/client'
 import { ContextMenu } from '@base-ui/react/context-menu'
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { Virtuoso, type ListItem, type VirtuosoHandle } from 'react-virtuoso'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -21,11 +21,13 @@ import type {
   BackgroundWorkStatus,
 } from '@/lib/runtime-context'
 import {
+  activityActionLabel,
   activityDisclosureSections,
   activityDisplayTitle,
   activityFileChangeStats,
   activityHeaderTitle,
   activityPreview,
+  activityRowDetail,
   activityTextRows,
   assistantResponseFooters,
   fencedCode,
@@ -1410,18 +1412,18 @@ function ActivityGroup({
   }, [running, liveTurn])
   if (!activities.length) return null
   return (
-    <div className="min-w-0 text-[11.5px] text-[var(--text-tertiary)]">
+    <div className="min-w-0 text-[12px] text-[var(--text-tertiary)]">
       <button
         aria-expanded={expanded}
-        className="flex h-[22px] w-full min-w-0 items-center gap-1.5 rounded px-0.5 outline-none hover:text-[var(--text-secondary)] focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
         type="button"
         onClick={() => setExpanded((value) => !value)}
       >
-        <span className="min-w-0 truncate text-left font-medium">{activityHeaderTitle(activities, liveTurn, t)}</span>
-        <WakuIcon className="size-3 shrink-0" name={expanded ? 'chevronDown' : 'chevronRight'} />
+        <span className="min-w-0 truncate text-left text-[12.5px] font-medium text-[var(--text-secondary)]">{activityHeaderTitle(activities, liveTurn, t)}</span>
+        <WakuIcon className="size-2.5 shrink-0" name={expanded ? 'chevronDown' : 'chevronRight'} />
       </button>
       {expanded && (
-        <div className="flex min-w-0 flex-col pl-[15px]">
+        <div className="ml-1.5 flex min-w-0 flex-col gap-2 border-l pb-0.5 pl-3">
           {activities.map((activity) => (
             <ActivityRow
               activity={activity}
@@ -1455,41 +1457,68 @@ function ActivityRow({
   const hasDetail = Boolean(reasoningContent || sections.length)
   const [expanded, setExpanded] = useState(Boolean(activity.reasoning && !activity.complete))
   const iconName = activityIcon(activity)
-  const title = activity.reasoning ? reasoningTitle(activity, t) : activityDisplayTitle(activity, t)
   const preview = expanded || activity.reasoning ? '' : activityPreview(activity, t)
+  const actionLabel = activityActionLabel(activity, t)
+  const rowDetail = activityRowDetail(activity, t) || preview
   const fileStats = activityFileChangeStats(activity)
+  const scrollContent = reasoningContent || (activity.kind === 'command'
+    ? sections.find((section) => section.kind === 'output')?.content ?? ''
+    : '')
+  const detailScroll = useRef<HTMLDivElement>(null)
+  const detailFollowsTail = useRef(true)
+  const [detailEdges, setDetailEdges] = useState({ atTop: true, atBottom: true })
+  const updateDetailEdges = useCallback((viewport: HTMLDivElement) => {
+    const atTop = viewport.scrollTop <= 1
+    const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 1
+    detailFollowsTail.current = atBottom
+    setDetailEdges((current) => (
+      current.atTop === atTop && current.atBottom === atBottom
+        ? current
+        : { atTop, atBottom }
+    ))
+  }, [])
+  useEffect(() => {
+    if (!expanded || !scrollContent) return
+    const viewport = detailScroll.current
+    if (!viewport) return
+    if (!activity.complete && detailFollowsTail.current) {
+      viewport.scrollTop = viewport.scrollHeight
+    }
+    updateDetailEdges(viewport)
+  }, [activity.complete, expanded, scrollContent, updateDetailEdges])
   return (
-    <div className="min-w-0">
-      <div className="flex min-h-6 w-full min-w-0 items-center">
+    <div className="min-w-0 overflow-hidden rounded-[9px] border bg-[var(--activity-surface)]">
+      <div className="flex h-7 w-full min-w-0 items-center">
         <button
           aria-expanded={hasDetail ? expanded : undefined}
           className={cn(
-            'flex min-h-6 min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-0.5 text-left outline-none',
-            hasDetail && 'hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring',
+            'flex h-7 min-w-0 flex-1 items-center gap-2 px-2 text-left outline-none',
+            expanded ? 'rounded-t-[8px]' : 'rounded-[8px]',
+            hasDetail && 'hover:bg-[var(--activity-hover-surface)] active:bg-[var(--activity-active-surface)] focus-visible:bg-[var(--activity-hover-surface)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
           )}
           disabled={!hasDetail}
           type="button"
           onClick={() => setExpanded((value) => !value)}
         >
-          <WakuIcon className="size-[11px] shrink-0" name={iconName} />
-          <span className="flex max-w-[300px] shrink-0 items-center gap-1 truncate text-[var(--text-secondary)]">
-            {title}
-            {fileStats && (
-              <>
-                <span className="shrink-0 text-[var(--success)]">+{fileStats.additions}</span>
-                <span className="shrink-0 text-destructive">-{fileStats.deletions}</span>
-              </>
-            )}
-          </span>
-          <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-ghost)]">
-            {preview}
-          </span>
-          <ActivityState activity={activity} t={t} />
+          <WakuIcon className="size-3 shrink-0 text-[var(--text-tertiary)]" name={iconName} />
+          <span className="shrink-0 font-semibold text-[var(--text-secondary)]">{actionLabel}</span>
+          {rowDetail && (
+            <span className="min-w-0 flex-1 truncate text-[var(--text-secondary)]">
+              {rowDetail}
+            </span>
+          )}
+          {fileStats && (
+            <>
+              <span className="shrink-0 text-[var(--success)]">+{fileStats.additions}</span>
+              <span className="shrink-0 text-destructive">-{fileStats.deletions}</span>
+            </>
+          )}
+          <ActivityState activity={activity} expanded={expanded} hasDetail={hasDetail} t={t} />
         </button>
         {backgroundWork && onOpenBackgroundWork && (
           <button
             className={cn(
-              'ml-1 flex h-5 shrink-0 items-center rounded-[5px] border px-1.5 text-[9.5px] outline-none hover:bg-accent focus-visible:border-ring',
+              'mr-2 flex h-5 shrink-0 items-center rounded-[5px] border px-1.5 text-[9.5px] outline-none hover:bg-accent focus-visible:border-ring',
               backgroundWorkStatusClass(backgroundWork.status),
             )}
             type="button"
@@ -1504,11 +1533,28 @@ function ActivityRow({
       </div>
       {expanded && hasDetail && (
         activity.reasoning ? (
-          <div className="px-1 pb-2 text-[var(--text-tertiary)]"><Markdown text={reasoningContent} /></div>
+          <div className="border-t">
+            <ActivityScrollableContent
+              className="px-3 py-2 text-[var(--text-secondary)]"
+              edges={detailEdges}
+              viewportRef={detailScroll}
+              onScroll={updateDetailEdges}
+            >
+              <Markdown text={reasoningContent} />
+            </ActivityScrollableContent>
+          </div>
         ) : (
-          <div className="mb-1 ml-[21px] mr-1 mt-0.5 flex min-w-0 flex-col gap-2 overflow-hidden rounded-[7px] border bg-[var(--inset)] p-2 font-mono text-[10.5px] leading-4 text-[var(--text-secondary)]">
+          <div className="flex min-w-0 flex-col gap-2 overflow-hidden border-t px-3 py-2 font-mono text-[10.5px] leading-4 text-[var(--text-secondary)]">
             {sections.map((section) => (
-              <ActivitySection key={section.kind} section={section} t={t} />
+              <ActivitySection
+                edges={detailEdges}
+                key={section.kind}
+                scrollable={activity.kind === 'command' && section.kind === 'output'}
+                section={section}
+                t={t}
+                viewportRef={detailScroll}
+                onScroll={updateDetailEdges}
+              />
             ))}
             {activity.image_urls?.map((url, index) => (
               <ActivityImage key={`${url}-${index}`} reference={url} t={t} />
@@ -1516,6 +1562,51 @@ function ActivityRow({
           </div>
         )
       )}
+    </div>
+  )
+}
+
+type ActivityScrollEdges = { atTop: boolean; atBottom: boolean }
+
+function ActivityScrollableContent({
+  children,
+  className,
+  edges,
+  viewportRef,
+  onScroll,
+}: {
+  children: ReactNode
+  className?: string
+  edges: ActivityScrollEdges
+  viewportRef: RefObject<HTMLDivElement | null>
+  onScroll: (viewport: HTMLDivElement) => void
+}) {
+  return (
+    <div className="relative min-w-0 overflow-hidden">
+      <div
+        className={cn(
+          'activity-detail-scroll max-h-[400px] min-w-0 overflow-y-auto overscroll-contain',
+          className,
+        )}
+        onScroll={(event) => onScroll(event.currentTarget)}
+        ref={viewportRef}
+      >
+        {children}
+      </div>
+      <div
+        aria-hidden="true"
+        className={cn(
+          'pointer-events-none absolute left-0 right-2 top-0 h-5 bg-gradient-to-b from-[var(--activity-surface)] to-transparent transition-opacity motion-reduce:transition-none',
+          edges.atTop ? 'opacity-0' : 'opacity-100',
+        )}
+      />
+      <div
+        aria-hidden="true"
+        className={cn(
+          'pointer-events-none absolute bottom-0 left-0 right-2 h-5 bg-gradient-to-t from-[var(--activity-surface)] to-transparent transition-opacity motion-reduce:transition-none',
+          edges.atBottom ? 'opacity-0' : 'opacity-100',
+        )}
+      />
     </div>
   )
 }
@@ -1530,11 +1621,19 @@ function backgroundWorkStatusClass(status: BackgroundWorkStatus) {
 }
 
 function ActivitySection({
+  edges,
+  scrollable,
   section,
   t,
+  viewportRef,
+  onScroll,
 }: {
+  edges: ActivityScrollEdges
+  scrollable: boolean
   section: ReturnType<typeof activityDisclosureSections>[number]
   t: Translator
+  viewportRef: RefObject<HTMLDivElement | null>
+  onScroll: (viewport: HTMLDivElement) => void
 }) {
   const [copied, setCopied] = useState(false)
   const copiedTimeout = useRef<number | null>(null)
@@ -1569,7 +1668,24 @@ function ActivitySection({
         </div>
       )}
       {section.content && (
-        <ActivitySectionText content={section.content} label={section.label} t={t} />
+        scrollable ? (
+          <ActivityScrollableContent
+            className="py-1 pr-2"
+            edges={edges}
+            viewportRef={viewportRef}
+            onScroll={onScroll}
+          >
+            <pre className="min-w-0 whitespace-pre-wrap break-words font-mono text-[10.5px] leading-4">
+              {section.content}
+            </pre>
+          </ActivityScrollableContent>
+        ) : section.kind === 'command' ? (
+          <pre className="min-w-0 whitespace-pre-wrap break-words font-mono text-[10.5px] leading-4">
+            {section.content}
+          </pre>
+        ) : (
+          <ActivitySectionText content={section.content} label={section.label} t={t} />
+        )
       )}
     </div>
   )
@@ -1608,10 +1724,21 @@ function ActivitySectionText({
   )
 }
 
-function ActivityState({ activity, t }: { activity: ActivityItem; t: Translator }) {
+function ActivityState({
+  activity,
+  expanded,
+  hasDetail,
+  t,
+}: {
+  activity: ActivityItem
+  expanded: boolean
+  hasDetail: boolean
+  t: Translator
+}) {
+  if (hasDetail) return <WakuIcon className="size-2.5 text-[var(--text-tertiary)]" name={expanded ? 'chevronDown' : 'chevronRight'} />
   if (activity.reasoning) return null
   if (activity.failed) return <WakuIcon label={t('background.status.failed')} className="size-3 text-destructive" name="alert" />
-  if (activity.complete) return <WakuIcon label={t('background.status.completed')} className="size-3 text-[var(--text-ghost)]" name="check" />
+  if (activity.complete) return null
   return <span aria-label={t('background.status.running')} className="size-1.5 rounded-full bg-ring motion-safe:animate-pulse" role="img" />
 }
 

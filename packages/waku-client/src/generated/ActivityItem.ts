@@ -21,6 +21,12 @@ file_changes?: Array<ActivityFileChange>,
  */
 display_target?: string | null,
 /**
+ * Human-authored command description prepared from native tool input.
+ * This stays separate from `display_target` so the UI can prefer a short
+ * label without discarding the raw command used by detail views.
+ */
+display_description?: string | null,
+/**
  * Native model reasoning carried by the same ordered activity stream as
  * tool work. Generic provider `think` tools can still use the ordinary
  * activity fields and leave this empty.

@@ -125,6 +125,7 @@ export function reduceRuntimeEvent(
           complete: value.complete === true,
           file_changes: [],
           display_target: null,
+          display_description: null,
           reasoning: null,
         },
         clock,
@@ -295,6 +296,7 @@ function appendReasoning(session: AgentSession, delta: string, clock: ReducerClo
     complete: false,
     file_changes: [],
     display_target: null,
+    display_description: null,
     reasoning: { content: delta, started_at_ms: now, finished_at_ms: now },
   })
 }
@@ -325,6 +327,7 @@ function upsertActivity(
         ? incoming.file_changes
         : matching.file_changes,
       display_target: incoming.display_target ?? matching.display_target,
+      display_description: incoming.display_description ?? matching.display_description,
       reasoning: incoming.reasoning ?? matching.reasoning,
     })
     return
@@ -421,6 +424,7 @@ export function activitiesForBlock(block: TranscriptBlock): ActivityItem[] {
       complete: true,
       file_changes: [],
       display_target: null,
+      display_description: null,
       reasoning,
     },
   ]

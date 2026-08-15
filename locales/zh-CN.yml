@@ -271,6 +271,14 @@ activity.running: 正在执行：%{activities}
 activity.detail: 活动详情
 activity.named_content: "%{name}内容"
 activity.ran: 已执行：%{activities}
+activity.action_think: 思考
+activity.action_run: 运行
+activity.action_edit: 编辑
+activity.action_read: 读取
+activity.action_search: 搜索
+activity.action_list: 列出
+activity.action_plan: 计划
+activity.action_use: 使用
 activity.arguments: 参数
 activity.output: 输出
 activity.image_output: 图片输出
@@ -291,6 +299,9 @@ activity.run_command: 运行命令
 activity.running_named_command: 正在运行 %{command}
 activity.ran_named_command: 已运行 %{command}
 activity.named_command_failed: "命令执行失败：%{command}"
+activity.running_described_command: "正在运行命令：%{description}"
+activity.ran_described_command: "已运行命令：%{description}"
+activity.described_command_failed: "命令执行失败：%{description}"
 activity.running_command: 正在运行命令
 activity.ran_command: 已运行命令
 activity.command_failed: 命令执行失败
@@ -341,6 +352,7 @@ activity.output_truncated: "\n\n… 输出已截断"
 activity.thought: 思考
 activity.thoughts: 思考
 activity.command: 命令
+activity.command_detail: 命令
 activity.commands: 命令
 activity.file_edit: 文件修改
 activity.file_edits: 文件修改

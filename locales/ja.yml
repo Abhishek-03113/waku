@@ -289,6 +289,14 @@ activity.running: 実行中：%{activities}
 activity.detail: アクティビティの詳細
 activity.named_content: "%{name} の内容"
 activity.ran: 実行済み：%{activities}
+activity.action_think: 思考
+activity.action_run: 実行
+activity.action_edit: 編集
+activity.action_read: 読み込み
+activity.action_search: 検索
+activity.action_list: 一覧
+activity.action_plan: 計画
+activity.action_use: 使用
 activity.arguments: 引数
 activity.output: 出力
 activity.image_output: 画像出力
@@ -309,6 +317,9 @@ activity.run_command: コマンドを実行
 activity.running_named_command: "%{command} を実行中"
 activity.ran_named_command: "%{command} を実行しました"
 activity.named_command_failed: "コマンドの実行に失敗しました：%{command}"
+activity.running_described_command: "コマンドを実行中：%{description}"
+activity.ran_described_command: "コマンドを実行しました：%{description}"
+activity.described_command_failed: "コマンドの実行に失敗しました：%{description}"
 activity.running_command: コマンドを実行中
 activity.ran_command: コマンドを実行しました
 activity.command_failed: コマンドの実行に失敗しました
@@ -359,6 +370,7 @@ activity.output_truncated: "\n\n… 出力は省略されました"
 activity.thought: 思考
 activity.thoughts: 思考
 activity.command: コマンド
+activity.command_detail: コマンド
 activity.commands: コマンド
 activity.file_edit: ファイル編集
 activity.file_edits: ファイル編集

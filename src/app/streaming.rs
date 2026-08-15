@@ -144,6 +144,11 @@ impl Waku {
                     {
                         activity.display_target = item.display_target;
                     }
+                    if item.display_description.is_some()
+                        && (activity.display_description.is_none() || has_arguments)
+                    {
+                        activity.display_description = item.display_description;
+                    }
                     if item.reasoning.is_some() {
                         activity.reasoning = item.reasoning;
                     }

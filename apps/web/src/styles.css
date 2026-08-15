@@ -78,6 +78,9 @@
   --text-secondary: #666666;
   --text-tertiary: #858585;
   --text-ghost: #a4a4a4;
+  --activity-surface: color-mix(in srgb, var(--background) 96.5%, var(--foreground) 3.5%);
+  --activity-hover-surface: color-mix(in srgb, var(--background) 95%, var(--foreground) 5%);
+  --activity-active-surface: color-mix(in srgb, var(--background) 93.5%, var(--foreground) 6.5%);
   --success: #2f8f52;
   --warning: #a66b20;
   --provider-codex: #34363b;
@@ -119,6 +122,9 @@
   --text-secondary: #a3a3a3;
   --text-tertiary: #7d7d7d;
   --text-ghost: #575757;
+  --activity-surface: color-mix(in srgb, var(--background) 96.5%, var(--foreground) 3.5%);
+  --activity-hover-surface: color-mix(in srgb, var(--background) 95%, var(--foreground) 5%);
+  --activity-active-surface: color-mix(in srgb, var(--background) 93.5%, var(--foreground) 6.5%);
   --success: #62c987;
   --warning: #e0b36a;
   --provider-codex: #f3f3f3;
@@ -174,6 +180,23 @@
   display: none;
   width: 0;
   height: 0;
+}
+
+.activity-detail-scroll {
+  scrollbar-color: var(--text-ghost) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.activity-detail-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.activity-detail-scroll::-webkit-scrollbar-thumb {
+  background: var(--text-ghost);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
 }
 
 .waku-terminal.wterm {

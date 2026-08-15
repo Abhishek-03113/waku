@@ -1620,30 +1620,36 @@ impl Waku {
         })
         .flatten();
         let header_title = activity_header_title(activities, live_turn, live_reasoning_id);
+        let header_focus =
+            self.transcript_control_focus(format!("activity-toggle-{block_index}"), cx);
         let cluster = div()
             .w_full()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(px(4.0))
             .child(
                 div()
                     .id(SharedString::from(format!("activity-toggle-{block_index}")))
+                    .track_focus(&header_focus)
+                    .tab_index(0)
                     .w_full()
                     .min_w_0()
-                    .h(px(22.0))
+                    .h(px(26.0))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(11.0))
-                    .line_height(px(14.0))
+                    .text_size(px(12.5))
+                    .line_height(px(16.0))
                     .cursor_default()
+                    .focus_visible(|style| style.text_color(theme.text))
+                    .hover(|style| style.text_color(theme.text))
                     .child(
                         div()
                             .min_w_0()
                             .truncate()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_tertiary)
+                            .text_color(theme.text_secondary)
                             .child(SharedString::from(header_title)),
                     )
                     .child(icon(
@@ -1652,17 +1658,37 @@ impl Waku {
                         } else {
                             "icons/chevron-right.svg"
                         },
-                        9.0,
-                        theme.text_ghost,
+                        10.0,
+                        theme.text_tertiary,
                     ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_activities(block_index, expanded, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.toggle_activities(block_index, expanded, cx);
+                            cx.stop_propagation();
+                        }
                     })),
             );
         if !expanded {
             return cluster.into_any_element();
         }
-        let mut items = div().w_full().min_w_0().flex().flex_col().pl(px(15.0));
+        // `Theme::overlay` is 5% alpha and GPUI's `opacity` multiplies it.
+        let activity_surface = theme.surface.blend(theme.overlay.opacity(0.7));
+        let activity_hover_surface = theme.surface.blend(theme.overlay);
+        let activity_active_surface = theme.surface.blend(theme.overlay_strong.opacity(0.72));
+        let mut items = div()
+            .w_full()
+            .min_w_0()
+            .ml(px(6.0))
+            .pl(px(12.0))
+            .pb(px(2.0))
+            .border_l_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(8.0));
         for activity in activities {
             let id = activity.id;
             let background_work = self
@@ -1719,10 +1745,11 @@ impl Waku {
             } else {
                 activity_preview(activity)
             };
-            let display_title = reasoning.map_or_else(
-                || activity_display_title(activity),
-                |reasoning| reasoning_activity_title(reasoning, reasoning_live),
-            );
+            let action_label = activity_action_label(activity);
+            let mut row_detail = activity_row_detail(activity, reasoning_live);
+            if row_detail.trim().is_empty() {
+                row_detail = preview;
+            }
             let file_change_stats = activity_file_change_stats(activity);
             let has_detail = reasoning
                 .is_some_and(|reasoning| !reasoning.content.trim().is_empty())
@@ -1733,107 +1760,186 @@ impl Waku {
                     .get(&id)
                     .copied()
                     .unwrap_or(reasoning_live);
-            let mut item = div().flex().flex_col().child(
-                div()
-                    .id(SharedString::from(format!("activity-item-{id}")))
-                    .min_h(px(24.0))
-                    .px(px(4.0))
-                    .py(px(2.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(11.5))
-                    .line_height(px(14.0))
-                    .when(has_detail, |element| {
-                        element
-                            .cursor_default()
-                            .hover(|element| element.bg(theme.overlay))
-                            .active(|element| element.bg(theme.overlay_strong))
-                    })
-                    .child(icon(
-                        activity_icon(activity.kind),
-                        11.0,
-                        theme.text_tertiary,
-                    ))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(300.0))
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.0))
-                            .child(
+            let item_focus = self.transcript_control_focus(format!("activity-item-{id}"), cx);
+            let mut item = div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .rounded(px(9.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(activity_surface)
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("activity-item-{id}")))
+                        // The parent owns a 1px border on each edge, so a
+                        // 28px row makes the visible activity header 30px.
+                        .h(px(28.0))
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .rounded_tl(px(8.0))
+                        .rounded_tr(px(8.0))
+                        .when(!item_expanded, |element| {
+                            element.rounded_bl(px(8.0)).rounded_br(px(8.0))
+                        })
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .when(has_detail, |element| {
+                            element
+                                .track_focus(&item_focus)
+                                .tab_index(0)
+                                .cursor_default()
+                                .focus_visible(|element| element.bg(activity_hover_surface))
+                                .hover(|element| element.bg(activity_hover_surface))
+                                .active(|element| element.bg(activity_active_surface))
+                        })
+                        .child(icon(
+                            activity_icon(activity.kind),
+                            12.0,
+                            theme.text_tertiary,
+                        ))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_secondary)
+                                .child(SharedString::from(action_label)),
+                        )
+                        .when(!row_detail.is_empty(), |element| {
+                            element.child(
                                 div()
+                                    .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .text_color(theme.text_secondary)
-                                    .child(SharedString::from(display_title)),
+                                    .child(SharedString::from(row_detail)),
                             )
-                            .when_some(file_change_stats, |title, (additions, deletions)| {
-                                title
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(theme.success)
-                                            .child(SharedString::from(format!("+{additions}"))),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(theme.danger)
-                                            .child(SharedString::from(format!("-{deletions}"))),
-                                    )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_ghost)
-                            .when(item_expanded, |element| element.invisible())
-                            .child(SharedString::from(preview)),
-                    )
-                    .children(background_badge)
-                    .when(reasoning.is_none(), |element| {
-                        element.child(if activity.failed {
-                            icon("icons/x.svg", 10.0, theme.danger).into_any_element()
-                        } else if activity.complete {
-                            icon("icons/check.svg", 10.0, theme.text_ghost).into_any_element()
-                        } else {
-                            pulse_dot(format!("activity-pulse-{id}"), 5.0, theme.accent)
                         })
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if has_detail {
-                            this.toggle_activity_item(id, item_expanded, cx);
-                        }
-                    })),
-            );
+                        .when_some(file_change_stats, |row, (additions, deletions)| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.success)
+                                    .child(SharedString::from(format!("+{additions}"))),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.danger)
+                                    .child(SharedString::from(format!("-{deletions}"))),
+                            )
+                        })
+                        .children(background_badge)
+                        .when(has_detail, |element| {
+                            element.child(icon(
+                                if item_expanded {
+                                    "icons/chevron-down.svg"
+                                } else {
+                                    "icons/chevron-right.svg"
+                                },
+                                10.0,
+                                theme.text_tertiary,
+                            ))
+                        })
+                        .when(!has_detail && reasoning.is_none(), |element| {
+                            element
+                                .when(activity.failed, |element| {
+                                    element.child(
+                                        icon("icons/x.svg", 10.0, theme.danger).into_any_element(),
+                                    )
+                                })
+                                .when(!activity.complete && !activity.failed, |element| {
+                                    element.child(pulse_dot(
+                                        format!("activity-pulse-{id}"),
+                                        5.0,
+                                        theme.accent,
+                                    ))
+                                })
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if has_detail {
+                                this.toggle_activity_item(id, item_expanded, cx);
+                            }
+                        }))
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                            if has_detail
+                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            {
+                                this.toggle_activity_item(id, item_expanded, cx);
+                                cx.stop_propagation();
+                            }
+                        })),
+                );
             if item_expanded && let Some(reasoning) = reasoning {
                 // Reasoning remains model prose even though it now shares the
                 // activity stream, so keep selectable markdown rather than
                 // presenting it as monospace tool output.
                 let mut palette = MarkdownPalette::from_theme(theme);
-                palette.text = theme.text_tertiary;
+                palette.text = theme.text_secondary;
                 palette.secondary = theme.text_tertiary;
                 let ctx = self.markdown_ctx(
                     format!("reasoning-{id}"),
                     &palette,
                     MarkdownMetrics::COMPACT,
                 );
+                let reasoning_viewport = self
+                    .activity_scroll_viewports
+                    .borrow_mut()
+                    .entry(id)
+                    .or_default()
+                    .clone();
                 let mut views = self.activity_markdown.borrow_mut();
                 let view = views.entry(id).or_default();
                 view.set_text(&reasoning.content, reasoning_live);
+                let wheel_scroll = reasoning_viewport.scroll_handle.clone();
+                let wheel_follow_tail = reasoning_viewport.follow_tail.clone();
                 item = item.child(
                     div()
                         .w_full()
                         .min_w_0()
-                        .px(px(4.0))
-                        .children(md::render::markdown(view, &ctx)),
+                        .relative()
+                        .max_h(px(400.0))
+                        .overflow_hidden()
+                        .border_t_1()
+                        .border_color(theme.border_strong)
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("reasoning-scroll-{id}")))
+                                .w_full()
+                                .min_w_0()
+                                .max_h(px(400.0))
+                                .overflow_y_scroll()
+                                .track_scroll(&reasoning_viewport.scroll_handle)
+                                .px(px(12.0))
+                                .py(px(8.0))
+                                .children(md::render::markdown(view, &ctx))
+                                .on_scroll_wheel(move |_, window, cx| {
+                                    let scroll = wheel_scroll.clone();
+                                    let follow_tail = wheel_follow_tail.clone();
+                                    window.defer(cx, move |_, _| {
+                                        follow_tail.set(activity_scroll_at_bottom(&scroll));
+                                    });
+                                }),
+                        )
+                        .child(activity_scroll_fade(
+                            reasoning_viewport.scroll_handle.clone(),
+                            ActivityScrollFadeSide::Top,
+                            activity_surface,
+                        ))
+                        .child(activity_scroll_fade(
+                            reasoning_viewport.scroll_handle.clone(),
+                            ActivityScrollFadeSide::Bottom,
+                            activity_surface,
+                        ))
+                        .child(scrollbar::vertical(
+                            &reasoning_viewport.scroll_handle,
+                            &reasoning_viewport.scrollbar,
+                        ))
+                        .child(activity_scroll_guard(reasoning_viewport, reasoning_live)),
                 );
             }
             if item_expanded && reasoning.is_none() {
@@ -1841,16 +1947,12 @@ impl Waku {
                 let ctx =
                     self.markdown_ctx(format!("activity-{id}"), &palette, MarkdownMetrics::COMPACT);
                 let mut detail_card = div()
-                    .ml(px(21.0))
-                    .mr(px(4.0))
+                    .w_full()
                     .min_w_0()
-                    .mt(px(2.0))
-                    .mb(px(4.0))
-                    .p(px(8.0))
-                    .rounded(px(7.0))
-                    .bg(theme.inset)
-                    .border_1()
-                    .border_color(theme.border)
+                    .border_t_1()
+                    .border_color(theme.border_strong)
+                    .px(px(12.0))
+                    .py(px(8.0))
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -1929,20 +2031,89 @@ impl Waku {
                         );
                     }
                     if !content.is_empty() {
-                        section_view = section_view.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .text_size(px(10.5))
-                                .line_height(px(16.0))
-                                .child(md::render::plain_text(
-                                    content.clone(),
-                                    md::render::MONO_FAMILY,
-                                    FontWeight::NORMAL,
-                                    theme.text_secondary,
-                                    &ctx,
-                                )),
-                        );
+                        if activity.kind == ActivityKind::Command
+                            && section_kind == ActivityDisclosureSectionKind::Output
+                        {
+                            let output_viewport = self
+                                .activity_scroll_viewports
+                                .borrow_mut()
+                                .entry(id)
+                                .or_default()
+                                .clone();
+                            let wheel_scroll = output_viewport.scroll_handle.clone();
+                            let wheel_follow_tail = output_viewport.follow_tail.clone();
+                            section_view = section_view.child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .relative()
+                                    .max_h(px(400.0))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "activity-output-scroll-{id}"
+                                            )))
+                                            .w_full()
+                                            .min_w_0()
+                                            .max_h(px(400.0))
+                                            .overflow_y_scroll()
+                                            .track_scroll(&output_viewport.scroll_handle)
+                                            .py(px(4.0))
+                                            .pr(px(8.0))
+                                            .text_size(px(10.5))
+                                            .line_height(px(16.0))
+                                            .child(md::render::plain_text(
+                                                content.clone(),
+                                                md::render::MONO_FAMILY,
+                                                FontWeight::NORMAL,
+                                                theme.text_secondary,
+                                                &ctx,
+                                            ))
+                                            .on_scroll_wheel(move |_, window, cx| {
+                                                let scroll = wheel_scroll.clone();
+                                                let follow_tail = wheel_follow_tail.clone();
+                                                window.defer(cx, move |_, _| {
+                                                    follow_tail
+                                                        .set(activity_scroll_at_bottom(&scroll));
+                                                });
+                                            }),
+                                    )
+                                    .child(activity_scroll_fade(
+                                        output_viewport.scroll_handle.clone(),
+                                        ActivityScrollFadeSide::Top,
+                                        activity_surface,
+                                    ))
+                                    .child(activity_scroll_fade(
+                                        output_viewport.scroll_handle.clone(),
+                                        ActivityScrollFadeSide::Bottom,
+                                        activity_surface,
+                                    ))
+                                    .child(scrollbar::vertical(
+                                        &output_viewport.scroll_handle,
+                                        &output_viewport.scrollbar,
+                                    ))
+                                    .child(activity_scroll_guard(
+                                        output_viewport,
+                                        !activity.complete,
+                                    )),
+                            );
+                        } else {
+                            section_view = section_view.child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .text_size(px(10.5))
+                                    .line_height(px(16.0))
+                                    .child(md::render::plain_text(
+                                        content.clone(),
+                                        md::render::MONO_FAMILY,
+                                        FontWeight::NORMAL,
+                                        theme.text_secondary,
+                                        &ctx,
+                                    )),
+                            );
+                        }
                     }
                     detail_card = detail_card.child(section_view);
                 }
@@ -1962,6 +2133,113 @@ impl Waku {
         }
         cluster.child(items).into_any_element()
     }
+}
+
+#[derive(Clone, Copy)]
+enum ActivityScrollFadeSide {
+    Top,
+    Bottom,
+}
+
+fn activity_scroll_at_bottom(scroll: &ScrollHandle) -> bool {
+    let scrolled = -scroll.offset().y;
+    scroll.max_offset().y - scrolled <= px(0.5)
+}
+
+fn activity_scroll_follow_state(
+    following: bool,
+    previous_scrolled: Option<Pixels>,
+    previous_max_offset: Option<Pixels>,
+    scrolled: Pixels,
+    max_offset: Pixels,
+) -> bool {
+    let at_bottom = max_offset - scrolled <= px(0.5);
+    let user_moved = previous_scrolled.zip(previous_max_offset).is_some_and(
+        |(previous_scrolled, previous_max_offset)| {
+            (scrolled - previous_scrolled).abs() > px(0.5)
+                && (max_offset - previous_max_offset).abs() <= px(0.5)
+        },
+    );
+    if user_moved || at_bottom {
+        at_bottom
+    } else {
+        following
+    }
+}
+
+fn activity_scroll_guard(viewport: ActivityScrollViewport, live: bool) -> impl IntoElement {
+    canvas(
+        move |_, window, _| {
+            let scrolled = -viewport.scroll_handle.offset().y;
+            let max_offset = viewport.scroll_handle.max_offset().y;
+            let following = activity_scroll_follow_state(
+                viewport.follow_tail.get(),
+                viewport.last_scrolled.get(),
+                viewport.last_max_offset.get(),
+                scrolled,
+                max_offset,
+            );
+            viewport.follow_tail.set(following);
+            viewport.last_scrolled.set(Some(scrolled));
+            viewport.last_max_offset.set(Some(max_offset));
+            if live && following && max_offset - scrolled > px(0.5) {
+                viewport.scroll_handle.scroll_to_bottom();
+                window.refresh();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .w(px(0.0))
+    .h(px(0.0))
+}
+
+fn activity_scroll_fade(
+    scroll: ScrollHandle,
+    side: ActivityScrollFadeSide,
+    surface: Hsla,
+) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| {
+            let scrolled = -scroll.offset().y;
+            let max_offset = scroll.max_offset().y;
+            let visible = match side {
+                ActivityScrollFadeSide::Top => scrolled > px(0.5),
+                ActivityScrollFadeSide::Bottom => max_offset - scrolled > px(0.5),
+            };
+            visible.then(|| {
+                let transparent = surface.opacity(0.0);
+                let background = match side {
+                    ActivityScrollFadeSide::Top => linear_gradient(
+                        180.0,
+                        linear_color_stop(surface, 0.0),
+                        linear_color_stop(transparent, 1.0),
+                    ),
+                    ActivityScrollFadeSide::Bottom => linear_gradient(
+                        180.0,
+                        linear_color_stop(transparent, 0.0),
+                        linear_color_stop(surface, 1.0),
+                    ),
+                };
+                fill(bounds, background)
+            })
+        },
+        |_, fade, window, _| {
+            if let Some(fade) = fade {
+                window.paint_quad(fade);
+            }
+        },
+    )
+    .absolute()
+    .left_0()
+    .w_full()
+    .h(px(18.0))
+    .when(matches!(side, ActivityScrollFadeSide::Top), |element| {
+        element.top_0()
+    })
+    .when(matches!(side, ActivityScrollFadeSide::Bottom), |element| {
+        element.bottom_0()
+    })
 }
 
 fn render_activity_image(
@@ -2026,4 +2304,52 @@ fn decode_activity_image(image_url: &str) -> Option<std::sync::Arc<gpui::Image>>
         .decode(encoded)
         .ok()?;
     (!bytes.is_empty()).then(|| std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
+}
+
+#[cfg(test)]
+mod activity_scroll_tests {
+    use super::*;
+
+    #[test]
+    fn user_scroll_pauses_following_until_the_tail_is_reached_again() {
+        assert!(!activity_scroll_follow_state(
+            true,
+            Some(px(100.0)),
+            Some(px(200.0)),
+            px(70.0),
+            px(200.0),
+        ));
+        assert!(!activity_scroll_follow_state(
+            false,
+            Some(px(70.0)),
+            Some(px(200.0)),
+            px(120.0),
+            px(200.0),
+        ));
+        assert!(activity_scroll_follow_state(
+            false,
+            Some(px(120.0)),
+            Some(px(200.0)),
+            px(200.0),
+            px(200.0),
+        ));
+    }
+
+    #[test]
+    fn growing_content_does_not_cancel_tail_following() {
+        assert!(activity_scroll_follow_state(
+            true,
+            Some(px(200.0)),
+            Some(px(200.0)),
+            px(200.0),
+            px(240.0),
+        ));
+        assert!(!activity_scroll_follow_state(
+            false,
+            Some(px(120.0)),
+            Some(px(200.0)),
+            px(120.0),
+            px(240.0),
+        ));
+    }
 }
