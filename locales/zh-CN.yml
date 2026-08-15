@@ -498,6 +498,9 @@ skills.disable_named: 停用%{name}
 commands.init_description: 为此项目创建或更新 %{instructions_file}
 commands.review_description: 审查当前分支中尚未合并的更改
 commands.commit_description: 暂存并提交当前更改
+commands.fast_description: 切换快速模式
+commands.fast_enabled: 已启用快速模式
+commands.fast_disabled: 已关闭快速模式
 commands.claude_compact: 总结对话以释放上下文空间
 commands.claude_context: 查看上下文窗口的占用情况
 commands.claude_cost: 查看当前任务的令牌用量与费用
@@ -505,15 +508,14 @@ commands.claude_init: 分析项目并编写 CLAUDE.md
 commands.claude_review: 审查拉取请求
 commands.claude_security_review: 对尚未合并的更改进行安全审查
 composer.edit_in_composer: 在输入框中编辑
-composer.queued_followups: 已排队的后续消息
-composer.queued_followups_description: 已排队的后续消息 · 当前回复结束后发送
+composer.steer: 引导
+composer.remove_followup: 从队列中移除
 user_input.other_placeholder: 输入其他回答
 user_input.back: 上一步
 user_input.next: 下一步
 user_input.submit: 提交
 user_input.progress: "%{current} / %{total}"
 composer.preparing_task: 正在准备任务…
-composer.steer_turn: 向本轮补充指示（%{shortcut}）
 composer.queue_followup: 排队为后续消息（⏎）
 composer.message: 消息
 composer.queue_placeholder: 添加后续消息…
@@ -526,8 +528,7 @@ composer.steer_current: 引导当前回合
 composer.starting_agent: 正在启动智能体…
 composer.suggestions: 输入建议
 composer.remove_attachment: 移除 %{name}
-composer.runs_after_current: 当前回合结束后运行
-composer.remove_queued: 移除后续消息
+composer.queued_message_actions: 后续消息操作
 branches.detached_head: 游离 HEAD
 branches.search_project: 搜索 %{project} 的分支
 branches.switching: 正在切换…

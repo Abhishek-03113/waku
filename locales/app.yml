@@ -1044,10 +1044,12 @@ commands.claude_security_review:
 
 composer.edit_in_composer:
   en: Edit in composer
-composer.queued_followups:
-  en: Queued follow-ups
-composer.queued_followups_description:
-  en: Queued follow-ups · sends when the current turn finishes
+composer.steer:
+  en: Steer
+composer.remove_followup:
+  en: Remove from queue
+composer.queued_message_actions:
+  en: Follow-up actions
 user_input.other_placeholder:
   en: Type another answer
 user_input.back:
@@ -1060,8 +1062,6 @@ user_input.progress:
   en: "%{current} of %{total}"
 composer.preparing_task:
   en: Preparing task…
-composer.steer_turn:
-  en: Steer the running turn (%{shortcut})
 composer.queue_followup:
   en: Queue as follow-up (⏎)
 composer.message:
@@ -1086,10 +1086,6 @@ composer.suggestions:
   en: Composer suggestions
 composer.remove_attachment:
   en: Remove %{name}
-composer.runs_after_current:
-  en: Runs after the current turn
-composer.remove_queued:
-  en: Remove queued follow-up
 
 branches.detached_head:
   en: Detached HEAD

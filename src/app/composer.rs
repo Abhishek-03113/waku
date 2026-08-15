@@ -2289,9 +2289,10 @@ impl Waku {
         row
     }
 
-    /// The pending follow-up chips between the transcript and the composer:
-    /// one row per queued message, clickable to pull the text back into the
-    /// composer, with a remove affordance per row.
+    /// The pending follow-up queue between the transcript and the composer: a
+    /// single card tucked against the composer's top edge, one row per queued
+    /// message. A row pulls its text back into the composer on click and
+    /// carries steer/remove/more controls on the right.
     pub(super) fn render_queued_messages(&self, cx: &mut Context<Self>) -> Option<Div> {
         let session_id = self.state.selected_session?;
         let session = self.selected_session()?;
@@ -2299,8 +2300,13 @@ impl Waku {
             return None;
         }
         let theme = Theme::current(cx);
-        let busy = session.is_busy();
-        let mut list = div().flex().flex_col().gap(px(6.0));
+        let steerable = session.is_busy()
+            && session.status != SessionStatus::Connecting
+            && self
+                .runtimes
+                .get(&session.id)
+                .is_some_and(|runtime| runtime.driver.supports_steer());
+        let mut list = div().flex().flex_col().py(px(4.0));
         for message in &session.queued_messages {
             let message_id = message.id;
             let content = if message.visible_content().trim().is_empty() {
@@ -2313,82 +2319,186 @@ impl Waku {
             } else {
                 message.visible_content().to_owned()
             };
+            let steer_control = steerable.then(|| {
+                div()
+                    .id(SharedString::from(format!(
+                        "queued-message-steer-{message_id}"
+                    )))
+                    .h(px(24.0))
+                    .px(px(7.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_default()
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .hover(|element| element.bg(theme.overlay_strong))
+                    .active(|element| element.opacity(0.8))
+                    .text_size(px(11.5))
+                    .text_color(theme.text_secondary)
+                    .child(icon(
+                        "icons/corner-down-right.svg",
+                        11.0,
+                        theme.text_secondary,
+                    ))
+                    .child(tr!("composer.steer"))
+                    .tooltip(Tooltip::text(tr!("composer.steer_current")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.steer_queued_message(session_id, message_id, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.steer_queued_message(session_id, message_id, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            });
+            let menu_handle = self.menu_handle(format!("queued-message-menu-{message_id}"), cx);
+            let menu_open = menu_handle.is_open();
+            let weak = cx.entity().downgrade();
+            let more_control = dropdown_menu(
+                div()
+                    .id(SharedString::from(format!(
+                        "queued-message-more-{message_id}"
+                    )))
+                    .w(px(24.0))
+                    .h(px(24.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_default()
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .when(menu_open, |element| element.bg(theme.overlay_strong))
+                    .hover(|element| element.bg(theme.overlay_strong))
+                    .active(|element| element.opacity(0.8))
+                    .child(icon("icons/ellipsis.svg", 12.5, theme.text_secondary)),
+                SharedString::from(format!("queued-message-more-menu-{message_id}")),
+                &menu_handle,
+                MenuAlign::BelowRight,
+                move |_| {
+                    let edit_weak = weak.clone();
+                    let remove_weak = weak.clone();
+                    vec![
+                        MenuItem::new(tr!("composer.edit_in_composer"), move |window, cx| {
+                            let _ = edit_weak.update(cx, |this, cx| {
+                                this.edit_queued_message(session_id, message_id, window, cx);
+                            });
+                        })
+                        .icon("icons/pencil.svg"),
+                        MenuItem::new(tr!("composer.remove_followup"), move |_, cx| {
+                            let _ = remove_weak.update(cx, |this, cx| {
+                                this.remove_queued_message(session_id, message_id, cx);
+                            });
+                        })
+                        .icon("icons/trash.svg"),
+                    ]
+                },
+            );
             list = list.child(
                 div()
                     .id(SharedString::from(format!("queued-message-{message_id}")))
-                    .h(px(34.0))
-                    .px(px(11.0))
-                    .rounded(px(9.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.composer)
+                    .h(px(30.0))
+                    .pl(px(12.0))
+                    .pr(px(6.0))
                     .flex()
                     .items_center()
                     .gap(px(9.0))
                     .cursor_default()
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .hover(|element| element.bg(theme.overlay))
                     .tooltip(Tooltip::text(tr!("composer.edit_in_composer")))
-                    .child(icon("icons/arrow-up.svg", 10.5, theme.text_tertiary))
+                    .child(icon("icons/queue.svg", 12.0, theme.text_tertiary))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.5))
-                            .text_color(theme.text_secondary)
+                            .text_size(px(12.5))
+                            .text_color(theme.text)
                             .child(SharedString::from(content)),
                     )
                     .child(
                         div()
-                            .id(SharedString::from(format!(
-                                "queued-message-remove-{message_id}"
-                            )))
-                            .w(px(22.0))
-                            .h(px(22.0))
-                            .rounded_full()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .cursor_default()
-                            .hover(|element| element.bg(theme.overlay_strong))
-                            .active(|element| element.opacity(0.8))
-                            .child(icon("icons/x.svg", 9.5, theme.text_ghost))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.remove_queued_message(session_id, message_id, cx);
-                            })),
+                            .gap(px(2.0))
+                            .children(steer_control)
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "queued-message-remove-{message_id}"
+                                    )))
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .rounded(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_default()
+                                    .tab_index(0)
+                                    .focus_visible(|style| {
+                                        style.border_1().border_color(theme.accent)
+                                    })
+                                    .hover(|element| element.bg(theme.overlay_strong))
+                                    .active(|element| element.opacity(0.8))
+                                    .child(icon("icons/trash.svg", 12.0, theme.text_secondary))
+                                    .tooltip(Tooltip::text(tr!("composer.remove_followup")))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.remove_queued_message(session_id, message_id, cx);
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        move |this, event: &KeyDownEvent, _, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                this.remove_queued_message(
+                                                    session_id, message_id, cx,
+                                                );
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    )),
+                            )
+                            .child(more_control),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.edit_queued_message(session_id, message_id, window, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.edit_queued_message(session_id, message_id, window, cx);
+                            cx.stop_propagation();
+                        }
                     })),
             );
         }
         Some(
-            div().flex_none().px(px(20.0)).pb(px(6.0)).child(
+            div().flex_none().px(px(20.0)).child(
                 div()
                     .w_full()
                     .max_w(px(CONTENT_MAX_WIDTH))
                     .mx_auto()
+                    .px(px(14.0))
                     .child(
                         div()
-                            .mb(px(5.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(icon("icons/list.svg", 10.5, theme.text_tertiary))
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.text_tertiary)
-                                    .child(if busy {
-                                        tr!("composer.queued_followups_description")
-                                    } else {
-                                        tr!("composer.queued_followups")
-                                    }),
-                            ),
-                    )
-                    .child(list),
+                            .rounded_tl(px(12.0))
+                            .rounded_tr(px(12.0))
+                            .border_t_1()
+                            .border_l_1()
+                            .border_r_1()
+                            .border_color(theme.border)
+                            .bg(theme.composer)
+                            // Row hover fills are full-width rectangles; clip
+                            // them to the card's rounded corners.
+                            .overflow_hidden()
+                            .child(list),
+                    ),
             ),
         )
     }
@@ -2408,14 +2518,6 @@ impl Waku {
         });
         let has_draft = !self.composer.read(cx).content().trim().is_empty()
             || !self.composer_attachments.is_empty();
-        let steerable = session.is_some_and(|session| {
-            session.is_busy()
-                && session.status != SessionStatus::Connecting
-                && self
-                    .runtimes
-                    .get(&session.id)
-                    .is_some_and(|runtime| runtime.driver.supports_steer())
-        });
         let autocomplete = self.render_composer_autocomplete(window, cx);
         let autocomplete_open = autocomplete.is_some();
         // Files dragged in from the OS light the card up as a drop target and
@@ -2534,41 +2636,6 @@ impl Waku {
                                             this.cancel_turn(cx);
                                         })),
                                 )
-                                .when(steerable && has_draft, |element| {
-                                    element.child(
-                                        div()
-                                            .id("steer-turn")
-                                            .w(px(26.0))
-                                            .h(px(26.0))
-                                            .rounded_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_default()
-                                            .bg(theme.overlay_strong)
-                                            .hover(|element| element.bg(theme.overlay))
-                                            .active(|element| element.opacity(0.8))
-                                            .child(icon("icons/zap.svg", 13.0, theme.warning))
-                                            .tooltip(Tooltip::text(tr!(
-                                                "composer.steer_turn",
-                                                shortcut = crate::platform::primary_shortcut(
-                                                    "⌘↩",
-                                                    "Ctrl+Enter"
-                                                )
-                                            )))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                let prompt =
-                                                    this.composer.read(cx).content().to_owned();
-                                                if let Some(submission) =
-                                                    this.submission_with_attachments(&prompt, cx)
-                                                {
-                                                    this.composer
-                                                        .update(cx, |input, cx| input.clear(cx));
-                                                    this.steer_composer_submission(submission, cx);
-                                                }
-                                            })),
-                                    )
-                                })
                                 .when(has_draft, |element| {
                                     element.child(
                                         div()

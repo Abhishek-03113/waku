@@ -553,22 +553,6 @@ export function Composer({
   return (
     <div className="shrink-0 px-3 pb-2 sm:px-5">
       <div className="mx-auto w-full max-w-[720px]">
-        <QueuedMessages
-          session={session}
-          onEdit={(message) => {
-            setPrompt(message.display_content ?? message.content)
-            setAttachments(message.attachments ?? [])
-            void removeQueuedMessage(session.id, message.id).catch((error) =>
-              toast.error(errorMessage(error)),
-            )
-          }}
-          onRemove={(messageId) =>
-            void removeQueuedMessage(session.id, messageId).catch((error) =>
-              toast.error(errorMessage(error)),
-            )
-          }
-        />
-
         {permission && !userInput && (
           <section className="mb-2 rounded-xl border border-[color:var(--warning)]/30 bg-card p-3 shadow-lg">
             <div className="text-[13px] font-medium">{permission.title}</div>
@@ -607,6 +591,34 @@ export function Composer({
             )}
           />
         )}
+
+        <QueuedMessages
+          canSteer={Boolean(canSteer)}
+          session={session}
+          onEdit={(message) => {
+            setPrompt(message.display_content ?? message.content)
+            setAttachments(message.attachments ?? [])
+            void removeQueuedMessage(session.id, message.id).catch((error) =>
+              toast.error(errorMessage(error)),
+            )
+          }}
+          onRemove={(messageId) =>
+            void removeQueuedMessage(session.id, messageId).catch((error) =>
+              toast.error(errorMessage(error)),
+            )
+          }
+          onSteer={(message) => {
+            void removeQueuedMessage(session.id, message.id).catch((error) =>
+              toast.error(errorMessage(error)),
+            )
+            void steerPrompt(
+              session,
+              message.display_content ?? message.content,
+              message.attachments ?? [],
+              message.content,
+            ).catch((error) => toast.error(errorMessage(error)))
+          }}
+        />
 
         <div className="relative">
           {autocompleteOpen && (
@@ -728,17 +740,6 @@ export function Composer({
                   {escapeStopArmed
                     ? <span className="text-[10px] font-semibold">Esc</span>
                     : <WakuIcon className="size-[18px]" name="stopFilled" />}
-                </Button>
-              )}
-              {busy && canSteer && hasDraft && (
-                <Button
-                  aria-label={t('composer.steer_current')}
-                  className="rounded-full text-[var(--warning)]"
-                  size="icon-sm"
-                  variant="secondary"
-                  onClick={() => void steer()}
-                >
-                  <WakuIcon className="size-[13px]" name="zap" />
                 </Button>
               )}
               <Button
@@ -1405,46 +1406,87 @@ function InteractionModeControl({
 
 function QueuedMessages({
   session,
+  canSteer,
   onEdit,
+  onSteer,
   onRemove,
 }: {
   session: AgentSession
+  canSteer: boolean
   onEdit: (message: NonNullable<AgentSession['queued_messages']>[number]) => void
+  onSteer: (message: NonNullable<AgentSession['queued_messages']>[number]) => void
   onRemove: (messageId: string) => void
 }) {
   const { t } = useI18n()
   const messages = session.queued_messages ?? []
   if (!messages.length) return null
   return (
-    <div className="mb-1.5">
-      <div className="mb-1 flex items-center gap-1.5 px-1 text-[10px] font-semibold text-[var(--text-tertiary)]">
-        <WakuIcon className="size-3" name="list" />
-        {t(session.status === 'idle' ? 'composer.queued_followups' : 'composer.runs_after_current')}
-      </div>
-      <div className="space-y-1.5">
+    <div className="px-3.5">
+      {/* The card tucks against the composer's top edge: rounded top corners
+          only, open bottom, and overflow-hidden so row hover fills clip to
+          the rounding. */}
+      <div className="overflow-hidden rounded-t-xl border border-b-0 bg-card py-1">
         {messages.map((message) => (
           <div
-            className="flex h-[34px] w-full items-center rounded-[9px] border bg-card text-[11.5px] text-[var(--text-secondary)] hover:bg-accent"
+            className="flex h-[30px] w-full items-center gap-2 pr-1.5 text-[12.5px] hover:bg-accent"
             key={message.id}
           >
             <button
-              className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+              className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+              title={t('composer.edit_in_composer')}
               type="button"
               onClick={() => onEdit(message)}
             >
-              <WakuIcon className="size-3 shrink-0" name="arrowUp" />
+              <WakuIcon className="size-3 shrink-0 text-[var(--text-tertiary)]" name="queue" />
               <span className="min-w-0 flex-1 truncate">
                 {message.display_content || message.content || message.attachments?.map((item) => item.name).join(', ')}
               </span>
             </button>
-            <button
-              aria-label={t('composer.remove_queued')}
-              className="mr-1 grid size-6 shrink-0 place-items-center rounded-full outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
-              type="button"
-              onClick={() => onRemove(message.id)}
-            >
-              <WakuIcon className="size-3" name="x" />
-            </button>
+            <div className="flex shrink-0 items-center gap-0.5">
+              {canSteer && (
+                <button
+                  className="flex h-6 items-center gap-1.5 rounded-md px-1.5 text-[11.5px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
+                  title={t('composer.steer_current')}
+                  type="button"
+                  onClick={() => onSteer(message)}
+                >
+                  <WakuIcon className="size-[11px]" name="cornerDownRight" />
+                  {t('composer.steer')}
+                </button>
+              )}
+              <button
+                aria-label={t('composer.remove_followup')}
+                className="grid size-6 shrink-0 place-items-center rounded-md text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
+                type="button"
+                onClick={() => onRemove(message.id)}
+              >
+                <WakuIcon className="size-3" name="trash" />
+              </button>
+              <ControlMenu
+                caret={false}
+                items={[
+                  {
+                    id: 'edit',
+                    label: t('composer.edit_in_composer'),
+                    icon: 'pencil',
+                    onSelect: () => onEdit(message),
+                  },
+                  {
+                    id: 'remove',
+                    label: t('composer.remove_followup'),
+                    icon: 'trash',
+                    onSelect: () => onRemove(message.id),
+                  },
+                ]}
+                align="right"
+                label={t('composer.queued_message_actions')}
+                placement="below"
+                selectionMode="status"
+                triggerClassName="grid size-6 place-items-center px-0 rounded-md"
+              >
+                <WakuIcon className="size-3" name="ellipsis" />
+              </ControlMenu>
+            </div>
           </div>
         ))}
       </div>

@@ -2787,6 +2787,29 @@ impl Waku {
         cx.notify();
     }
 
+    /// Deliver a queued follow-up into the running turn right away instead of
+    /// waiting for the turn to settle. Falls through the same paths as a
+    /// composer steer: an idle session starts a fresh turn, an unsteerable
+    /// one re-queues the message.
+    pub(super) fn steer_queued_message(
+        &mut self,
+        session_id: Uuid,
+        message_id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self.state.session_mut(session_id).and_then(|session| {
+            let index = session
+                .queued_messages
+                .iter()
+                .position(|message| message.id == message_id)?;
+            Some(session.queued_messages.remove(index))
+        }) else {
+            return;
+        };
+        self.save();
+        self.steer_composer_submission(ComposerSubmission::from_queued_message(message), cx);
+    }
+
     /// Start the next queued follow-up as a fresh turn. Only called once a
     /// settled turn has been fully closed, so the session is Idle.
     fn drain_queued_message(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
