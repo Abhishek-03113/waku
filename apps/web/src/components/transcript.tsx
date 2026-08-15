@@ -15,6 +15,11 @@ import { readAttachmentImage } from '@/lib/attachments'
 import { useDaemon } from '@/lib/daemon-context'
 import { activitiesForBlock } from '@/lib/event-reducer'
 import { useI18n, type AppLocale } from '@/lib/i18n'
+import {
+  advanceMarkdownVeil,
+  createMarkdownVeilState,
+  markdownVeilPlugin,
+} from '@/lib/markdown-veil'
 import type {
   BackgroundWorkItem,
   BackgroundWorkKey,
@@ -414,7 +419,7 @@ function ConversationNavigationRail({
       <Virtuoso
         atBottomStateChange={setAtBottom}
         atTopStateChange={setAtTop}
-        className="conversation-navigation-rail-scroll h-full w-11 overscroll-contain"
+        className="h-full w-11 overscroll-contain"
         computeItemKey={(_, turn) => turn.messageId}
         data={turns}
         fixedItemHeight={NAVIGATION_RAIL_PITCH}
@@ -1071,7 +1076,7 @@ function MessageRow({
   return (
     <MessageContextMenu content={copyContent} forkAction={forkAction} t={t}>
       <article className="group/message min-w-0 py-1">
-        <Markdown text={visible} />
+        <Markdown streaming={message.streaming} text={visible} />
         {beforeFooter && <div className="mb-[3px] mt-3 w-full">{beforeFooter}</div>}
         {footer && (
           <MessageFooter
@@ -1356,12 +1361,26 @@ function MessageContextMenu({
   )
 }
 
-function Markdown({ text, compact = false }: { text: string; compact?: boolean }) {
+function Markdown({
+  text,
+  compact = false,
+  streaming = false,
+}: {
+  text: string
+  compact?: boolean
+  streaming?: boolean
+}) {
   const onOpenLink = useContext(TranscriptLinkContext)
+  // Match the painter's attach semantics: text already present when this row
+  // mounts is the baseline; only later appends dissolve in.
+  const veil = useRef(createMarkdownVeilState(text))
+  const now = Date.now()
+  const chunks = advanceMarkdownVeil(veil.current, text, streaming, now)
   return (
     <div className={cn('markdown min-w-0', compact && '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0')}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={chunks.length ? [markdownVeilPlugin(chunks, now)] : []}
         components={{
           a: ({ children, href, ...props }) => (
             <a
@@ -1540,7 +1559,7 @@ function ActivityRow({
               viewportRef={detailScroll}
               onScroll={updateDetailEdges}
             >
-              <Markdown text={reasoningContent} />
+              <Markdown streaming={!activity.complete} text={reasoningContent} />
             </ActivityScrollableContent>
           </div>
         ) : (
@@ -1585,7 +1604,7 @@ function ActivityScrollableContent({
     <div className="relative min-w-0 overflow-hidden">
       <div
         className={cn(
-          'activity-detail-scroll max-h-[400px] min-w-0 overflow-y-auto overscroll-contain',
+          'max-h-[400px] min-w-0 overflow-y-auto overscroll-contain',
           className,
         )}
         onScroll={(event) => onScroll(event.currentTarget)}

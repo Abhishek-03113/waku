@@ -20,6 +20,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::{
     AnyElement, BorderStyle, Bounds, CursorStyle, DispatchPhase, Font, FontStyle, FontWeight, Hsla,
@@ -35,6 +36,7 @@ use super::parser::{Block, IncrementalParser, InlineRun, ListItem, TableAlign, T
 use super::selection::{
     RegisteredText, SelectionRegistry, SelectionState, TextKey, line_range, word_range,
 };
+use super::veil::{RowVeil, apply_veil};
 use crate::theme::Theme;
 
 /// Selection geometry: the laid-out text handle for one painted element.
@@ -333,6 +335,10 @@ pub struct MarkdownView {
     /// a theme switch has to drop them or the transcript keeps painting the old
     /// palette.
     style: Cell<Option<(Palette, Metrics)>>,
+    /// Per-element opacity spans for the live response. Text is committed to
+    /// layout immediately; only these paint colors animate.
+    veil: RefCell<RowVeil>,
+    streaming: Cell<bool>,
 }
 
 impl Default for MarkdownView {
@@ -349,7 +355,23 @@ impl MarkdownView {
             flats: RefCell::new(HashMap::new()),
             volatile_from: Cell::new(0),
             style: Cell::new(None),
+            veil: RefCell::new(RowVeil::default()),
+            streaming: Cell::new(false),
         }
+    }
+
+    /// A view attached to an already-streaming body. Its first rendered text
+    /// becomes the full-opacity baseline; later appends fade normally.
+    pub fn seeded() -> Self {
+        let view = Self::new();
+        *view.veil.borrow_mut() = RowVeil::seeded();
+        view
+    }
+
+    /// Reattach an existing parsed view without animating text that arrived
+    /// while its session was off screen.
+    pub fn seed_streaming_baseline(&self) {
+        *self.veil.borrow_mut() = RowVeil::seeded();
     }
 
     /// Point the view at `text`. `mend` closes hanging inline markers, which is
@@ -361,6 +383,14 @@ impl MarkdownView {
     }
 
     pub fn set_text(&mut self, text: &str, mend: bool) {
+        let was_streaming = self.streaming.replace(mend);
+        if !mend && was_streaming {
+            *self.veil.borrow_mut() = RowVeil::default();
+        } else if mend && !was_streaming && !self.parser.text().is_empty() {
+            // A completed body that starts streaming again already has a
+            // rendered baseline. Do not make that history dissolve again.
+            *self.veil.borrow_mut() = RowVeil::seeded();
+        }
         let changed = self.parser.text() != text;
         if changed {
             self.parser.set_text(text);
@@ -380,6 +410,10 @@ impl MarkdownView {
                 .borrow_mut()
                 .retain(|ordinal, _| *ordinal < boundary);
         }
+    }
+
+    pub fn is_fading(&self) -> bool {
+        self.streaming.get() && self.veil.borrow().is_fading()
     }
 
     /// Drop cached flats if the style they were built for no longer applies.
@@ -432,6 +466,8 @@ pub struct Ctx<'a> {
     next_ordinal: Cell<usize>,
     /// Set while rendering the first element of a block, for copy spacing.
     starts_block: Cell<bool>,
+    animate_streaming: bool,
+    now: Instant,
 }
 
 impl<'a> Ctx<'a> {
@@ -450,6 +486,8 @@ impl<'a> Ctx<'a> {
             cache: None,
             next_ordinal: Cell::new(0),
             starts_block: Cell::new(true),
+            animate_streaming: true,
+            now: Instant::now(),
         }
     }
 
@@ -459,6 +497,11 @@ impl<'a> Ctx<'a> {
 
     pub fn with_link_handler(mut self, handler: LinkHandler) -> Self {
         self.link_handler = Some(handler);
+        self
+    }
+
+    pub fn with_streaming_animation(mut self, animate: bool) -> Self {
+        self.animate_streaming = animate;
         self
     }
 
@@ -472,6 +515,8 @@ impl<'a> Ctx<'a> {
             cache: Some(view),
             next_ordinal: Cell::new(self.next_ordinal.get()),
             starts_block: Cell::new(self.starts_block.get()),
+            animate_streaming: self.animate_streaming,
+            now: Instant::now(),
         }
     }
 
@@ -506,6 +551,7 @@ impl<'a> Ctx<'a> {
 /// pass read real glyph geometry without a second layout pass.
 fn text_element_with_selection(
     flat: &FlatText,
+    runs: Vec<TextRun>,
     key: TextKey,
     selection: TranscriptSelection,
     link_handler: Option<LinkHandler>,
@@ -513,7 +559,7 @@ fn text_element_with_selection(
     selection_wash: Hsla,
     block_break: bool,
 ) -> AnyElement {
-    let styled = StyledText::new(flat.text.clone()).with_runs(flat.runs.clone());
+    let styled = StyledText::new(flat.text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
 
     let body: AnyElement = if flat.links.is_empty() {
@@ -588,8 +634,22 @@ fn text_element_with_selection(
 }
 
 fn text_element(flat: &FlatText, key: TextKey, ctx: &Ctx) -> AnyElement {
+    let runs = match ctx
+        .cache
+        .filter(|view| ctx.animate_streaming && view.streaming.get())
+    {
+        Some(view) => {
+            let spans = view
+                .veil
+                .borrow_mut()
+                .advance(key.index, flat.text.as_ref(), ctx.now);
+            apply_veil(flat.runs.clone(), &spans)
+        }
+        None => flat.runs.clone(),
+    };
     text_element_with_selection(
         flat,
+        runs,
         key,
         ctx.selection.clone(),
         ctx.link_handler.clone(),
@@ -615,6 +675,7 @@ pub fn selectable_flat_text(
 ) -> AnyElement {
     text_element_with_selection(
         flat,
+        flat.runs.clone(),
         key,
         selection,
         None,
@@ -872,10 +933,20 @@ pub fn install_selection_input(window: &mut Window, state: &TranscriptSelection)
 /// Render a markdown body. Returns `None` when it has no content.
 pub fn markdown<'a>(view: &'a MarkdownView, ctx: &Ctx<'a>) -> Option<AnyElement> {
     let blocks = view.blocks().collect::<Vec<_>>();
-    let (&last, leading) = blocks.split_last()?;
+    let Some((&last, leading)) = blocks.split_last() else {
+        if ctx.animate_streaming && view.streaming.get() {
+            let mut veil = view.veil.borrow_mut();
+            veil.begin_frame();
+            veil.finish_frame();
+        }
+        return None;
+    };
 
     view.sync_style(ctx.palette, &ctx.metrics);
     let ctx = ctx.with_cache(view);
+    if ctx.animate_streaming && view.streaming.get() {
+        view.veil.borrow_mut().begin_frame();
+    }
     let mut children = Vec::with_capacity(blocks.len());
     for block in leading {
         children.push(render_block(block, &ctx));
@@ -884,6 +955,11 @@ pub fn markdown<'a>(view: &'a MarkdownView, ctx: &Ctx<'a>) -> Option<AnyElement>
     // stay cacheable across appends.
     view.volatile_from.set(ctx.next_ordinal.get());
     children.push(render_block(last, &ctx));
+    if ctx.animate_streaming && view.streaming.get() {
+        // Every element visible on the attach pass has synchronously adopted
+        // its baseline. Elements introduced by later appends should now fade.
+        view.veil.borrow_mut().finish_frame();
+    }
 
     Some(
         div()

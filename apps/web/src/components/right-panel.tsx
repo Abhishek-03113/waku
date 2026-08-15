@@ -310,7 +310,7 @@ export function RightPanel({
         <div className="relative min-w-0 flex-1 self-stretch overflow-hidden">
           <div
             aria-label={t('right_panel.tabs')}
-            className="right-panel-tabs-scroll flex h-full min-w-0 items-center gap-1 overflow-x-auto overscroll-x-contain"
+            className="flex h-full min-w-0 items-center gap-1 overflow-x-auto overscroll-x-contain"
             ref={tabStrip}
             role="tablist"
             onScroll={updateTabOverflow}

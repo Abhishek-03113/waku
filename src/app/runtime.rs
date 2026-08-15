@@ -3216,25 +3216,14 @@ impl Waku {
             };
             let follow_up_remeasure = std::mem::take(&mut runtime.stream_remeasure_pending);
             Self::collect_runtime_events(&mut runtime);
-            let flush_stream_backlog = stream_backlog_should_flush(&runtime.pending_events);
             let mut runtime_changed = false;
             let mut background_changed = false;
             let mut markdown_changed = false;
-            let mut revealed_stream_chunk = false;
             let mut keep_runtime = true;
             while let Some(event) = runtime.pending_events.front() {
                 let kind = stream_delta_kind(event);
-                if kind.is_some() && revealed_stream_chunk && !flush_stream_backlog {
-                    break;
-                }
-
                 let event = if let Some(kind) = kind {
-                    revealed_stream_chunk = true;
-                    if flush_stream_backlog {
-                        pop_complete_stream_chunk(&mut runtime.pending_events, kind)
-                    } else {
-                        pop_stream_chunk(&mut runtime.pending_events, kind)
-                    }
+                    pop_stream_batch(&mut runtime.pending_events, kind)
                 } else {
                     runtime.pending_events.pop_front()
                 };

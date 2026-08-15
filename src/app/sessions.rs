@@ -728,6 +728,25 @@ impl Waku {
         // Selection belongs to the session being left.
         self.transcript_selection.selection.borrow_mut().clear();
         self.transcript_selection.registry.borrow_mut().clear();
+        let (streaming_messages, live_reasoning) = self.selected_session().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |session| {
+                let messages = session
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == MessageRole::Assistant && message.streaming)
+                    .map(|message| message.id)
+                    .collect();
+                let reasoning = session
+                    .transcript_blocks
+                    .iter()
+                    .flat_map(|block| &block.activities)
+                    .filter(|activity| activity.reasoning.is_some() && !activity.complete)
+                    .map(|activity| activity.id)
+                    .collect();
+                (messages, reasoning)
+            },
+        );
         // Parsed messages are keyed by message id, which is unique across
         // sessions, so they stay cached — switching back to a recent session
         // then costs no re-parse. Bounded so a long-running window cannot grow
@@ -740,10 +759,21 @@ impl Waku {
         if cached_bytes > MAX_CACHED_MESSAGE_SOURCE_BYTES {
             message_markdown.clear();
         }
+        for id in streaming_messages {
+            message_markdown
+                .entry(id)
+                .or_insert_with(MarkdownView::new)
+                .seed_streaming_baseline();
+        }
         drop(message_markdown);
         // Block parses are keyed by position within the session, so they would
         // be read as another session's blocks.
-        self.activity_markdown.borrow_mut().clear();
+        let mut activity_markdown = self.activity_markdown.borrow_mut();
+        activity_markdown.clear();
+        for id in live_reasoning {
+            activity_markdown.insert(id, MarkdownView::seeded());
+        }
+        drop(activity_markdown);
         self.activity_scroll_viewports.borrow_mut().clear();
         self.menus.borrow_mut().clear();
         self.message_edit = None;

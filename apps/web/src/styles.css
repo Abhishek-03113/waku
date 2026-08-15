@@ -160,45 +160,6 @@
   }
 }
 
-.conversation-navigation-rail-scroll {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.conversation-navigation-rail-scroll::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
-}
-
-.right-panel-tabs-scroll {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.right-panel-tabs-scroll::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
-}
-
-.activity-detail-scroll {
-  scrollbar-color: var(--text-ghost) transparent;
-  scrollbar-gutter: stable;
-  scrollbar-width: thin;
-}
-
-.activity-detail-scroll::-webkit-scrollbar {
-  width: 8px;
-}
-
-.activity-detail-scroll::-webkit-scrollbar-thumb {
-  background: var(--text-ghost);
-  background-clip: padding-box;
-  border: 2px solid transparent;
-  border-radius: 999px;
-}
-
 .waku-terminal.wterm {
   --term-fg: var(--foreground);
   --term-bg: var(--background);
@@ -337,6 +298,11 @@
   .markdown th,
   .markdown td { @apply border px-3 py-2 text-left; }
 
+  .markdown-stream-veil {
+    animation: markdown-stream-veil var(--markdown-veil-duration) linear both;
+    animation-delay: var(--markdown-veil-delay);
+  }
+
   .skill-markdown > * + * { margin-top: 0.65rem; }
   .skill-markdown h1,
   .skill-markdown h2,
@@ -401,6 +367,14 @@
     --code-text: #e0a882;
     --code-wash: rgb(230 230 230 / 8%);
   }
+}
+
+@keyframes markdown-stream-veil {
+  0% { opacity: 0; }
+  25% { opacity: 0.369; }
+  50% { opacity: 0.67; }
+  75% { opacity: 0.891; }
+  100% { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

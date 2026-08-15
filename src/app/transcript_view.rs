@@ -292,10 +292,12 @@ impl Waku {
             // exactly the text elements this frame put on screen, in order.
             .child(md::render::frame_reset(self.transcript_selection.clone()))
             .child(
-                list(transcript_rows, move |index, _window, cx| {
+                list(transcript_rows, move |index, window, cx| {
                     entity
                         .upgrade()
-                        .map(|entity| entity.update(cx, |this, cx| this.transcript_row(index, cx)))
+                        .map(|entity| {
+                            entity.update(cx, |this, cx| this.transcript_row(index, window, cx))
+                        })
                         .unwrap_or_else(|| div().into_any_element())
                 })
                 .size_full()
@@ -996,9 +998,11 @@ impl Waku {
         row: String,
         palette: &'a MarkdownPalette,
         metrics: MarkdownMetrics,
+        animate_streaming: bool,
     ) -> MarkdownCtx<'a> {
         MarkdownCtx::new(row, palette, metrics, self.transcript_selection.clone())
             .with_link_handler(self.markdown_link_handler.clone())
+            .with_streaming_animation(animate_streaming)
     }
 
     /// The menu handle for `id`, created on first use.
@@ -1042,7 +1046,12 @@ impl Waku {
         handle
     }
 
-    pub(super) fn transcript_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn transcript_row(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::current(cx);
         let palette = MarkdownPalette::from_theme(&theme);
         let composer = self.composer.clone();
@@ -1133,8 +1142,13 @@ impl Waku {
                     } else {
                         MarkdownMetrics::BODY
                     };
-                    let ctx =
-                        self.markdown_ctx(format!("message-{}", message.id), &palette, metrics);
+                    let animate_streaming = message.streaming && !cx.reduce_motion();
+                    let ctx = self.markdown_ctx(
+                        format!("message-{}", message.id),
+                        &palette,
+                        metrics,
+                        animate_streaming,
+                    );
                     // Human and assistant messages share the Markdown path.
                     // Parse only visible rows rather than doing work for every
                     // driver delta or every off-screen prompt.
@@ -1145,7 +1159,7 @@ impl Waku {
                             view.set_text(message.visible_content(), message.streaming);
                             &*view
                         });
-                    render_message(
+                    let rendered = render_message(
                         MessageRender {
                             theme: &theme,
                             message: &message,
@@ -1166,13 +1180,19 @@ impl Waku {
                             composer,
                         },
                         cx,
-                    )
+                    );
+                    if animate_streaming && view.is_some_and(MarkdownView::is_fading) {
+                        window.request_animation_frame();
+                    }
+                    rendered
                 })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnBlock(block_index) => self
                 .selected_transcript_blocks()
                 .get(block_index)
-                .map(|block| self.render_activities_row(&block.activities, block_index, &theme, cx))
+                .map(|block| {
+                    self.render_activities_row(&block.activities, block_index, &theme, window, cx)
+                })
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
             TranscriptRowKind::ChangedFiles(turn_id) => self
@@ -1589,6 +1609,7 @@ impl Waku {
         activities: &[ActivityItem],
         block_index: usize,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let live_turn = self
@@ -1885,6 +1906,7 @@ impl Waku {
                     format!("reasoning-{id}"),
                     &palette,
                     MarkdownMetrics::COMPACT,
+                    reasoning_live && !cx.reduce_motion(),
                 );
                 let reasoning_viewport = self
                     .activity_scroll_viewports
@@ -1897,6 +1919,10 @@ impl Waku {
                 view.set_text(&reasoning.content, reasoning_live);
                 let wheel_scroll = reasoning_viewport.scroll_handle.clone();
                 let wheel_follow_tail = reasoning_viewport.follow_tail.clone();
+                let markdown = md::render::markdown(view, &ctx);
+                if reasoning_live && !cx.reduce_motion() && view.is_fading() {
+                    window.request_animation_frame();
+                }
                 item = item.child(
                     div()
                         .w_full()
@@ -1916,7 +1942,7 @@ impl Waku {
                                 .track_scroll(&reasoning_viewport.scroll_handle)
                                 .px(px(12.0))
                                 .py(px(8.0))
-                                .children(md::render::markdown(view, &ctx))
+                                .children(markdown)
                                 .on_scroll_wheel(move |_, window, cx| {
                                     let scroll = wheel_scroll.clone();
                                     let follow_tail = wheel_follow_tail.clone();
@@ -1944,8 +1970,12 @@ impl Waku {
             }
             if item_expanded && reasoning.is_none() {
                 let palette = MarkdownPalette::from_theme(theme);
-                let ctx =
-                    self.markdown_ctx(format!("activity-{id}"), &palette, MarkdownMetrics::COMPACT);
+                let ctx = self.markdown_ctx(
+                    format!("activity-{id}"),
+                    &palette,
+                    MarkdownMetrics::COMPACT,
+                    false,
+                );
                 let mut detail_card = div()
                     .w_full()
                     .min_w_0()

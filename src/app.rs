@@ -153,9 +153,6 @@ const MAX_CACHED_MESSAGE_SOURCE_BYTES: usize = 512 * 1024;
 /// practice. 8 is generous and caps the tree cache, the only large one, at a
 /// few hundred KB.
 const MAX_CACHED_WORKSPACES: usize = 8;
-const STREAM_CATCH_UP_FRAMES: usize = 18;
-const STREAM_MIN_GRAPHEMES_PER_FRAME: usize = 12;
-const STREAM_MAX_GRAPHEMES_PER_FRAME: usize = 256;
 const STREAM_REMEASURE_TAIL_ROWS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2307,8 +2304,8 @@ impl Waku {
 
             // Like T3 Code's adapter subscriptions feeding its ingestion
             // worker, provider threads push an edge into this bounded wake
-            // channel. The UI does no standing scan: 24 ms pacing exists only
-            // while a streamed response still has presentation work queued.
+            // channel. The UI does no standing scan: the short follow-up tick
+            // exists only to remeasure Markdown after a changed text frame.
             cx.spawn(async move |this, cx| {
                 while event_wake_events.recv().await.is_ok() {
                     loop {
@@ -2322,7 +2319,19 @@ impl Waku {
                         match schedule {
                             EventPumpSchedule::Idle => break,
                             EventPumpSchedule::StreamFrame => {
-                                cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
+                                // A Markdown remeasure still gets its next-frame
+                                // pass, but fresh provider events wake the pump
+                                // immediately instead of waiting behind the old
+                                // typewriter cadence.
+                                futures_lite::future::race(
+                                    async {
+                                        let _ = event_wake_events.recv().await;
+                                    },
+                                    async {
+                                        cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
+                                    },
+                                )
+                                .await;
                             }
                             EventPumpSchedule::BackgroundOutput(delay) => {
                                 // A log cache has its own 100 ms batching

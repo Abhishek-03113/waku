@@ -29,16 +29,9 @@ import {
 import { useI18n } from '../lib/i18n'
 import { compactReviewPatch, createReviewDiffLoader } from '../lib/review-diff'
 
-const nativeScrollbarCSS = `
-  [data-code] {
-    scrollbar-gutter: auto;
-  }
-`
-
 const sharedOptions = {
   overflow: 'wrap' as const,
   preferredHighlighter: 'shiki-js' as const,
-  unsafeCSS: nativeScrollbarCSS,
 }
 
 const commonCodeSurfaceLanguages: SupportedLanguages[] = [
@@ -95,8 +88,7 @@ export function preloadCodeSurfaces(): Promise<void> {
 // initialization as the idle preload started by the app shell.
 void preloadCodeSurfaces().catch(() => {})
 
-const fullHeightEditorCSS = `${nativeScrollbarCSS}
-
+const fullHeightEditorCSS = `
   :host, [data-file], [data-code] {
     min-height: 100%;
   }

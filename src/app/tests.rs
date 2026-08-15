@@ -14,12 +14,11 @@ use super::{
     folded_transcript_row_kinds, format_worked_duration, format_working_elapsed,
     maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
     navigation_rail_fade_visibility, navigation_rail_height, navigation_rail_scale,
-    paused_toast_duration, pop_complete_stream_chunk, pop_stream_chunk, push_transcript_activity,
-    session_is_reapable, should_refresh_branch_after_activity, should_show_navigation_rail,
-    should_show_scroll_to_bottom, stream_backlog_should_flush, take_stream_prefix,
-    task_id_from_notification_tag, task_notification_tag, transcript_anchor_end_space,
-    transcript_navigation_turns, transcript_row_kinds, transcript_row_splice,
-    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
+    paused_toast_duration, pop_stream_batch, push_transcript_activity, session_is_reapable,
+    should_refresh_branch_after_activity, should_show_navigation_rail,
+    should_show_scroll_to_bottom, task_id_from_notification_tag, task_notification_tag,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_row_kinds,
+    transcript_row_splice, transcript_rows_fingerprint, widened_panel_width_for_file_editor,
     widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
@@ -687,22 +686,7 @@ fn fenced_code_collects_all_blocks_without_languages() {
 }
 
 #[test]
-fn stream_prefix_stops_at_lines_without_splitting_graphemes() {
-    let mut text = "hello 👋🏽\nnext line".to_owned();
-    let (first, count) = take_stream_prefix(&mut text, 100);
-    assert_eq!(first, "hello 👋🏽\n");
-    assert_eq!(count, 8);
-    assert_eq!(text, "next line");
-
-    let mut emoji = "👨‍👩‍👧‍👦x".to_owned();
-    let (first, count) = take_stream_prefix(&mut emoji, 1);
-    assert_eq!(first, "👨‍👩‍👧‍👦");
-    assert_eq!(count, 1);
-    assert_eq!(emoji, "x");
-}
-
-#[test]
-fn stream_chunks_use_the_frame_budget_across_short_lines_and_preserve_event_order() {
+fn stream_batches_commit_full_adjacent_text_and_preserve_event_order() {
     let runtime_id = Uuid::new_v4();
     let epoch = Uuid::new_v4();
     let mut events = VecDeque::from([
@@ -729,64 +713,17 @@ fn stream_chunks_use_the_frame_budget_across_short_lines_and_preserve_event_orde
     ]);
 
     assert!(matches!(
-        pop_stream_chunk(&mut events, StreamDeltaKind::Text),
-        Some(DriverEvent::TextDelta(text)) if text == "first line\ns"
-    ));
-    assert!(matches!(
-        events.pop_front(),
-        Some(DriverEvent::RuntimeEventCursorAdvanced(cursor)) if cursor.sequence == 1
-    ));
-    assert!(matches!(
-        events.front(),
-        Some(DriverEvent::TextDelta(text)) if text == "econd line"
-    ));
-
-    assert!(matches!(
-        pop_stream_chunk(&mut events, StreamDeltaKind::Text),
-        Some(DriverEvent::TextDelta(text)) if text == "econd line"
-    ));
-    assert!(matches!(
-        events.pop_front(),
-        Some(DriverEvent::RuntimeEventCursorAdvanced(cursor)) if cursor.sequence == 2
-    ));
-    assert!(matches!(events.front(), Some(DriverEvent::Activity { .. })));
-}
-
-#[test]
-fn settled_stream_backlog_flushes_before_the_terminal_event() {
-    let runtime_id = Uuid::new_v4();
-    let epoch = Uuid::new_v4();
-    let mut events = VecDeque::from([
-        DriverEvent::TextDelta("first line\nsecond ".into()),
-        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
-            runtime_id,
-            epoch,
-            sequence: 1,
-        }),
-        DriverEvent::TextDelta("line".into()),
-        DriverEvent::RuntimeEventCursorAdvanced(RuntimeEventCursor {
-            runtime_id,
-            epoch,
-            sequence: 2,
-        }),
-        DriverEvent::TurnFinished {
-            success: true,
-            summary: None,
-        },
-    ]);
-
-    assert!(stream_backlog_should_flush(&events));
-    assert!(matches!(
-        pop_complete_stream_chunk(&mut events, StreamDeltaKind::Text),
+        pop_stream_batch(&mut events, StreamDeltaKind::Text),
         Some(DriverEvent::TextDelta(text)) if text == "first line\nsecond line"
     ));
     assert!(matches!(
         events.pop_front(),
         Some(DriverEvent::RuntimeEventCursorAdvanced(cursor)) if cursor.sequence == 2
     ));
+    assert!(matches!(events.front(), Some(DriverEvent::Activity { .. })));
     assert!(matches!(
-        events.front(),
-        Some(DriverEvent::TurnFinished { success: true, .. })
+        events.get(1),
+        Some(DriverEvent::TextDelta(text)) if text == "after tool"
     ));
 }
 
