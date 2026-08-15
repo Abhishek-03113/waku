@@ -861,6 +861,10 @@ impl Waku {
                                 provider
                             };
                         this.model_picker_tab = ModelPickerTab::Provider(provider);
+                        // Opening re-runs the tab's catalog discovery so models
+                        // authored since launch appear without a restart; the
+                        // other rails refresh when selected, not all at once.
+                        this.refresh_provider_model_discovery(provider);
                         this.model_picker_highlight = None;
                         reset_search.update(cx, |search, cx| search.clear(cx));
                         this.reveal_selected_picker_model();

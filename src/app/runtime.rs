@@ -1310,8 +1310,10 @@ impl Waku {
     }
 
     /// Re-run one provider's model-owned catalog discovery, for selectors whose
-    /// contents can change while Waku stays open (for example, DeepSeek's
-    /// user-authored agent presets).
+    /// contents can change while Waku stays open — models the user just
+    /// authored in a provider's config, or DeepSeek's custom agent presets.
+    /// The stale catalog stays on screen until the fresh probe lands, so an
+    /// open menu never blanks into a loading state while it refreshes.
     pub(super) fn refresh_provider_model_discovery(&mut self, provider: ProviderKind) {
         if self.provider_model_discoveries_pending.contains(&provider) {
             return;

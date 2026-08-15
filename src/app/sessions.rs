@@ -940,6 +940,12 @@ impl Waku {
     pub(super) fn select_model_picker_tab(&mut self, tab: ModelPickerTab, cx: &mut Context<Self>) {
         if self.model_picker_tab != tab {
             self.model_picker_tab = tab;
+            if let ModelPickerTab::Provider(provider) = tab {
+                // Selecting a rail re-runs that provider's catalog discovery,
+                // so each tab is fresh when viewed without probing every
+                // provider on open.
+                self.refresh_provider_model_discovery(provider);
+            }
             // A different tab renumbers the rows under the keyboard cursor,
             // and would otherwise inherit the old tab's scroll offset.
             self.model_picker_highlight = None;
