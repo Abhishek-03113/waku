@@ -2945,7 +2945,18 @@ impl Waku {
             self.message_edit = None;
             self.hide_toast();
             self.transcript_anchor.set(transcript_anchor);
-            self.transcript_anchor_end_space.set(Pixels::ZERO);
+            // Provisional reservation: the anchored list has no measured
+            // bounds until its first paint, and a zero end space cannot hold
+            // the sent row at the viewport top — without scroll room past the
+            // tail, the list clamps to its end and the prompt paints a frame
+            // at the bottom before the first measured frame lifts it. Seed a
+            // full viewport of end space instead; the overshoot is invisible
+            // under the top anchor and the first measured frame trues it up.
+            let mut provisional = self.transcript_rows.viewport_bounds().size.height;
+            if provisional <= Pixels::ZERO {
+                provisional = self.anchored_transcript_rows.viewport_bounds().size.height;
+            }
+            self.transcript_anchor_end_space.set(provisional);
             self.transcript_anchor_following.set(true);
             self.splice_transcript_rows_after_visibility_change(&previous_kinds);
             self.scroll_transcript_to_anchor();

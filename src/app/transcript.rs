@@ -267,14 +267,20 @@ impl Waku {
             let last = transcript_rows.bounds_for_item(last_row)?;
             Some((last.bottom() - anchor.top()).max(Pixels::ZERO))
         });
-        // Unmeasured rows report no bounds. Treating that as a zero-height tail
-        // asks for a full viewport of end space, which pushes the transcript off
-        // screen; leave the padding alone until the rows have been measured.
-        let Some(anchored_tail_height) = anchored_tail_height else {
-            self.transcript_anchor_end_space.set(Pixels::ZERO);
-            return Pixels::ZERO;
+        // Tail rows report no bounds for a frame whenever they are remeasured —
+        // which the stream pump does on every commit — and report none at all
+        // before the anchored list's first paint. Missing bounds mean unknown,
+        // not zero: a zero end space reads as "the reply filled the viewport",
+        // so the render's follow branch pins the list to its end, the next
+        // measured frame snaps back to the anchor, and the two alternate at
+        // stream cadence for the whole turn. Let the previous end space stand
+        // (the send path seeds a provisional full-viewport reservation) and
+        // keep asserting the anchor straight through the unmeasured frame —
+        // scroll_to is bounds-independent.
+        let end_space = match anchored_tail_height {
+            Some(height) => transcript_anchor_end_space(viewport_height, height),
+            None => self.transcript_anchor_end_space.get(),
         };
-        let end_space = transcript_anchor_end_space(viewport_height, anchored_tail_height);
         self.transcript_anchor_end_space.set(end_space);
         if maintain_transcript_anchor(
             transcript_rows,
