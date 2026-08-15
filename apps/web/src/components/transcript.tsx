@@ -24,8 +24,8 @@ import {
   activityDisclosureSections,
   activityDisplayTitle,
   activityFileChangeStats,
+  activityHeaderTitle,
   activityPreview,
-  activitySummary,
   activityTextRows,
   assistantResponseFooters,
   fencedCode,
@@ -1417,8 +1417,7 @@ function ActivityGroup({
         type="button"
         onClick={() => setExpanded((value) => !value)}
       >
-        {running && <span className="size-1.5 rounded-full bg-ring motion-safe:animate-pulse" />}
-        <span className="font-medium">{activitySummary(activities, t)}</span>
+        <span className="font-medium">{activityHeaderTitle(activities, liveTurn, t)}</span>
         <WakuIcon className="size-3" name={expanded ? 'chevronDown' : 'chevronRight'} />
       </button>
       {expanded && (

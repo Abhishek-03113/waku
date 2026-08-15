@@ -1591,7 +1591,6 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let running = activities.iter().any(|activity| !activity.complete);
         let live_turn = self
             .selected_session()
             .and_then(AgentSession::active_turn_id)
@@ -1620,6 +1619,7 @@ impl Waku {
                 .map(|activity| activity.id)
         })
         .flatten();
+        let header_title = activity_header_title(activities, live_turn, live_reasoning_id);
         let cluster = div()
             .w_full()
             .min_w_0()
@@ -1636,18 +1636,11 @@ impl Waku {
                     .text_size(px(11.0))
                     .line_height(px(14.0))
                     .cursor_default()
-                    .when(running, |element| {
-                        element.child(pulse_dot(
-                            format!("activity-running-{block_index}"),
-                            5.0,
-                            theme.accent,
-                        ))
-                    })
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_tertiary)
-                            .child(SharedString::from(activity_summary(activities))),
+                            .child(SharedString::from(header_title)),
                     )
                     .child(icon(
                         if expanded {
@@ -1964,23 +1957,6 @@ impl Waku {
             items = items.child(item);
         }
         cluster.child(items).into_any_element()
-    }
-}
-
-fn reasoning_activity_title(reasoning: &ReasoningBlock, live: bool) -> String {
-    if live {
-        tr!("transcript.thinking")
-    } else {
-        tr!(
-            "transcript.thought_for",
-            duration = format_worked_duration(
-                reasoning
-                    .finished_at_ms
-                    .saturating_sub(reasoning.started_at_ms)
-                    .div_ceil(1000)
-                    .max(1)
-            )
-        )
     }
 }
 

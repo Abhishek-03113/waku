@@ -922,6 +922,21 @@ pub(super) fn activity_summary(activities: &[ActivityItem]) -> String {
     }
 }
 
+pub(super) fn activity_header_title(
+    activities: &[ActivityItem],
+    live_turn: bool,
+    live_reasoning_id: Option<Uuid>,
+) -> String {
+    if live_turn && let Some(activity) = activities.last() {
+        return activity.reasoning.as_ref().map_or_else(
+            || activity_display_title(activity),
+            |reasoning| reasoning_activity_title(reasoning, live_reasoning_id == Some(activity.id)),
+        );
+    }
+
+    activity_summary(activities)
+}
+
 pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
     use crate::model::ActivityKind;
 
@@ -1051,6 +1066,23 @@ pub(super) fn activity_display_title(activity: &ActivityItem) -> String {
             .clone()
             .unwrap_or_else(|| activity.title.clone()),
         ActivityKind::Reasoning => activity.title.clone(),
+    }
+}
+
+pub(super) fn reasoning_activity_title(reasoning: &ReasoningBlock, live: bool) -> String {
+    if live {
+        tr!("transcript.thinking")
+    } else {
+        tr!(
+            "transcript.thought_for",
+            duration = format_worked_duration(
+                reasoning
+                    .finished_at_ms
+                    .saturating_sub(reasoning.started_at_ms)
+                    .div_ceil(1000)
+                    .max(1)
+            )
+        )
     }
 }
 
@@ -1335,6 +1367,43 @@ mod message_time_tests {
 
         assert_eq!(activity_display_title(&titled), "Inspect Helium browser");
         assert_eq!(activity_display_title(&untitled), "Js");
+    }
+
+    #[test]
+    fn live_activity_header_tracks_the_latest_child_until_the_turn_settles() {
+        let reasoning = ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Inspecting history".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        );
+        let command = ActivityItem::new(
+            Some("command-1".into()),
+            crate::model::ActivityKind::Command,
+            "bash",
+            None,
+            false,
+        )
+        .with_arguments(Some(
+            serde_json::json!({"command": "git log --oneline -15"}).to_string(),
+        ));
+        let mut activities = vec![reasoning, command];
+
+        assert_eq!(
+            activity_header_title(&activities, true, None),
+            "Running git log --oneline -15"
+        );
+        activities[1].complete = true;
+        assert_eq!(
+            activity_header_title(&activities, true, None),
+            "Ran git log --oneline -15"
+        );
+        assert_eq!(
+            activity_header_title(&activities, false, None),
+            "Ran 1 thought · 1 command"
+        );
     }
 
     #[test]

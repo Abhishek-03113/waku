@@ -4,6 +4,7 @@ import {
   activityDisclosureSections,
   activityDisplayTitle,
   activityFileChangeStats,
+  activityHeaderTitle,
   activityPreview,
   activitySummary,
   activityTextRows,
@@ -37,6 +38,19 @@ describe('desktop transcript language', () => {
       activity('command', true),
     ])).toBe('Ran 2 thoughts · 1 command')
     expect(activitySummary([reasoning(false, 0, 0)])).toBe('Running 1 thought')
+  })
+
+  test('uses the latest child title while an activity group is live', () => {
+    const command = {
+      ...activity('command', false),
+      display_target: 'git log --oneline -15',
+    }
+    const activities = [reasoning(true, 0, 1_000), command]
+
+    expect(activityHeaderTitle(activities, true)).toBe('Running git log --oneline -15')
+    command.complete = true
+    expect(activityHeaderTitle(activities, true)).toBe('Ran git log --oneline -15')
+    expect(activityHeaderTitle(activities, false)).toBe('Ran 1 thought · 1 command')
   })
 
   test('derives the same provider-neutral activity titles as desktop', () => {
