@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.1.0]
+
 - Add standalone Waku daemon and browser client
 - Add Linux support (X11 and Wayland, you need to build from source for now)
 - Answer agent questions directly in the composer
