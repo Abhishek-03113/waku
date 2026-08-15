@@ -5,8 +5,10 @@ import {
   detectComposerTrigger,
   expandCommandTemplate,
   expandedComposerSubmission,
+  isFastModeToggleSubmission,
   mergeComposerCommands,
   replaceComposerTrigger,
+  toggledFastServiceTier,
 } from './composer-autocomplete'
 
 describe('composer autocomplete', () => {
@@ -53,6 +55,23 @@ describe('composer autocomplete', () => {
       discovered[0],
       discovered[1],
     ])
+  })
+
+  test('recognizes only the resolved Codex fast-mode command', () => {
+    const builtin = command('fast', 'Builtin', 'Toggle fast mode', null)
+    expect(isFastModeToggleSubmission('codex', '/fast ', [builtin])).toBe(true)
+    expect(isFastModeToggleSubmission('claude', '/fast', [builtin])).toBe(false)
+    expect(isFastModeToggleSubmission('codex', '/fast now', [builtin])).toBe(false)
+    expect(isFastModeToggleSubmission('codex', '/fast', [
+      command('fast', 'Project', 'Project fast command', 'Run fast'),
+    ])).toBe(false)
+  })
+
+  test('toggles the concrete Fast service-tier ID reported by the model', () => {
+    const tiers = [{ id: 'priority', label: 'Fast' }]
+    expect(toggledFastServiceTier('default', tiers)).toBe('priority')
+    expect(toggledFastServiceTier('priority', tiers)).toBe('default')
+    expect(toggledFastServiceTier(null, [])).toBeNull()
   })
 
   test('filters by fuzzy path and caps the result count', () => {

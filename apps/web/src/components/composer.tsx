@@ -48,8 +48,10 @@ import {
   composerAutocompleteRows,
   detectComposerTrigger,
   expandedComposerSubmission,
+  isFastModeToggleSubmission,
   mergeComposerCommands,
   replaceComposerTrigger,
+  toggledFastServiceTier,
   type ComposerAutocompleteRow,
 } from '@/lib/composer-autocomplete'
 import {
@@ -344,8 +346,26 @@ export function Composer({
     ].filter(Boolean).join(' ')
   }
 
+  function executeLocalComposerCommand(submittedPrompt = prompt): boolean {
+    if (!isFastModeToggleSubmission(session.provider, submittedPrompt, availableCommands)) return false
+    const nextTier = toggledFastServiceTier(
+      session.service_tier,
+      selectedModel?.service_tiers ?? [],
+    )
+    if (!nextTier) return false
+    const enabled = nextTier !== 'default'
+    setPrompt('')
+    setCursor(0)
+    setDismissedAutocomplete(null)
+    setAutocompleteSelection({ key: '', index: 0 })
+    savePatch({ service_tier: nextTier })
+    toast.success(t(enabled ? 'commands.fast_enabled' : 'commands.fast_disabled'))
+    return true
+  }
+
   async function submit() {
     if (submitting || (!prompt.trim() && attachments.length === 0)) return
+    if (executeLocalComposerCommand()) return
     const submittedPrompt = prompt
     const submittedAttachments = attachments
     let cleared = false
@@ -384,6 +404,7 @@ export function Composer({
 
   async function steer() {
     if (!hasDraft || !canSteer) return
+    if (executeLocalComposerCommand()) return
     const submittedPrompt = prompt
     const submittedAttachments = attachments
     let cleared = false
@@ -465,6 +486,7 @@ export function Composer({
     const row = autocompleteRows[index]
     if (!row) return
     const replacement = replaceComposerTrigger(prompt, autocompleteTrigger, row)
+    if (row.kind === 'command' && executeLocalComposerCommand(replacement.text)) return
     pendingCursor.current = replacement.cursor
     setPrompt(replacement.text)
     setDismissedAutocomplete(null)

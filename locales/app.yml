@@ -1015,6 +1015,12 @@ commands.review_description:
   en: Review the pending changes on this branch
 commands.commit_description:
   en: Stage and commit the current changes
+commands.fast_description:
+  en: Toggle fast mode
+commands.fast_enabled:
+  en: Fast mode enabled
+commands.fast_disabled:
+  en: Fast mode disabled
 commands.claude_compact:
   en: Free up context by summarizing the conversation
 commands.claude_context:

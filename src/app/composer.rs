@@ -1970,6 +1970,9 @@ impl Waku {
         prompt: &str,
         cx: &mut Context<Self>,
     ) -> Option<ComposerSubmission> {
+        if self.execute_local_composer_command(prompt, cx) {
+            return None;
+        }
         for attachment in &self.composer_attachments {
             if let (Some(reference), Some(image)) = (
                 attachment.blob_reference.as_ref(),
@@ -1997,6 +2000,40 @@ impl Waku {
             display_content,
             attachments,
         })
+    }
+
+    pub(super) fn execute_local_composer_command(
+        &mut self,
+        prompt: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(next_tier) = self.selected_session().and_then(|session| {
+            if !crate::composer_complete::is_fast_mode_toggle_submission(
+                session.provider,
+                prompt,
+                &self.slash_command_index,
+            ) {
+                return None;
+            }
+            let model = self.model_metadata_for_session(session)?;
+            crate::composer_complete::toggled_fast_service_tier(
+                session.service_tier.as_deref(),
+                &model.service_tiers,
+            )
+        }) else {
+            return false;
+        };
+        let enabled = next_tier != "default";
+        // Clearing emits an Edited event. Apply the tier afterward so any
+        // draft refresh caused by that event cannot repaint the old choice.
+        self.composer.update(cx, |input, cx| input.clear(cx));
+        self.set_service_tier(next_tier, cx);
+        self.show_success_toast(tr!(if enabled {
+            "commands.fast_enabled"
+        } else {
+            "commands.fast_disabled"
+        }));
+        true
     }
 
     pub(super) fn restore_composer_submission(

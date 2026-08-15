@@ -85,16 +85,18 @@ pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
 // ── Slash commands ─────────────────────────────────────────────────────────
 
 /// Where a command came from, in the order groups are listed.
-/// Waku's own built-ins, available on every provider. Each is a plain prompt
-/// template Waku expands at submit, so they work over any transport — unlike
-/// a CLI's native built-ins, which only its own TUI understands. A provider's
-/// native command of the same name is discovered first and wins the collision.
+/// Waku's own built-ins. The shared commands are plain prompt templates Waku
+/// expands at submit, so they work over any transport — unlike a CLI's native
+/// built-ins, which only its own TUI understands. Provider-specific local
+/// commands such as Codex's `/fast` are handled by the client without starting
+/// a turn. A provider's native command of the same name is discovered first
+/// and wins the collision.
 fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
     let instructions_file = match provider {
         ProviderKind::Claude => "CLAUDE.md",
         _ => "AGENTS.md",
     };
-    [
+    let mut commands = [
         (
             "init",
             tr!(
@@ -132,7 +134,17 @@ fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
         argument_hint: None,
         template: Some(template),
     })
-    .collect()
+    .collect::<Vec<_>>();
+    if provider == ProviderKind::Codex {
+        commands.push(SlashCommand {
+            name: "fast".to_owned(),
+            description: tr!("commands.fast_description"),
+            scope: CommandScope::Builtin,
+            argument_hint: None,
+            template: None,
+        });
+    }
+    commands
 }
 
 /// Claude Code built-ins worth surfacing from a frontend. The live session's
@@ -1190,6 +1202,25 @@ mod tests {
                 .contains("AGENTS.md")
         }));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fast_builtin_is_codex_only() {
+        for provider in ProviderKind::ALL {
+            let commands = builtin_waku_commands(provider);
+            let fast = commands.iter().find(|command| command.name == "fast");
+            if provider == ProviderKind::Codex {
+                let fast = fast.expect("Codex is missing /fast");
+                assert_eq!(fast.scope, CommandScope::Builtin);
+                assert!(fast.template.is_none());
+            } else {
+                assert!(
+                    fast.is_none(),
+                    "{} unexpectedly offers /fast",
+                    provider.display_name()
+                );
+            }
+        }
     }
 
     #[test]

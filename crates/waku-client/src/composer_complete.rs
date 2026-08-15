@@ -5,7 +5,7 @@ use std::ops::Range;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
 pub use waku_protocol::composer::{CommandScope, FileEntry, SlashCommand};
-use waku_protocol::model::ReportedCommand;
+use waku_protocol::model::{ProviderKind, ProviderModelOption, ReportedCommand};
 
 pub const FILTER_CAP: usize = 64;
 pub const FILE_INDEX_CAP: usize = 50_000;
@@ -79,6 +79,40 @@ pub fn merge_reported_commands(
     merged
         .sort_by(|a, b| (a.scope.display_rank(), &a.name).cmp(&(b.scope.display_rank(), &b.name)));
     merged
+}
+
+/// Whether the submitted text resolves to Waku's Codex-only fast-mode
+/// toggle. Checking the resolved entry preserves project/user command
+/// precedence when one of them intentionally owns `/fast`.
+pub fn is_fast_mode_toggle_submission(
+    provider: ProviderKind,
+    prompt: &str,
+    commands: &[SlashCommand],
+) -> bool {
+    provider == ProviderKind::Codex
+        && prompt.trim() == "/fast"
+        && commands.iter().any(|command| {
+            command.name == "fast"
+                && command.scope == CommandScope::Builtin
+                && command.template.is_none()
+        })
+}
+
+/// Resolve the next concrete service-tier ID for Codex's Fast toggle. Model
+/// metadata may expose the Fast tier as `fast` or as `priority`; the display
+/// label is the stable product vocabulary, while the ID is provider-owned.
+pub fn toggled_fast_service_tier(
+    current: Option<&str>,
+    service_tiers: &[ProviderModelOption],
+) -> Option<String> {
+    let fast = service_tiers.iter().find(|tier| {
+        matches!(tier.id.as_str(), "fast" | "priority") || tier.label.eq_ignore_ascii_case("fast")
+    })?;
+    Some(if current == Some(fast.id.as_str()) {
+        "default".to_owned()
+    } else {
+        fast.id.clone()
+    })
 }
 
 pub fn expand_command_template(template: &str, args: &str) -> String {
@@ -267,6 +301,45 @@ mod tests {
                 (CommandScope::Skill, "deploy"),
             ]
         );
+    }
+
+    #[test]
+    fn fast_toggle_is_codex_only_and_respects_command_overrides() {
+        let builtin = command("fast", CommandScope::Builtin);
+        assert!(is_fast_mode_toggle_submission(
+            ProviderKind::Codex,
+            "/fast ",
+            std::slice::from_ref(&builtin),
+        ));
+        assert!(!is_fast_mode_toggle_submission(
+            ProviderKind::Claude,
+            "/fast",
+            std::slice::from_ref(&builtin),
+        ));
+        assert!(!is_fast_mode_toggle_submission(
+            ProviderKind::Codex,
+            "/fast now",
+            std::slice::from_ref(&builtin),
+        ));
+        assert!(!is_fast_mode_toggle_submission(
+            ProviderKind::Codex,
+            "/fast",
+            &[command("fast", CommandScope::Project)],
+        ));
+    }
+
+    #[test]
+    fn fast_toggle_uses_the_models_concrete_service_tier_id() {
+        let tiers = [ProviderModelOption::new("priority", "Fast")];
+        assert_eq!(
+            toggled_fast_service_tier(Some("default"), &tiers).as_deref(),
+            Some("priority")
+        );
+        assert_eq!(
+            toggled_fast_service_tier(Some("priority"), &tiers).as_deref(),
+            Some("default")
+        );
+        assert_eq!(toggled_fast_service_tier(None, &[]), None);
     }
 
     fn command(name: &str, scope: CommandScope) -> SlashCommand {
