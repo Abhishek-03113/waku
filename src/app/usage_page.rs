@@ -350,19 +350,7 @@ impl Waku {
         });
 
         let refresh_glyph: AnyElement = if pending {
-            icon("icons/loader-circle.svg", 12.0, theme.text_tertiary)
-                .with_animation(
-                    "usage-refresh-spinner",
-                    Animation::new(Duration::from_millis(900))
-                        .repeat()
-                        .with_easing(gpui::linear),
-                    |icon, delta| {
-                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                            delta,
-                        )))
-                    },
-                )
-                .into_any_element()
+            motion::spin(icon("icons/loader-circle.svg", 12.0, theme.text_tertiary))
         } else {
             icon("icons/rotate-cw.svg", 12.0, theme.text_tertiary).into_any_element()
         };
@@ -2052,16 +2040,13 @@ fn usage_skeleton(view: UsageViewMode, theme: &Theme) -> AnyElement {
         }
     };
 
-    div()
-        .child(body)
-        .with_animation(
-            "usage-page-skeleton",
-            Animation::new(Duration::from_millis(1400))
-                .repeat()
-                .with_easing(pulsating_between(0.45, 0.9)),
-            |element, delta| element.opacity(delta),
-        )
-        .into_any_element()
+    motion::pulse(Duration::from_millis(1400), move |phase| {
+        div()
+            .child(body)
+            .opacity(pulsating_between(0.45, 0.9)(phase))
+            .into_any_element()
+    })
+    .into_any_element()
 }
 
 /* ------------------------------------------------------------------------- */

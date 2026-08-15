@@ -420,12 +420,7 @@ fn background_summary_process_status_icon(
     }
 }
 
-fn rendered_work_status_icon(
-    status: BackgroundWorkStatus,
-    size: f32,
-    color: Hsla,
-    animation_id: impl Into<SharedString>,
-) -> AnyElement {
+fn rendered_work_status_icon(status: BackgroundWorkStatus, size: f32, color: Hsla) -> AnyElement {
     let icon = icon(work_status_icon(status), size, color);
     if matches!(
         status,
@@ -433,16 +428,7 @@ fn rendered_work_status_icon(
             | BackgroundWorkStatus::Running
             | BackgroundWorkStatus::Monitoring
     ) {
-        icon.with_animation(
-            animation_id.into(),
-            Animation::new(Duration::from_millis(900))
-                .repeat()
-                .with_easing(gpui::linear),
-            |icon, delta| {
-                icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta)))
-            },
-        )
-        .into_any_element()
+        motion::spin(icon)
     } else {
         icon.into_any_element()
     }
@@ -987,15 +973,7 @@ impl Waku {
                                     .gap(px(5.0))
                                     .text_size(px(10.0))
                                     .text_color(theme.text_tertiary)
-                                    .child(rendered_work_status_icon(
-                                        item.status,
-                                        9.0,
-                                        status_color,
-                                        SharedString::from(format!(
-                                            "background-surface-spinner-{}-{}",
-                                            item.key.provider_id, item.key.kind as u8
-                                        )),
-                                    ))
+                                    .child(rendered_work_status_icon(item.status, 9.0, status_color))
                                     .child(work_status_label(item.status))
                                     .child("·")
                                     .child(work_elapsed(item)),
@@ -1346,17 +1324,7 @@ fn render_environment_action_row(
         theme.text_ghost
     };
     let indicator = if active {
-        icon("icons/loader-circle.svg", 14.0, theme.text_secondary)
-            .with_animation(
-                SharedString::from(format!("{id}-spinner")),
-                Animation::new(Duration::from_millis(900))
-                    .repeat()
-                    .with_easing(gpui::linear),
-                |icon, delta| {
-                    icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta)))
-                },
-            )
-            .into_any_element()
+        motion::spin(icon("icons/loader-circle.svg", 14.0, theme.text_secondary))
     } else {
         icon(icon_path, 14.0, icon_foreground).into_any_element()
     };
@@ -1459,10 +1427,6 @@ fn render_background_summary_row(
                 item.status,
                 12.0,
                 work_status_color(item.status, *theme),
-                SharedString::from(format!(
-                    "background-summary-spinner-{}-{}",
-                    item.key.provider_id, item.key.kind as u8
-                )),
             ))
     });
     let stop = (item.status.is_stoppable() && item.can_stop).then(|| {

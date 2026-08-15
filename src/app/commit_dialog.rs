@@ -796,17 +796,7 @@ fn render_commit_action_row(
         theme.text_ghost
     };
     let indicator = if active {
-        icon("icons/loader-circle.svg", 15.0, theme.text_secondary)
-            .with_animation(
-                SharedString::from(format!("commit-dialog-spinner-{action:?}")),
-                Animation::new(Duration::from_millis(900))
-                    .repeat()
-                    .with_easing(gpui::linear),
-                |icon, delta| {
-                    icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta)))
-                },
-            )
-            .into_any_element()
+        motion::spin(icon("icons/loader-circle.svg", 15.0, theme.text_secondary))
     } else {
         icon(icon_path, 15.0, foreground).into_any_element()
     };

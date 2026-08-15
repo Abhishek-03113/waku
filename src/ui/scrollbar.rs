@@ -247,9 +247,14 @@ where
                     BorderStyle::default(),
                 ));
                 if !active {
-                    // Keep driving frames through the hold and the fade;
-                    // nothing else would repaint a resting transcript.
-                    window.request_animation_frame();
+                    // Advance the hold-then-fade timeline from the shared
+                    // pulse clock — nothing else would repaint a resting
+                    // transcript. Riding the clock instead of
+                    // `request_animation_frame` keeps a transcript that
+                    // scrolls every commit (a streaming turn pins the bar in
+                    // its hold) from redrawing the window at display rate,
+                    // and the lease parks itself shortly after the bar hides.
+                    super::motion::pulse_lease(window.current_view(), cx);
                 }
             }
 

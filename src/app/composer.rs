@@ -2494,22 +2494,11 @@ impl Waku {
                                 .justify_center()
                                 .cursor_default()
                                 .bg(theme.overlay_strong)
-                                .child(
-                                    icon("icons/loader-circle.svg", 15.0, theme.text_secondary)
-                                        .with_animation(
-                                            "submission-preparation-spinner",
-                                            Animation::new(Duration::from_millis(900))
-                                                .repeat()
-                                                .with_easing(gpui::linear),
-                                            |icon, delta| {
-                                                icon.with_transformation(
-                                                    gpui::Transformation::rotate(gpui::percentage(
-                                                        delta,
-                                                    )),
-                                                )
-                                            },
-                                        ),
-                                )
+                                .child(motion::spin(icon(
+                                    "icons/loader-circle.svg",
+                                    15.0,
+                                    theme.text_secondary,
+                                )))
                                 .tooltip(Tooltip::text(tr!("composer.preparing_task"))),
                             ComposerSubmitAction::Stop => div()
                                 .id("working-actions")

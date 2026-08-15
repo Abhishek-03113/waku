@@ -535,7 +535,8 @@ fn usage_panel(
 /// a header bar and two quota rows, pulsing gently. `with_animation` honors
 /// the system's reduce-motion setting on its own.
 fn plan_skeleton(theme: &Theme) -> AnyElement {
-    let bar = |width: f32| {
+    let theme = *theme;
+    let bar = move |width: f32| {
         div()
             .h(px(9.0))
             .w(px(width))
@@ -543,7 +544,7 @@ fn plan_skeleton(theme: &Theme) -> AnyElement {
             .rounded(px(4.5))
             .bg(theme.overlay_strong)
     };
-    let row = |label_width: f32, value_width: f32| {
+    let row = move |label_width: f32, value_width: f32| {
         div()
             .flex()
             .flex_col()
@@ -565,21 +566,18 @@ fn plan_skeleton(theme: &Theme) -> AnyElement {
                     .bg(theme.overlay_strong),
             )
     };
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(12.0))
-        .child(bar(132.0))
-        .child(row(96.0, 64.0))
-        .child(row(120.0, 64.0))
-        .with_animation(
-            "plan-usage-skeleton",
-            Animation::new(Duration::from_millis(1400))
-                .repeat()
-                .with_easing(pulsating_between(0.45, 0.9)),
-            |element, delta| element.opacity(delta),
-        )
-        .into_any_element()
+    motion::pulse(Duration::from_millis(1400), move |phase| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(bar(132.0))
+            .child(row(96.0, 64.0))
+            .child(row(120.0, 64.0))
+            .opacity(pulsating_between(0.45, 0.9)(phase))
+            .into_any_element()
+    })
+    .into_any_element()
 }
 
 /// A quota bar: full-width track, fill proportional to `percent`. A lane in

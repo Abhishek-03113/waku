@@ -401,20 +401,27 @@ impl MarkdownView {
         if changed {
             self.parser.set_text(text);
         }
-        let tail = if mend {
-            self.parser.display_tail().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        if changed || tail != self.tail {
-            self.tail = tail;
-            // Markdown block structure only ever extends the final block, so
-            // every element before it is still valid. A streamed delta thus
-            // re-flattens one block instead of the whole response.
-            let boundary = self.volatile_from.get();
-            self.flats
-                .borrow_mut()
-                .retain(|ordinal, _| *ordinal < boundary);
+        // The mended display tail depends only on the source and the
+        // streaming flag. Deriving it re-mends — and, with a hanging marker,
+        // re-parses — the final block, and `set_text` runs for every visible
+        // row on every frame, so a frame that changed neither input must not
+        // pay for it.
+        if changed || mend != was_streaming {
+            let tail = if mend {
+                self.parser.display_tail().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if changed || tail != self.tail {
+                self.tail = tail;
+                // Markdown block structure only ever extends the final block,
+                // so every element before it is still valid. A streamed delta
+                // thus re-flattens one block instead of the whole response.
+                let boundary = self.volatile_from.get();
+                self.flats
+                    .borrow_mut()
+                    .retain(|ordinal, _| *ordinal < boundary);
+            }
         }
     }
 

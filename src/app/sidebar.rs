@@ -558,19 +558,7 @@ impl Waku {
             });
 
         if !available {
-            let indicator = icon("icons/loader-circle.svg", 14.0, foreground)
-                .with_animation(
-                    "sidebar-updater-spinner",
-                    Animation::new(Duration::from_millis(900))
-                        .repeat()
-                        .with_easing(gpui::linear),
-                    |icon, delta| {
-                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                            delta,
-                        )))
-                    },
-                )
-                .into_any_element();
+            let indicator = motion::spin(icon("icons/loader-circle.svg", 14.0, foreground));
             return Some(
                 button
                     .tooltip(Tooltip::text(
@@ -1074,24 +1062,11 @@ impl Waku {
                     .line_height(px(18.0))
                     .child(title)
                     .when(working, |element| {
-                        element.child(
-                            icon(
-                                "icons/loader-circle.svg",
-                                12.0,
-                                status_color(&theme, session.status),
-                            )
-                            .with_animation(
-                                SharedString::from(format!("session-spinner-{session_id}")),
-                                Animation::new(Duration::from_millis(900))
-                                    .repeat()
-                                    .with_easing(gpui::linear),
-                                |icon, delta| {
-                                    icon.with_transformation(gpui::Transformation::rotate(
-                                        gpui::percentage(delta),
-                                    ))
-                                },
-                            ),
-                        )
+                        element.child(motion::spin(icon(
+                            "icons/loader-circle.svg",
+                            12.0,
+                            status_color(&theme, session.status),
+                        )))
                     })
                     .when(session.status == SessionStatus::Waiting, |element| {
                         element.child(icon(

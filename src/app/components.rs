@@ -3,52 +3,45 @@ use super::*;
 use chrono::{Datelike, Days};
 use std::path::Path;
 
-pub(super) fn pulse_dot(id: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
-    div()
-        .w(px(size))
-        .h(px(size))
-        .flex_none()
-        .rounded_full()
-        .bg(color)
-        .with_animation(
-            id.into(),
-            Animation::new(Duration::from_millis(1600))
-                .repeat()
-                .with_easing(pulsating_between(0.3, 1.0)),
-            |element, delta| element.opacity(delta),
-        )
-        .into_any_element()
+pub(super) fn pulse_dot(size: f32, color: Hsla) -> AnyElement {
+    motion::pulse(Duration::from_millis(1600), move |phase| {
+        div()
+            .w(px(size))
+            .h(px(size))
+            .flex_none()
+            .rounded_full()
+            .bg(color)
+            .opacity(pulsating_between(0.3, 1.0)(phase))
+            .into_any_element()
+    })
+    .into_any_element()
 }
 
 /// Three dots chasing a brightness wave, the transcript's "still working"
-/// signal. Each dot runs the same repeating cycle with a phase offset, so the
-/// bright spot travels left to right. Under reduce-motion GPUI holds the
+/// signal. Each dot rides the shared pulse clock with a phase offset, so the
+/// bright spot travels left to right. Under reduce-motion the clock holds the
 /// cycle's first frame — the lead dot bright, the tail dim — which reads as a
 /// static ellipsis.
 pub(super) fn working_wave_dots(color: Hsla) -> AnyElement {
     const DOT_PHASE_STEP: f32 = 0.18;
-    div()
-        .flex()
-        .items_center()
-        .gap(px(3.5))
-        .children((0..3).map(|index| {
-            let phase_offset = index as f32 * DOT_PHASE_STEP;
-            div()
-                .size(px(4.5))
-                .flex_none()
-                .rounded_full()
-                .bg(color)
-                .with_animation(
-                    SharedString::from(format!("working-wave-dot-{index}")),
-                    Animation::new(Duration::from_millis(1400)).repeat(),
-                    move |element, delta| {
-                        let phase = (delta + 1.0 - phase_offset) % 1.0;
-                        let wave = ((phase * std::f32::consts::TAU).sin() + 1.0) / 2.0;
-                        element.opacity(0.25 + 0.75 * wave)
-                    },
-                )
-        }))
-        .into_any_element()
+    motion::pulse(Duration::from_millis(1400), move |phase| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(3.5))
+            .children((0..3).map(|index| {
+                let dot_phase = (phase + 1.0 - index as f32 * DOT_PHASE_STEP) % 1.0;
+                let wave = ((dot_phase * std::f32::consts::TAU).sin() + 1.0) / 2.0;
+                div()
+                    .size(px(4.5))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(color)
+                    .opacity(0.25 + 0.75 * wave)
+            }))
+            .into_any_element()
+    })
+    .into_any_element()
 }
 
 pub(super) fn format_message_time(created_at: u64) -> String {
@@ -199,7 +192,7 @@ fn render_message_footer(
     theme: &Theme,
     message: &Message,
     footer_time: u64,
-    copy_content: String,
+    copy_content: SharedString,
     copied: bool,
     group_name: SharedString,
     align_right: bool,
@@ -249,7 +242,7 @@ fn render_message_footer(
             tr!("common.copy_message")
         }))
         .on_click(move |_, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_content.to_string()));
             let _ = copy_waku.update(cx, |this, cx| {
                 this.show_message_copied(message_id, cx);
             });
@@ -272,19 +265,7 @@ fn render_message_footer(
         if let Some(action) = assistant_message_action {
             let fork_waku = waku.clone();
             let fork_icon = if action.preparing {
-                icon("icons/loader-circle.svg", 14.0, footer_color)
-                    .with_animation(
-                        SharedString::from(format!("response-fork-spinner-{message_id}")),
-                        Animation::new(Duration::from_millis(900))
-                            .repeat()
-                            .with_easing(gpui::linear),
-                        |icon, delta| {
-                            icon.with_transformation(gpui::Transformation::rotate(
-                                gpui::percentage(delta),
-                            ))
-                        },
-                    )
-                    .into_any_element()
+                motion::spin(icon("icons/loader-circle.svg", 14.0, footer_color))
             } else {
                 icon("icons/fork.svg", 14.0, footer_color).into_any_element()
             };
@@ -358,7 +339,7 @@ fn render_message_footer(
 pub(super) struct MessageRender<'a> {
     pub(super) theme: &'a Theme,
     pub(super) message: &'a Message,
-    pub(super) assistant_footer_copy_content: Option<String>,
+    pub(super) assistant_footer_copy_content: Option<SharedString>,
     pub(super) assistant_footer_time: Option<u64>,
     pub(super) assistant_before_footer: Option<AnyElement>,
     pub(super) copied: bool,
@@ -578,7 +559,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
     // stay out — rather than copying the final part alone.
     let menu_copy_content = assistant_footer_copy_content
         .clone()
-        .unwrap_or_else(|| content.clone());
+        .unwrap_or_else(|| SharedString::from(content.clone()));
     let message_id = message.id;
     let role = message.role;
     let element = match role {
@@ -705,7 +686,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                     theme,
                     message,
                     message.created_at,
-                    content.clone(),
+                    SharedString::from(content.clone()),
                     copied,
                     group_name,
                     true,

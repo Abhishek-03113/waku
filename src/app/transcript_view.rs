@@ -1086,12 +1086,8 @@ impl Waku {
                 .cloned()
                 .map(|message| {
                     let copied = self.copied_message_feedback.contains_key(&message.id);
-                    let assistant_footer_copy_content = self
-                        .selected_session()
-                        .and_then(|session| assistant_response_footer(session, message_index));
-                    let assistant_footer_time = self
-                        .selected_session()
-                        .and_then(|session| assistant_response_footer_time(session, message_index));
+                    let (assistant_footer_copy_content, assistant_footer_time) =
+                        self.assistant_response_footer_cached(message_index);
                     let assistant_before_footer = assistant_footer_copy_content
                         .as_ref()
                         .and(message.turn_id)
@@ -1182,7 +1178,18 @@ impl Waku {
                         cx,
                     );
                     if animate_streaming && view.is_some_and(MarkdownView::is_fading) {
-                        window.request_animation_frame();
+                        // Advance the dissolve from the shared pulse clock,
+                        // not `request_animation_frame`: chunks land every
+                        // stream commit, so a fade is active for essentially
+                        // the whole response and a display-rate re-arm held
+                        // the window at 120 Hz — and every one of those
+                        // frames rebuilds each visible row. ~30 fps across a
+                        // 120-400 ms dissolve is visually equivalent at a
+                        // quarter of the redraws, the same trade the loaders
+                        // make, and the lease parks once the last chunk
+                        // settles. Leasing `current_view` (the transcript
+                        // pane) keeps the tick from busting sibling islands.
+                        motion::pulse_lease(window.current_view(), cx);
                     }
                     rendered
                 })
@@ -1874,11 +1881,7 @@ impl Waku {
                                     )
                                 })
                                 .when(!activity.complete && !activity.failed, |element| {
-                                    element.child(pulse_dot(
-                                        format!("activity-pulse-{id}"),
-                                        5.0,
-                                        theme.accent,
-                                    ))
+                                    element.child(pulse_dot(5.0, theme.accent))
                                 })
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1921,7 +1924,10 @@ impl Waku {
                 let wheel_follow_tail = reasoning_viewport.follow_tail.clone();
                 let markdown = md::render::markdown(view, &ctx);
                 if reasoning_live && !cx.reduce_motion() && view.is_fading() {
-                    window.request_animation_frame();
+                    // Same trade as the transcript veil: pulse-clock cadence
+                    // instead of a display-rate re-arm, leased to the
+                    // enclosing island via `current_view`.
+                    motion::pulse_lease(window.current_view(), cx);
                 }
                 item = item.child(
                     div()

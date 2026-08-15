@@ -63,7 +63,7 @@ use crate::theme::{Theme, ThemePreference};
 use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, activity_icon, activity_noun, file_icon, icon, icon_button,
-    provider_color, provider_icon, status_color,
+    motion, provider_color, provider_icon, status_color,
 };
 use crate::{
     CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
@@ -111,7 +111,12 @@ const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const ESCAPE_STOP_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Presentation pacing only. The app sleeps until a provider or background
 /// result wakes it, then uses this cadence while streamed chunks remain.
-const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(24);
+/// 120 ms matches Zeron's `STREAM_COMMIT_MS`: chunks queue for a full
+/// interval and fold into one drain → one notify → one remeasure, so the
+/// per-commit parse/flatten/highlight work runs at ~8 Hz regardless of the
+/// provider's chunk rate, and the veil dissolve spans the gap so streamed
+/// text still reads as continuous.
+const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(120);
 /// How long a session may sit untouched before its provider process is released.
 /// Codex and Pi stay resident between turns, so without this an afternoon of
 /// abandoned tasks is an afternoon of idle agent processes.
@@ -608,6 +613,46 @@ enum EventPumpSchedule {
     Idle,
     StreamFrame,
     BackgroundOutput(Duration),
+}
+
+/// One cached island of the root view: a region rendered by delegating back
+/// into [`Waku`] under its own view identity.
+///
+/// All state stays on the root entity; what the island buys is scope for
+/// gpui's cached-view machinery. The pulse clock and the streaming veil lease
+/// `window.current_view()`, so their ~30 fps ticks dirty only the island
+/// hosting the animation while every sibling island replays its cached
+/// subtree instead of rebuilding. Observing the root preserves the old
+/// invalidation semantics exactly — any root notify still re-renders every
+/// island — so caching cannot show state the single-view architecture would
+/// have repainted.
+struct WakuPane {
+    waku: Option<WeakEntity<Waku>>,
+    content: fn(&mut Waku, &mut Window, &mut Context<Waku>) -> AnyElement,
+}
+
+impl WakuPane {
+    fn new(
+        content: fn(&mut Waku, &mut Window, &mut Context<Waku>) -> AnyElement,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        cx.new(|_| Self { waku: None, content })
+    }
+
+    fn bind(&mut self, waku: &Entity<Waku>, cx: &mut Context<Self>) {
+        self.waku = Some(waku.downgrade());
+        cx.observe(waku, |_, _, cx| cx.notify()).detach();
+    }
+}
+
+impl Render for WakuPane {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(waku) = self.waku.as_ref().and_then(WeakEntity::upgrade) else {
+            return gpui::div().into_any_element();
+        };
+        let content = self.content;
+        waku.update(cx, |waku, cx| content(waku, window, cx))
+    }
 }
 
 struct RightPanelFileEditor {
@@ -1312,6 +1357,14 @@ pub struct Waku {
     transcript_navigation_turns: RefCell<Rc<Vec<TranscriptNavigationTurn>>>,
     /// The row-kinds fingerprint `transcript_navigation_turns` was built from.
     transcript_navigation_turns_fingerprint: Cell<Option<u64>>,
+    /// Response-footer copy content and completion time per message index,
+    /// rebuilt when the row-kinds fingerprint moves. The row builder asks for
+    /// every visible row on every frame, and the underlying turn walk and
+    /// answer join are O(session). Footers exist only for settled turns,
+    /// whose parts are immutable, and settling moves the fingerprint.
+    assistant_footer_cache: RefCell<HashMap<usize, (Option<SharedString>, Option<u64>)>>,
+    /// The row-kinds fingerprint `assistant_footer_cache` was built under.
+    assistant_footer_fingerprint: Cell<Option<u64>>,
     /// Checkpoint-ref existence per (session, retained turn count), filled by
     /// `prefetch_checkpoint_refs` on the background executor. Rows read only
     /// this cache: resolving a ref forks a `git` subprocess, which must stay
@@ -1365,6 +1418,10 @@ pub struct Waku {
     menus: RefCell<HashMap<SharedString, ContextMenuHandle>>,
     navigation_rail: Entity<ConversationNavigationRail>,
     navigation_rail_reset_generation: Cell<u64>,
+    /// Cached islands of the root view; see [`WakuPane`].
+    sidebar_pane: Entity<WakuPane>,
+    transcript_pane: Entity<WakuPane>,
+    right_panel_pane: Entity<WakuPane>,
     /// The unix second the pending time-label wake-up targets, or `None` when
     /// none is armed. See `schedule_time_label_wake`.
     time_label_wake: Cell<Option<u64>>,
@@ -1792,6 +1849,9 @@ impl Waku {
                 .placeholder(tr!("diff.filter_files"))
         });
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
+        let sidebar_pane = WakuPane::new(Waku::sidebar_pane_content, cx);
+        let transcript_pane = WakuPane::new(Waku::transcript_pane_content, cx);
+        let right_panel_pane = WakuPane::new(Waku::right_panel_pane_content, cx);
         let workspace_client = waku_client::WorkspaceClient::new(daemon.client());
         let (projectless_migrated, projectless_migration_error) =
             migrate_legacy_projectless_projects(&mut state, &workspace_client);
@@ -2319,19 +2379,13 @@ impl Waku {
                         match schedule {
                             EventPumpSchedule::Idle => break,
                             EventPumpSchedule::StreamFrame => {
-                                // A Markdown remeasure still gets its next-frame
-                                // pass, but fresh provider events wake the pump
-                                // immediately instead of waiting behind the old
-                                // typewriter cadence.
-                                futures_lite::future::race(
-                                    async {
-                                        let _ = event_wake_events.recv().await;
-                                    },
-                                    async {
-                                        cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
-                                    },
-                                )
-                                .await;
+                                // Deliberately not raced against the wake
+                                // channel: waking per chunk made the notify
+                                // rate equal the provider's chunk rate, and
+                                // every notify is a full re-render. Chunks
+                                // queue during the sleep and fold into the
+                                // next drain's single batch.
+                                cx.background_executor().timer(STREAM_FRAME_INTERVAL).await;
                             }
                             EventPumpSchedule::BackgroundOutput(delay) => {
                                 // A log cache has its own 100 ms batching
@@ -2636,6 +2690,8 @@ impl Waku {
                 transcript_row_kinds_fingerprint: Cell::new(None),
                 transcript_navigation_turns: RefCell::new(Rc::new(Vec::new())),
                 transcript_navigation_turns_fingerprint: Cell::new(None),
+                assistant_footer_cache: RefCell::new(HashMap::new()),
+                assistant_footer_fingerprint: Cell::new(None),
                 checkpoint_ref_cache: RefCell::new(HashMap::new()),
                 checkpoint_ref_generation: Cell::new(0),
                 checkpoint_ref_prefetch: Cell::new(None),
@@ -2657,6 +2713,9 @@ impl Waku {
                 menus: RefCell::new(HashMap::new()),
                 navigation_rail: navigation_rail.clone(),
                 navigation_rail_reset_generation: Cell::new(0),
+                sidebar_pane: sidebar_pane.clone(),
+                transcript_pane: transcript_pane.clone(),
+                right_panel_pane: right_panel_pane.clone(),
                 time_label_wake: Cell::new(None),
                 time_label_wake_generation: Cell::new(0),
                 fps_last_frame: Instant::now(),
@@ -2665,6 +2724,9 @@ impl Waku {
             }
         });
         navigation_rail.update(cx, |rail, _| rail.set_waku(entity.downgrade()));
+        for pane in [&sidebar_pane, &transcript_pane, &right_panel_pane] {
+            pane.update(cx, |pane, cx| pane.bind(&entity, cx));
+        }
         let initial_row_count = entity.read(cx).transcript_row_count();
         entity.read(cx).reset_transcript_rows(initial_row_count);
         // Everything launch needs from `git` or the filesystem, started now

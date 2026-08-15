@@ -34,6 +34,41 @@ impl Waku {
         })
     }
 
+    /// The response footer's copy content and timestamp for `message_index`,
+    /// cached under the row-kinds fingerprint.
+    ///
+    /// The row builder asks for every visible row on every frame, and
+    /// [`assistant_response_footer`] walks the whole session and joins the
+    /// turn's answer into a fresh `String` — far too much to redo per frame
+    /// for values that only move when the fingerprint does: footers exist
+    /// only for settled turns ([`assistant_response_footer_index`] returns
+    /// `None` while the message streams or its turn runs), settled parts are
+    /// immutable, and settling flips a turn status the fingerprint hashes.
+    pub(super) fn assistant_response_footer_cached(
+        &self,
+        message_index: usize,
+    ) -> (Option<SharedString>, Option<u64>) {
+        self.refresh_transcript_row_kinds();
+        let fingerprint = self.transcript_row_kinds_fingerprint.get();
+        if self.assistant_footer_fingerprint.get() != fingerprint {
+            self.assistant_footer_cache.borrow_mut().clear();
+            self.assistant_footer_fingerprint.set(fingerprint);
+        }
+        if let Some(cached) = self.assistant_footer_cache.borrow().get(&message_index) {
+            return cached.clone();
+        }
+        let value = self.selected_session().map_or((None, None), |session| {
+            (
+                assistant_response_footer(session, message_index).map(SharedString::from),
+                assistant_response_footer_time(session, message_index),
+            )
+        });
+        self.assistant_footer_cache
+            .borrow_mut()
+            .insert(message_index, value.clone());
+        value
+    }
+
     /// The navigation rail's turn list, rebuilt only when the row-kinds
     /// fingerprint moves.
     ///
