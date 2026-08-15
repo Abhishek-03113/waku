@@ -1,8 +1,9 @@
 //! Daemon-owned task storage plus desktop preference/state serialization.
 //!
 //! Sessions and projects live in SQLite (`app.db`), app-managed UI state in
-//! `state.json`, desktop preferences in `~/.waku/app.json`, daemon preferences
-//! in `~/.waku/settings.json`, and binary payloads in [`crate::blob_store`].
+//! `state.json`, desktop preferences in `temp/app.json` for Debug or
+//! `~/.waku/app.json` for Release, daemon preferences in
+//! `~/.waku/settings.json`, and binary payloads in [`crate::blob_store`].
 //! Of the configuration documents, only the desktop file is written here;
 //! daemon settings cross the RPC boundary and are persisted by `waku-daemon`.
 //!
@@ -825,8 +826,8 @@ pub struct StateStore {
     /// Client-local navigation and layout state stored beside the preview
     /// cache. It is never read by the daemon.
     app_state_path: PathBuf,
-    /// Desktop-owned preferences. Both Debug and Release use the explicit
-    /// cross-client Waku configuration directory.
+    /// Desktop-owned preferences. Debug stays isolated in the checkout while
+    /// Release uses the explicit cross-client Waku configuration directory.
     app_settings_path: PathBuf,
     /// Read-only migration sources for the former combined settings document.
     legacy_settings_paths: Vec<PathBuf>,
@@ -863,12 +864,17 @@ impl StateStore {
         let configuration_directory = dirs::home_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join(".waku");
-        let app_settings_path = configuration_directory.join("app.json");
-        let mut legacy_settings_paths = Vec::new();
-        if cfg!(debug_assertions) {
-            legacy_settings_paths.push(directory.join("settings.json"));
-        }
-        legacy_settings_paths.push(configuration_directory.join("settings.json"));
+        let (app_settings_path, legacy_settings_paths) = if cfg!(debug_assertions) {
+            (
+                directory.join("app.json"),
+                vec![directory.join("settings.json")],
+            )
+        } else {
+            (
+                configuration_directory.join("app.json"),
+                vec![configuration_directory.join("settings.json")],
+            )
+        };
         Self::with_settings_paths(path, app_settings_path, legacy_settings_paths)
     }
 
@@ -2369,13 +2375,8 @@ mod tests {
         let store = StateStore::new(path.clone());
         assert_eq!(store.app_state_path, path.with_file_name("state.json"));
 
-        let expected_app_settings = dirs::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".waku/app.json");
-        assert_eq!(store.app_settings_path, expected_app_settings);
-
-        // Debug databases stay inside the checkout, while both builds use the
-        // explicit shared configuration directory requested by the user.
+        // Debug files stay inside the checkout so development cannot read or
+        // write the installed app's settings.
         #[cfg(debug_assertions)]
         {
             assert_eq!(directory, Some(std::ffi::OsStr::new("temp")));
@@ -2384,10 +2385,26 @@ mod tests {
                 .and_then(Path::parent)
                 .unwrap();
             assert!(path.starts_with(checkout));
+            assert_eq!(store.app_settings_path, path.with_file_name("app.json"));
+            assert_eq!(
+                store.legacy_settings_paths,
+                [path.with_file_name("settings.json")]
+            );
         }
         #[cfg(not(debug_assertions))]
         {
             assert_eq!(directory, Some(std::ffi::OsStr::new("Waku")));
+            let configuration_directory = dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".waku");
+            assert_eq!(
+                store.app_settings_path,
+                configuration_directory.join("app.json")
+            );
+            assert_eq!(
+                store.legacy_settings_paths,
+                [configuration_directory.join("settings.json")]
+            );
         }
     }
 

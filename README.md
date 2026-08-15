@@ -54,9 +54,10 @@ Projectless task workspaces live on the daemon host under
 `~/.waku/projects/<date>/<slug>`. The daemon moves workspaces created by the
 older `~/.waku/<date>/<slug>` layout on first load.
 
-Configuration ownership is separate too: the desktop writes
-`~/.waku/app.json`, while daemon provider and Computer Use settings live in
-`~/.waku/settings.json`. The desktop's Settings → Daemon page can explicitly
+Configuration ownership is separate too: the Release desktop writes
+`~/.waku/app.json`, while Debug stays isolated at `temp/app.json`. Daemon
+provider and Computer Use settings live in `~/.waku/settings.json`. The
+desktop's Settings → Daemon page can explicitly
 expose the child daemon on a fixed port, configure exact browser origins, and
 copy its stable authentication token. It remains loopback-only by default.
 

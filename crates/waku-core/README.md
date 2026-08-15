@@ -18,7 +18,8 @@ binary.
 
 Configuration ownership is explicit:
 
-- the desktop owns `~/.waku/app.json`;
+- the desktop owns `~/.waku/app.json` in Release and checkout-local
+  `temp/app.json` in Debug;
 - the daemon owns `~/.waku/settings.json`.
 
 Task SQLite rows and durable attachment materializations are daemon-owned as

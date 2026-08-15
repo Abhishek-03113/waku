@@ -556,22 +556,19 @@ fn configuration_directory() -> PathBuf {
 }
 
 fn default_app_settings_path() -> PathBuf {
-    configuration_directory().join("app.json")
+    if cfg!(debug_assertions) {
+        StateStore::default_path().with_file_name("app.json")
+    } else {
+        configuration_directory().join("app.json")
+    }
 }
 
 fn default_legacy_settings_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
     if cfg!(debug_assertions) {
-        let state_path = StateStore::default_path();
-        paths.push(
-            state_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("settings.json"),
-        );
+        vec![StateStore::default_path().with_file_name("settings.json")]
+    } else {
+        vec![configuration_directory().join("settings.json")]
     }
-    paths.push(configuration_directory().join("settings.json"));
-    paths
 }
 
 fn read_app_settings_source(
@@ -918,6 +915,34 @@ fn restore_task_state_skeletons(sessions: &mut [AgentSession]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_settings_paths_are_build_specific() {
+        let app_settings_path = default_app_settings_path();
+        let legacy_settings_paths = default_legacy_settings_paths();
+
+        #[cfg(debug_assertions)]
+        {
+            let state_path = StateStore::default_path();
+            assert_eq!(app_settings_path, state_path.with_file_name("app.json"));
+            assert_eq!(
+                legacy_settings_paths,
+                [state_path.with_file_name("settings.json")]
+            );
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            assert_eq!(
+                app_settings_path,
+                configuration_directory().join("app.json")
+            );
+            assert_eq!(
+                legacy_settings_paths,
+                [configuration_directory().join("settings.json")]
+            );
+        }
+    }
 
     #[test]
     fn daemon_task_state_becomes_list_only_after_crossing_the_client_boundary() {
