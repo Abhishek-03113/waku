@@ -42,6 +42,8 @@ pub struct ScrollbarState {
     last_scroll: Cell<Option<Instant>>,
     /// Offset at the previous paint, to notice movement.
     last_offset: Cell<Option<Pixels>>,
+    /// A hold-expiry wake is in flight; see `arm_fade_wake`.
+    fade_wake_armed: Cell<bool>,
 }
 
 impl ScrollbarState {
@@ -189,6 +191,29 @@ fn scroll_to(surface: &impl Scrollable, offset: Pixels, max_offset: Pixels) {
     surface.scroll_to(offset.clamp(Pixels::ZERO, max_offset));
 }
 
+/// One in-flight wake for the end of the reveal hold. If the content keeps
+/// moving, the paint that this wake triggers finds the hold extended and arms
+/// the next wake — one timer alive at a time, one no-op frame per expiry.
+fn arm_fade_wake(
+    state: &Rc<ScrollbarState>,
+    view: gpui::EntityId,
+    delay: Duration,
+    cx: &mut App,
+) {
+    if state.fade_wake_armed.replace(true) {
+        return;
+    }
+    let state = state.clone();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(delay + Duration::from_millis(16))
+            .await;
+        state.fade_wake_armed.set(false);
+        cx.update(|cx| cx.notify(view));
+    })
+    .detach();
+}
+
 /// An overlay vertical scrollbar pinned to the right edge of its parent.
 ///
 /// The parent must be `relative()`; this element positions itself absolutely
@@ -247,14 +272,20 @@ where
                     BorderStyle::default(),
                 ));
                 if !active {
-                    // Advance the hold-then-fade timeline from the shared
-                    // pulse clock — nothing else would repaint a resting
-                    // transcript. Riding the clock instead of
-                    // `request_animation_frame` keeps a transcript that
-                    // scrolls every commit (a streaming turn pins the bar in
-                    // its hold) from redrawing the window at display rate,
-                    // and the lease parks itself shortly after the bar hides.
-                    super::motion::pulse_lease(window.current_view(), cx);
+                    match since_scroll {
+                        // The hold is constant-opacity: it needs no repaints,
+                        // only a wake at the moment the fade should begin. A
+                        // streaming transcript moves its content every commit
+                        // and so holds its bar for the whole turn — driving
+                        // frames through that hold pinned the pane at pulse
+                        // rate for nothing.
+                        Some(elapsed) if elapsed < HOLD => {
+                            arm_fade_wake(&state, window.current_view(), HOLD - elapsed, cx);
+                        }
+                        // The fade itself animates; ride the shared pulse
+                        // clock, which parks shortly after the bar hides.
+                        _ => super::motion::pulse_lease(window.current_view(), cx),
+                    }
                 }
             }
 

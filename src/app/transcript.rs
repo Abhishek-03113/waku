@@ -853,11 +853,11 @@ pub(super) const EMPTY_TRANSCRIPT_FINGERPRINT: u64 = 0xcbf2_9ce4_8422_2325;
 
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-fn mix(hash: u64, value: u64) -> u64 {
+pub(super) fn mix(hash: u64, value: u64) -> u64 {
     (hash ^ value).wrapping_mul(FINGERPRINT_PRIME)
 }
 
-fn mix_uuid(hash: u64, id: Uuid) -> u64 {
+pub(super) fn mix_uuid(hash: u64, id: Uuid) -> u64 {
     let bits = id.as_u128();
     mix(mix(hash, bits as u64), (bits >> 64) as u64)
 }

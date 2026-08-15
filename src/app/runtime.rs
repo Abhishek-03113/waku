@@ -3258,7 +3258,16 @@ impl Waku {
                         | DriverEvent::Error(_)
                         | DriverEvent::ProcessExited
                 );
-                markdown_changed |= matches!(event, DriverEvent::TextDelta(_));
+                // Reasoning is markdown too (the live peek renders it), and
+                // this flag is also what routes the pump onto the coalesced
+                // `StreamFrame` cadence: without it a reasoning-only drain
+                // reported Idle, so every fast thinking chunk woke the pump
+                // for an immediate drain-and-notify — 40+ full re-renders a
+                // second, sailing straight past the 120 ms commit floor.
+                markdown_changed |= matches!(
+                    event,
+                    DriverEvent::TextDelta(_) | DriverEvent::ReasoningDelta(_)
+                );
                 if background_output_delta {
                     // The registry batches log text into SharedString at 10Hz;
                     // repainting and saving for every provider chunk would

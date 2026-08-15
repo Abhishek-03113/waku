@@ -776,6 +776,7 @@ impl Waku {
             activity_markdown.insert(id, MarkdownView::seeded());
         }
         drop(activity_markdown);
+        self.reasoning_window_starts.borrow_mut().clear();
         self.activity_scroll_viewports.borrow_mut().clear();
         self.menus.borrow_mut().clear();
         self.message_edit = None;

@@ -1919,15 +1919,30 @@ impl Waku {
                     .clone();
                 let mut views = self.activity_markdown.borrow_mut();
                 let view = views.entry(id).or_default();
-                view.set_text(&reasoning.content, reasoning_live);
+                if reasoning_live {
+                    let start = self.live_reasoning_window_start(id, &reasoning.content, view);
+                    view.set_text(&reasoning.content[start..], true);
+                } else {
+                    self.reasoning_window_starts.borrow_mut().remove(&id);
+                    view.set_text(&reasoning.content, false);
+                }
                 let wheel_scroll = reasoning_viewport.scroll_handle.clone();
                 let wheel_follow_tail = reasoning_viewport.follow_tail.clone();
-                let markdown = md::render::markdown(view, &ctx);
+                let markdown = if reasoning_live {
+                    // The live peek pins to the tail of a growing document;
+                    // building every block of a long think per pulse tick was
+                    // the remaining 40%-CPU streaming path.
+                    md::render::markdown_tail(view, &ctx, LIVE_REASONING_TAIL_BLOCKS)
+                } else {
+                    md::render::markdown(view, &ctx)
+                };
                 if reasoning_live && !cx.reduce_motion() && view.is_fading() {
-                    // Same trade as the transcript veil: pulse-clock cadence
-                    // instead of a display-rate re-arm, leased to the
-                    // enclosing island via `current_view`.
-                    motion::pulse_lease(window.current_view(), cx);
+                    // The reasoning dissolve rides the half-rate lease: fast
+                    // thinking keeps a fade active for the whole phase, every
+                    // tick rebuilds each visible transcript row, and 15 fps
+                    // alpha on the dim 11.5px peek is indistinguishable. The
+                    // answer text keeps the full-rate dissolve.
+                    motion::pulse_lease_slow(window.current_view(), cx);
                 }
                 item = item.child(
                     div()
@@ -2205,9 +2220,46 @@ fn activity_scroll_follow_state(
     }
 }
 
+impl Waku {
+    /// Byte offset the live reasoning peek renders from, slid forward as the
+    /// thought grows. The peek pins a 400 px viewport to the tail, but
+    /// markdown cost is O(rendered source) per pulse tick regardless of block
+    /// shape, so the window keeps parse, flatten, elements, and veil all
+    /// O(window); the full trace renders once the turn settles. A slide
+    /// re-anchors at a block boundary and reseeds the view so already-shown
+    /// text never re-dissolves.
+    fn live_reasoning_window_start(
+        &self,
+        id: Uuid,
+        content: &str,
+        view: &mut MarkdownView,
+    ) -> usize {
+        let mut starts = self.reasoning_window_starts.borrow_mut();
+        let start = starts.entry(id).or_insert(0);
+        if *start > content.len() {
+            // The block restarted with shorter content; drop the stale window.
+            *start = 0;
+            *view = MarkdownView::seeded();
+        }
+        if content.len() - *start > LIVE_REASONING_WINDOW_MAX {
+            let cut = content.len() - LIVE_REASONING_WINDOW_TARGET;
+            let mut next = content[cut..]
+                .find("\n\n")
+                .map(|found| cut + found + 2)
+                .unwrap_or(cut);
+            while next < content.len() && !content.is_char_boundary(next) {
+                next += 1;
+            }
+            *start = next;
+            *view = MarkdownView::seeded();
+        }
+        *start
+    }
+}
+
 fn activity_scroll_guard(viewport: ActivityScrollViewport, live: bool) -> impl IntoElement {
     canvas(
-        move |_, window, _| {
+        move |_, window, cx| {
             let scrolled = -viewport.scroll_handle.offset().y;
             let max_offset = viewport.scroll_handle.max_offset().y;
             let following = activity_scroll_follow_state(
@@ -2222,7 +2274,10 @@ fn activity_scroll_guard(viewport: ActivityScrollViewport, live: bool) -> impl I
             viewport.last_max_offset.set(Some(max_offset));
             if live && following && max_offset - scrolled > px(0.5) {
                 viewport.scroll_handle.scroll_to_bottom();
-                window.refresh();
+                // Notify the enclosing island rather than `window.refresh()`:
+                // a refresh busts every pane cache, and this fires on each
+                // stream commit while a live viewport follows its tail.
+                cx.notify(window.current_view());
             }
         },
         |_, _, _, _| {},

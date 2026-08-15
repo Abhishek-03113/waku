@@ -943,8 +943,40 @@ pub fn install_selection_input(window: &mut Window, state: &TranscriptSelection)
 
 // ── Blocks ─────────────────────────────────────────────────────────────────
 
+/// Per-top-level-block ordinal stride: an element's ordinal is
+/// `block_index << 16 | position_within_block`. Deriving keys from the
+/// block's document index rather than a running document counter means a
+/// walk that skips leading blocks ([`markdown_tail`]) hands every rendered
+/// block exactly the flatten-cache and veil keys a full walk would, so the
+/// two can alternate without thrashing either.
+const BLOCK_ORDINAL_STRIDE_BITS: u32 = 16;
+
+fn block_ordinal_base(block_ix: usize) -> usize {
+    block_ix << BLOCK_ORDINAL_STRIDE_BITS
+}
+
 /// Render a markdown body. Returns `None` when it has no content.
 pub fn markdown<'a>(view: &'a MarkdownView, ctx: &Ctx<'a>) -> Option<AnyElement> {
+    markdown_capped(view, ctx, usize::MAX)
+}
+
+/// Like [`markdown`], but builds only the trailing `max_blocks` top-level
+/// blocks. The live reasoning peek shows a tail-pinned viewport while a
+/// thought streams, and building the whole growing document every pulse tick
+/// made a long think O(document) per frame; the cap makes it O(window).
+pub fn markdown_tail<'a>(
+    view: &'a MarkdownView,
+    ctx: &Ctx<'a>,
+    max_blocks: usize,
+) -> Option<AnyElement> {
+    markdown_capped(view, ctx, max_blocks.max(1))
+}
+
+fn markdown_capped<'a>(
+    view: &'a MarkdownView,
+    ctx: &Ctx<'a>,
+    max_blocks: usize,
+) -> Option<AnyElement> {
     let blocks = view.blocks().collect::<Vec<_>>();
     let Some((&last, leading)) = blocks.split_last() else {
         if ctx.animate_streaming && view.streaming.get() {
@@ -960,13 +992,22 @@ pub fn markdown<'a>(view: &'a MarkdownView, ctx: &Ctx<'a>) -> Option<AnyElement>
     if ctx.animate_streaming && view.streaming.get() {
         view.veil.borrow_mut().begin_frame();
     }
-    let mut children = Vec::with_capacity(blocks.len());
-    for block in leading {
+    let first = blocks.len().saturating_sub(max_blocks);
+    let mut children = Vec::with_capacity(blocks.len() - first);
+    for (block_ix, block) in leading.iter().enumerate().skip(first) {
+        ctx.next_ordinal.set(block_ordinal_base(block_ix));
         children.push(render_block(block, &ctx));
+        debug_assert!(
+            ctx.next_ordinal.get() - block_ordinal_base(block_ix)
+                < 1 << BLOCK_ORDINAL_STRIDE_BITS,
+            "a single block overflowed its ordinal stride"
+        );
     }
     // Everything before the final block is settled, so its flattened elements
     // stay cacheable across appends.
-    view.volatile_from.set(ctx.next_ordinal.get());
+    let last_base = block_ordinal_base(blocks.len() - 1);
+    ctx.next_ordinal.set(last_base);
+    view.volatile_from.set(last_base);
     children.push(render_block(last, &ctx));
     if ctx.animate_streaming && view.streaming.get() {
         // Every element visible on the attach pass has synchronously adopted

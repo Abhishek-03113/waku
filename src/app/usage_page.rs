@@ -2046,6 +2046,7 @@ fn usage_skeleton(view: UsageViewMode, theme: &Theme) -> AnyElement {
             .opacity(pulsating_between(0.45, 0.9)(phase))
             .into_any_element()
     })
+    .every(2)
     .into_any_element()
 }
 

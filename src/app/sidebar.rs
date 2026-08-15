@@ -558,7 +558,7 @@ impl Waku {
             });
 
         if !available {
-            let indicator = motion::spin(icon("icons/loader-circle.svg", 14.0, foreground));
+            let indicator = motion::spin_slow(icon("icons/loader-circle.svg", 14.0, foreground));
             return Some(
                 button
                     .tooltip(Tooltip::text(
@@ -672,9 +672,7 @@ impl Waku {
             .panel_resize_drag
             .is_some_and(|drag| drag.target == PanelResizeTarget::Sidebar);
 
-        // Building the row snapshot is cheap (a few bytes per session); the
-        // heavy element construction happens only for rows the list can see.
-        let rows = Rc::new(self.sidebar_rows(Local::now().date_naive()));
+        let rows = self.sidebar_rows_cached(Local::now().date_naive());
         self.sync_sidebar_rows(&rows);
         let history_scrolled =
             self.sidebar_list_state.scroll_px_offset_for_scrollbar().y < px(-0.5);
@@ -739,6 +737,42 @@ impl Waku {
                     }),
             )
             .child(self.render_sidebar_footer(cx))
+    }
+
+    /// The sidebar row snapshot, rebuilt only when its inputs move.
+    ///
+    /// The sidebar re-renders at pulse cadence whenever one of its session
+    /// rows shows a working spinner, and rebuilding the snapshot sorts every
+    /// started session and runs calendar math per session — far too much per
+    /// tick for values that move at most once per stream commit. The
+    /// fingerprint is an allocation-free scan of exactly what
+    /// [`Self::sidebar_rows`] reads: started sessions in order with their
+    /// recency timestamps, the collapsed-group set, and today's date.
+    fn sidebar_rows_cached(&self, today: NaiveDate) -> Rc<Vec<SidebarRow>> {
+        let mut fingerprint = mix(0x51de_ba5e_5eed_c0de, today.num_days_from_ce() as u64);
+        for session in &self.state.sessions {
+            if !session.has_started() {
+                continue;
+            }
+            fingerprint = mix_uuid(fingerprint, session.id);
+            fingerprint = mix(fingerprint, sidebar_session_timestamp(session));
+        }
+        // A set has no stable iteration order; combine order-independently.
+        let collapsed = self
+            .sidebar_collapsed_groups
+            .iter()
+            .fold(0u64, |combined, group| {
+                combined.wrapping_add(mix(0, group.index() as u64 + 1))
+            });
+        fingerprint = mix(
+            mix(fingerprint, self.sidebar_collapsed_groups.len() as u64),
+            collapsed,
+        );
+        if self.sidebar_rows_fingerprint.get() != Some(fingerprint) {
+            *self.sidebar_rows_snapshot.borrow_mut() = Rc::new(self.sidebar_rows(today));
+            self.sidebar_rows_fingerprint.set(Some(fingerprint));
+        }
+        self.sidebar_rows_snapshot.borrow().clone()
     }
 
     /// Snapshot the session history as a flat list of lightweight rows, newest
@@ -1062,7 +1096,7 @@ impl Waku {
                     .line_height(px(18.0))
                     .child(title)
                     .when(working, |element| {
-                        element.child(motion::spin(icon(
+                        element.child(motion::spin_slow(icon(
                             "icons/loader-circle.svg",
                             12.0,
                             status_color(&theme, session.status),

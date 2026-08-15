@@ -159,6 +159,24 @@ const MAX_CACHED_MESSAGE_SOURCE_BYTES: usize = 512 * 1024;
 /// few hundred KB.
 const MAX_CACHED_WORKSPACES: usize = 8;
 const STREAM_REMEASURE_TAIL_ROWS: usize = 3;
+/// Top-level markdown blocks the live reasoning peek renders, counted from
+/// the tail. The peek is a 400 px viewport pinned to the newest thought, so
+/// this only bounds how far a mid-stream scrollback reaches — the full trace
+/// renders once the turn settles. 48 blocks is far more than the viewport
+/// shows and keeps a long think from costing O(document) per pulse tick.
+const LIVE_REASONING_TAIL_BLOCKS: usize = 48;
+/// Source bytes the live reasoning peek keeps parsed, counted from the tail.
+/// Markdown cost is O(rendered source) per pulse tick regardless of block
+/// shape — a wall-of-text think is one giant paragraph and a bulleted think
+/// one giant list, so the block cap above bounds neither. Six KB is several
+/// viewports of scrollback; the full trace renders once the turn settles.
+const LIVE_REASONING_WINDOW_TARGET: usize = 6 * 1024;
+/// Slide hysteresis: the window re-anchors (and the peek reparses from a
+/// fresh view) only once the tail outgrows this. Fast reasoning can append
+/// several KB per commit, so the gap to the target is deliberately wide —
+/// a slide costs a full window rebuild, and sliding every commit would pay
+/// it at commit rate.
+const LIVE_REASONING_WINDOW_MAX: usize = 18 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StreamPhase {
@@ -1346,6 +1364,9 @@ pub struct Waku {
     sidebar_scrollbar: Rc<ScrollbarState>,
     /// Snapshot of the sidebar rows the list state currently corresponds to.
     sidebar_row_cache: RefCell<Vec<SidebarRow>>,
+    /// Fingerprint + snapshot pair backing `sidebar_rows_cached`.
+    sidebar_rows_fingerprint: Cell<Option<u64>>,
+    sidebar_rows_snapshot: RefCell<Rc<Vec<SidebarRow>>>,
     transcript_row_kinds: RefCell<Vec<TranscriptRowKind>>,
     /// Fingerprint of the transcript inputs `transcript_row_kinds` was folded
     /// from, so an unchanged transcript costs nothing on a frame. `None` until
@@ -1399,6 +1420,9 @@ pub struct Waku {
     message_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
     /// Parsed markdown for reasoning activities, keyed by stable activity id.
     activity_markdown: RefCell<HashMap<Uuid, MarkdownView>>,
+    /// Byte offsets live reasoning peeks render from, slid forward as the
+    /// thought grows; see `live_reasoning_window_start`.
+    reasoning_window_starts: RefCell<HashMap<Uuid, usize>>,
     /// Independent capped viewports for expanded thoughts and command output.
     /// Keeping these stable preserves scroll position through virtualization.
     activity_scroll_viewports: RefCell<HashMap<Uuid, ActivityScrollViewport>>,
@@ -2686,6 +2710,8 @@ impl Waku {
                 sidebar_list_state,
                 sidebar_scrollbar: ScrollbarState::new(),
                 sidebar_row_cache: RefCell::new(Vec::new()),
+                sidebar_rows_fingerprint: Cell::new(None),
+                sidebar_rows_snapshot: RefCell::new(Rc::new(Vec::new())),
                 transcript_row_kinds: RefCell::new(Vec::new()),
                 transcript_row_kinds_fingerprint: Cell::new(None),
                 transcript_navigation_turns: RefCell::new(Rc::new(Vec::new())),
@@ -2705,6 +2731,7 @@ impl Waku {
                 transcript_layout_width: Cell::new(Pixels::ZERO),
                 message_markdown: RefCell::new(HashMap::new()),
                 activity_markdown: RefCell::new(HashMap::new()),
+                reasoning_window_starts: RefCell::new(HashMap::new()),
                 activity_scroll_viewports: RefCell::new(HashMap::new()),
                 markdown_link_handler,
                 transcript_selection: TranscriptSelection::default(),

@@ -14,6 +14,8 @@ pub(super) fn pulse_dot(size: f32, color: Hsla) -> AnyElement {
             .opacity(pulsating_between(0.3, 1.0)(phase))
             .into_any_element()
     })
+    // Mounted for whole activities; its pane must not tick at full rate.
+    .every(2)
     .into_any_element()
 }
 
@@ -41,6 +43,10 @@ pub(super) fn working_wave_dots(color: Hsla) -> AnyElement {
             }))
             .into_any_element()
     })
+    // Mounted for the whole turn: this is what sets the transcript pane's
+    // tick floor, and every tick rebuilds each visible row. The 1400 ms wave
+    // reads identically at half cadence.
+    .every(2)
     .into_any_element()
 }
 
