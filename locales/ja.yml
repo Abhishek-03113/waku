@@ -531,10 +531,8 @@ commands.claude_compact: 会話を要約してコンテキストを空ける
 commands.claude_context: コンテキストウインドウの使用状況を表示
 commands.claude_cost: このセッションのトークン使用量とコストを表示
 commands.claude_init: プロジェクトを分析して CLAUDE.md を作成
-commands.claude_pr_comments: 現在の PR のレビューコメントを取得
 commands.claude_review: プルリクエストをレビュー
 commands.claude_security_review: 保留中の変更をセキュリティレビュー
-commands.claude_todos: 現在の TODO 項目を一覧表示
 
 composer.edit_in_composer: 入力欄で編集
 composer.queued_followups: キューに追加したフォローアップ

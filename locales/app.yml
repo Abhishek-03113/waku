@@ -1037,14 +1037,10 @@ commands.claude_cost:
   en: Show token usage and cost for this session
 commands.claude_init:
   en: Analyze the project and write CLAUDE.md
-commands.claude_pr_comments:
-  en: Fetch review comments for the current PR
 commands.claude_review:
   en: Review a pull request
 commands.claude_security_review:
   en: Security review of the pending changes
-commands.claude_todos:
-  en: List the current todo items
 
 composer.edit_in_composer:
   en: Edit in composer

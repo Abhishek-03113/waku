@@ -502,10 +502,8 @@ commands.claude_compact: 总结对话以释放上下文空间
 commands.claude_context: 查看上下文窗口的占用情况
 commands.claude_cost: 查看当前任务的令牌用量与费用
 commands.claude_init: 分析项目并编写 CLAUDE.md
-commands.claude_pr_comments: 获取当前拉取请求的审查意见
 commands.claude_review: 审查拉取请求
 commands.claude_security_review: 对尚未合并的更改进行安全审查
-commands.claude_todos: 列出当前待办事项
 composer.edit_in_composer: 在输入框中编辑
 composer.queued_followups: 已排队的后续消息
 composer.queued_followups_description: 已排队的后续消息 · 当前回复结束后发送

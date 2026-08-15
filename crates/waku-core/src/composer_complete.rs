@@ -151,15 +151,13 @@ fn builtin_waku_commands(provider: ProviderKind) -> Vec<SlashCommand> {
 /// init handshake later reports the authoritative list; this seeds the picker
 /// before any turn has started.
 fn builtin_claude_commands() -> Vec<SlashCommand> {
-    const BUILTINS: [(&str, &str); 8] = [
+    const BUILTINS: [(&str, &str); 6] = [
         ("compact", "commands.claude_compact"),
         ("context", "commands.claude_context"),
         ("cost", "commands.claude_cost"),
         ("init", "commands.claude_init"),
-        ("pr-comments", "commands.claude_pr_comments"),
         ("review", "commands.claude_review"),
         ("security-review", "commands.claude_security_review"),
-        ("todos", "commands.claude_todos"),
     ];
     BUILTINS
         .into_iter()
