@@ -55,6 +55,14 @@ impl ScrollbarState {
         self.grab_offset.get().is_some()
     }
 
+    /// True while the pointer is over the track or a drag is in progress.
+    /// Bubble-phase mouse listeners run in reverse registration order, so a
+    /// surface painted beneath the bar hears these events too and must be able
+    /// to ignore the ones the bar is handling.
+    pub fn engaged(&self) -> bool {
+        self.hovered.get() || self.is_grabbed()
+    }
+
     /// Note the current scroll offset, starting the reveal timer when it moved.
     /// The first observation only seeds the baseline, so a transcript that opens
     /// already scrolled to its tail does not flash its scrollbar.
@@ -218,7 +226,7 @@ fn arm_fade_wake(
 ///
 /// The parent must be `relative()`; this element positions itself absolutely
 /// and never participates in layout, so adding it cannot change content size.
-pub fn vertical<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement
+pub fn vertical<S>(surface: &S, state: &Rc<ScrollbarState>) -> impl IntoElement + use<S>
 where
     S: Scrollable + Clone + 'static,
 {
