@@ -775,6 +775,17 @@ impl Waku {
         }
     }
 
+    /// Re-run one provider's model-owned catalog discovery, for selectors whose
+    /// contents can change while Waku stays open (for example, DeepSeek's
+    /// user-authored agent presets).
+    pub(super) fn refresh_provider_model_discovery(&mut self, provider: ProviderKind) {
+        if self.provider_model_discoveries_pending.contains(&provider) {
+            return;
+        }
+        self.provider_model_discoveries.remove(&provider);
+        self.request_provider_model_discovery(provider);
+    }
+
     /// Ask every installed CLI for its version, one short-lived subprocess per
     /// provider on its own thread. Answers land in `provider_versions` through
     /// the drain loop; render reads only that map.

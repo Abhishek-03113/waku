@@ -1303,13 +1303,20 @@ impl Waku {
         let selected_id = self.agent_preset_for_session(session)?;
         let selected_label = self.agent_preset_label_for_session(session)?;
         let theme = Theme::current(cx);
-        let handle = self.menu_handle("agent-preset", cx);
+        let weak = cx.entity().downgrade();
+        let refresh_weak = weak.clone();
+        let handle = self.menu_handle_with("agent-preset", cx, move |open, _, cx| {
+            if open {
+                let _ = refresh_weak.update(cx, |this, _| {
+                    this.refresh_provider_model_discovery(ProviderKind::DeepSeek);
+                });
+            }
+        });
         let trigger = MenuChip::new("agent-preset")
             .icon("icons/bot.svg", theme.text_tertiary)
             .label(selected_label)
             .selected(handle.is_open());
 
-        let weak = cx.entity().downgrade();
         Some(dropdown_menu(
             trigger,
             "agent-preset-menu",
