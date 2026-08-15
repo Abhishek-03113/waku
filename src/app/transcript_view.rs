@@ -1629,6 +1629,8 @@ impl Waku {
             .child(
                 div()
                     .id(SharedString::from(format!("activity-toggle-{block_index}")))
+                    .w_full()
+                    .min_w_0()
                     .h(px(22.0))
                     .flex()
                     .items_center()
@@ -1638,6 +1640,8 @@ impl Waku {
                     .cursor_default()
                     .child(
                         div()
+                            .min_w_0()
+                            .truncate()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_tertiary)
                             .child(SharedString::from(header_title)),

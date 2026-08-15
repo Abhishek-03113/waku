@@ -1413,12 +1413,12 @@ function ActivityGroup({
     <div className="min-w-0 text-[11.5px] text-[var(--text-tertiary)]">
       <button
         aria-expanded={expanded}
-        className="flex h-[22px] items-center gap-1.5 rounded px-0.5 outline-none hover:text-[var(--text-secondary)] focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex h-[22px] w-full min-w-0 items-center gap-1.5 rounded px-0.5 outline-none hover:text-[var(--text-secondary)] focus-visible:ring-1 focus-visible:ring-ring"
         type="button"
         onClick={() => setExpanded((value) => !value)}
       >
-        <span className="font-medium">{activityHeaderTitle(activities, liveTurn, t)}</span>
-        <WakuIcon className="size-3" name={expanded ? 'chevronDown' : 'chevronRight'} />
+        <span className="min-w-0 truncate text-left font-medium">{activityHeaderTitle(activities, liveTurn, t)}</span>
+        <WakuIcon className="size-3 shrink-0" name={expanded ? 'chevronDown' : 'chevronRight'} />
       </button>
       {expanded && (
         <div className="flex min-w-0 flex-col pl-[15px]">
