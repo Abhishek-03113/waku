@@ -1128,6 +1128,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn review_diff_text_rows_soft_wrap() {
+        let source = include_str!("right_panel.rs");
+        let start = source
+            .find("\n    fn render_right_panel_diff_line(")
+            .expect("review diff line renderer");
+        let body = &source[start + 1..];
+        let end = body
+            .find("\n    #[allow(clippy::too_many_arguments)]")
+            .expect("review diff line renderer end");
+        let body = &body[..end];
+
+        assert!(!body.contains(".whitespace_nowrap()"));
+        assert!(body.matches(".whitespace_normal()").count() >= 3);
+        assert!(body.contains(".min_h(px(20.0))"));
+        assert!(!body.contains(".h(px(20.0))"));
+    }
+
     /// The render path must never reach the filesystem. This reads the source
     /// rather than the behaviour, because the cost of a regression here is a
     /// syscall per directory entry on every frame — invisible until a project
@@ -3442,18 +3460,20 @@ impl Waku {
                     .into_any_element()
             }
             crate::review_diff::LineKind::HunkHeader => div()
-                .h(px(24.0))
+                .min_h(px(24.0))
                 .w_full()
                 .min_w_0()
                 .flex()
-                .items_center()
+                .items_stretch()
                 .font_family(md::render::MONO_FAMILY)
                 .text_size(px(10.0))
+                .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
                 .child(
                     div()
                         .w(px(52.0))
-                        .h_full()
+                        .min_h(px(24.0))
+                        .self_stretch()
                         .flex_none()
                         .border_r_1()
                         .border_color(theme.border)
@@ -3461,34 +3481,38 @@ impl Waku {
                 )
                 .child(
                     div()
-                        .h_full()
+                        .min_h(px(24.0))
                         .min_w_0()
                         .flex_1()
                         .px(px(12.0))
+                        .py(px(4.0))
                         .flex()
-                        .items_center()
+                        .items_start()
                         .overflow_hidden()
-                        .whitespace_nowrap()
+                        .whitespace_normal()
                         .bg(theme.overlay)
                         .child(line.content.clone()),
                 )
                 .into_any_element(),
             crate::review_diff::LineKind::Meta => div()
-                .h(px(24.0))
+                .min_h(px(24.0))
                 .w_full()
                 .min_w_0()
                 .flex()
-                .items_center()
+                .items_stretch()
                 .font_family(md::render::MONO_FAMILY)
                 .text_size(px(10.5))
+                .line_height(px(16.0))
                 .text_color(theme.text_tertiary)
-                .child(div().w(px(52.0)).h_full().flex_none())
+                .child(div().w(px(52.0)).min_h(px(24.0)).self_stretch().flex_none())
                 .child(
                     div()
+                        .min_h(px(24.0))
                         .min_w_0()
                         .flex_1()
+                        .py(px(4.0))
                         .overflow_hidden()
-                        .whitespace_nowrap()
+                        .whitespace_normal()
                         .pr(px(10.0))
                         .child(line.content.clone()),
                 )
@@ -3539,11 +3563,12 @@ impl Waku {
                 );
                 let gutter = div()
                     .w(px(52.0))
-                    .h_full()
+                    .min_h(px(20.0))
+                    .self_stretch()
                     .flex_none()
                     .pr(px(9.0))
                     .flex()
-                    .items_center()
+                    .items_start()
                     .justify_end()
                     .border_r_1()
                     .border_color(theme.border)
@@ -3553,35 +3578,36 @@ impl Waku {
                     })
                     .child(shown_line.map(|line| line.to_string()).unwrap_or_default());
                 let body = div()
-                    .h_full()
+                    .min_h(px(20.0))
+                    .self_stretch()
                     .min_w_0()
                     .flex_1()
                     .pl(px(12.0))
                     .flex()
-                    .items_center()
+                    .items_start()
                     .when_some(body_background, |body, background| body.bg(background))
                     .child(
                         div()
                             .id(SharedString::from(format!(
                                 "review-diff-line-content-{index}"
                             )))
-                            .h_full()
+                            .min_h(px(20.0))
                             .min_w_0()
                             .flex_1()
                             .pr(px(10.0))
                             .flex()
-                            .items_center()
+                            .items_start()
                             .overflow_hidden()
-                            .whitespace_nowrap()
+                            .whitespace_normal()
                             .child(selectable),
                     );
                 div()
                     .id(SharedString::from(format!("review-diff-row-{index}")))
                     .w_full()
                     .min_w_0()
-                    .h(px(20.0))
+                    .min_h(px(20.0))
                     .flex()
-                    .items_center()
+                    .items_stretch()
                     .font_family(md::render::MONO_FAMILY)
                     .text_size(px(10.5))
                     .line_height(px(20.0))

@@ -20,14 +20,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, CursorStyle, DispatchPhase, Font, FontStyle, FontWeight, Hsla,
-    InteractiveText, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, SharedString, StrikethroughStyle, StyledText, TextLayout,
-    TextRun, UnderlineStyle, Window, canvas, div, font, img, point, prelude::*, px, quad, relative,
-    size,
+    AnyElement, BorderStyle, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Font, FontStyle,
+    FontWeight, Hsla, InteractiveText, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, SharedString, StrikethroughStyle,
+    StyledText, TextLayout, TextRun, UnderlineStyle, Window, canvas, div, font, img, point,
+    prelude::*, px, quad, relative, size,
 };
 
 use super::highlight::{self, Lang, TokenClass};
@@ -38,6 +38,7 @@ use super::selection::{
 };
 use super::veil::{RowVeil, apply_veil};
 use crate::theme::Theme;
+use crate::ui::tooltip::Tooltip;
 
 /// Selection geometry: the laid-out text handle for one painted element.
 pub type TextGeometry = TextLayout;
@@ -338,6 +339,10 @@ pub struct MarkdownView {
     /// Per-element opacity spans for the live response. Text is committed to
     /// layout immediately; only these paint colors animate.
     veil: RefCell<RowVeil>,
+    /// Code-block ordinals currently showing successful copy feedback. Kept
+    /// outside the parsed/flattened caches so a three-second icon change never
+    /// invalidates text shaping.
+    copied_code_blocks: Rc<RefCell<HashMap<usize, u64>>>,
     streaming: Cell<bool>,
 }
 
@@ -356,6 +361,7 @@ impl MarkdownView {
             volatile_from: Cell::new(0),
             style: Cell::new(None),
             veil: RefCell::new(RowVeil::default()),
+            copied_code_blocks: Rc::new(RefCell::new(HashMap::new())),
             streaming: Cell::new(false),
         }
     }
@@ -1182,6 +1188,43 @@ fn render_image(url: &str, alt: &str, ctx: &Ctx) -> AnyElement {
         .into_any_element()
 }
 
+const CODE_COPY_FEEDBACK_DURATION: Duration = Duration::from_secs(3);
+type CodeCopyFeedback = Rc<RefCell<HashMap<usize, u64>>>;
+
+fn begin_code_copy_feedback(feedback: &CodeCopyFeedback, ordinal: usize) -> u64 {
+    let mut feedback = feedback.borrow_mut();
+    let generation = feedback
+        .get(&ordinal)
+        .copied()
+        .unwrap_or_default()
+        .wrapping_add(1);
+    feedback.insert(ordinal, generation);
+    generation
+}
+
+fn clear_code_copy_feedback(feedback: &CodeCopyFeedback, ordinal: usize, generation: u64) -> bool {
+    let mut feedback = feedback.borrow_mut();
+    if feedback.get(&ordinal) != Some(&generation) {
+        return false;
+    }
+    feedback.remove(&ordinal);
+    true
+}
+
+fn show_code_copied(feedback: CodeCopyFeedback, ordinal: usize, cx: &mut gpui::App) {
+    let generation = begin_code_copy_feedback(&feedback, ordinal);
+    cx.refresh_windows();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(CODE_COPY_FEEDBACK_DURATION)
+            .await;
+        if clear_code_copy_feedback(&feedback, ordinal, generation) {
+            cx.refresh();
+        }
+    })
+    .detach();
+}
+
 /// Decode a `data:` image URL. Shared with the transcript's tool-output images.
 pub fn decode_data_url(url: &str) -> Option<std::sync::Arc<gpui::Image>> {
     use base64::Engine as _;
@@ -1213,8 +1256,69 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
     let label = language
         .filter(|language| !language.is_empty())
         .map(|language| language.to_ascii_lowercase());
+    // Reuse the cached shaped string. Settled code blocks render every frame,
+    // so cloning the whole source here would turn the copy affordance into a
+    // permanent O(code length) render cost; allocate only when it is invoked.
+    let copy_content = flat.text.clone();
+    let keyboard_copy_content = copy_content.clone();
+    let copy_feedback = ctx.cache.map(|view| view.copied_code_blocks.clone());
+    let copied = copy_feedback
+        .as_ref()
+        .is_some_and(|feedback| feedback.borrow().contains_key(&key.index));
+    let keyboard_copy_feedback = copy_feedback.clone();
+    let ordinal = key.index;
+    let copy_button = div()
+        .id(SharedString::from(format!(
+            "copy-code-{}-{}",
+            key.row, key.index
+        )))
+        .tab_index(0)
+        .size(px(24.0))
+        .flex_none()
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_default()
+        .focus_visible(|style| style.border_1().border_color(ctx.palette.accent))
+        .hover(|style| style.bg(ctx.palette.overlay))
+        .child(crate::ui::icon(
+            if copied {
+                "icons/check.svg"
+            } else {
+                "icons/copy.svg"
+            },
+            11.0,
+            ctx.palette.ghost,
+        ))
+        .tooltip(Tooltip::text(if copied {
+            tr!("common.copied")
+        } else {
+            tr!("common.copy_code")
+        }))
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_content.to_string()));
+            if let Some(feedback) = copy_feedback.clone() {
+                show_code_copied(feedback, ordinal, cx);
+            }
+        })
+        .on_key_down(move |event: &KeyDownEvent, _, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                cx.write_to_clipboard(ClipboardItem::new_string(keyboard_copy_content.to_string()));
+                if let Some(feedback) = keyboard_copy_feedback.clone() {
+                    show_code_copied(feedback, ordinal, cx);
+                }
+                cx.stop_propagation();
+            }
+        });
 
     div()
+        .id(SharedString::from(format!(
+            "code-block-{}-{}",
+            key.row, key.index
+        )))
+        .tab_group()
+        .tab_stop(false)
         .w_full()
         .min_w_0()
         .rounded(px(8.0))
@@ -1222,23 +1326,31 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
         .border_color(ctx.palette.border)
         .bg(ctx.palette.inset)
         .overflow_hidden()
-        .when_some(label, |element, label| {
-            element.child(
-                div()
-                    .w_full()
-                    .h(px(24.0))
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(ctx.palette.border)
-                    .text_size(px(10.0))
-                    .line_height(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(ctx.palette.ghost)
-                    .child(SharedString::from(label)),
-            )
-        })
+        .child(
+            div()
+                .w_full()
+                .h(px(28.0))
+                .pl(px(10.0))
+                .pr(px(2.0))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(ctx.palette.border)
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_size(px(10.0))
+                        .line_height(px(14.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(ctx.palette.ghost)
+                        .when_some(label, |element, label| {
+                            element.child(SharedString::from(label))
+                        }),
+                )
+                .child(copy_button),
+        )
         .child(
             div()
                 .id(SharedString::from(format!(
@@ -1246,13 +1358,14 @@ fn render_code_block(language: Option<&str>, code: &str, ctx: &Ctx) -> AnyElemen
                     key.row, key.index
                 )))
                 .w_full()
+                .min_w_0()
                 .px(px(10.0))
                 .py(px(8.0))
-                .overflow_x_scroll()
                 .child(
                     div()
-                        .flex_none()
-                        .whitespace_nowrap()
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
                         .text_size(px(ctx.metrics.code_text_size))
                         .line_height(px(ctx.metrics.code_line_height))
                         .text_color(ctx.palette.secondary)
@@ -1577,6 +1690,43 @@ mod tests {
         let plain = code_runs(code, None, &code_font, &palette());
         assert_eq!(plain.iter().map(|run| run.len).sum::<usize>(), code.len());
         assert_eq!(plain.len(), 1);
+    }
+
+    #[test]
+    fn code_block_rendering_wraps_and_exposes_a_keyboard_copy_control() {
+        let source = include_str!("render.rs");
+        let start = source
+            .find("\nfn render_code_block(")
+            .expect("code block renderer");
+        let body = &source[start + 1..];
+        let end = body
+            .find("\nfn code_runs(")
+            .expect("code block renderer end");
+        let body = &body[..end];
+
+        assert!(body.contains(".whitespace_normal()"));
+        assert!(!body.contains(".overflow_x_scroll()"));
+        assert!(!body.contains(".whitespace_nowrap()"));
+        assert!(body.contains("\"icons/copy.svg\""));
+        assert!(body.contains("\"icons/check.svg\""));
+        assert!(body.contains("ClipboardItem::new_string"));
+        assert!(body.contains("show_code_copied"));
+        assert!(body.contains(".tab_index(0)"));
+        assert!(body.contains(".on_key_down"));
+    }
+
+    #[test]
+    fn copied_code_feedback_resets_after_three_seconds_and_ignores_stale_timers() {
+        assert_eq!(CODE_COPY_FEEDBACK_DURATION, Duration::from_secs(3));
+
+        let feedback = Rc::new(RefCell::new(HashMap::new()));
+        let first = begin_code_copy_feedback(&feedback, 4);
+        let second = begin_code_copy_feedback(&feedback, 4);
+
+        assert!(!clear_code_copy_feedback(&feedback, 4, first));
+        assert!(feedback.borrow().contains_key(&4));
+        assert!(clear_code_copy_feedback(&feedback, 4, second));
+        assert!(!feedback.borrow().contains_key(&4));
     }
 
     /// A soft-wrap boundary has two caret affinities. GPUI's generic
