@@ -151,5 +151,5 @@ export function expandedComposerSubmission(
 }
 
 function commandScopeRank(scope: SlashCommand['scope']): number {
-  return ['Project', 'User', 'Skill', 'Builtin'].indexOf(scope)
+  return ['Builtin', 'Project', 'User', 'Skill'].indexOf(scope)
 }

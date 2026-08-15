@@ -40,14 +40,18 @@ describe('composer autocomplete', () => {
   })
 
   test('merges live provider commands without losing discovered templates', () => {
-    const discovered = [command('review', 'Project', 'Review changes', 'Review $ARGUMENTS')]
+    const discovered = [
+      command('review', 'Project', 'Review changes', 'Review $ARGUMENTS'),
+      command('deploy', 'Skill', 'Deploy the app', null),
+    ]
     const reported: ReportedCommand[] = [
       { name: 'review', description: 'Provider review' },
       { name: 'compact', description: 'Compact context' },
     ]
     expect(mergeComposerCommands(discovered, reported)).toEqual([
-      discovered[0],
       command('compact', 'Builtin', 'Compact context', null),
+      discovered[0],
+      discovered[1],
     ])
   })
 

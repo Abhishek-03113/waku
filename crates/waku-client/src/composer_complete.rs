@@ -76,7 +76,8 @@ pub fn merge_reported_commands(
             });
         }
     }
-    merged.sort_by(|a, b| (a.scope, &a.name).cmp(&(b.scope, &b.name)));
+    merged
+        .sort_by(|a, b| (a.scope.display_rank(), &a.name).cmp(&(b.scope.display_rank(), &b.name)));
     merged
 }
 
@@ -233,4 +234,48 @@ pub fn highlight_byte_ranges(
         }
     }
     ranges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merged_command_picker_puts_builtins_first_and_skills_last() {
+        let discovered = vec![
+            command("deploy", CommandScope::Skill),
+            command("format", CommandScope::User),
+            command("lint", CommandScope::Project),
+            command("review", CommandScope::Builtin),
+        ];
+        let reported = vec![ReportedCommand {
+            name: "compact".into(),
+            description: "Free up context".into(),
+        }];
+
+        let merged = merge_reported_commands(&discovered, &reported);
+        assert_eq!(
+            merged
+                .iter()
+                .map(|command| (command.scope, command.name.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (CommandScope::Builtin, "compact"),
+                (CommandScope::Builtin, "review"),
+                (CommandScope::Project, "lint"),
+                (CommandScope::User, "format"),
+                (CommandScope::Skill, "deploy"),
+            ]
+        );
+    }
+
+    fn command(name: &str, scope: CommandScope) -> SlashCommand {
+        SlashCommand {
+            name: name.into(),
+            description: String::new(),
+            scope,
+            argument_hint: None,
+            template: None,
+        }
+    }
 }

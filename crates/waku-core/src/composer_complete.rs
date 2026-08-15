@@ -352,17 +352,26 @@ pub fn merge_reported_commands(
             });
         }
     }
-    merged.sort_by(|a, b| (a.scope, &a.name).cmp(&(b.scope, &b.name)));
+    sort_commands_for_display(&mut merged);
     merged
 }
 
 /// Most-specific scope wins on a name collision, matching how the CLIs resolve
-/// their own lookups; within a scope the list reads alphabetically.
+/// their own lookups. Once collisions are resolved, the picker puts built-ins
+/// first and skills last; within each scope the list reads alphabetically.
 fn dedup_and_sort_commands(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
+    // `CommandScope`'s declaration order describes resolution precedence,
+    // which intentionally differs from the picker's presentation order.
     commands.sort_by(|a, b| (a.scope, &a.name).cmp(&(b.scope, &b.name)));
     let mut seen = BTreeSet::new();
     commands.retain(|command| seen.insert(command.name.clone()));
+    sort_commands_for_display(&mut commands);
     commands
+}
+
+fn sort_commands_for_display(commands: &mut [SlashCommand]) {
+    commands
+        .sort_by(|a, b| (a.scope.display_rank(), &a.name).cmp(&(b.scope.display_rank(), &b.name)));
 }
 
 /// Collect `*.md` command files under `root`, one command per file, with
@@ -980,6 +989,13 @@ mod tests {
         ];
         let merged = merge_reported_commands(&discovered, &reported);
         assert_eq!(merged.len(), 3);
+        assert_eq!(
+            merged
+                .iter()
+                .map(|command| command.name.as_str())
+                .collect::<Vec<_>>(),
+            ["compact", "statusline", "bare"]
+        );
         // Discovered metadata wins; a report only fills gaps.
         let compact = merged.iter().find(|c| c.name == "compact").unwrap();
         assert_eq!(compact.description, "Free up context");
@@ -1009,6 +1025,60 @@ mod tests {
         ]);
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].description, "project copy");
+    }
+
+    #[test]
+    fn command_picker_puts_builtins_first_and_skills_last() {
+        let commands = dedup_and_sort_commands(vec![
+            SlashCommand {
+                name: "deploy".into(),
+                description: String::new(),
+                scope: CommandScope::Skill,
+                argument_hint: None,
+                template: None,
+            },
+            SlashCommand {
+                name: "format".into(),
+                description: String::new(),
+                scope: CommandScope::User,
+                argument_hint: None,
+                template: None,
+            },
+            SlashCommand {
+                name: "lint".into(),
+                description: String::new(),
+                scope: CommandScope::Project,
+                argument_hint: None,
+                template: None,
+            },
+            SlashCommand {
+                name: "review".into(),
+                description: String::new(),
+                scope: CommandScope::Builtin,
+                argument_hint: None,
+                template: None,
+            },
+            SlashCommand {
+                name: "commit".into(),
+                description: String::new(),
+                scope: CommandScope::Builtin,
+                argument_hint: None,
+                template: None,
+            },
+        ]);
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| (command.scope, command.name.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (CommandScope::Builtin, "commit"),
+                (CommandScope::Builtin, "review"),
+                (CommandScope::Project, "lint"),
+                (CommandScope::User, "format"),
+                (CommandScope::Skill, "deploy"),
+            ]
+        );
     }
 
     #[test]

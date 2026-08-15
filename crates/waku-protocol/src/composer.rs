@@ -10,6 +10,18 @@ pub enum CommandScope {
 }
 
 impl CommandScope {
+    /// Presentation order in the composer picker. Resolution precedence is
+    /// separate: project and user commands can still override less-specific
+    /// commands with the same name.
+    pub const fn display_rank(self) -> u8 {
+        match self {
+            Self::Builtin => 0,
+            Self::Project => 1,
+            Self::User => 2,
+            Self::Skill => 3,
+        }
+    }
+
     pub fn label(self) -> String {
         match self {
             Self::Project => tr!("command_scope.project"),
