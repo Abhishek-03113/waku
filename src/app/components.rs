@@ -149,6 +149,33 @@ fn format_message_time_at(created_at: u64, now: DateTime<Local>) -> String {
 }
 
 impl Waku {
+    pub(super) fn control_was_copied(&self, control_id: &str) -> bool {
+        self.copied_control_feedback.contains_key(control_id)
+    }
+
+    pub(super) fn show_control_copied(
+        &mut self,
+        control_id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let control_id = control_id.into();
+        self.copied_control_generation = self.copied_control_generation.wrapping_add(1);
+        let generation = self.copied_control_generation;
+        self.copied_control_feedback
+            .insert(control_id.clone(), generation);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied_control_feedback.get(&control_id) == Some(&generation) {
+                    this.copied_control_feedback.remove(&control_id);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn show_message_copied(&mut self, message_id: Uuid, cx: &mut Context<Self>) {
         self.copied_message_generation = self.copied_message_generation.wrapping_add(1);
         let generation = self.copied_message_generation;
@@ -339,6 +366,7 @@ pub(super) struct MessageRender<'a> {
     pub(super) user_message_action: Option<UserMessageAction>,
     pub(super) message_edit_input: Option<Entity<ComposerInput>>,
     pub(super) attachment_menus: Vec<ContextMenuHandle>,
+    pub(super) attachment_images: Vec<Option<Arc<gpui::Image>>>,
     /// The parsed human or assistant body. System messages remain verbatim.
     pub(super) markdown: Option<&'a MarkdownView>,
     pub(super) ctx: &'a MarkdownCtx<'a>,
@@ -351,8 +379,10 @@ fn render_sent_message_attachments(
     message_id: Uuid,
     attachments: &[MessageAttachment],
     attachment_menus: &[ContextMenuHandle],
+    attachment_images: &[Option<Arc<gpui::Image>>],
     waku: &gpui::WeakEntity<Waku>,
     theme: &Theme,
+    cx: &App,
 ) -> Option<AnyElement> {
     if attachments.is_empty() {
         return None;
@@ -363,6 +393,9 @@ fn render_sent_message_attachments(
         .flex_wrap()
         .justify_end()
         .gap(px(8.0));
+    let daemon_remote = waku
+        .upgrade()
+        .is_some_and(|waku| waku.read(cx).daemon.is_remote());
     for (index, attachment) in attachments.iter().enumerate() {
         let Some(menu) = attachment_menus.get(index) else {
             continue;
@@ -372,6 +405,8 @@ fn render_sent_message_attachments(
         } else {
             right_panel::file_icon_for_path(&attachment.mention)
         };
+        let attachment_image = attachment_images.get(index).and_then(|image| image.clone());
+        let can_reveal = !daemon_remote;
         let mut tile = div()
             .id(SharedString::from(format!(
                 "message-{message_id}-attachment-{index}"
@@ -388,49 +423,72 @@ fn render_sent_message_attachments(
             .focus_visible(|style| style.border_color(theme.accent))
             .tooltip(Tooltip::text(attachment.name.clone()));
         if attachment.is_image {
-            let preview_waku = waku.clone();
-            let key_waku = waku.clone();
-            let preview_path = attachment.path.clone();
-            let key_path = attachment.path.clone();
-            let preview_name = SharedString::from(attachment.name.clone());
-            let key_name = preview_name.clone();
             let key_menu = menu.clone();
-            tile = tile.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "message-{message_id}-attachment-{index}-preview"
-                    )))
-                    .size_full()
-                    .cursor_default()
-                    .on_click(move |_, window, cx| {
-                        let _ = preview_waku.update(cx, |this, cx| {
+            if let Some(attachment_image) = attachment_image.as_ref() {
+                let preview_waku = waku.clone();
+                let key_waku = waku.clone();
+                let preview_image = attachment_image.clone();
+                let key_image = attachment_image.clone();
+                let preview_name = SharedString::from(attachment.name.clone());
+                let key_name = preview_name.clone();
+                tile = tile.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "message-{message_id}-attachment-{index}-preview"
+                        )))
+                        .size_full()
+                        .cursor_default()
+                        .on_click(move |_, window, cx| {
+                            let _ = preview_waku.update(cx, |this, cx| {
+                                this.open_image_preview(
+                                    preview_image.clone(),
+                                    preview_name.clone(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            img(attachment_image.clone())
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        ),
+                );
+                tile = tile.on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    if matches!(key, "enter" | "space") {
+                        let _ = key_waku.update(cx, |this, cx| {
                             this.open_image_preview(
-                                preview_path.clone(),
-                                preview_name.clone(),
+                                key_image.clone(),
+                                key_name.clone(),
                                 window,
                                 cx,
                             );
                         });
                         cx.stop_propagation();
-                    })
+                    } else if key == "f10" && event.keystroke.modifiers.shift {
+                        key_menu.open_context_menu(window, cx);
+                        cx.stop_propagation();
+                    }
+                });
+            } else {
+                tile = tile
                     .child(
-                        img(attachment.path.clone())
+                        div()
                             .size_full()
-                            .object_fit(ObjectFit::Cover),
-                    ),
-            );
-            tile = tile.on_key_down(move |event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                if matches!(key, "enter" | "space") {
-                    let _ = key_waku.update(cx, |this, cx| {
-                        this.open_image_preview(key_path.clone(), key_name.clone(), window, cx);
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("icons/file-types/image.svg", 18.0, theme.text_ghost)),
+                    )
+                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "f10" && event.keystroke.modifiers.shift {
+                            key_menu.open_context_menu(window, cx);
+                            cx.stop_propagation();
+                        }
                     });
-                    cx.stop_propagation();
-                } else if key == "f10" && event.keystroke.modifiers.shift {
-                    key_menu.open_context_menu(window, cx);
-                    cx.stop_propagation();
-                }
-            });
+            }
         } else {
             let key_menu = menu.clone();
             tile = tile.child(
@@ -465,7 +523,7 @@ fn render_sent_message_attachments(
             tile,
             SharedString::from(format!("message-{message_id}-attachment-{index}-menu")),
             menu,
-            move |_| image_preview::attachment_menu_items(reveal_path.clone()),
+            move |_| image_preview::attachment_menu_items(reveal_path.clone(), can_reveal),
         ));
     }
     Some(row.into_any_element())
@@ -503,6 +561,7 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
         user_message_action,
         message_edit_input,
         attachment_menus,
+        attachment_images,
         markdown,
         ctx,
         menu,
@@ -534,8 +593,10 @@ pub(super) fn render_message(params: MessageRender, cx: &mut App) -> AnyElement 
                 message_id,
                 &message.attachments,
                 &attachment_menus,
+                &attachment_images,
                 &waku,
                 theme,
+                cx,
             ) {
                 column = column.child(attachments);
             }

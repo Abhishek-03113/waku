@@ -222,6 +222,11 @@ impl Waku {
     ) -> bool {
         runtime.last_active_at = Instant::now();
         match event {
+            DriverEvent::RuntimeEventCursorAdvanced(cursor) => {
+                if let Some(session) = self.state.session_mut(session_id) {
+                    session.runtime_event_cursor = Some(cursor);
+                }
+            }
             DriverEvent::Connected { provider_cursor } => {
                 runtime.last_driver_error = None;
                 runtime.last_background_refresh_at = Instant::now();
@@ -642,12 +647,20 @@ impl Waku {
         true
     }
 
-    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, mut state: ComputerUseState) {
+    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, state: ComputerUseState) {
         if !state.visible {
             return;
         }
         let Some(window_id) = state.target.as_ref().map(|target| target.window_id) else {
             return;
+        };
+        let mut preview = ComputerUsePreview {
+            target: state.target,
+            phase: state.phase,
+            visible: state.visible,
+            screenshot: state.image_url.as_deref().and_then(|image_url| {
+                crate::computer_use::decode_preview_image_url(image_url).ok()
+            }),
         };
         if let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
             preview
@@ -656,11 +669,11 @@ impl Waku {
                 .is_some_and(|target| target.window_id == window_id)
         }) {
             let previous = runtime.computer_use_previews.remove(index);
-            if state.screenshot.is_none() {
-                state.screenshot = previous.screenshot;
+            if preview.screenshot.is_none() {
+                preview.screenshot = previous.screenshot;
             }
         }
-        runtime.computer_use_previews.push(state);
+        runtime.computer_use_previews.push(preview);
     }
 }
 
@@ -716,6 +729,20 @@ pub(super) fn stream_delta_text(event: &DriverEvent, kind: StreamDeltaKind) -> O
     }
 }
 
+/// Once the daemon has already settled or lost the runtime, presentation
+/// pacing must not delay that fact behind an old text backlog. A second client
+/// receives the same sequenced events directly, so retaining a typewriter
+/// queue here would make Desktop visibly trail Web even though both are caught
+/// up to the same daemon sequence.
+pub(super) fn stream_backlog_should_flush(events: &VecDeque<DriverEvent>) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            DriverEvent::TurnFinished { .. } | DriverEvent::ProcessExited
+        )
+    })
+}
+
 pub(super) fn compact_driver_error(error: &str) -> String {
     const MAX_LINES: usize = 6;
     const MAX_CHARS: usize = 800;
@@ -750,24 +777,42 @@ pub(super) fn stream_frame_budget(backlog: usize) -> usize {
 /// Pop one display-sized chunk while retaining the provider's event order.
 ///
 /// Adjacent deltas of the same kind are coalesced. Large deltas are split on
-/// grapheme and line boundaries, so a provider that emits its whole answer in
-/// one event still gets the same progressive presentation as token streams.
+/// grapheme boundaries, so a provider that emits its whole answer in one event
+/// still gets the same progressive presentation as token streams. Newlines are
+/// safe split points, but short lines share a frame budget instead of turning
+/// a multiline response into one 24 ms delay per line.
 pub(super) fn pop_stream_chunk(
     events: &mut VecDeque<DriverEvent>,
     kind: StreamDeltaKind,
 ) -> Option<DriverEvent> {
-    let backlog = events
-        .iter()
-        .map_while(|event| stream_delta_text(event, kind))
-        .map(|text| text.graphemes(true).count())
-        .sum();
+    let mut backlog = 0;
+    for event in events.iter() {
+        if let Some(text) = stream_delta_text(event, kind) {
+            backlog += text.graphemes(true).count();
+        } else if matches!(event, DriverEvent::RuntimeEventCursorAdvanced(_)) {
+            // The remote adapter acknowledges every sequenced daemon event.
+            // Those cursors are persistence metadata, not a presentation
+            // boundary between token deltas.
+            continue;
+        } else {
+            break;
+        }
+    }
     if backlog == 0 {
         return events.pop_front();
     }
 
     let mut remaining_budget = stream_frame_budget(backlog);
     let mut chunk = String::new();
+    let mut latest_cursor = None;
     while remaining_budget > 0 {
+        if matches!(
+            events.front(),
+            Some(DriverEvent::RuntimeEventCursorAdvanced(_))
+        ) {
+            latest_cursor = events.pop_front();
+            continue;
+        }
         let Some(text) = events.front_mut().and_then(|event| match (kind, event) {
             (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
             | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => Some(text),
@@ -777,17 +822,56 @@ pub(super) fn pop_stream_chunk(
         };
 
         let (prefix, graphemes) = take_stream_prefix(text, remaining_budget);
-        let reached_line_boundary = prefix.ends_with('\n');
         chunk.push_str(&prefix);
         remaining_budget = remaining_budget.saturating_sub(graphemes);
         if text.is_empty() {
             events.pop_front();
         }
-        if reached_line_boundary {
-            break;
-        }
+    }
+    if let Some(cursor) = latest_cursor {
+        // Apply the newest acknowledgement after the combined visible chunk.
+        // If the next raw delta was only partly revealed, this remains the
+        // cursor immediately before that remainder, so a crash cannot skip
+        // unpresented output when the task is replayed.
+        events.push_front(cursor);
     }
 
+    match kind {
+        StreamDeltaKind::Text => Some(DriverEvent::TextDelta(chunk)),
+        StreamDeltaKind::Reasoning => Some(DriverEvent::ReasoningDelta(chunk)),
+    }
+}
+
+/// Coalesce all adjacent deltas of one kind after a terminal runtime event has
+/// reached the queue. This preserves event order while making settlement land
+/// in the same UI pass instead of waiting for presentation-only animation.
+pub(super) fn pop_complete_stream_chunk(
+    events: &mut VecDeque<DriverEvent>,
+    kind: StreamDeltaKind,
+) -> Option<DriverEvent> {
+    let mut chunk = String::new();
+    let mut latest_cursor = None;
+    loop {
+        match events.front() {
+            Some(DriverEvent::RuntimeEventCursorAdvanced(_)) => {
+                latest_cursor = events.pop_front();
+            }
+            Some(event) if stream_delta_text(event, kind).is_some() => {
+                let event = events.pop_front()?;
+                match (kind, event) {
+                    (StreamDeltaKind::Text, DriverEvent::TextDelta(text))
+                    | (StreamDeltaKind::Reasoning, DriverEvent::ReasoningDelta(text)) => {
+                        chunk.push_str(&text);
+                    }
+                    _ => unreachable!("the stream kind was checked before removing the event"),
+                }
+            }
+            _ => break,
+        }
+    }
+    if let Some(cursor) = latest_cursor {
+        events.push_front(cursor);
+    }
     match kind {
         StreamDeltaKind::Text => Some(DriverEvent::TextDelta(chunk)),
         StreamDeltaKind::Reasoning => Some(DriverEvent::ReasoningDelta(chunk)),
