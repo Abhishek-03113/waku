@@ -14,6 +14,7 @@ export const WAKU_ICONS = {
   chevronDown: 'i-waku-chevron-down',
   chevronRight: 'i-waku-chevron-right',
   cloudUpload: 'i-waku-cloud-upload',
+  command: 'i-waku-command',
   compose: 'i-waku-compose',
   copy: 'i-waku-copy',
   eye: 'i-waku-eye',

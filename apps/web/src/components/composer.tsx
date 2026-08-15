@@ -1073,14 +1073,7 @@ function AutocompleteRowContents({ row }: { row: ComposerAutocompleteRow }) {
       <>
         {command.scope === 'Skill'
           ? <WakuIcon className="size-3 text-[var(--text-tertiary)]" name="sparkle" />
-          : (
-              <span
-                aria-hidden="true"
-                className="grid size-3 shrink-0 place-items-center text-[12px] font-medium text-[var(--text-tertiary)]"
-              >
-                /
-              </span>
-            )}
+          : <WakuIcon className="size-3 text-[var(--text-tertiary)]" name="command" />}
         <span className="max-w-[260px] shrink-0 truncate text-[12px] font-medium">
           /{command.name}
         </span>

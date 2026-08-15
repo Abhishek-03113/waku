@@ -466,7 +466,7 @@ impl Waku {
                 let icon_path = if command.scope == composer_complete::CommandScope::Skill {
                     "icons/sparkle.svg"
                 } else {
-                    "icons/slash.svg"
+                    "icons/command.svg"
                 };
                 // Positions index the bare name; the drawn `/` shifts every
                 // byte range right by one.
