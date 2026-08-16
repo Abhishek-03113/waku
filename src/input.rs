@@ -6,12 +6,12 @@ use crate::md::highlight::{self, Lang, TokenClass};
 use crate::ui::menu::{ContextMenuHandle, MenuItem, context_menu};
 use crate::ui::scrollbar::{self, ScrollbarState};
 use gpui::{
-    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle,
-    SharedString, StyledText, Subscription, Task, TextLayout, TextRun, UTF16Selection,
-    UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, size,
+    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DispatchPhase, Element,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ScrollHandle, SharedString, StyledText, Subscription, Task, TextLayout, TextRun,
+    UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -2264,6 +2264,20 @@ impl Element for InputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        // Element-level mouse listeners are hitbox-gated, so a drag that
+        // leaves the field would freeze the selection at the border. Track
+        // the drag window-level instead — like a native text view, the
+        // selection keeps extending outside the bounds because
+        // index_for_mouse_position clamps an outside point to the nearest
+        // line edge (above maps to the start, below to the end).
+        window.on_mouse_event({
+            let input = self.input.clone();
+            move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble && input.read(cx).is_selecting {
+                    input.update(cx, |input, cx| input.on_mouse_move(event, window, cx));
+                }
+            }
+        });
         layout_state.text.paint(
             None,
             None,
@@ -2330,7 +2344,6 @@ impl Render for ComposerInput {
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
             .text_color(theme.text)
             // A composer owns its own metrics; a code editor inherits the
