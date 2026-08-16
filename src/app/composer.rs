@@ -2130,7 +2130,7 @@ impl Waku {
     fn render_composer_attachments(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let mut row = div()
-            .px(px(4.0))
+            .px(px(14.0))
             .pt(px(2.0))
             .pb(px(8.0))
             .flex()
@@ -2546,7 +2546,10 @@ impl Waku {
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.composer)
-                .p(px(10.0))
+                // Horizontal insets live on each row (and inside the field's
+                // scroll viewport, via `padding_x`) rather than on the card,
+                // so the field's overlay scrollbar can hug the card's edge.
+                .py(px(10.0))
                 .drag_over::<ExternalPaths>(move |style, _, _, _| {
                     style.bg(drop_wash).border_color(drop_ring)
                 })
@@ -2581,10 +2584,11 @@ impl Waku {
                 .when(!self.composer_attachments.is_empty(), |card| {
                     card.child(self.render_composer_attachments(cx))
                 })
-                .child(div().px(px(4.0)).pt(px(2.0)).child(self.composer.clone()))
+                .child(div().pt(px(2.0)).child(self.composer.clone()))
                 .child(
                     div()
                         .mt(px(8.0))
+                        .px(px(10.0))
                         .flex()
                         .items_center()
                         .gap(px(4.0))

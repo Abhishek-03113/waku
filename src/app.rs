@@ -1816,7 +1816,7 @@ impl Waku {
                 .count(),
         });
 
-        let composer = cx.new(|cx| ComposerInput::new(window, cx));
+        let composer = cx.new(|cx| ComposerInput::new(window, cx).padding_x(px(14.0)));
         let user_input_answer = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()

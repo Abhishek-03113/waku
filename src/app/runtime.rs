@@ -1986,7 +1986,7 @@ impl Waku {
             return;
         };
 
-        let input = cx.new(|cx| ComposerInput::new(window, cx));
+        let input = cx.new(|cx| ComposerInput::new(window, cx).padding_x(px(12.0)));
         input.update(cx, |input, cx| input.set_content(initial_message, cx));
         cx.subscribe(
             &input,
