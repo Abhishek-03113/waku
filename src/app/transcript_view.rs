@@ -2220,6 +2220,32 @@ fn activity_scroll_follow_state(
     }
 }
 
+/// Pure window arithmetic behind [`Waku::live_reasoning_window_start`]:
+/// given the cached start and the current content, the byte offset the
+/// window should render from. Every returned offset is a character boundary
+/// of `content`, so callers may slice with it directly.
+fn live_reasoning_window_anchor(cached: usize, content: &str) -> usize {
+    // A restarted block can leave the cached start past the end of the new
+    // content or inside a multibyte character; either way the window is
+    // stale (`is_char_boundary` is false past the end too), so restart it.
+    let cached = if content.is_char_boundary(cached) { cached } else { 0 };
+    if content.len() - cached <= LIVE_REASONING_WINDOW_MAX {
+        return cached;
+    }
+    // Slide: re-anchor near the tail, preferring a block boundary so the
+    // window opens on whole markdown. The raw cut is an arbitrary byte
+    // offset, so advance it to a character boundary before slicing; the
+    // end of the string is always a boundary, so this terminates.
+    let mut cut = content.len() - LIVE_REASONING_WINDOW_TARGET;
+    while !content.is_char_boundary(cut) {
+        cut += 1;
+    }
+    content[cut..]
+        .find("\n\n")
+        .map(|found| cut + found + 2)
+        .unwrap_or(cut)
+}
+
 impl Waku {
     /// Byte offset the live reasoning peek renders from, slid forward as the
     /// thought grows. The peek pins a 400 px viewport to the tail, but
@@ -2236,20 +2262,8 @@ impl Waku {
     ) -> usize {
         let mut starts = self.reasoning_window_starts.borrow_mut();
         let start = starts.entry(id).or_insert(0);
-        if *start > content.len() {
-            // The block restarted with shorter content; drop the stale window.
-            *start = 0;
-            *view = MarkdownView::seeded();
-        }
-        if content.len() - *start > LIVE_REASONING_WINDOW_MAX {
-            let cut = content.len() - LIVE_REASONING_WINDOW_TARGET;
-            let mut next = content[cut..]
-                .find("\n\n")
-                .map(|found| cut + found + 2)
-                .unwrap_or(cut);
-            while next < content.len() && !content.is_char_boundary(next) {
-                next += 1;
-            }
+        let next = live_reasoning_window_anchor(*start, content);
+        if next != *start {
             *start = next;
             *view = MarkdownView::seeded();
         }
@@ -2444,5 +2458,57 @@ mod activity_scroll_tests {
             px(120.0),
             px(240.0),
         ));
+    }
+}
+
+#[cfg(test)]
+mod live_reasoning_window_tests {
+    use super::*;
+
+    #[test]
+    fn slide_lands_on_a_character_boundary_in_multibyte_content() {
+        // A body of 3-byte chars with two ASCII bytes at the end leaves the
+        // naive cut mid-character while both tuning consts are KiB multiples;
+        // the guard assert keeps the test honest if they are ever retuned.
+        let content = "界".repeat(LIVE_REASONING_WINDOW_MAX / 3 + 1) + "zz";
+        assert!(content.len() > LIVE_REASONING_WINDOW_MAX);
+        assert!(
+            !content.is_char_boundary(content.len() - LIVE_REASONING_WINDOW_TARGET),
+            "setup must place the naive cut mid-character to cover the panic",
+        );
+        let start = live_reasoning_window_anchor(0, &content);
+        assert!(content.is_char_boundary(start));
+        assert!(content.len() - start <= LIVE_REASONING_WINDOW_TARGET);
+        assert!(!content[start..].is_empty());
+    }
+
+    #[test]
+    fn stale_start_from_a_restarted_block_resets_to_zero() {
+        let content = "思".repeat(64);
+        assert!(!content.is_char_boundary(4));
+        assert_eq!(live_reasoning_window_anchor(4, &content), 0);
+        assert_eq!(live_reasoning_window_anchor(content.len() + 1, &content), 0);
+    }
+
+    #[test]
+    fn stale_start_still_slides_when_the_new_content_is_long() {
+        let content = "界".repeat(LIVE_REASONING_WINDOW_MAX);
+        assert!(!content.is_char_boundary(5));
+        let start = live_reasoning_window_anchor(5, &content);
+        assert!(content.is_char_boundary(start));
+        assert!(content.len() - start <= LIVE_REASONING_WINDOW_TARGET);
+    }
+
+    #[test]
+    fn slide_reanchors_after_a_block_boundary_when_one_is_near() {
+        let content = format!("{}\n\ntail", "a".repeat(LIVE_REASONING_WINDOW_MAX));
+        let start = live_reasoning_window_anchor(0, &content);
+        assert_eq!(&content[start..], "tail");
+    }
+
+    #[test]
+    fn window_below_the_threshold_keeps_the_cached_start() {
+        let content = "a".repeat(LIVE_REASONING_WINDOW_MAX);
+        assert_eq!(live_reasoning_window_anchor(7, &content), 7);
     }
 }
