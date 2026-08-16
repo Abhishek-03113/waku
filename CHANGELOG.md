@@ -16,6 +16,13 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.1.1]
+
+- Give nested Markdown the full message width
+- Cap composer height and scroll overflow with an overlay scrollbar
+- Keep drag-selecting text past the input bounds
+- Fix char boundary panic when sliding the live reasoning window
+
 ## [0.1.0]
 
 - Add standalone Waku daemon and browser client
