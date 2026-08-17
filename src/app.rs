@@ -1262,6 +1262,16 @@ pub struct Waku {
     sidebar_width: f32,
     right_panel_visible: bool,
     right_panel_width: f32,
+    /// The show/hide slide each panel is in the middle of, if any. Driven by
+    /// hand from `render` (see [`motion::WidthTween`]) because the width these
+    /// produce is what the transcript column between them is laid out against.
+    sidebar_slide: Option<motion::WidthTween>,
+    right_panel_slide: Option<motion::WidthTween>,
+    /// Width each panel actually occupied in the last frame — where a toggle
+    /// starts its slide from, and what the transcript measures itself against
+    /// while one is running.
+    sidebar_rendered_width: f32,
+    right_panel_rendered_width: f32,
     fps_counter_visible: bool,
     panel_resize_drag: Option<PanelResizeDrag>,
     right_panel_session_states: HashMap<Uuid, RightPanelSessionState>,
@@ -2679,6 +2689,14 @@ impl Waku {
                 sidebar_width,
                 right_panel_visible,
                 right_panel_width,
+                sidebar_slide: None,
+                right_panel_slide: None,
+                sidebar_rendered_width: if sidebar_visible { sidebar_width } else { 0.0 },
+                right_panel_rendered_width: if right_panel_visible {
+                    right_panel_width
+                } else {
+                    0.0
+                },
                 fps_counter_visible: false,
                 panel_resize_drag: None,
                 right_panel_session_states: HashMap::new(),
