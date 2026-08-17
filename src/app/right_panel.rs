@@ -321,6 +321,39 @@ impl DiffRowStyle {
     };
 }
 
+/// Selection identity for one diff code row. Selection resolves a drag by
+/// looking rows up by key, so every row must have its own.
+///
+/// Rows with line numbers key on them: they survive Review's gap expansion,
+/// where a revealed gap shifts every later row's index. Rows without them — a
+/// diff synthesized from a provider's before/after text — key on the row index
+/// instead, which is stable there because an activity diff is only ever
+/// rebuilt whole. Keying those on their (absent) numbers gave every added row
+/// the same key, and a drag resolved against whichever duplicate registered
+/// first: selections jumped rows, skipped wrapped lines, and collapsed when
+/// the head crossed into context.
+fn diff_row_selection_key(
+    key_prefix: &str,
+    line: &crate::review_diff::Line,
+    index: usize,
+) -> String {
+    let kind = match &line.kind {
+        crate::review_diff::LineKind::Context => "context",
+        crate::review_diff::LineKind::Addition => "addition",
+        crate::review_diff::LineKind::Deletion => "deletion",
+        _ => "other",
+    };
+    match (line.old_line, line.new_line) {
+        (None, None) => format!("{key_prefix}-line-{}-{kind}-i{index}", line.file_index),
+        (old, new) => format!(
+            "{key_prefix}-line-{}-{kind}-{}-{}",
+            line.file_index,
+            old.unwrap_or(0),
+            new.unwrap_or(0),
+        ),
+    }
+}
+
 /// One context, addition, or deletion row, shared by the Review panel and the
 /// diff inside an expanded file-change activity so the two never drift.
 pub(super) fn render_diff_code_row(
@@ -354,21 +387,7 @@ pub(super) fn render_diff_code_row(
     let flat = review_diff_flat_text(line, theme);
     let selectable = md::render::selectable_flat_text(
         &flat,
-        crate::md::selection::TextKey::new(
-            format!(
-                "{key_prefix}-line-{}-{}-{}-{}",
-                line.file_index,
-                match &line.kind {
-                    crate::review_diff::LineKind::Context => "context",
-                    crate::review_diff::LineKind::Addition => "addition",
-                    crate::review_diff::LineKind::Deletion => "deletion",
-                    _ => "other",
-                },
-                line.old_line.unwrap_or(0),
-                line.new_line.unwrap_or(0),
-            ),
-            0,
-        ),
+        crate::md::selection::TextKey::new(diff_row_selection_key(key_prefix, line, index), 0),
         selection.clone(),
         theme.code_wash,
         theme.selection,
@@ -1089,6 +1108,52 @@ mod tests {
         assert_eq!(
             transcript_link_route("https://example.com/file.rs:12", Some(workspace)),
             TranscriptLinkRoute::External
+        );
+    }
+
+    /// Selection resolves rows by key, so a repeated key makes a drag jump
+    /// between the duplicates. Numbered rows keep their number-derived keys
+    /// (stable across Review's gap expansion); rows a provider never
+    /// positioned fall back to the row index.
+    #[test]
+    fn diff_row_selection_keys_are_unique_even_without_line_numbers() {
+        let positionless = crate::review_diff::from_file_changes(&[
+            crate::model::ActivityFileChange {
+                path: "a.md".into(),
+                additions: Some(2),
+                deletions: Some(0),
+                status: None,
+                diff: Some("@@\n+one\n+two\n \n+three\n".into()),
+            },
+        ]);
+        let keys = positionless
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                matches!(
+                    line.kind,
+                    crate::review_diff::LineKind::Context
+                        | crate::review_diff::LineKind::Addition
+                        | crate::review_diff::LineKind::Deletion
+                )
+            })
+            .map(|(index, line)| diff_row_selection_key("activity", line, index))
+            .collect::<Vec<_>>();
+        let unique = keys.iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), keys.len(), "{keys:?}");
+
+        let numbered = crate::review_diff::Line {
+            file_index: 0,
+            old_line: Some(4),
+            new_line: Some(6),
+            kind: crate::review_diff::LineKind::Context,
+            content: "kept".into(),
+            tokens: Vec::new(),
+        };
+        assert_eq!(
+            diff_row_selection_key("review-diff", &numbered, 9),
+            "review-diff-line-0-context-4-6",
         );
     }
 
