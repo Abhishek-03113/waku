@@ -18,6 +18,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use crossbeam_channel::{Sender, unbounded};
@@ -109,6 +110,29 @@ fn wire_model(model: Option<&str>, context_window: Option<&str>) -> Option<Strin
     } else {
         Some(model.to_owned())
     }
+}
+
+/// Claude Code titles the session itself, on Haiku, in a request it fires
+/// alongside the first turn's own first model call, so the title reaches the
+/// native transcript about three seconds in — long before the turn it belongs
+/// to settles. Reading it only when `result` arrives, as the turn-end pass
+/// does, leaves an agentic first turn showing the truncated prompt for its
+/// whole run and an interrupted one showing it forever. One look after five
+/// seconds catches it, with a second as insurance; a schedule that runs dry
+/// re-arms on the next prompt, and the turn-end pass still owns later
+/// retitles and the rewind cursor.
+fn start_claude_title_refresh(
+    title_refresh: &super::title_refresh::NativeTitleRefresh,
+    session_id: &str,
+    events: &DriverEventSender,
+) {
+    let session_id = session_id.to_owned();
+    title_refresh.start(
+        "waku-claude-title",
+        vec![Duration::from_secs(5), Duration::from_secs(10)],
+        events.clone(),
+        move || crate::claude_session::session_metadata(&session_id).map(|native| native.title),
+    );
 }
 
 fn configure_stream_command(
@@ -264,6 +288,8 @@ impl ClaudeDriver {
         let writer_events = events.clone();
         let writer_turn = turn_active;
         let writer_pending_task_stops = pending_task_stops;
+        let writer_title_refresh = super::title_refresh::NativeTitleRefresh::default();
+        let title_session_id = session_id;
         thread::Builder::new()
             .name("waku-claude-writer".into())
             .spawn(move || {
@@ -274,6 +300,11 @@ impl ClaudeDriver {
                     let written = match message {
                         CommandMessage::Prompt(text) => {
                             *writer_turn.lock() = true;
+                            start_claude_title_refresh(
+                                &writer_title_refresh,
+                                &title_session_id,
+                                &writer_events,
+                            );
                             let _ = writer_events.send(DriverEvent::TurnStarted);
                             write_line(&mut stdin, &user_message_payload(&text))
                         }
