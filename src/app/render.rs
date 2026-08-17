@@ -88,9 +88,18 @@ fn slide_width(slide: &mut Option<motion::WidthTween>, target: f32) -> f32 {
 }
 
 impl Waku {
+    /// An edge is currently animating. While this holds, the pane islands'
+    /// root observer stops fanning root notifies out to every island (see
+    /// [`WakuPane::bind`]) and lets the cached-view geometry checks decide
+    /// which islands a slide tick actually rebuilds.
+    pub(super) fn panels_sliding(&self) -> bool {
+        self.sidebar_slide.is_some() || self.right_panel_slide.is_some()
+    }
+
     /// Settle both panel slides for this frame and publish the widths the
     /// pane islands — which render later, during layout — have to agree with.
     fn settle_panel_slides(&mut self, window: &Window) -> PanelFrame {
+        let was_sliding = self.panels_sliding();
         if self.settings_page.is_some() {
             // Settings covers the workspace, so there is no edge on screen to
             // move. Retire the slide rather than animate a layout nobody can
@@ -117,12 +126,21 @@ impl Waku {
         );
         self.sidebar_rendered_width = sidebar;
         self.right_panel_rendered_width = right_panel;
+        let sliding = self.panels_sliding();
+        if was_sliding && !sliding {
+            // The observer gate held root-state fan-out away from any island
+            // the slide left geometry-stable. One ungated notify now that
+            // the slide is over rebuilds every island once, so whatever
+            // root state changed during those 200ms lands the next frame.
+            let root = window.current_view();
+            window.on_next_frame(move |_, cx| cx.notify(root));
+        }
         PanelFrame {
             sidebar_content,
             right_panel_content,
             sidebar,
             right_panel,
-            sliding: self.sidebar_slide.is_some() || self.right_panel_slide.is_some(),
+            sliding,
         }
     }
 
