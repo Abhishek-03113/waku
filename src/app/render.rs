@@ -69,6 +69,12 @@ struct PanelFrame {
     /// Width each panel occupies on screen: the eased slide while one runs.
     sidebar: f32,
     right_panel: f32,
+    /// Which edge is mid-slide. The clip that keeps a sliding panel inside its
+    /// narrowing container also cuts whatever that panel draws outside its own
+    /// bounds — the right panel's resize handle sits entirely left of its edge
+    /// — so each clip only goes on while its own panel is actually moving.
+    sidebar_sliding: bool,
+    right_panel_sliding: bool,
     /// An edge is still moving, so the frame loop has to keep going.
     sliding: bool,
 }
@@ -140,6 +146,8 @@ impl Waku {
             right_panel_content,
             sidebar,
             right_panel,
+            sidebar_sliding: self.sidebar_slide.is_some(),
+            right_panel_sliding: self.right_panel_slide.is_some(),
             sliding,
         }
     }
@@ -300,7 +308,7 @@ impl Render for Waku {
                         .h_full()
                         .flex_none()
                         .w(px(panels.sidebar))
-                        .overflow_hidden()
+                        .when(panels.sidebar_sliding, |element| element.overflow_hidden())
                         .child(self.sidebar_pane.clone().cached(
                             StyleRefinement::default()
                                 .w(px(panels.sidebar_content))
@@ -357,7 +365,9 @@ impl Render for Waku {
                         .w(px(panels.right_panel))
                         .flex()
                         .relative()
-                        .overflow_hidden()
+                        .when(panels.right_panel_sliding, |element| {
+                            element.overflow_hidden()
+                        })
                         // Pinned to the window's right edge, so the panel is
                         // uncovered from that edge inward rather than dragged
                         // across the screen.
