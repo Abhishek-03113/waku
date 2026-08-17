@@ -669,7 +669,10 @@ impl WakuPane {
         content: fn(&mut Waku, &mut Window, &mut Context<Waku>) -> AnyElement,
         cx: &mut App,
     ) -> Entity<Self> {
-        cx.new(|_| Self { waku: None, content })
+        cx.new(|_| Self {
+            waku: None,
+            content,
+        })
     }
 
     fn bind(&mut self, waku: &Entity<Waku>, cx: &mut Context<Self>) {
@@ -1441,6 +1444,13 @@ pub struct Waku {
     /// Independent capped viewports for expanded thoughts and command output.
     /// Keeping these stable preserves scroll position through virtualization.
     activity_scroll_viewports: RefCell<HashMap<Uuid, ActivityScrollViewport>>,
+    /// Positioned, syntax-tokenized diff rows for expanded file-change
+    /// activities. Built once when the activity is expanded and dropped when it
+    /// collapses or its changes are replaced, so a frame only indexes rows.
+    activity_diffs: RefCell<HashMap<Uuid, Rc<activity_diff::Diff>>>,
+    /// Viewports for those diffs. Separate from `activity_scroll_viewports`
+    /// because a failed edit shows both its diff and the error it returned.
+    activity_diff_viewports: RefCell<HashMap<Uuid, ActivityScrollViewport>>,
     /// One allocation for every transcript markdown context to share. The
     /// callback knows about the active workspace; the renderer deliberately
     /// does not.
@@ -1472,6 +1482,7 @@ pub struct Waku {
     fps_value: u32,
 }
 
+mod activity_diff;
 mod autocomplete;
 mod background_work;
 mod branches;
@@ -2772,6 +2783,8 @@ impl Waku {
                 activity_markdown: RefCell::new(HashMap::new()),
                 reasoning_window_starts: RefCell::new(HashMap::new()),
                 activity_scroll_viewports: RefCell::new(HashMap::new()),
+                activity_diffs: RefCell::new(HashMap::new()),
+                activity_diff_viewports: RefCell::new(HashMap::new()),
                 markdown_link_handler,
                 transcript_selection: TranscriptSelection::default(),
                 toast_selection: TranscriptSelection::default(),
