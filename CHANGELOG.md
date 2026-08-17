@@ -16,6 +16,10 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.1.4]
+
+- Fix text selection in diff view
+
 ## [0.1.3]
 
 - Pin Codex and Claude commit message generation to cheap models: gpt-5.6-luna and claude-4.5-haiku
