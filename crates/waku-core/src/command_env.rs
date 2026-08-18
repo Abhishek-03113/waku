@@ -45,9 +45,44 @@ static SHELL_ENV_CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
 /// launcher needs `node`). Callers can add provider-specific overrides after
 /// this.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
+    let program = program.as_ref();
+    let search_path = child_search_path(Path::new(program));
     let mut command = plain_command(program);
     command.envs(shell_environment());
+    if let Some(search_path) = search_path {
+        command.env("PATH", search_path);
+    }
     command
+}
+
+/// The `PATH` a provider CLI runs with: every directory Waku itself searched,
+/// plus the one the binary was found in.
+///
+/// Detection resolves CLIs from more directories than the desktop process
+/// inherits — a Bun or npm global prefix that the GUI `PATH` predates, for
+/// example — so a CLI found in one of them has to *run* with them too.
+/// Launcher-based installs depend on it and fail silently without it: Bun's
+/// Windows `pi.EXE` is a shim that launches `bun.exe` from its own directory,
+/// and both an npm `.cmd` shim and a `/usr/bin/env node` shebang need `node`
+/// on the child's `PATH`. Detection still succeeds in that state — it only
+/// looks for the file — so the provider shows up as installed while every
+/// probe it runs comes back empty.
+///
+/// Windows needs this most: there is no login shell to capture an environment
+/// from, so a GUI-launched Waku has only the `PATH` it inherited.
+fn child_search_path(program: &Path) -> Option<OsString> {
+    let mut directories = executable_search_paths();
+    // Last, not first: an install outside the known prefixes still finds its
+    // runtime, while the user's own `PATH` order decides everything else.
+    directories.extend(
+        program
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf),
+    );
+    let mut seen = HashSet::new();
+    directories.retain(|directory| seen.insert(directory.clone()));
+    std::env::join_paths(directories).ok()
 }
 
 /// A command that never flashes a console window.
@@ -658,6 +693,44 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    fn command_search_path(command: &Command) -> Vec<PathBuf> {
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("PATH"))
+            .and_then(|(_, value)| value)
+            .expect("a provider command sets PATH for its child");
+        std::env::split_paths(path).collect()
+    }
+
+    /// A CLI resolved from a directory the desktop `PATH` never had must run
+    /// with that directory too, or its own launcher — a Bun shim, an npm
+    /// `.cmd`, an `env node` shebang — cannot find its runtime.
+    #[test]
+    fn a_provider_cli_runs_with_the_directories_detection_searched() {
+        #[cfg(windows)]
+        let program = PathBuf::from("C:\\waku-fixture\\bin\\pi.exe");
+        #[cfg(not(windows))]
+        let program = PathBuf::from("/opt/waku-fixture/bin/pi");
+
+        let directories = command_search_path(&command(&program));
+
+        assert!(directories.contains(&program.parent().expect("fixture parent").to_path_buf()));
+        for searched in executable_search_paths() {
+            assert!(
+                directories.contains(&searched),
+                "{} is searched during detection but missing from the child PATH",
+                searched.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_program_name_contributes_no_search_directory() {
+        let directories = command_search_path(&command("git"));
+
+        assert_eq!(directories, executable_search_paths());
+    }
 
     #[cfg(unix)]
     #[test]
