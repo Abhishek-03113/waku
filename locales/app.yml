@@ -318,7 +318,7 @@ common.creating:
 settings.local_by_default:
   en: Local by default
 settings.local_by_default_description:
-  en: Projects, conversations, and settings are stored on this Mac
+  en: Projects, conversations, and settings are stored on this computer
 settings.local_by_default_web_description:
   en: Projects, conversations, and attachments stay on the connected daemon host. Waku Web preferences stay in this browser.
 settings.automatic_updates:
@@ -333,7 +333,7 @@ settings.share_anonymous_usage_data_description:
 providers.coding_agents:
   en: Coding agents
 providers.description:
-  en: Waku drives agent CLIs installed on this Mac. Install or sign in with each agent's own CLI, then refresh
+  en: Waku drives agent CLIs installed on this computer. Install or sign in with each agent's own CLI, then refresh
 providers.web_description:
   en: Waku drives agent CLIs installed on the daemon host. Install or sign in with each agent's own CLI, then refresh
 providers.check_failed:
@@ -481,7 +481,7 @@ project.your_project:
 onboarding.open_project_to_begin:
   en: Open a project to begin
 onboarding.description:
-  en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this Mac
+  en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this computer
 onboarding.web_description:
   en: Choose a path on the daemon host, or start without a project.
 onboarding.open_project_folder:
