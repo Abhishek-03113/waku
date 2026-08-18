@@ -72,7 +72,7 @@ fn find_session_file(projects_directory: &Path, session_id: &str) -> anyhow::Res
     bail!("Claude session {session_id} was not found on disk")
 }
 
-fn read_entries(path: &Path) -> anyhow::Result<Vec<Value>> {
+pub fn read_entries(path: &Path) -> anyhow::Result<Vec<Value>> {
     let file = fs::File::open(path)
         .with_context(|| format!("could not open Claude session {}", path.display()))?;
     Ok(BufReader::new(file)
