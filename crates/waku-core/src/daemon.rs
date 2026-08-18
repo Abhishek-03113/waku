@@ -100,6 +100,13 @@ impl WakuBackend {
 
     /// Discover and import historical sessions from provider storage,
     /// merging newly imported sessions into the live task state under lock.
+    ///
+    /// Also reconciles sessions imported by an earlier, buggier parser (see
+    /// `StateStore::import_historical_session`) and prunes sessions whose
+    /// provider transcript no longer yields any real conversation (for
+    /// example, a session that turns out to be nothing but slash-command
+    /// invocations) — scoped to providers whose discovery succeeded this
+    /// run, so a transient discovery failure can never delete real history.
     fn import_historical_sessions(
         task_store: &StateStore,
         task_state: &Mutex<crate::persistence::PersistedState>,
@@ -111,8 +118,27 @@ impl WakuBackend {
             eprintln!("Warning: Failed to discover historical sessions from {provider:?}: {error}");
         }
 
-        if discovery_result.sessions.is_empty() {
-            return Ok(());
+        let known_providers = crate::model::ProviderKind::ALL
+            .into_iter()
+            .filter(|provider| !discovery_result.errors.contains_key(provider))
+            .collect::<std::collections::HashSet<_>>();
+        let still_present = discovery_result
+            .sessions
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        {
+            let mut state = task_state.lock();
+            let pruned = StateStore::prune_stale_imported_sessions(
+                &mut state,
+                &known_providers,
+                &still_present,
+            );
+            if !pruned.is_empty() {
+                if let Err(e) = task_store.save(&mut state) {
+                    eprintln!("Warning: Failed to persist pruned historical sessions: {e}");
+                }
+            }
         }
 
         for ((_provider, native_id), historical_session) in discovery_result.sessions {
@@ -132,7 +158,7 @@ impl WakuBackend {
                     }
                 }
                 None => {
-                    // Session already exists, skip
+                    // Already imported and already up to date.
                 }
             }
         }
