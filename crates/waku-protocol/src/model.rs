@@ -795,6 +795,14 @@ pub struct AgentSession {
     /// then refreshed when the turn settles, whatever its outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reply_at: Option<u64>,
+    /// Whether this session was imported from a provider's native storage.
+    /// Imported sessions are read-only historical records and cannot be resumed.
+    #[serde(default)]
+    pub is_imported: bool,
+    /// Provider's native session ID for imported sessions.
+    /// Used together with `provider` to ensure idempotent import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_session_id: Option<String>,
     #[serde(default)]
     pub provider_cursor: Option<ProviderResumeCursor>,
     /// Slash commands the provider reported for this session's live process,
@@ -860,6 +868,8 @@ impl AgentSession {
             created_at: now,
             updated_at: now,
             last_reply_at: None,
+            is_imported: false,
+            native_session_id: None,
             detail_loaded: true,
             provider_cursor: None,
             available_commands: Vec::new(),
@@ -897,6 +907,8 @@ impl AgentSession {
             created_at: self.created_at,
             updated_at: self.updated_at,
             last_reply_at: self.last_reply_at,
+            is_imported: self.is_imported,
+            native_session_id: self.native_session_id.clone(),
             provider_cursor: None,
             available_commands: Vec::new(),
             context_usage: None,
