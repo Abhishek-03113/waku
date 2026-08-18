@@ -29,7 +29,6 @@ window.maximize: 最大化
 window.restore: 元に戻す
 
 updater.update: アップデート
-updater.checking: アップデートを確認中…
 updater.updating: アップデート中…
 updater.up_to_date: Waku は最新です
 updater.failed: "アップデートに失敗しました：%{error}"

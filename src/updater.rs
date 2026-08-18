@@ -27,7 +27,6 @@ impl Global for UpdaterState {}
 pub enum UpdateStatus {
     #[default]
     Idle,
-    Checking,
     Available,
     Updating,
 }
@@ -1015,6 +1014,14 @@ mod windows {
     pub struct Updater {
         status: Arc<Mutex<UpdateStatus>>,
         staged: Arc<Mutex<Option<StagedUpdate>>>,
+        /// A check is running. Separate from `status` because a silent check
+        /// is deliberately invisible, so the published status cannot be what
+        /// keeps two checks from overlapping.
+        checking: Arc<AtomicBool>,
+        /// Whether the running check reports its outcome. An explicit request
+        /// that lands while a silent one is in flight sets it rather than
+        /// being dropped, so Check for Updates still answers.
+        explicit_check: Arc<AtomicBool>,
         automatic: Arc<AtomicBool>,
         preference_path: PathBuf,
         events: smol::channel::Sender<UpdaterEvent>,
@@ -1040,6 +1047,8 @@ mod windows {
             let updater = Self {
                 status: Arc::new(Mutex::new(UpdateStatus::Idle)),
                 staged: Arc::new(Mutex::new(None)),
+                checking: Arc::new(AtomicBool::new(false)),
+                explicit_check: Arc::new(AtomicBool::new(false)),
                 automatic,
                 preference_path,
                 events,
@@ -1060,52 +1069,83 @@ mod windows {
             self.start_check(true);
         }
 
+        /// `user_initiated` decides only what is reported at the end. A check
+        /// is never a state the sidebar renders — its button announces a ready
+        /// update, not the poll that looks for one — so neither the launch
+        /// check nor an explicit one puts a spinner in the footer. macOS is
+        /// the same: Sparkle's own window carries an explicit check's
+        /// progress, and its scheduled checks show nothing at all.
         fn start_check(&self, user_initiated: bool) {
-            if matches!(
-                self.status(),
-                UpdateStatus::Checking | UpdateStatus::Updating
-            ) {
+            if self.status() == UpdateStatus::Updating {
                 return;
             }
-            self.set_status(UpdateStatus::Checking);
+            if self
+                .checking
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                // The launch check is in flight. An explicit request adopts
+                // it so the menu still gets an answer, rather than being
+                // dropped for the second or so that check takes.
+                if user_initiated {
+                    self.explicit_check.store(true, Ordering::Relaxed);
+                }
+                return;
+            }
+            self.explicit_check.store(user_initiated, Ordering::Relaxed);
 
             let status = self.status.clone();
             let staged = self.staged.clone();
+            let checking = self.checking.clone();
+            let explicit_check = self.explicit_check.clone();
             let events = self.events.clone();
             let publish = move |next: UpdateStatus| {
-                *status
+                let mut status = status
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // A check leaves the status alone while it runs, so most of
+                // its outcomes are not transitions and must not repaint.
+                if *status == next {
+                    return;
+                }
+                *status = next;
                 let _ = events.try_send(UpdaterEvent::StatusChanged(next));
             };
             let events = self.events.clone();
             let spawned = std::thread::Builder::new()
                 .name("waku-updater-check".into())
-                .spawn(move || match fetch_and_stage() {
-                    Ok(Some(installer)) => {
-                        *staged
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                            Some(StagedUpdate { installer });
-                        publish(UpdateStatus::Available);
-                    }
-                    Ok(None) => {
-                        publish(UpdateStatus::Idle);
-                        if user_initiated {
-                            let _ = events.try_send(UpdaterEvent::UpToDate);
+                .spawn(move || {
+                    let outcome = fetch_and_stage();
+                    // Read once the work is done, so a request that arrived
+                    // meanwhile is honored.
+                    let report = explicit_check.load(Ordering::Relaxed);
+                    match outcome {
+                        Ok(Some(installer)) => {
+                            *staged
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(StagedUpdate { installer });
+                            publish(UpdateStatus::Available);
+                        }
+                        Ok(None) => {
+                            publish(UpdateStatus::Idle);
+                            if report {
+                                let _ = events.try_send(UpdaterEvent::UpToDate);
+                            }
+                        }
+                        Err(error) => {
+                            publish(UpdateStatus::Idle);
+                            if report {
+                                let _ = events.try_send(UpdaterEvent::Failed(error.to_string()));
+                            } else {
+                                eprintln!("Waku updater: {error}");
+                            }
                         }
                     }
-                    Err(error) => {
-                        publish(UpdateStatus::Idle);
-                        if user_initiated {
-                            let _ = events.try_send(UpdaterEvent::Failed(error.to_string()));
-                        } else {
-                            eprintln!("Waku updater: {error}");
-                        }
-                    }
+                    checking.store(false, Ordering::Release);
                 });
             if spawned.is_err() {
-                self.set_status(UpdateStatus::Idle);
+                self.checking.store(false, Ordering::Release);
             }
         }
 
@@ -1179,10 +1219,14 @@ mod windows {
         }
 
         fn set_status(&self, next: UpdateStatus) {
-            *self
+            let mut status = self
                 .status
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *status == next {
+                return;
+            }
+            *status = next;
             let _ = self.events.try_send(UpdaterEvent::StatusChanged(next));
         }
     }

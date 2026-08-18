@@ -567,13 +567,7 @@ impl Waku {
             let indicator = motion::spin_slow(icon("icons/loader-circle.svg", 14.0, foreground));
             return Some(
                 button
-                    .tooltip(Tooltip::text(
-                        if status == crate::updater::UpdateStatus::Checking {
-                            tr!("updater.checking")
-                        } else {
-                            tr!("updater.updating")
-                        },
-                    ))
+                    .tooltip(Tooltip::text(tr!("updater.updating")))
                     .child(
                         div()
                             .size_full()

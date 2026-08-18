@@ -28,7 +28,6 @@ window.minimize: 最小化
 window.maximize: 最大化
 window.restore: 还原
 updater.update: 更新
-updater.checking: 正在检查更新…
 updater.updating: 正在更新…
 updater.up_to_date: Waku 已是最新版本
 updater.failed: "更新失败：%{error}"

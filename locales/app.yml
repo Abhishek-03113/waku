@@ -57,8 +57,6 @@ window.restore:
 
 updater.update:
   en: Update
-updater.checking:
-  en: Checking for updates…
 updater.updating:
   en: Updating…
 updater.up_to_date:
