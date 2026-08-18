@@ -331,7 +331,7 @@ fn render_message_footer(
                 .tooltip(Tooltip::text(tr_cow!("session.revert_to_here")))
                 .on_click(move |_, window, cx| {
                     let _ = edit_waku.update(cx, |this, cx| {
-                        this.begin_message_edit(action.session_id, action.turn_count, window, cx);
+                        this.begin_message_edit(action, window, cx);
                     });
                 }),
         );
@@ -828,7 +828,7 @@ fn message_menu_items(
         items.push(
             MenuItem::new(tr!("session.revert_to_here_title"), move |window, cx| {
                 let _ = waku.update(cx, |this, cx| {
-                    this.begin_message_edit(action.session_id, action.turn_count, window, cx);
+                    this.begin_message_edit(action, window, cx);
                 });
             })
             .icon("icons/rewind.svg"),

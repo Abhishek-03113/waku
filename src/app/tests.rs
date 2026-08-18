@@ -12,10 +12,10 @@ use super::{
     assistant_response_footer_time, changed_files_inline_message_index, compact_driver_error,
     disclosure_leading_space, fenced_code, fitted_file_tree_width, fitted_panel_widths,
     folded_transcript_row_kinds, format_worked_duration, format_working_elapsed,
-    maintain_transcript_anchor, message_starts_followup_turn, navigation_preview_snippet,
-    navigation_rail_fade_visibility, navigation_rail_height, navigation_rail_scale,
-    paused_toast_duration, pop_stream_batch, push_transcript_activity, session_is_reapable,
-    should_refresh_branch_after_activity, should_show_navigation_rail,
+    maintain_transcript_anchor, message_opens_turn, message_starts_followup_turn,
+    navigation_preview_snippet, navigation_rail_fade_visibility, navigation_rail_height,
+    navigation_rail_scale, paused_toast_duration, pop_stream_batch, push_transcript_activity,
+    session_is_reapable, should_refresh_branch_after_activity, should_show_navigation_rail,
     should_show_scroll_to_bottom, task_id_from_notification_tag, task_notification_tag,
     transcript_anchor_end_space, transcript_navigation_turns, transcript_rests_at_tail,
     transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
@@ -700,6 +700,27 @@ fn only_later_user_messages_start_followup_turns() {
     assert!(!message_starts_followup_turn(&messages, 1));
     assert!(message_starts_followup_turn(&messages, 2));
     assert!(!message_starts_followup_turn(&messages, 3));
+}
+
+#[test]
+fn only_the_turn_opening_prompt_is_a_rewind_boundary() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    session.begin_turn("first prompt");
+    session.push_message(MessageRole::Assistant, "working on it");
+    // A steer the provider folded into the live turn.
+    session.push_user_message_with_presentation("actually, also this", None, Vec::new());
+    session.push_message(MessageRole::Assistant, "answer");
+    session.finish_active_turn(TurnStatus::Interrupted);
+    session.begin_turn("second prompt");
+
+    assert!(message_opens_turn(&session.messages, 0));
+    assert!(!message_opens_turn(&session.messages, 1));
+    assert!(
+        !message_opens_turn(&session.messages, 2),
+        "a steer shares the turn's checkpoint, so it cannot be rewound to on its own"
+    );
+    assert!(!message_opens_turn(&session.messages, 3));
+    assert!(message_opens_turn(&session.messages, 4));
 }
 
 #[test]

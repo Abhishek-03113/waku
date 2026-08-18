@@ -1946,11 +1946,15 @@ impl Waku {
 
     pub(super) fn begin_message_edit(
         &mut self,
-        session_id: Uuid,
-        turn_count: usize,
+        action: UserMessageAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let UserMessageAction {
+            session_id,
+            message_id,
+            turn_count,
+        } = action;
         let Some((message_index, initial_message, attachments)) = self
             .state
             .sessions
@@ -1970,7 +1974,9 @@ impl Waku {
                     .iter()
                     .enumerate()
                     .find_map(|(index, message)| {
-                        (message.turn_id == Some(turn.id) && message.role == MessageRole::User)
+                        (message.id == message_id
+                            && message.turn_id == Some(turn.id)
+                            && message.role == MessageRole::User)
                             .then(|| {
                                 (
                                     index,
@@ -2007,6 +2013,7 @@ impl Waku {
         .detach();
         self.message_edit = Some(MessageEdit {
             session_id,
+            message_id,
             turn_count,
             input: input.clone(),
             attachments,
@@ -2030,14 +2037,10 @@ impl Waku {
             return;
         };
         let message_index = self.selected_session().and_then(|session| {
-            let turn_id = session
-                .turns
+            session
+                .messages
                 .iter()
-                .find(|turn| turn.turn_count == edit.turn_count)?
-                .id;
-            session.messages.iter().position(|message| {
-                message.turn_id == Some(turn_id) && message.role == MessageRole::User
-            })
+                .position(|message| message.id == edit.message_id)
         });
         if let Some(message_index) = message_index {
             self.remeasure_transcript_message(message_index);
@@ -2203,19 +2206,17 @@ impl Waku {
         let provider_cursor = source.provider_cursor.clone();
         let session_title = source.display_title().to_owned();
         let cursor_source = (provider == ProviderKind::Cursor).then(|| source.clone());
-        let Some((edited_message_index, edited_message_id)) = source
+        let edited_message_id = edit.message_id;
+        let Some(edited_message_index) = source
             .turns
             .iter()
             .find(|turn| turn.turn_count == turn_count)
             .and_then(|turn| {
-                source
-                    .messages
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, message)| {
-                        (message.turn_id == Some(turn.id) && message.role == MessageRole::User)
-                            .then_some((index, message.id))
-                    })
+                source.messages.iter().position(|message| {
+                    message.id == edited_message_id
+                        && message.turn_id == Some(turn.id)
+                        && message.role == MessageRole::User
+                })
             })
         else {
             self.show_toast(tr!("session.message_unavailable"));
@@ -2325,13 +2326,10 @@ impl Waku {
                 }
                 if selected
                     && let Some(message_index) = self.selected_session().and_then(|session| {
-                        let turn = session
-                            .turns
+                        session
+                            .messages
                             .iter()
-                            .find(|turn| turn.turn_count == turn_count)?;
-                        session.messages.iter().position(|message| {
-                            message.turn_id == Some(turn.id) && message.role == MessageRole::User
-                        })
+                            .position(|message| message.id == edited_message_id)
                     })
                 {
                     self.remeasure_transcript_message(message_index);

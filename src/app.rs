@@ -811,6 +811,10 @@ fn traits_choice(theme: Theme, label: String, is_default: bool, selected: bool) 
 #[derive(Clone, Copy, Debug)]
 struct UserMessageAction {
     session_id: Uuid,
+    /// The prompt that opened the turn. A turn can hold several user messages
+    /// once a steer lands in it, and only the opening one is a rewind
+    /// boundary, so this is what the editor and the rewind both address.
+    message_id: Uuid,
     turn_count: usize,
 }
 
@@ -825,6 +829,9 @@ struct AssistantMessageAction {
 #[derive(Clone)]
 struct MessageEdit {
     session_id: Uuid,
+    /// Identifies the edited bubble outright. Matching by turn alone would
+    /// open this one input on every user message the turn holds.
+    message_id: Uuid,
     turn_count: usize,
     input: Entity<ComposerInput>,
     attachments: Vec<MessageAttachment>,

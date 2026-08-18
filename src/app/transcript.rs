@@ -748,7 +748,11 @@ pub(super) fn should_show_scroll_to_bottom(
         return Some(false);
     }
 
-    Some(!transcript_rests_at_tail(viewport_bottom, tail_bottom, end_space)?)
+    Some(!transcript_rests_at_tail(
+        viewport_bottom,
+        tail_bottom,
+        end_space,
+    )?)
 }
 
 /// Whether the transcript currently sits at the end of its content, or `None`
@@ -1158,6 +1162,28 @@ pub(super) fn format_working_elapsed(seconds: u64) -> String {
             }
         }
     }
+}
+
+/// Whether this user message is the prompt that opened its turn.
+///
+/// A steer accepted mid-turn joins the running turn as another user message,
+/// so a turn can hold several. Only the opening prompt is a rewind boundary —
+/// checkpoints and provider rollback are per turn, not per message. Messages
+/// of a turn are contiguous, so this walks back only while the turn id holds
+/// rather than scanning the session, which a per-frame row builder must avoid.
+pub(super) fn message_opens_turn(messages: &[Message], message_index: usize) -> bool {
+    let Some(turn_id) = messages
+        .get(message_index)
+        .filter(|message| message.role == MessageRole::User)
+        .and_then(|message| message.turn_id)
+    else {
+        return false;
+    };
+    !messages[..message_index]
+        .iter()
+        .rev()
+        .take_while(|earlier| earlier.turn_id == Some(turn_id))
+        .any(|earlier| earlier.role == MessageRole::User)
 }
 
 pub(super) fn message_starts_followup_turn(messages: &[Message], message_index: usize) -> bool {
