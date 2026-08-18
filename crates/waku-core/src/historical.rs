@@ -108,9 +108,7 @@ pub fn discover_all_providers() -> impl FnOnce() -> Result<DiscoveryResult> + Se
                 }
             }
             Err(e) => {
-                result
-                    .errors
-                    .insert(ProviderKind::Claude, e.to_string());
+                result.errors.insert(ProviderKind::Claude, e.to_string());
             }
         }
 
@@ -126,9 +124,7 @@ pub struct ClaudeHistoricalDiscovery {
 
 impl ClaudeHistoricalDiscovery {
     pub fn new() -> Self {
-        Self {
-            projects_dir: None,
-        }
+        Self { projects_dir: None }
     }
 
     /// Create a discovery instance with a custom projects directory (for testing).
@@ -217,19 +213,10 @@ impl ClaudeHistoricalDiscovery {
         entries: &[serde_json::Value],
         native_session_id: &str,
     ) -> Option<HistoricalSession> {
-        // Reuse claude_session.rs to get transcript entries
-        let transcript_entries = entries
-            .iter()
-            .filter_map(|v| v.as_object())
-            .filter(|entry| {
-                let entry_type = entry.get("type").and_then(|v| v.as_str());
-                matches!(entry_type, Some("user" | "assistant" | "system"))
-                    && entry.get("uuid").is_some()
-                    && entry.get("isSidechain") != Some(&serde_json::Value::Bool(true))
-            })
-            .collect::<Vec<_>>();
-
-        if transcript_entries.is_empty() {
+        // Reuse claude_session.rs's transcript filtering so historical import
+        // stays in step with the same TRANSCRIPT_TYPES, uuid, and sidechain
+        // rules the live fork/resume paths already rely on.
+        if claude_session::transcript_entries(entries).is_empty() {
             return None;
         }
 
@@ -240,17 +227,16 @@ impl ClaudeHistoricalDiscovery {
             .next()
             .map(PathBuf::from);
 
-        // Extract title using claude_session.rs helper
+        // Extract title using claude_session.rs's own title-tracking logic
         let title = entries
             .iter()
-            .filter_map(claude_title_from_entry)
+            .filter_map(claude_session::claude_title)
             .last();
 
-        // Extract timestamps - use the earliest and latest from transcript entries
-        let (created_at, updated_at) = self.extract_timestamps(&transcript_entries);
-
-        // Parse messages from the active chain using claude_session.rs logic
+        // Parse messages from the active chain using claude_session.rs logic,
+        // then derive session-level timestamps from the same chain.
         let messages = self.parse_active_message_chain(entries);
+        let (created_at, updated_at) = extract_timestamps(&messages);
 
         Some(HistoricalSession {
             provider: ProviderKind::Claude,
@@ -263,130 +249,134 @@ impl ClaudeHistoricalDiscovery {
         })
     }
 
-    fn extract_timestamps(
-        &self,
-        entries: &[&serde_json::Map<String, serde_json::Value>],
-    ) -> (u64, u64) {
-        let mut timestamps: Vec<u64> = entries
-            .iter()
+    /// Walk the active message chain (the same branch Claude itself would
+    /// resume from) and convert each transcript entry into a flattened,
+    /// human-readable `HistoricalMessage`.
+    fn parse_active_message_chain(&self, entries: &[serde_json::Value]) -> Vec<HistoricalMessage> {
+        claude_session::active_chain(entries)
+            .into_iter()
             .filter_map(|entry| {
-                entry
+                let uuid = entry.get("uuid")?.as_str()?.to_owned();
+                let entry_type = entry.get("type").and_then(|v| v.as_str());
+                // Only user/assistant/system turns become messages; progress
+                // and attachment entries only exist to keep the parent chain
+                // connected through tool calls.
+                let role = entry_type.and_then(MessageRole::from_provider_str)?;
+
+                // Slash-command scaffolding (`<command-name>`, `<command-message>`
+                // control blocks) is logged as an ordinary user turn with
+                // `isMeta: true`. The live turn-checkpoint path already skips
+                // these (see `claude_session::is_user_prompt`); historical
+                // import must too, or the transcript reads as raw control text.
+                if entry.get("isMeta").and_then(|v| v.as_bool()) == Some(true) {
+                    return None;
+                }
+
+                let parent_uuid = entry
+                    .get("parentUuid")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let content = entry
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+                    .map(content_block_to_text)
+                    .unwrap_or_default();
+                let created_at = entry
                     .get("timestamp")
                     .and_then(|v| v.as_str())
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.timestamp() as u64)
-            })
-            .collect();
+                    .unwrap_or_else(unix_time);
 
-        timestamps.sort();
-        let created_at = timestamps.first().copied().unwrap_or_else(unix_time);
-        let updated_at = timestamps.last().copied().unwrap_or(created_at);
-        (created_at, updated_at)
+                Some(HistoricalMessage {
+                    uuid,
+                    parent_uuid,
+                    role,
+                    content,
+                    display_content: None,
+                    created_at,
+                })
+            })
+            .collect()
     }
+}
 
-    fn parse_active_message_chain(&self, entries: &[serde_json::Value]) -> Vec<HistoricalMessage> {
-        // Build a map of uuid -> entry
-        let by_uuid: HashMap<String, &serde_json::Map<String, serde_json::Value>> = entries
+/// Session-level created/updated timestamps derived from the active chain
+/// already extracted for the session, since [`claude_session::active_chain`]
+/// walks entries `historical.rs` no longer keeps around separately.
+fn extract_timestamps(messages: &[HistoricalMessage]) -> (u64, u64) {
+    let created_at = messages
+        .first()
+        .map(|message| message.created_at)
+        .unwrap_or_else(unix_time);
+    let updated_at = messages
+        .last()
+        .map(|message| message.created_at)
+        .unwrap_or(created_at);
+    (created_at, updated_at)
+}
+
+/// Flatten one Claude message's `content` (a plain string, or an array of
+/// typed content blocks) into readable text for Waku's plain-text transcript.
+///
+/// This mirrors the block types the live streaming driver switches on in
+/// `driver::claude::handle_message` (text, thinking, tool_use, tool_result) —
+/// unlike a naive `text`/`content` key guess, which silently drops
+/// `tool_use` (no `text` key) and `tool_result` blocks whose `content` is
+/// itself an array of blocks rather than a plain string.
+fn content_block_to_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => blocks
             .iter()
-            .filter_map(|v| {
-                let uuid = v.get("uuid")?.as_str()?.to_owned();
-                Some((uuid, v.as_object()?))
-            })
-            .collect();
+            .filter_map(content_block_to_text_opt)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
 
-        // Filter to transcript entries
-        let transcript: Vec<&serde_json::Map<String, serde_json::Value>> = entries
-            .iter()
-            .filter_map(|v| v.as_object())
-            .filter(|entry| {
-                let entry_type = entry.get("type").and_then(|v| v.as_str());
-                matches!(entry_type, Some("user" | "assistant" | "system"))
-                    && entry.get("uuid").is_some()
-                    && entry.get("isSidechain") != Some(&serde_json::Value::Bool(true))
-            })
-            .collect();
-
-        let Some(mut current) = transcript.last().copied() else {
-            return Vec::new();
-        };
-
-        // Walk backwards through the parent chain
-        let mut chain = Vec::new();
-        loop {
-            let Some(uuid) = current.get("uuid").and_then(|v| v.as_str()) else {
-                break;
-            };
-            let parent_uuid = current
-                .get("parentUuid")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let role = current
-                .get("type")
-                .and_then(|v| v.as_str())
-                .and_then(MessageRole::from_provider_str)
-                .unwrap_or(MessageRole::Assistant);
-
-            let content = self.extract_message_content(current);
-            let created_at = current
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.timestamp() as u64)
-                .unwrap_or_else(unix_time);
-
-            chain.push(HistoricalMessage {
-                uuid: uuid.to_owned(),
-                parent_uuid: parent_uuid.clone(),
-                role,
-                content,
-                display_content: None,
-                created_at,
-            });
-
-            // Move to parent
-            if let Some(ref parent_uuid) = parent_uuid {
-                if let Some(&parent_entry) = by_uuid.get(parent_uuid) {
-                    current = parent_entry;
-                } else {
-                    break;
-                }
+fn content_block_to_text_opt(block: &serde_json::Value) -> Option<String> {
+    match block.get("type").and_then(|v| v.as_str()) {
+        Some("text") => block
+            .get("text")
+            .and_then(|v| v.as_str())
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned),
+        Some("thinking") => block
+            .get("thinking")
+            .and_then(|v| v.as_str())
+            .filter(|text| !text.is_empty())
+            .map(|text| format!("[thinking] {text}")),
+        Some("tool_use") => {
+            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+            let input = block
+                .get("input")
+                .map(|input| input.to_string())
+                .unwrap_or_default();
+            Some(format!("[tool call] {name}({input})"))
+        }
+        Some("tool_result") => {
+            let failed = block.get("is_error").and_then(|v| v.as_bool()) == Some(true);
+            let text = block
+                .get("content")
+                .map(content_block_to_text)
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "(no output)".to_owned());
+            Some(if failed {
+                format!("[tool result, failed] {text}")
             } else {
-                break;
-            }
+                format!("[tool result] {text}")
+            })
         }
-
-        // Reverse to get chronological order
-        chain.reverse();
-        chain
-    }
-
-    fn extract_message_content(&self, entry: &serde_json::Map<String, serde_json::Value>) -> String {
-        // Try to extract content from the message field
-        if let Some(message) = entry.get("message") {
-            if let Some(content) = message.get("content") {
-                return self.content_to_string(content);
-            }
-        }
-        String::new()
-    }
-
-    fn content_to_string(&self, content: &serde_json::Value) -> String {
-        match content {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Array(blocks) => {
-                blocks
-                    .iter()
-                    .filter_map(|block| {
-                        block
-                            .get("text")
-                            .or_else(|| block.get("content"))
-                            .and_then(|v| v.as_str())
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-            _ => String::new(),
-        }
+        // Untyped/plain string content (rare on-disk) and unknown block
+        // types are read the way a naive parser would, but only as a
+        // fallback rather than the default for every block.
+        None => block
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        _ => None,
     }
 }
 
@@ -409,21 +399,6 @@ impl HistoricalSessionDiscovery for ClaudeHistoricalDiscovery {
     }
 }
 
-/// Helper to extract title from a Claude entry, matching claude_session.rs logic
-fn claude_title_from_entry(entry: &serde_json::Value) -> Option<String> {
-    let field = match entry.get("type").and_then(|v| v.as_str()) {
-        Some("ai-title") => "aiTitle",
-        Some("custom-title") => "customTitle",
-        _ => return None,
-    };
-    entry
-        .get(field)
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .map(str::to_owned)
-}
-
 fn unix_time() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -436,37 +411,214 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discover_claude_sessions_finds_fixture_sessions() {
-        // This test would require a fixture setup; skip if no fixture exists
-        let discovery = ClaudeHistoricalDiscovery::new();
-        let projects_dir = discovery.projects_directory();
-        
-        // Just check that the method doesn't panic
-        let result = discovery.discover_claude_sessions();
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn parse_session_file_returns_none_for_invalid_file() {
         let discovery = ClaudeHistoricalDiscovery::new();
-        
+
         // Create a temp file with invalid JSONL
-        let temp_dir = std::env::temp_dir().join(format!("waku-historical-test-{}", Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("waku-historical-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let session_file = temp_dir.join("not-a-uuid.jsonl");
         std::fs::write(&session_file, "invalid json\n").unwrap();
-        
+
         let result = discovery.parse_session_file(&session_file);
         assert!(result.is_none());
-        
+
         std::fs::remove_dir_all(temp_dir).ok();
     }
 
     #[test]
     fn message_role_from_provider_str() {
-        assert_eq!(MessageRole::from_provider_str("user"), Some(MessageRole::User));
-        assert_eq!(MessageRole::from_provider_str("assistant"), Some(MessageRole::Assistant));
-        assert_eq!(MessageRole::from_provider_str("system"), Some(MessageRole::System));
+        assert_eq!(
+            MessageRole::from_provider_str("user"),
+            Some(MessageRole::User)
+        );
+        assert_eq!(
+            MessageRole::from_provider_str("assistant"),
+            Some(MessageRole::Assistant)
+        );
+        assert_eq!(
+            MessageRole::from_provider_str("system"),
+            Some(MessageRole::System)
+        );
         assert_eq!(MessageRole::from_provider_str("unknown"), None);
+    }
+
+    #[test]
+    fn content_block_to_text_reads_every_block_type() {
+        let text = serde_json::json!({"type": "text", "text": "hello"});
+        assert_eq!(content_block_to_text_opt(&text).as_deref(), Some("hello"));
+
+        let thinking = serde_json::json!({"type": "thinking", "thinking": "pondering"});
+        assert_eq!(
+            content_block_to_text_opt(&thinking).as_deref(),
+            Some("[thinking] pondering")
+        );
+
+        let tool_use = serde_json::json!({
+            "type": "tool_use",
+            "name": "Read",
+            "input": {"file_path": "/tmp/a.txt"}
+        });
+        let tool_use_text = content_block_to_text_opt(&tool_use).unwrap();
+        assert!(tool_use_text.starts_with("[tool call] Read("));
+        assert!(tool_use_text.contains("/tmp/a.txt"));
+
+        // A tool_result whose content is itself an array of blocks (the
+        // common on-disk shape) must not be dropped by a naive
+        // `.as_str()` on `content`.
+        let tool_result = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "abc",
+            "content": [{"type": "text", "text": "file contents"}]
+        });
+        assert_eq!(
+            content_block_to_text_opt(&tool_result).as_deref(),
+            Some("[tool result] file contents")
+        );
+
+        let failed_result = serde_json::json!({
+            "type": "tool_result",
+            "is_error": true,
+            "content": "boom"
+        });
+        assert_eq!(
+            content_block_to_text_opt(&failed_result).as_deref(),
+            Some("[tool result, failed] boom")
+        );
+    }
+
+    #[test]
+    fn parse_active_message_chain_reconstructs_tool_use_and_thinking() {
+        let session_id = Uuid::new_v4().to_string();
+        let user_uuid = Uuid::new_v4().to_string();
+        let assistant_uuid = Uuid::new_v4().to_string();
+        let entries = vec![
+            serde_json::json!({
+                "type": "user",
+                "uuid": user_uuid,
+                "parentUuid": null,
+                "sessionId": session_id,
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "message": {"role": "user", "content": "read the file"}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": assistant_uuid,
+                "parentUuid": user_uuid,
+                "sessionId": session_id,
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "let me check"},
+                        {"type": "tool_use", "name": "Read", "input": {"file_path": "/tmp/a.txt"}},
+                        {"type": "text", "text": "done reading"}
+                    ]
+                }
+            }),
+        ];
+
+        let discovery = ClaudeHistoricalDiscovery::new();
+        let messages = discovery.parse_active_message_chain(&entries);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[0].content, "read the file");
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        assert!(messages[1].content.contains("[thinking] let me check"));
+        assert!(messages[1].content.contains("[tool call] Read("));
+        assert!(messages[1].content.contains("done reading"));
+    }
+
+    #[test]
+    fn parse_active_message_chain_skips_meta_control_entries() {
+        let session_id = Uuid::new_v4().to_string();
+        let meta_uuid = Uuid::new_v4().to_string();
+        let real_uuid = Uuid::new_v4().to_string();
+        let entries = vec![
+            serde_json::json!({
+                "type": "user",
+                "uuid": meta_uuid,
+                "parentUuid": null,
+                "sessionId": session_id,
+                "isMeta": true,
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "message": {
+                    "role": "user",
+                    "content": "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "uuid": real_uuid,
+                "parentUuid": meta_uuid,
+                "sessionId": session_id,
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "message": {"role": "user", "content": "what does this function do?"}
+            }),
+        ];
+
+        let discovery = ClaudeHistoricalDiscovery::new();
+        let messages = discovery.parse_active_message_chain(&entries);
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "the isMeta entry must not become a message"
+        );
+        assert_eq!(messages[0].uuid, real_uuid);
+        assert_eq!(messages[0].content, "what does this function do?");
+    }
+
+    #[test]
+    fn discover_claude_sessions_finds_fixture_sessions() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("waku-historical-fixture-{}", Uuid::new_v4()));
+        let project_dir = temp_dir.join("-tmp-fixture-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let session_id = Uuid::new_v4().to_string();
+        let user_uuid = Uuid::new_v4().to_string();
+        let assistant_uuid = Uuid::new_v4().to_string();
+        let entries = vec![
+            serde_json::json!({
+                "type": "user",
+                "uuid": user_uuid,
+                "parentUuid": null,
+                "sessionId": session_id,
+                "cwd": "/tmp/fixture-project",
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "message": {"role": "user", "content": "hello"}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": assistant_uuid,
+                "parentUuid": user_uuid,
+                "sessionId": session_id,
+                "cwd": "/tmp/fixture-project",
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "hi there"}]}
+            }),
+        ];
+        let session_file = project_dir.join(format!("{session_id}.jsonl"));
+        let mut file = std::fs::File::create(&session_file).unwrap();
+        for entry in &entries {
+            use std::io::Write;
+            serde_json::to_writer(&mut file, entry).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+
+        let discovery = ClaudeHistoricalDiscovery::with_projects_dir(temp_dir.clone());
+        let sessions = discovery.discover_claude_sessions().unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.native_session_id, session_id);
+        assert_eq!(session.cwd, Some(PathBuf::from("/tmp/fixture-project")));
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[1].content, "hi there");
+
+        std::fs::remove_dir_all(temp_dir).ok();
     }
 }
