@@ -88,11 +88,11 @@ const FAQ = [
   },
   {
     q: 'Where does my data live?',
-    a: 'On your Mac. Projects, sessions, transcripts, and provider session IDs are stored locally. There is no Waku account and no telemetry.',
+    a: 'On your machine. Projects, sessions, transcripts, and provider session IDs are stored locally. There is no Waku account and no telemetry.',
   },
   {
-    q: 'What about Windows and Linux?',
-    a: "Waku runs natively on macOS and Linux. Prebuilt downloads currently target Apple Silicon; Linux can be built from source, and Windows remains planned.",
+    q: 'What about Windows?',
+    a: 'Still planned. Waku runs natively on macOS and Linux today.',
   },
   {
     q: 'What is the future plan?',
@@ -145,11 +145,17 @@ function DownloadMenu({
             >
               macOS (Apple Silicon)
             </Menu.LinkItem>
+            <Menu.LinkItem
+              href="https://github.com/egoist/waku/blob/main/docs/linux.md"
+              target="_blank"
+              rel="noreferrer"
+              closeOnClick
+              className={itemClassName}
+            >
+              Linux (x86_64, arm64)
+            </Menu.LinkItem>
             <Menu.Item disabled className={itemClassName}>
               Windows (soon)
-            </Menu.Item>
-            <Menu.Item disabled className={itemClassName}>
-              Linux (soon)
             </Menu.Item>
           </Menu.Popup>
         </Menu.Positioner>
