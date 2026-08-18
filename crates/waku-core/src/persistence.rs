@@ -942,6 +942,237 @@ impl StateStore {
         move || search_session_messages(&path, &query, limit)
     }
 
+    /// Import a historical session from a provider's native storage.
+    ///
+    /// This function converts a discovered `HistoricalSession` into a Waku
+    /// `AgentSession` and persists it. The import is idempotent: if a session
+    /// with the same (provider, native_session_id) already exists, it is skipped.
+    ///
+    /// Returns the imported session's UUID if newly created, or None if it
+    /// already existed.
+    pub fn import_historical_session(
+        &self,
+        historical: &crate::historical::HistoricalSession,
+        project_id: uuid::Uuid,
+    ) -> io::Result<Option<uuid::Uuid>> {
+        let mut guard = self.storage.lock();
+        if guard.is_none() {
+            *guard = Some(Storage {
+                connection: self.open()?,
+                persisted_sessions: HashSet::new(),
+                written_messages: HashMap::new(),
+                saved_projects: 0,
+                saved_app_settings: 0,
+                saved_app_state: 0,
+            });
+        }
+        let connection = &mut guard.as_mut().expect("storage opened above").connection;
+
+        // Check if this session already exists
+        let existing: Option<String> = connection
+            .query_row(
+                "SELECT id FROM sessions
+                 WHERE provider = ?1 AND native_session_id = ?2",
+                rusqlite::params![
+                    tag_of(historical.provider),
+                    historical.native_session_id
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(to_io_error)?;
+
+        if existing.is_some() {
+            return Ok(None); // Already imported
+        }
+
+        // Create the imported session
+        let session_id = uuid::Uuid::new_v4();
+        let mut session = crate::model::AgentSession {
+            id: session_id,
+            title: historical
+                .title
+                .clone()
+                .unwrap_or_else(|| "Imported session".to_owned()),
+            auto_title: historical.title.clone(),
+            project_id,
+            workspace: crate::model::SessionWorkspace::Local,
+            provider: historical.provider,
+            model: None,
+            runtime_mode: crate::model::RuntimeMode::FullAccess,
+            interaction_mode: crate::model::InteractionMode::Build,
+            reasoning_effort: None,
+            service_tier: None,
+            context_window: None,
+            agent_preset: None,
+            status: crate::model::SessionStatus::Idle,
+            created_at: historical.created_at,
+            updated_at: historical.updated_at,
+            last_reply_at: Some(historical.updated_at),
+            is_imported: true,
+            native_session_id: Some(historical.native_session_id.clone()),
+            provider_cursor: None,
+            available_commands: Vec::new(),
+            context_usage: None,
+            runtime_event_cursor: None,
+            provider_session_id: None,
+            messages: Vec::new(),
+            transcript_blocks: Vec::new(),
+            turns: Vec::new(),
+            queued_messages: Vec::new(),
+            detail_loaded: true,
+        };
+
+        // Convert historical messages to Waku messages
+        for (_position, historical_message) in historical.messages.iter().enumerate() {
+            let message_id = uuid::Uuid::new_v4();
+            let role = match historical_message.role {
+                crate::historical::MessageRole::User => crate::model::MessageRole::User,
+                crate::historical::MessageRole::Assistant => {
+                    crate::model::MessageRole::Assistant
+                }
+                crate::historical::MessageRole::System => crate::model::MessageRole::System,
+            };
+
+            session.messages.push(crate::model::Message {
+                id: message_id,
+                turn_id: None,
+                role,
+                content: historical_message.content.clone(),
+                display_content: historical_message.display_content.clone(),
+                attachments: Vec::new(),
+                created_at: historical_message.created_at,
+                streaming: false,
+            });
+        }
+
+        // Persist the session
+        let transaction = connection
+            .transaction()
+            .map_err(to_io_error)?;
+        
+        transaction
+            .execute(
+                UPSERT_SESSION,
+                rusqlite::params_from_iter(session_params(&session)),
+            )
+            .map_err(to_io_error)?;
+
+        let data = session_data(&session)?;
+        transaction
+            .execute(
+                UPSERT_SESSION_DETAIL,
+                rusqlite::params![session.id.to_string(), data],
+            )
+            .map_err(to_io_error)?;
+
+        // Write messages
+        for (position, message) in session.messages.iter().enumerate() {
+            transaction
+                .execute(
+                    UPSERT_MESSAGE,
+                    rusqlite::params![
+                        message.id.to_string(),
+                        session.id.to_string(),
+                        message.turn_id.as_ref().map(ToString::to_string),
+                        position as i64,
+                        tag_of(message.role),
+                        &message.content,
+                        message.display_content.as_ref(),
+                        serde_json::to_string(&message.attachments).map_err(to_io_error)?,
+                        message.created_at as i64,
+                        if message.streaming { 1 } else { 0 },
+                    ],
+                )
+                .map_err(to_io_error)?;
+        }
+
+        transaction.commit().map_err(to_io_error)?;
+
+        Ok(Some(session_id))
+    }
+
+    /// Find or create a project for the given path.
+    ///
+    /// If a project with a matching canonical path exists, returns its ID.
+    /// Otherwise, creates a new project and persists it.
+    pub fn find_or_create_project_for_path(&self, path: &Path) -> io::Result<Uuid> {
+        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        
+        let mut guard = self.storage.lock();
+        if guard.is_none() {
+            *guard = Some(Storage {
+                connection: self.open()?,
+                persisted_sessions: HashSet::new(),
+                written_messages: HashMap::new(),
+                saved_projects: 0,
+                saved_app_settings: 0,
+                saved_app_state: 0,
+            });
+        }
+        let connection = &guard.as_ref().expect("storage opened above").connection;
+
+        // Check if a project with this path already exists
+        let _existing: Option<(String, String)> = connection
+            .query_row(
+                "SELECT id, path FROM projects",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(to_io_error)?;
+
+        // Check all projects for a canonical path match
+        let mut statement = connection
+            .prepare("SELECT id, path FROM projects")
+            .map_err(to_io_error)?;
+        let projects = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(to_io_error)?;
+
+        for project in projects.filter_map(Result::ok) {
+            let (id_str, project_path_str) = project;
+            let project_path = PathBuf::from(project_path_str);
+            if let Ok(project_canonical) = project_path.canonicalize() {
+                if project_canonical == canonical_path {
+                    if let Ok(project_id) = Uuid::parse_str(&id_str) {
+                        return Ok(project_id);
+                    }
+                }
+            }
+        }
+
+        // No matching project found, create a new one
+        let project = Project::from_path(canonical_path);
+        let project_id = project.id;
+
+        // Get the current max position
+        let max_position: i64 = connection
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) FROM projects",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
+
+        connection
+            .execute(
+                INSERT_PROJECT,
+                params![
+                    project.id.to_string(),
+                    project.name,
+                    project.path.display().to_string(),
+                    max_position + 1,
+                    project.created_at as i64,
+                ],
+            )
+            .map_err(to_io_error)?;
+
+        Ok(project_id)
+    }
+
     pub fn blobs(&self) -> Arc<BlobStore> {
         Arc::clone(&self.blobs)
     }
@@ -1105,7 +1336,7 @@ impl StateStore {
         let mut sessions = connection
             .prepare(
                 "SELECT id, project_id, title, auto_title, provider, model, status,
-                        created_at, updated_at, last_reply_at
+                        created_at, updated_at, last_reply_at, is_imported, native_session_id
                  FROM sessions ORDER BY updated_at",
             )
             .map_err(to_io_error)?;
@@ -1123,6 +1354,8 @@ impl StateStore {
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             })
             .map_err(to_io_error)?
@@ -1469,6 +1702,8 @@ type SessionColumns = (
     i64,
     i64,
     Option<i64>,
+    i64,
+    Option<String>,
 );
 
 /// Builds a list-only session from its columns. `messages`,
@@ -1488,6 +1723,8 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         created_at,
         updated_at,
         last_reply_at,
+        is_imported,
+        native_session_id,
     ) = row;
     Some(AgentSession {
         id: Uuid::parse_str(&id).ok()?,
@@ -1508,6 +1745,8 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         created_at: created_at as u64,
         updated_at: updated_at as u64,
         last_reply_at: last_reply_at.map(|at| at as u64),
+        is_imported: is_imported != 0,
+        native_session_id,
         provider_cursor: None,
         available_commands: Vec::new(),
         context_usage: None,
@@ -1715,18 +1954,20 @@ fn message_fingerprint(message: &Message, position: usize) -> u64 {
 /// listing sessions never has to deserialize a transcript.
 const UPSERT_SESSION: &str = "INSERT INTO sessions(
          id, project_id, title, auto_title, provider, model, status,
-         created_at, updated_at, last_reply_at
-     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         created_at, updated_at, last_reply_at, is_imported, native_session_id
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
      ON CONFLICT(id) DO UPDATE SET
-         project_id    = excluded.project_id,
-         title         = excluded.title,
-         auto_title    = excluded.auto_title,
-         provider      = excluded.provider,
-         model         = excluded.model,
-         status        = excluded.status,
-         created_at    = excluded.created_at,
-         updated_at    = excluded.updated_at,
-         last_reply_at = excluded.last_reply_at";
+         project_id        = excluded.project_id,
+         title             = excluded.title,
+         auto_title        = excluded.auto_title,
+         provider          = excluded.provider,
+         model             = excluded.model,
+         status            = excluded.status,
+         created_at        = excluded.created_at,
+         updated_at        = excluded.updated_at,
+         last_reply_at     = excluded.last_reply_at,
+         is_imported       = excluded.is_imported,
+         native_session_id = excluded.native_session_id";
 
 const INSERT_PROJECT: &str = "INSERT INTO projects(id, name, path, position, created_at)
      VALUES(?1, ?2, ?3, ?4, ?5)
@@ -1765,6 +2006,8 @@ fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
         session
             .last_reply_at
             .map_or(Value::Null, |at| Value::Integer(at as i64)),
+        Value::Integer(if session.is_imported { 1 } else { 0 }),
+        session.native_session_id.clone().map_or(Value::Null, Value::Text),
     ]
 }
 
@@ -3504,6 +3747,126 @@ mod tests {
         let state = store_in(&directory).load_or_fresh(PathBuf::from("/"));
         assert!(state.projects.is_empty());
         assert!(state.selected_session.is_none());
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn imported_historical_sessions_load_with_full_transcripts() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        
+        // Create a historical session with multiple messages
+        let historical_session = crate::historical::HistoricalSession {
+            provider: ProviderKind::Claude,
+            native_session_id: "claude-test-123".to_string(),
+            cwd: Some(PathBuf::from("/tmp/test-project")),
+            title: Some("Test Historical Session".to_string()),
+            created_at: 1700000000,
+            updated_at: 1700000100,
+            messages: vec![
+                crate::historical::HistoricalMessage {
+                    uuid: "msg-1".to_string(),
+                    parent_uuid: None,
+                    role: crate::historical::MessageRole::User,
+                    content: "Write a test".to_string(),
+                    display_content: Some("Write a test".to_string()),
+                    created_at: 1700000010,
+                },
+                crate::historical::HistoricalMessage {
+                    uuid: "msg-2".to_string(),
+                    parent_uuid: Some("msg-1".to_string()),
+                    role: crate::historical::MessageRole::Assistant,
+                    content: "Here's the test code...".to_string(),
+                    display_content: Some("Here's the test code...".to_string()),
+                    created_at: 1700000020,
+                },
+                crate::historical::HistoricalMessage {
+                    uuid: "msg-3".to_string(),
+                    parent_uuid: Some("msg-2".to_string()),
+                    role: crate::historical::MessageRole::User,
+                    content: "Make it better".to_string(),
+                    display_content: Some("Make it better".to_string()),
+                    created_at: 1700000030,
+                },
+            ],
+        };
+        
+        // Create a project for the historical session
+        let project_id = Uuid::new_v4();
+        let project = crate::model::Project {
+            id: project_id,
+            name: "Test Project".to_string(),
+            path: PathBuf::from("/tmp/test-project"),
+            created_at: 1700000000,
+        };
+        
+        // Import the historical session
+        let session_id = store
+            .import_historical_session(&historical_session, project_id)
+            .expect("import should succeed")
+            .expect("should return new session id");
+        
+        // Load state (as daemon does) - this should use session_skeleton
+        let mut state = store.load().expect("load should succeed");
+        
+        // The session should be in the list
+        let skeleton_session = state
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .expect("imported session should be in list");
+        
+        // Verify session metadata
+        assert_eq!(skeleton_session.title, "Test Historical Session");
+        assert!(skeleton_session.is_imported);
+        assert_eq!(
+            skeleton_session.native_session_id.as_deref(),
+            Some("claude-test-123")
+        );
+        assert_eq!(skeleton_session.provider, ProviderKind::Claude);
+        
+        // Skeleton should have empty messages (not yet hydrated)
+        assert_eq!(skeleton_session.messages.len(), 0);
+        assert!(!skeleton_session.detail_loaded);
+        
+        // Now hydrate the session (as HydrateSession command does)
+        let session_index = state
+            .sessions
+            .iter()
+            .position(|s| s.id == session_id)
+            .unwrap();
+        store
+            .hydrate(&mut state.sessions[session_index])
+            .expect("hydrate should succeed");
+        
+        let hydrated_session = &state.sessions[session_index];
+        
+        // After hydration, messages should be present
+        assert_eq!(hydrated_session.messages.len(), 3);
+        assert!(hydrated_session.detail_loaded);
+        
+        // Verify message content
+        assert_eq!(hydrated_session.messages[0].role, MessageRole::User);
+        assert_eq!(hydrated_session.messages[0].content, "Write a test");
+        assert_eq!(hydrated_session.messages[1].role, MessageRole::Assistant);
+        assert_eq!(
+            hydrated_session.messages[1].content,
+            "Here's the test code..."
+        );
+        assert_eq!(hydrated_session.messages[2].role, MessageRole::User);
+        assert_eq!(hydrated_session.messages[2].content, "Make it better");
+        
+        // Verify all messages are not streaming
+        for message in &hydrated_session.messages {
+            assert!(!message.streaming);
+        }
+        
+        // Verify re-import is idempotent
+        let second_import = store
+            .import_historical_session(&historical_session, project_id)
+            .expect("second import should succeed");
+        assert!(second_import.is_none(), "should not reimport existing session");
+        
         fs::remove_dir_all(directory).ok();
     }
 }
