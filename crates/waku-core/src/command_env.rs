@@ -7,11 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{OnceLock, RwLock};
 
-#[cfg(unix)]
 use std::fs::{self, OpenOptions};
-#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -25,7 +22,6 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-#[cfg(unix)]
 const LOGIN_SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const INTERACTIVE_SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(3);
@@ -35,7 +31,6 @@ const SHELL_ENV_COMMAND: &str = "/usr/bin/env -0 > \"$WAKU_SHELL_ENV_CAPTURE_FIL
 type ShellEnvironment = Vec<(OsString, OsString)>;
 
 static LOGIN_SHELL_ENVIRONMENT: OnceLock<RwLock<Option<ShellEnvironment>>> = OnceLock::new();
-#[cfg(unix)]
 static SHELL_ENV_CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Build a command with the environment a terminal-launched Waku normally
@@ -68,8 +63,9 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 /// looks for the file — so the provider shows up as installed while every
 /// probe it runs comes back empty.
 ///
-/// Windows needs this most: there is no login shell to capture an environment
-/// from, so a GUI-launched Waku has only the `PATH` it inherited.
+/// Windows needs this most: the login-shell probe there is best-effort — no
+/// PowerShell may be present, and a profile can refuse to load — so a
+/// GUI-launched Waku can still be running with only the `PATH` it inherited.
 fn child_search_path(program: &Path) -> Option<OsString> {
     let mut directories = executable_search_paths();
     // Last, not first: an install outside the known prefixes still finds its
@@ -289,14 +285,159 @@ pub fn refresh_from_default_shell() -> bool {
     true
 }
 
-/// Windows has nothing to resolve. The user and machine environment blocks
-/// are applied to every process the shell also reads them from, so a
-/// desktop-launched Waku already has the `PATH` a terminal would — unlike
-/// LaunchServices and desktop-file launches, which is what the probe exists
-/// for. Children inherit Waku's own environment.
-#[cfg(not(unix))]
+/// Windows has no login shell, but it still needs this probe. A GUI-launched
+/// Waku inherits explorer's `PATH`, which predates later installs, and the
+/// package managers users actually add to it — fnm, Volta, nvm — extend
+/// `PATH` only in the PowerShell profile, which never reaches the machine or
+/// user environment block. Probe PowerShell with the profile loaded, capture
+/// the fresh user and machine registry `PATH` values in the same run, and
+/// cache the merge for provider discovery and every later child. This starts
+/// PowerShell — which runs the user's profile — and must therefore only be
+/// called from a background thread.
+#[cfg(windows)]
+pub fn refresh_from_default_shell() -> bool {
+    let Some(environment) = resolve_windows_profile_environment(LOGIN_SHELL_ENV_TIMEOUT) else {
+        return false;
+    };
+    *login_shell_environment()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(environment);
+    true
+}
+
+/// Targets with neither probe keep the inherited environment.
+#[cfg(not(any(unix, windows)))]
 pub fn refresh_from_default_shell() -> bool {
     true
+}
+
+/// A hanging or exiting profile loses the whole probe run, so the
+/// no-profile retry gets its own short leash.
+#[cfg(windows)]
+const WINDOWS_NO_PROFILE_ENV_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The PowerShell script the probe runs. Each captured variable is written to
+/// the capture file as NUL-separated `name=value` entries — the same format
+/// as `env -0` on Unix — so profile noise on stdout cannot corrupt the
+/// result. `[Environment]::GetEnvironmentVariable` reads the child's
+/// *process* environment, which includes whatever the profile did to
+/// `$env:PATH`; the two-argument form reads the fresh registry blocks, which
+/// the inherited `PATH` may be older than.
+#[cfg(windows)]
+const WINDOWS_ENV_CAPTURE_COMMAND: &str = "\
+$ErrorActionPreference = 'Continue'
+$entries = New-Object System.Collections.Generic.List[string]
+foreach ($name in @('PATH', 'FNM_DIR', 'FNM_MULTISHELL_PATH')) {
+  $value = [Environment]::GetEnvironmentVariable($name)
+  if ($value) { $entries.Add($name + '=' + $value) }
+}
+foreach ($target in @('User', 'Machine')) {
+  $value = [Environment]::GetEnvironmentVariable('PATH', $target)
+  if ($value) { $entries.Add('WAKU_' + $target.ToUpper() + '_PATH=' + [Environment]::ExpandEnvironmentVariables($value)) }
+}
+[IO.File]::WriteAllText($env:WAKU_SHELL_ENV_CAPTURE_FILE, [string]::Join([string][char]0, $entries))
+";
+
+/// PowerShell 7 first, then the in-box Windows PowerShell. `cmd.exe` is not a
+/// candidate: it has no profile to load and no registry API.
+#[cfg(windows)]
+fn windows_powershell_candidates() -> Vec<PathBuf> {
+    ["pwsh.exe", "powershell.exe"]
+        .into_iter()
+        .filter_map(find_executable)
+        .collect()
+}
+
+#[cfg(windows)]
+fn resolve_windows_profile_environment(timeout: Duration) -> Option<ShellEnvironment> {
+    let started_at = Instant::now();
+    // Load each shell's profile first — fnm/Volta/nvm extend PATH there and
+    // nowhere else. The registry PATH is captured by the same run, so a
+    // profile that merely lacks PATH still succeeds via the registry values.
+    for shell in windows_powershell_candidates() {
+        let remaining = timeout.checked_sub(started_at.elapsed())?;
+        if remaining.is_zero() {
+            return None;
+        }
+        if let Some(environment) = capture_windows_environment(&shell, true, remaining) {
+            if let Some(environment) = merge_windows_environment(environment) {
+                return Some(environment);
+            }
+        }
+    }
+    // A hanging or exiting profile loses the whole run. Retry without it on a
+    // short leash; the registry PATH alone is still worth the spawn.
+    for shell in windows_powershell_candidates() {
+        if let Some(environment) =
+            capture_windows_environment(&shell, false, WINDOWS_NO_PROFILE_ENV_TIMEOUT)
+        {
+            if let Some(environment) = merge_windows_environment(environment) {
+                return Some(environment);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn capture_windows_environment(
+    shell: &Path,
+    load_profile: bool,
+    timeout: Duration,
+) -> Option<ShellEnvironment> {
+    let capture = ShellEnvironmentCapture::create()?;
+    let mut command = Command::new(shell);
+    command.arg("-NoLogo").arg("-NonInteractive");
+    if !load_profile {
+        command.arg("-NoProfile");
+    }
+    command
+        .arg("-Command")
+        .arg(WINDOWS_ENV_CAPTURE_COMMAND)
+        .env("WAKU_SHELL_ENV_CAPTURE_FILE", capture.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = spawn(&mut command).ok()?;
+    if !wait_for_child(&mut child, timeout) {
+        return None;
+    }
+    parse_shell_environment(&fs::read(capture.path()).ok()?)
+}
+
+/// Combine the profile variables with the fresh registry `PATH` values into
+/// the cached environment. The profile `PATH` comes first — it is the user's
+/// own order — then the user registry `PATH`, then the machine one; the
+/// inherited `PATH` is appended afterwards by [`search_paths_from`], and a
+/// child `PATH` built by [`child_search_path`] keeps that order. fnm's
+/// variables ride along so its shims can resolve their Node installation.
+/// `PATH` matching is case-insensitive on Windows, so deduplicate that way.
+#[cfg(windows)]
+fn merge_windows_environment(mut environment: ShellEnvironment) -> Option<ShellEnvironment> {
+    let mut directories = Vec::new();
+    for name in ["PATH", "WAKU_USER_PATH", "WAKU_MACHINE_PATH"] {
+        if let Some(value) = take_environment_variable(&mut environment, name) {
+            directories.extend(std::env::split_paths(&value));
+        }
+    }
+    let mut seen = HashSet::new();
+    directories.retain(|directory| {
+        seen.insert(directory.as_os_str().to_string_lossy().to_lowercase())
+    });
+    if directories.is_empty() {
+        return None;
+    }
+    let path = std::env::join_paths(directories).ok()?;
+    environment.insert(0, (OsString::from("PATH"), path));
+    Some(environment)
+}
+
+#[cfg(windows)]
+fn take_environment_variable(environment: &mut ShellEnvironment, name: &str) -> Option<OsString> {
+    let position = environment
+        .iter()
+        .position(|(candidate, _)| candidate.to_string_lossy().eq_ignore_ascii_case(name))?;
+    Some(environment.remove(position).1)
 }
 
 fn executable_search_paths() -> Vec<PathBuf> {
@@ -363,14 +504,24 @@ fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
 
 #[cfg(windows)]
 fn user_tool_directories(home: &Path) -> Vec<PathBuf> {
-    vec![
+    let mut directories = vec![
         // npm's global prefix, where a `claude.cmd` shim lands.
         home.join("AppData/Roaming/npm"),
         home.join(".bun/bin"),
         home.join(".cargo/bin"),
         home.join("scoop/shims"),
         home.join("AppData/Local/Microsoft/WindowsApps"),
-    ]
+        home.join(".local/bin"),
+    ];
+    // Volta, pnpm, and the user-scoped Node installer default to LocalAppData
+    // (the same list T3 Code probes); it can be redirected away from home.
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let local_app_data = PathBuf::from(local_app_data);
+        directories.push(local_app_data.join("Volta/bin"));
+        directories.push(local_app_data.join("pnpm"));
+        directories.push(local_app_data.join("Programs/nodejs"));
+    }
+    directories
 }
 
 #[cfg(not(windows))]
@@ -589,7 +740,6 @@ fn capture_shell_environment(
     parse_shell_environment(&fs::read(capture.path()).ok()?)
 }
 
-#[cfg(unix)]
 fn parse_shell_environment(bytes: &[u8]) -> Option<ShellEnvironment> {
     let environment = bytes
         .split(|byte| *byte == 0)
@@ -610,7 +760,6 @@ fn parse_shell_environment(bytes: &[u8]) -> Option<ShellEnvironment> {
     (!environment.is_empty()).then_some(environment)
 }
 
-#[cfg(unix)]
 fn is_shell_capture_variable(name: &OsStr) -> bool {
     [
         "WAKU_SHELL_ENV_CAPTURE_FILE",
@@ -622,12 +771,24 @@ fn is_shell_capture_variable(name: &OsStr) -> bool {
     .any(|candidate| name == OsStr::new(candidate))
 }
 
-#[cfg(unix)]
 fn os_string_from_bytes(bytes: &[u8]) -> Option<OsString> {
-    Some(OsString::from_vec(bytes.to_vec()))
+    #[cfg(unix)]
+    {
+        Some(OsString::from_vec(bytes.to_vec()))
+    }
+    #[cfg(windows)]
+    {
+        // The Windows probe writes UTF-8; PowerShell encodes .NET strings
+        // exactly, so lossy decoding loses nothing.
+        Some(String::from_utf8_lossy(bytes).into_owned().into())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = bytes;
+        None
+    }
 }
 
-#[cfg(unix)]
 fn wait_for_child(child: &mut Child, timeout: Duration) -> bool {
     let started_at = Instant::now();
     loop {
@@ -644,8 +805,8 @@ fn wait_for_child(child: &mut Child, timeout: Duration) -> bool {
     }
 }
 
-#[cfg(unix)]
 fn terminate_shell_capture(child: &mut Child) {
+    #[cfg(unix)]
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
@@ -653,10 +814,8 @@ fn terminate_shell_capture(child: &mut Child) {
     let _ = child.wait();
 }
 
-#[cfg(unix)]
 struct ShellEnvironmentCapture(PathBuf);
 
-#[cfg(unix)]
 impl ShellEnvironmentCapture {
     fn create() -> Option<Self> {
         for _ in 0..16 {
@@ -665,6 +824,7 @@ impl ShellEnvironmentCapture {
                 std::env::temp_dir().join(format!(".waku-shell-env-{}-{id}", std::process::id()));
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
+            #[cfg(unix)]
             options.mode(0o600);
             match options.open(&path) {
                 Ok(_) => return Some(Self(path)),
@@ -680,7 +840,6 @@ impl ShellEnvironmentCapture {
     }
 }
 
-#[cfg(unix)]
 impl Drop for ShellEnvironmentCapture {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
@@ -859,6 +1018,14 @@ mod tests {
         assert_eq!(paths[1], PathBuf::from("C:\\Windows"));
         assert!(paths.contains(&home.join("AppData/Roaming/npm")));
         assert!(paths.contains(&home.join(".bun/bin")));
+        assert!(paths.contains(&home.join("scoop/shims")));
+        assert!(paths.contains(&home.join(".local/bin")));
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let local_app_data = PathBuf::from(local_app_data);
+            assert!(paths.contains(&local_app_data.join("Volta/bin")));
+            assert!(paths.contains(&local_app_data.join("pnpm")));
+            assert!(paths.contains(&local_app_data.join("Programs/nodejs")));
+        }
         assert_eq!(
             paths
                 .iter()
@@ -866,6 +1033,76 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The probe script must execute as written against the in-box Windows
+    /// PowerShell: `-NoProfile` leaves the child `PATH` untouched, so the
+    /// captured value is exactly the one this process inherited.
+    #[cfg(windows)]
+    #[test]
+    fn windows_environment_probe_captures_the_inherited_path_without_a_profile() {
+        let capture = ShellEnvironmentCapture::create().expect("create capture file");
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .arg(WINDOWS_ENV_CAPTURE_COMMAND)
+            .env("WAKU_SHELL_ENV_CAPTURE_FILE", capture.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = spawn(&mut command).expect("spawn PowerShell probe");
+        assert!(
+            wait_for_child(&mut child, Duration::from_secs(10)),
+            "PowerShell probe did not finish in time"
+        );
+        let environment =
+            parse_shell_environment(&fs::read(capture.path()).expect("capture file written"))
+                .expect("parse captured environment");
+        let path = environment
+            .iter()
+            .find(|(name, _)| name == OsStr::new("PATH"))
+            .map(|(_, value)| value.clone())
+            .expect("captured PATH");
+        assert_eq!(path, std::env::var_os("PATH").expect("inherited PATH"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_profile_environment_merges_registry_paths_behind_the_profile_path() {
+        let environment = merge_windows_environment(vec![
+            (OsString::from("FNM_DIR"), OsString::from("C:\\fnm")),
+            (
+                OsString::from("PATH"),
+                OsString::from("C:\\profile-first;C:\\shared"),
+            ),
+            (
+                OsString::from("WAKU_USER_PATH"),
+                OsString::from("C:\\user;C:\\shared"),
+            ),
+            (
+                OsString::from("WAKU_MACHINE_PATH"),
+                OsString::from("C:\\machine;C:\\USER;C:\\SHARED"),
+            ),
+        ])
+        .expect("merge captured environment");
+
+        let path = environment
+            .iter()
+            .find(|(name, _)| name == OsStr::new("PATH"))
+            .map(|(_, value)| value.clone())
+            .expect("merged PATH");
+        assert_eq!(
+            std::env::split_paths(&path).collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("C:\\profile-first"),
+                PathBuf::from("C:\\shared"),
+                PathBuf::from("C:\\user"),
+                PathBuf::from("C:\\machine"),
+            ]
+        );
+        assert!(environment.contains(&(OsString::from("FNM_DIR"), OsString::from("C:\\fnm"))));
+        assert!(!environment.iter().any(|(name, _)| name == OsStr::new("WAKU_USER_PATH")));
+        assert!(!environment.iter().any(|(name, _)| name == OsStr::new("WAKU_MACHINE_PATH")));
     }
 
     #[cfg(windows)]
@@ -879,8 +1116,14 @@ mod tests {
             .expect("write shim fixture");
 
         assert_eq!(
-            resolve_executable_file(&directory.join("faux-provider")),
-            Some(directory.join("faux-provider.cmd"))
+            resolve_executable_file(&directory.join("faux-provider"))
+                .expect("resolve through PATHEXT")
+                .to_string_lossy()
+                .to_lowercase(),
+            directory
+                .join("faux-provider.cmd")
+                .to_string_lossy()
+                .to_lowercase(),
         );
         assert_eq!(resolve_executable_file(&directory.join("absent")), None);
 
@@ -973,3 +1216,5 @@ mod tests {
         let _ = fs::remove_dir(directory);
     }
 }
+
+
