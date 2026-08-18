@@ -16,6 +16,10 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+## [0.1.8]
+
+- Fix `PATH` resolution on Windows
+
 ## [0.1.4]
 
 - Fix text selection in diff view
