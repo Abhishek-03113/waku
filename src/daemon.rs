@@ -64,6 +64,9 @@ fn daemon_executable_path() -> anyhow::Result<PathBuf> {
     if let Some(path) = std::env::var_os("WAKU_DAEMON_PATH").filter(|path| !path.is_empty()) {
         return Ok(path.into());
     }
+    #[cfg(debug_assertions)]
+    let executable = format!("waku-debug-daemon{}", std::env::consts::EXE_SUFFIX);
+    #[cfg(not(debug_assertions))]
     let executable = format!("waku-daemon{}", std::env::consts::EXE_SUFFIX);
     let current = std::env::current_exe().context("could not locate the Waku executable")?;
 
