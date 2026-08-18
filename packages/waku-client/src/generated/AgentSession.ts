@@ -47,7 +47,17 @@ updated_at: number,
  * Activity time of the newest turn. Set as soon as the user submits it,
  * then refreshed when the turn settles, whatever its outcome.
  */
-last_reply_at?: number | null, provider_cursor: ProviderResumeCursor | null,
+last_reply_at?: number | null,
+/**
+ * Whether this session was imported from a provider's native storage.
+ * Imported sessions are read-only historical records and cannot be resumed.
+ */
+is_imported: boolean,
+/**
+ * Provider's native session ID for imported sessions.
+ * Used together with `provider` to ensure idempotent import.
+ */
+native_session_id?: string | null, provider_cursor: ProviderResumeCursor | null,
 /**
  * Slash commands the provider reported for this session's live process,
  * kept so a resumed session still completes them before its next
