@@ -211,6 +211,7 @@ function runningSession(): AgentSession {
     created_at: 100,
     updated_at: 100,
     provider_cursor: null,
+    is_imported: false,
     messages: [
       {
         id: 'message',

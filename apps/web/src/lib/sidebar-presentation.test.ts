@@ -99,6 +99,7 @@ function session(patch: Partial<AgentSession>): AgentSession {
     messages: [],
     transcript_blocks: [],
     turns: [],
+    is_imported: false,
     ...patch,
   }
 }

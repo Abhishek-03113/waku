@@ -241,6 +241,7 @@ function transcriptSession(): AgentSession {
     created_at: 10,
     updated_at: 200,
     provider_cursor: null,
+    is_imported: false,
     turns: [turn('completed', 100, 200)],
     queued_messages: [],
     transcript_blocks: [{

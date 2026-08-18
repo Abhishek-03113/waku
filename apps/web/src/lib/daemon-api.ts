@@ -623,6 +623,8 @@ export function createSession(
     transcript_blocks: [],
     turns: [],
     queued_messages: [],
+    is_imported: false,
+    native_session_id: null,
   }
 }
 
