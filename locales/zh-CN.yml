@@ -202,6 +202,8 @@ common.copy: 复制
 common.remove: 移除
 common.rename: 重命名
 session.new_task: 新任务
+session.imported_read_only: 已导入・只读
+session.imported_composer_locked: 此会话是从 Claude Code 导入的，为只读状态。
 sidebar.today: 今天
 sidebar.search: 搜索
 sidebar.yesterday: 昨天

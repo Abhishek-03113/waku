@@ -1095,6 +1095,9 @@ impl Waku {
                     .overflow_hidden()
                     .line_height(px(18.0))
                     .child(title)
+                    .when(session.is_imported, |element| {
+                        element.child(icon("icons/lock.svg", 11.0, theme.text_ghost))
+                    })
                     .when(working, |element| {
                         element.child(motion::spin_slow(icon(
                             "icons/loader-circle.svg",
@@ -1224,6 +1227,7 @@ impl Waku {
         let agent_preset_label = session
             .filter(|session| session.provider == ProviderKind::DeepSeek && session.has_started())
             .and_then(|session| self.agent_preset_label_for_session(session));
+        let is_imported = session.is_some_and(|session| session.is_imported);
         let left_window_controls = (!self.sidebar_visible)
             .then(|| {
                 self.render_client_window_controls(
@@ -1320,6 +1324,24 @@ impl Waku {
                                 .text_color(theme.text)
                                 .child(SharedString::from(title)),
                         )
+                        .when(is_imported, |element| {
+                            element.child(
+                                div()
+                                    .h(px(22.0))
+                                    .px(px(6.0))
+                                    .rounded(px(6.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .bg(theme.overlay)
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text_ghost)
+                                    .child(icon("icons/lock.svg", 10.5, theme.text_ghost))
+                                    .child(tr!("session.imported_read_only")),
+                            )
+                        })
                         .children(agent_preset_label.map(|label| {
                             div()
                                 .h(px(22.0))

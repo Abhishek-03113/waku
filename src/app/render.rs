@@ -7,6 +7,35 @@ fn should_render_empty_state(session: Option<&AgentSession>) -> bool {
 }
 
 impl Waku {
+    /// Replaces the composer for an imported (read-only) session: these are
+    /// historical Claude Code transcripts, not resumable conversations, so
+    /// there is nothing to send a message into.
+    pub(super) fn render_imported_session_banner(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        div().flex_none().px(px(20.0)).child(
+            div()
+                .w_full()
+                .max_w(px(CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .rounded(px(13.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.overlay)
+                .py(px(10.0))
+                .px(px(14.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon("icons/lock.svg", 12.0, theme.text_ghost))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.text_ghost)
+                        .child(tr!("session.imported_composer_locked")),
+                ),
+        )
+    }
+
     pub(super) fn render_panel_resize_handle(
         &self,
         id: &'static str,
@@ -309,12 +338,14 @@ impl Render for Waku {
                         .flex_none()
                         .w(px(panels.sidebar))
                         .when(panels.sidebar_sliding, |element| element.overflow_hidden())
-                        .child(self.sidebar_pane.clone().cached(
-                            StyleRefinement::default()
-                                .w(px(panels.sidebar_content))
-                                .h_full()
-                                .flex_none(),
-                        )),
+                        .child(
+                            self.sidebar_pane.clone().cached(
+                                StyleRefinement::default()
+                                    .w(px(panels.sidebar_content))
+                                    .h_full()
+                                    .flex_none(),
+                            ),
+                        ),
                 )
             })
             .child(
@@ -334,16 +365,21 @@ impl Render for Waku {
                     } else {
                         self.transcript_pane
                             .clone()
-                            .cached(
-                                StyleRefinement::default().flex_1().min_h(px(0.0)).w_full(),
-                            )
+                            .cached(StyleRefinement::default().flex_1().min_h(px(0.0)).w_full())
                             .into_any_element()
                     })
                     .children(permission)
                     .when(self.selected_project().is_some(), |element| {
+                        let imported = self
+                            .selected_session()
+                            .is_some_and(|session| session.is_imported);
                         element
                             .children(self.render_queued_messages(cx))
-                            .child(self.render_composer(window, cx))
+                            .child(if imported {
+                                self.render_imported_session_banner(cx).into_any_element()
+                            } else {
+                                self.render_composer(window, cx).into_any_element()
+                            })
                             .child(self.render_workspace_footer(cx))
                     })
                     .relative()
@@ -371,14 +407,16 @@ impl Render for Waku {
                         // Pinned to the window's right edge, so the panel is
                         // uncovered from that edge inward rather than dragged
                         // across the screen.
-                        .child(self.right_panel_pane.clone().cached(
-                            StyleRefinement::default()
-                                .absolute()
-                                .top_0()
-                                .right_0()
-                                .w(px(panels.right_panel_content))
-                                .h_full(),
-                        )),
+                        .child(
+                            self.right_panel_pane.clone().cached(
+                                StyleRefinement::default()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .w(px(panels.right_panel_content))
+                                    .h_full(),
+                            ),
+                        ),
                 )
             })
             .children(command_palette)

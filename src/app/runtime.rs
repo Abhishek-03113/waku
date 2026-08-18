@@ -2690,6 +2690,12 @@ impl Waku {
         let Some(session) = self.selected_session() else {
             return;
         };
+        if session.is_imported {
+            // Imported historical sessions are read-only; the composer that
+            // would produce this submission is not rendered for them, but a
+            // stale keyboard shortcut or queued action must not resurrect it.
+            return;
+        }
         if self.response_fork_preparations.contains_key(&session.id) {
             return;
         }

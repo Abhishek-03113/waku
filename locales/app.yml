@@ -416,6 +416,12 @@ common.rename:
 session.new_task:
   en: New task
 
+session.imported_read_only:
+  en: Imported · Read only
+
+session.imported_composer_locked:
+  en: This session was imported from Claude Code and is read-only.
+
 sidebar.today:
   en: Today
 sidebar.search:

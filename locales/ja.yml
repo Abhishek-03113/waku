@@ -213,6 +213,8 @@ common.remove: 削除
 common.rename: 名前を変更
 
 session.new_task: 新規タスク
+session.imported_read_only: インポート済み・読み取り専用
+session.imported_composer_locked: このセッションは Claude Code からインポートされたため、読み取り専用です。
 
 sidebar.today: 今日
 sidebar.search: 検索
