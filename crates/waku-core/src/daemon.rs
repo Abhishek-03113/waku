@@ -117,36 +117,22 @@ impl WakuBackend {
 
         for ((_provider, native_id), historical_session) in discovery_result.sessions {
             let mut state = task_state.lock();
-            let project_id = if let Some(ref cwd) = historical_session.cwd {
-                match task_store.find_or_create_project_for_path(cwd) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: Failed to create project for {}: {}. Using default project.",
-                            cwd.display(),
-                            e
-                        );
-                        Self::get_or_create_default_project(&mut state)
-                    }
-                }
-            } else {
-                Self::get_or_create_default_project(&mut state)
+            let project_id = match historical_session.cwd {
+                Some(ref cwd) => StateStore::find_or_create_project_for_path(&mut state, cwd),
+                None => Self::get_or_create_default_project(&mut state),
             };
 
-            match task_store.import_historical_session(&historical_session, project_id) {
-                Ok(Some(session_id)) => {
+            match StateStore::import_historical_session(&mut state, &historical_session, project_id)
+            {
+                Some(session_id) => {
                     if let Err(e) = task_store.save(&mut state) {
-                        eprintln!("Warning: Failed to persist imported session {session_id}: {e}");
+                        eprintln!(
+                            "Warning: Failed to persist imported session {session_id} ({native_id}): {e}"
+                        );
                     }
                 }
-                Ok(None) => {
+                None => {
                     // Session already exists, skip
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to import historical session {} from {:?}: {}",
-                        native_id, historical_session.provider, e
-                    );
                 }
             }
         }
@@ -158,18 +144,22 @@ impl WakuBackend {
     fn get_or_create_default_project(
         task_state: &mut crate::persistence::PersistedState,
     ) -> uuid::Uuid {
-        task_state.projects.first().map(|p| p.id).unwrap_or_else(|| {
-            let default_project = crate::model::Project {
-                id: uuid::Uuid::new_v4(),
-                name: "Imported Sessions".to_string(),
-                path: crate::projectless::workspace_root()
-                    .unwrap_or_else(|| std::path::PathBuf::from(".")),
-                created_at: crate::model::unix_time(),
-            };
-            let id = default_project.id;
-            task_state.projects.push(default_project);
-            id
-        })
+        task_state
+            .projects
+            .first()
+            .map(|p| p.id)
+            .unwrap_or_else(|| {
+                let default_project = crate::model::Project {
+                    id: uuid::Uuid::new_v4(),
+                    name: "Imported Sessions".to_string(),
+                    path: crate::projectless::workspace_root()
+                        .unwrap_or_else(|| std::path::PathBuf::from(".")),
+                    created_at: crate::model::unix_time(),
+                };
+                let id = default_project.id;
+                task_state.projects.push(default_project);
+                id
+            })
     }
 
     /// Capture and persist one ending checkpoint exactly once per daemon.

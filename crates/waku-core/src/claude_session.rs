@@ -82,7 +82,7 @@ pub fn read_entries(path: &Path) -> anyhow::Result<Vec<Value>> {
         .collect())
 }
 
-fn transcript_entries(entries: &[Value]) -> Vec<&Map<String, Value>> {
+pub(crate) fn transcript_entries(entries: &[Value]) -> Vec<&Map<String, Value>> {
     entries
         .iter()
         .filter_map(Value::as_object)
@@ -97,7 +97,7 @@ fn transcript_entries(entries: &[Value]) -> Vec<&Map<String, Value>> {
         .collect()
 }
 
-fn active_chain(entries: &[Value]) -> Vec<&Map<String, Value>> {
+pub(crate) fn active_chain(entries: &[Value]) -> Vec<&Map<String, Value>> {
     let transcript = transcript_entries(entries);
     let by_uuid = transcript
         .iter()
@@ -146,7 +146,7 @@ fn session_metadata_in(
     })
 }
 
-fn claude_title(entry: &Value) -> Option<String> {
+pub(crate) fn claude_title(entry: &Value) -> Option<String> {
     let field = match entry.get("type").and_then(Value::as_str) {
         Some("ai-title") => "aiTitle",
         Some("custom-title") => "customTitle",
