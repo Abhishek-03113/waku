@@ -99,10 +99,6 @@ const FAQ = [
     a: 'On your machine. Projects, sessions, transcripts, and provider session IDs are stored locally. There is no Waku account and no telemetry.',
   },
   {
-    q: 'What about Windows?',
-    a: 'Waku runs natively on Windows 10 and 11. Run the installer and it keeps itself up to date, same as macOS. The embedded browser and computer use are macOS-only for now.',
-  },
-  {
     q: 'What is the future plan?',
     a: 'A mobile app for remote control, and cloud agents are planned',
   },
