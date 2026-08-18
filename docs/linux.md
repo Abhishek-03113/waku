@@ -9,12 +9,8 @@ curl -fsSL https://waku.sh/install.sh | sh
 The script needs no root. It unpacks the release tarball into
 `~/.local/waku.app` and installs the desktop entry into
 `~/.local/share/applications`, so **Waku appears in your applications menu** —
-launching it from a terminal is never required. Run the script again to
+you can also launch it from a terminal via `waku` command. Run the script again to
 upgrade; it replaces the previous install rather than merging into it.
-
-It also links `~/.local/bin/waku` for convenience. Waku takes no command-line
-arguments, so that link is only useful for starting the app from a terminal
-when you want to watch its output.
 
 Waku expects:
 
@@ -112,10 +108,3 @@ give the guest a real GL driver — on UTM that means the QEMU backend with
 virtio-gpu-gl (virgl) rather than Apple Virtualization, which offers Linux
 guests no 3D at all. `VK_DRIVER_FILES=/nonexistent.json` hides the software
 Vulkan driver so wgpu takes the GL path instead.
-
-## Known gaps
-
-The embedded browser and computer-use integration are macOS-only. On Linux the
-browser reports that it is unavailable and the computer-use UI stays disabled.
-Agent sessions, projects, transcripts, skills, usage, diffs, file editing, and
-the terminal all run natively.
