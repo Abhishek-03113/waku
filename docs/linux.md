@@ -7,17 +7,23 @@ curl -fsSL https://waku.sh/install.sh | sh
 ```
 
 The script needs no root. It unpacks the release tarball into
-`~/.local/waku.app`, links `~/.local/bin/waku`, and installs the desktop entry
-into `~/.local/share/applications`. Run it again to upgrade — it replaces the
-previous install rather than merging into it.
+`~/.local/waku.app` and installs the desktop entry into
+`~/.local/share/applications`, so **Waku appears in your applications menu** —
+launching it from a terminal is never required. Run the script again to
+upgrade; it replaces the previous install rather than merging into it.
+
+It also links `~/.local/bin/waku` for convenience. Waku takes no command-line
+arguments, so that link is only useful for starting the app from a terminal
+when you want to watch its output.
 
 Waku expects:
 
 - **glibc 2.35 or newer** — Ubuntu 22.04, Debian 12, Fedora 36, and anything
   more recent. Releases are built on Ubuntu 22.04, so older distributions must
   build from source.
-- **A working Vulkan driver.** GPUI renders through Vulkan and will not start
-  without one.
+- **A working Vulkan or OpenGL driver.** Waku renders through wgpu, which tries
+  Vulkan first and falls back to GL. Software rasterizers (lavapipe, llvmpipe)
+  are accepted, so it can run in a VM, but see the note below.
 - **x86_64 or aarch64.** Other architectures build from source.
 - `xdg-desktop-portal` for native file dialogs.
 
@@ -34,7 +40,7 @@ wherever you like:
 ```sh
 mkdir -p ~/.local/waku.app
 tar -xzf waku-<version>-<target>.tar.gz --strip-components=1 -C ~/.local/waku.app
-ln -sf ~/.local/waku.app/bin/waku ~/.local/bin/waku
+ln -sf ~/.local/waku.app/bin/waku ~/.local/bin/waku   # optional
 ```
 
 The archive uses an install-prefix layout (`bin/`, `share/`) beneath one
@@ -45,7 +51,10 @@ versioned directory, so `--strip-components=1` into a prefix such as
 copying `bin/waku` somewhere on its own leaves it unable to start the daemon.
 A symlink is fine — Waku resolves it back to the real path.
 
-For a launcher entry, install the packaged desktop file and point it at the
+Installing the desktop entry is the part that matters — it is how the app is
+launched normally, and it is what associates the running window with its icon
+and name (Waku reports the Wayland `app_id` / X11 `WM_CLASS` `sh.waku`, which
+matches the entry's filename). Install the packaged file and point it at the
 install (the packaged copy uses bare `Exec=waku` and `Icon=sh.waku` names so it
 can be relocated):
 
@@ -87,6 +96,22 @@ To exercise the install script against that local build:
 WAKU_BUNDLE_PATH=target/release/waku-<version>-<target>.tar.gz \
   sh website/public/install.sh
 ```
+
+## Running in a virtual machine
+
+VMs usually have no GPU passthrough, so Mesa falls back to a software
+rasterizer. That works in principle — wgpu accepts a CPU adapter — but both
+lavapipe (Vulkan) and llvmpipe (GL) JIT-compile shaders through LLVM, and that
+path is fragile: on Fedora 44 aarch64 (mesa 26.0.3 + LLVM 22.1) it segfaults
+inside `gallivm_jit_function` while compiling a fragment shader. The crash is
+in the driver, not in Waku, and no application-side setting avoids it.
+
+If the app dies on its first frame in a VM, check `coredumpctl info` for a
+backtrace through `libvulkan_lvp.so` or `libgallium`. The reliable fix is to
+give the guest a real GL driver — on UTM that means the QEMU backend with
+virtio-gpu-gl (virgl) rather than Apple Virtualization, which offers Linux
+guests no 3D at all. `VK_DRIVER_FILES=/nonexistent.json` hides the software
+Vulkan driver so wgpu takes the GL path instead.
 
 ## Known gaps
 
