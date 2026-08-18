@@ -140,6 +140,92 @@ jobs:
           path: target/release/waku-*-aarch64-unknown-linux-gnu.tar.gz
           if-no-files-found: error
 
+  windows-x86_64:
+    name: Windows x86_64
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustup target add x86_64-pc-windows-msvc
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-latest-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            windows-latest-rust-1.96.0-release-
+
+      - name: Bundle
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: bun scripts/bundle-windows.ts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x86_64
+          path: |
+            target/release/waku-*-x86_64-pc-windows-msvc.zip
+            target/release/Waku-*-x86_64-Setup.exe
+          if-no-files-found: error
+
+  windows-arm64:
+    name: Windows arm64
+    needs: version
+    runs-on: windows-11-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustup target add aarch64-pc-windows-msvc
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-11-arm-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            windows-11-arm-rust-1.96.0-release-
+
+      - name: Bundle
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: bun scripts/bundle-windows.ts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-arm64
+          path: |
+            target/release/waku-*-aarch64-pc-windows-msvc.zip
+            target/release/Waku-*-aarch64-Setup.exe
+          if-no-files-found: error
+
   macos:
     name: macOS
     needs: version
@@ -215,7 +301,15 @@ jobs:
 
   draft-release:
     name: Draft GitHub release
-    needs: [version, linux-x86_64, linux-arm64, macos]
+    needs:
+      [
+        version,
+        linux-x86_64,
+        linux-arm64,
+        windows-x86_64,
+        windows-arm64,
+        macos,
+      ]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -230,10 +324,30 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Write the Linux version pointer
+      - name: Write the version pointers
         env:
           VERSION: ${{ needs.version.outputs.version }}
-        run: echo "$VERSION" > artifacts/latest-linux.txt
+        run: |
+          # What `install.sh` and the website's Windows download resolve
+          # "latest" to. In-app updates read the appcasts instead.
+          echo "$VERSION" > artifacts/latest-linux.txt
+          echo "$VERSION" > artifacts/latest-windows.txt
+
+      # Signed here rather than on the Windows runners: this is the only job
+      # that holds both installers, and the signing key stays in one place.
+      - name: Sign the Windows update feeds
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          # Merge into the live feeds so previously published releases keep
+          # their entries; a first run simply starts from nothing.
+          for arch in x86_64 aarch64; do
+            curl -fsSL --max-time 30 \
+              "https://releases.waku.sh/appcast-windows-$arch.xml" \
+              -o "artifacts/appcast-windows-$arch.xml" || true
+          done
+          bun scripts/appcast-windows.ts artifacts "$VERSION"
 
       - name: Write release notes
         env:
@@ -267,5 +381,8 @@ jobs:
             artifacts/*.dmg
             artifacts/*.md
             artifacts/*.zip
+            artifacts/*.exe
             artifacts/appcast.xml
+            artifacts/appcast-windows-*.xml
             artifacts/latest-linux.txt
+            artifacts/latest-windows.txt
