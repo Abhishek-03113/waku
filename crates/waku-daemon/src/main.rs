@@ -50,10 +50,13 @@ fn main() -> anyhow::Result<()> {
     )
     .context("could not load daemon settings")?;
     let task_store = waku_core::persistence::StateStore::daemon(task_path);
+    let backend = Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?);
+    #[cfg(not(test))]
+    backend.spawn_historical_import();
     waku_core::serve(
         listener,
         token,
-        Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?),
+        backend,
         shutdown,
         waku_core::ServerOptions {
             allowed_origins: arguments.allowed_origins.into_iter().collect(),

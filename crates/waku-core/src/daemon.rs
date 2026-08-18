@@ -47,6 +47,7 @@ impl WakuBackend {
             .load()
             .context("could not load Waku task database")?;
         migrate_projectless_state(&task_store, &mut task_state)?;
+
         let composer_drafts = ComposerDraftStore::for_state_path(task_store.path());
         let attachments = AttachmentStore::new(
             task_store
@@ -73,6 +74,101 @@ impl WakuBackend {
             checkpoint_capture_locks: Mutex::new(HashMap::new()),
             usage_rates_dir,
             default_cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        })
+    }
+
+    /// Discover and import historical sessions from provider storage on a
+    /// background thread so daemon startup is never blocked by disk I/O.
+    /// Must be called only after `self` is held behind an `Arc`, so the
+    /// spawned thread can keep the backend alive without borrowing it.
+    /// Skipped during tests to avoid picking up the developer's real
+    /// sessions.
+    #[cfg(not(test))]
+    pub fn spawn_historical_import(self: &Arc<Self>) {
+        let backend = self.clone();
+        std::thread::Builder::new()
+            .name("waku-daemon-historical-import".into())
+            .spawn(move || {
+                if let Err(error) =
+                    Self::import_historical_sessions(&backend.task_store, &backend.task_state)
+                {
+                    eprintln!("Warning: historical session import failed: {error:#}");
+                }
+            })
+            .ok();
+    }
+
+    /// Discover and import historical sessions from provider storage,
+    /// merging newly imported sessions into the live task state under lock.
+    fn import_historical_sessions(
+        task_store: &StateStore,
+        task_state: &Mutex<crate::persistence::PersistedState>,
+    ) -> anyhow::Result<()> {
+        let discovery_result = (crate::historical::discover_all_providers())()
+            .context("failed to discover historical sessions")?;
+
+        for (provider, error) in &discovery_result.errors {
+            eprintln!("Warning: Failed to discover historical sessions from {provider:?}: {error}");
+        }
+
+        if discovery_result.sessions.is_empty() {
+            return Ok(());
+        }
+
+        for ((_provider, native_id), historical_session) in discovery_result.sessions {
+            let mut state = task_state.lock();
+            let project_id = if let Some(ref cwd) = historical_session.cwd {
+                match task_store.find_or_create_project_for_path(cwd) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to create project for {}: {}. Using default project.",
+                            cwd.display(),
+                            e
+                        );
+                        Self::get_or_create_default_project(&mut state)
+                    }
+                }
+            } else {
+                Self::get_or_create_default_project(&mut state)
+            };
+
+            match task_store.import_historical_session(&historical_session, project_id) {
+                Ok(Some(session_id)) => {
+                    if let Err(e) = task_store.save(&mut state) {
+                        eprintln!("Warning: Failed to persist imported session {session_id}: {e}");
+                    }
+                }
+                Ok(None) => {
+                    // Session already exists, skip
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to import historical session {} from {:?}: {}",
+                        native_id, historical_session.provider, e
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the first project or create a default project for imported sessions.
+    fn get_or_create_default_project(
+        task_state: &mut crate::persistence::PersistedState,
+    ) -> uuid::Uuid {
+        task_state.projects.first().map(|p| p.id).unwrap_or_else(|| {
+            let default_project = crate::model::Project {
+                id: uuid::Uuid::new_v4(),
+                name: "Imported Sessions".to_string(),
+                path: crate::projectless::workspace_root()
+                    .unwrap_or_else(|| std::path::PathBuf::from(".")),
+                created_at: crate::model::unix_time(),
+            };
+            let id = default_project.id;
+            task_state.projects.push(default_project);
+            id
         })
     }
 
