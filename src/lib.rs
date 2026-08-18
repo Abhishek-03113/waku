@@ -324,10 +324,7 @@ pub fn run() {
                         icon: crate::platform::linux_app_icon(),
                         window_bounds: Some(window_bounds),
                         display_id,
-                        window_min_size: Some(size(
-                            px(MIN_WINDOW_WIDTH),
-                            px(MIN_WINDOW_HEIGHT),
-                        )),
+                        window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
                         ..Default::default()
                     },
                     move |window, cx| {

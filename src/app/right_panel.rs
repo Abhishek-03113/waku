@@ -1117,15 +1117,14 @@ mod tests {
     /// positioned fall back to the row index.
     #[test]
     fn diff_row_selection_keys_are_unique_even_without_line_numbers() {
-        let positionless = crate::review_diff::from_file_changes(&[
-            crate::model::ActivityFileChange {
+        let positionless =
+            crate::review_diff::from_file_changes(&[crate::model::ActivityFileChange {
                 path: "a.md".into(),
                 additions: Some(2),
                 deletions: Some(0),
                 status: None,
                 diff: Some("@@\n+one\n+two\n \n+three\n".into()),
-            },
-        ]);
+            }]);
         let keys = positionless
             .lines
             .iter()

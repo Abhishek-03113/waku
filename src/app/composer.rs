@@ -1454,8 +1454,10 @@ impl Waku {
             });
 
         let fast = selected_tier == "fast" || tier_label.eq_ignore_ascii_case("fast");
-        let trigger_label = match (effort_label.unwrap_or_else(|| tier_label.clone()), window_label)
-        {
+        let trigger_label = match (
+            effort_label.unwrap_or_else(|| tier_label.clone()),
+            window_label,
+        ) {
             (label, Some(window)) => format!("{label} · {window}"),
             (label, None) => label,
         };

@@ -183,7 +183,11 @@ impl Waku {
         // asks when the thumb is let go: did the reader come to rest on the
         // tail?
         let scrollbar_dragging = self.transcript_scrollbar.is_grabbed();
-        if self.transcript_scrollbar_dragging.replace(scrollbar_dragging) != scrollbar_dragging {
+        if self
+            .transcript_scrollbar_dragging
+            .replace(scrollbar_dragging)
+            != scrollbar_dragging
+        {
             if scrollbar_dragging {
                 self.transcript_anchor_following.set(false);
                 self.transcript_is_scrolled.set(true);
