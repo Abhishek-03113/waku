@@ -29,8 +29,9 @@ bun run release
   [`scripts/appcast.ts`](scripts/appcast.ts),
   [`scripts/changelog.ts`](scripts/changelog.ts).
 - GitHub Actions: [`.github/workflows/release.yml`](.github/workflows/release.yml)
-  builds Linux (x86_64, arm64) and macOS archives on a `v*` tag and opens a
-  draft GitHub release;
+  builds Linux (x86_64, arm64) and macOS archives on a `v*` tag — or on a
+  manual **Run workflow**, which takes the version from `Cargo.toml` — and
+  opens a draft GitHub release;
   [`.github/workflows/sync-release.yml`](.github/workflows/sync-release.yml)
   copies published assets into the R2 bucket.
 
@@ -137,9 +138,16 @@ Test by keeping an older build around, launching it, and choosing
 
 ### GitHub draft release + R2 sync
 
-Pushing a `v*` tag (matching the `version` in `Cargo.toml`) runs the Release
-workflow. macOS CI runs `bun run release --local`, which signs, notarizes, and
-writes the same artifacts as a local release:
+The Release workflow runs two ways:
+
+- **Push a `v*` tag** — the tag must match the `version` in `Cargo.toml`, or the
+  run fails before anything builds.
+- **Actions → Release → Run workflow** — no tag needed. The run releases
+  whatever `Cargo.toml` says and drafts it as `v<version>`; that tag is created
+  at the built commit when you publish the draft.
+
+macOS CI runs `bun run release --local`, which signs, notarizes, and writes the
+same artifacts as a local release:
 
 - `Waku-<version>.dmg`
 - `Waku-<version>.zip`

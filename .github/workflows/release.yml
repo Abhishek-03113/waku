@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,21 +17,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version from Cargo.toml
+        id: resolve
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "::error::No version found in Cargo.toml"
+            exit 1
+          fi
+          # Cargo.toml is the source of truth. A tag push must agree with it;
+          # a manual run has no tag and simply releases what Cargo.toml says.
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$version" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version as v$version"
+
   linux-x86_64:
     name: Linux x86_64
+    needs: version
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
-
-      - name: Check tag matches Cargo.toml
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$tag" != "$version" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
-            exit 1
-          fi
 
       - name: Install Rust
         run: |
@@ -72,19 +96,11 @@ jobs:
 
   linux-arm64:
     name: Linux arm64
+    needs: version
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
-
-      - name: Check tag matches Cargo.toml
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$tag" != "$version" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
-            exit 1
-          fi
 
       - name: Install Rust
         run: |
@@ -126,19 +142,11 @@ jobs:
 
   macos:
     name: macOS
+    needs: version
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
-
-      - name: Check tag matches Cargo.toml
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$tag" != "$version" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
-            exit 1
-          fi
 
       - name: Install Rust
         run: |
@@ -207,7 +215,7 @@ jobs:
 
   draft-release:
     name: Draft GitHub release
-    needs: [linux-x86_64, linux-arm64, macos]
+    needs: [version, linux-x86_64, linux-arm64, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -223,10 +231,12 @@ jobs:
           merge-multiple: true
 
       - name: Write release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           bun -e '
             import { extractReleaseNotes } from "./scripts/changelog.ts";
-            const version = process.env.GITHUB_REF_NAME.replace(/^v/i, "");
+            const version = process.env.VERSION;
             const file = Bun.file("CHANGELOG.md");
             const notes = (await file.exists())
               ? extractReleaseNotes(await file.text(), version)
@@ -240,7 +250,11 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
-          name: ${{ github.ref_name }}
+          # A manual run has no tag yet; publishing the draft creates this one
+          # at the commit that was built.
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.version.outputs.tag }}
           body_path: release-notes.md
           fail_on_unmatched_files: true
           files: |
