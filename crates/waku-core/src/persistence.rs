@@ -943,92 +943,109 @@ impl StateStore {
     /// Import a historical session from a provider's native storage into the
     /// live, in-memory `PersistedState`.
     ///
-    /// This function converts a discovered `HistoricalSession` into a Waku
-    /// `AgentSession` and appends it to `state.sessions`. The import is
-    /// idempotent: if a session with the same (provider, native_session_id)
-    /// already exists in `state`, it is skipped. The caller is responsible
-    /// for calling `StateStore::save` afterward so the change reaches disk —
-    /// writing straight to SQLite here would leave the running daemon's
-    /// in-memory state unaware of the import, and a later unrelated `save`
-    /// would silently discard it.
+    /// This function normalizes a discovered `HistoricalTranscript` (already
+    /// provider-neutral — see `crate::historical`) into a Waku `AgentSession`
+    /// with real turns, messages, and activities, and appends it to
+    /// `state.sessions`. The caller is responsible for calling
+    /// `StateStore::save` afterward so the change reaches disk — writing
+    /// straight to SQLite here would leave the running daemon's in-memory
+    /// state unaware of the import, and a later unrelated `save` would
+    /// silently discard it.
     ///
-    /// Returns the imported session's UUID if newly created, or None if it
-    /// already existed.
+    /// A session with the same (provider, native_session_id) is reconciled
+    /// in place rather than skipped outright: normalization is
+    /// deterministic (see `historical::stable_uuid`), so re-running it over
+    /// the same provider transcript is a no-op once a session's content is
+    /// already correct, and it is how a parser fix (for example, historical
+    /// import once flattened Claude's slash-command control markup into
+    /// visible messages/titles) heals sessions imported before the fix
+    /// without the user re-running Claude Code. The existing session's own
+    /// UUID is preserved across a reconciliation so nothing referencing it
+    /// (selection, navigation history) breaks.
+    ///
+    /// Returns the imported/reconciled session's UUID if its content
+    /// changed, or None if it was already up to date.
     pub fn import_historical_session(
         state: &mut PersistedState,
-        historical: &crate::historical::HistoricalSession,
+        historical: &crate::historical::HistoricalTranscript,
         project_id: uuid::Uuid,
     ) -> Option<uuid::Uuid> {
-        let already_imported = state.sessions.iter().any(|session| {
-            session.provider == historical.provider
-                && session.native_session_id.as_deref()
-                    == Some(historical.native_session_id.as_str())
-        });
-        if already_imported {
-            return None; // Already imported
-        }
+        let existing_id = state
+            .sessions
+            .iter()
+            .find(|session| {
+                session.provider == historical.provider
+                    && session.native_session_id.as_deref()
+                        == Some(historical.native_session_id.as_str())
+            })
+            .map(|session| session.id);
 
-        // Create the imported session
-        let session_id = uuid::Uuid::new_v4();
-        let mut session = crate::model::AgentSession {
-            id: session_id,
-            title: historical
-                .title
-                .clone()
-                .unwrap_or_else(|| "Imported session".to_owned()),
-            auto_title: historical.title.clone(),
-            project_id,
-            workspace: crate::model::SessionWorkspace::Local,
-            provider: historical.provider,
-            model: None,
-            runtime_mode: crate::model::RuntimeMode::FullAccess,
-            interaction_mode: crate::model::InteractionMode::Build,
-            reasoning_effort: None,
-            service_tier: None,
-            context_window: None,
-            agent_preset: None,
-            status: crate::model::SessionStatus::Idle,
-            created_at: historical.created_at,
-            updated_at: historical.updated_at,
-            last_reply_at: Some(historical.updated_at),
-            is_imported: true,
-            native_session_id: Some(historical.native_session_id.clone()),
-            provider_cursor: None,
-            available_commands: Vec::new(),
-            context_usage: None,
-            runtime_event_cursor: None,
-            provider_session_id: None,
-            messages: Vec::new(),
-            transcript_blocks: Vec::new(),
-            turns: Vec::new(),
-            queued_messages: Vec::new(),
-            detail_loaded: true,
+        let Some(existing_id) = existing_id else {
+            let session = crate::historical::normalize_transcript(historical, project_id);
+            let session_id = session.id;
+            state.push_session(session);
+            return Some(session_id);
         };
 
-        // Convert historical messages to Waku messages
-        for historical_message in &historical.messages {
-            let message_id = uuid::Uuid::new_v4();
-            let role = match historical_message.role {
-                crate::historical::MessageRole::User => crate::model::MessageRole::User,
-                crate::historical::MessageRole::Assistant => crate::model::MessageRole::Assistant,
-                crate::historical::MessageRole::System => crate::model::MessageRole::System,
-            };
-
-            session.messages.push(crate::model::Message {
-                id: message_id,
-                turn_id: None,
-                role,
-                content: historical_message.content.clone(),
-                display_content: historical_message.display_content.clone(),
-                attachments: Vec::new(),
-                created_at: historical_message.created_at,
-                streaming: false,
-            });
+        let mut refreshed = crate::historical::normalize_transcript(historical, project_id);
+        refreshed.id = existing_id;
+        let existing = state
+            .sessions
+            .iter()
+            .find(|session| session.id == existing_id)
+            .expect("existing_id was just found above");
+        if sessions_equivalent(existing, &refreshed) {
+            return None;
         }
+        let slot = state
+            .session_mut(existing_id)
+            .expect("existing_id was just found above");
+        *slot = refreshed;
+        Some(existing_id)
+    }
 
-        state.push_session(session);
-
-        Some(session_id)
+    /// Remove previously-imported sessions that a provider's own discovery
+    /// no longer reports, for providers whose discovery succeeded this run.
+    ///
+    /// A provider transcript can shrink to nothing after a parser fix (for
+    /// example, a session that turns out to be nothing but slash-command
+    /// invocations, with no real conversation to reconstruct) — that session
+    /// should stop existing in Waku too, not linger as a stale row that
+    /// discovery no longer touches. This is scoped to `known_providers`
+    /// (providers whose discovery ran without error this pass) so a
+    /// transient discovery failure — a permissions error, a temporarily
+    /// unavailable disk — can never be mistaken for "the user deleted their
+    /// history" and delete real imported sessions. The caller is
+    /// responsible for calling `StateStore::save` afterward, same as
+    /// `import_historical_session`.
+    ///
+    /// Returns the ids of sessions removed.
+    pub fn prune_stale_imported_sessions(
+        state: &mut PersistedState,
+        known_providers: &std::collections::HashSet<crate::model::ProviderKind>,
+        still_present: &std::collections::HashSet<(crate::model::ProviderKind, String)>,
+    ) -> Vec<uuid::Uuid> {
+        let stale = state
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.is_imported
+                    && known_providers.contains(&session.provider)
+                    && session
+                        .native_session_id
+                        .as_deref()
+                        .is_some_and(|native_id| {
+                            !still_present.contains(&(session.provider, native_id.to_owned()))
+                        })
+            })
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        if !stale.is_empty() {
+            state
+                .sessions
+                .retain(|session| !stale.contains(&session.id));
+        }
+        stale
     }
 
     /// Find or create a project for the given path in the live, in-memory
@@ -1575,6 +1592,23 @@ impl StateStore {
                 .retain_unreferenced_older_than(&live_attachments, cutoff);
         }
     }
+}
+
+/// Whether an already-imported session's visible content matches what a
+/// fresh normalization of the same provider transcript would produce, so
+/// `import_historical_session` can skip rewriting (and marking dirty) a
+/// session that is already correct instead of touching every imported
+/// session's row on every daemon start.
+fn sessions_equivalent(existing: &AgentSession, refreshed: &AgentSession) -> bool {
+    existing.title == refreshed.title
+        && existing.turns.len() == refreshed.turns.len()
+        && existing.messages.len() == refreshed.messages.len()
+        && existing
+            .messages
+            .iter()
+            .zip(&refreshed.messages)
+            .all(|(a, b)| a.role == b.role && a.content == b.content)
+        && existing.transcript_blocks.len() == refreshed.transcript_blocks.len()
 }
 
 type SessionColumns = (
@@ -3640,38 +3674,47 @@ mod tests {
         let directory = temporary_directory();
         let store = store_in(&directory);
 
-        // Create a historical session with multiple messages
-        let historical_session = crate::historical::HistoricalSession {
+        // Create a historical transcript with multiple turns
+        use crate::historical::{
+            HistoricalMessage, HistoricalRole, HistoricalTranscript, HistoricalTurn,
+            HistoricalTurnItem,
+        };
+        let historical_session = HistoricalTranscript {
             provider: ProviderKind::Claude,
             native_session_id: "claude-test-123".to_string(),
             cwd: Some(PathBuf::from("/tmp/test-project")),
             title: Some("Test Historical Session".to_string()),
+            model: None,
+            git_branch: None,
             created_at: 1700000000,
             updated_at: 1700000100,
-            messages: vec![
-                crate::historical::HistoricalMessage {
-                    uuid: "msg-1".to_string(),
-                    parent_uuid: None,
-                    role: crate::historical::MessageRole::User,
-                    content: "Write a test".to_string(),
-                    display_content: Some("Write a test".to_string()),
-                    created_at: 1700000010,
+            turns: vec![
+                HistoricalTurn {
+                    id: "msg-1".to_string(),
+                    started_at: 1700000010,
+                    completed_at: Some(1700000020),
+                    items: vec![
+                        HistoricalTurnItem::Message(HistoricalMessage {
+                            role: HistoricalRole::User,
+                            content: "Write a test".to_string(),
+                            created_at: 1700000010,
+                        }),
+                        HistoricalTurnItem::Message(HistoricalMessage {
+                            role: HistoricalRole::Assistant,
+                            content: "Here's the test code...".to_string(),
+                            created_at: 1700000020,
+                        }),
+                    ],
                 },
-                crate::historical::HistoricalMessage {
-                    uuid: "msg-2".to_string(),
-                    parent_uuid: Some("msg-1".to_string()),
-                    role: crate::historical::MessageRole::Assistant,
-                    content: "Here's the test code...".to_string(),
-                    display_content: Some("Here's the test code...".to_string()),
-                    created_at: 1700000020,
-                },
-                crate::historical::HistoricalMessage {
-                    uuid: "msg-3".to_string(),
-                    parent_uuid: Some("msg-2".to_string()),
-                    role: crate::historical::MessageRole::User,
-                    content: "Make it better".to_string(),
-                    display_content: Some("Make it better".to_string()),
-                    created_at: 1700000030,
+                HistoricalTurn {
+                    id: "msg-3".to_string(),
+                    started_at: 1700000030,
+                    completed_at: Some(1700000030),
+                    items: vec![HistoricalTurnItem::Message(HistoricalMessage {
+                        role: HistoricalRole::User,
+                        content: "Make it better".to_string(),
+                        created_at: 1700000030,
+                    })],
                 },
             ],
         };
@@ -3758,5 +3801,204 @@ mod tests {
         );
 
         fs::remove_dir_all(directory).ok();
+    }
+
+    /// A session imported before a parser fix (for example, historical
+    /// import once flattened Claude's slash-command control markup into a
+    /// visible message and a garbage title) must self-heal the next time
+    /// the daemon discovers the same provider transcript, rather than being
+    /// silently skipped forever because `(provider, native_session_id)`
+    /// already matches.
+    #[test]
+    fn reimporting_a_changed_transcript_reconciles_the_existing_session_in_place() {
+        use crate::historical::{
+            HistoricalMessage, HistoricalRole, HistoricalTranscript, HistoricalTurn,
+            HistoricalTurnItem,
+        };
+
+        let mut state = PersistedState::empty();
+        let project_id = Uuid::new_v4();
+        state.projects.push(crate::model::Project {
+            id: project_id,
+            name: "Test Project".to_string(),
+            path: PathBuf::from("/tmp/test-project"),
+            created_at: 1700000000,
+        });
+
+        // Simulate a stale import: title and first message are raw
+        // slash-command control markup, as the pre-fix importer produced.
+        let stale = HistoricalTranscript {
+            provider: ProviderKind::Claude,
+            native_session_id: "claude-stale-456".to_string(),
+            cwd: None,
+            title: Some("<command-name>/clear</command-name>".to_string()),
+            model: None,
+            git_branch: None,
+            created_at: 1700000000,
+            updated_at: 1700000010,
+            turns: vec![HistoricalTurn {
+                id: "turn-stale".to_string(),
+                started_at: 1700000000,
+                completed_at: Some(1700000000),
+                items: vec![HistoricalTurnItem::Message(HistoricalMessage {
+                    role: HistoricalRole::User,
+                    content: "<command-name>/clear</command-name>".to_string(),
+                    created_at: 1700000000,
+                })],
+            }],
+        };
+        let original_id =
+            StateStore::import_historical_session(&mut state, &stale, project_id).unwrap();
+        assert_eq!(
+            state
+                .sessions
+                .iter()
+                .find(|s| s.id == original_id)
+                .unwrap()
+                .title,
+            "<command-name>/clear</command-name>"
+        );
+
+        // The fixed parser now produces the real conversation for the same
+        // native session id.
+        let fixed = HistoricalTranscript {
+            provider: ProviderKind::Claude,
+            native_session_id: "claude-stale-456".to_string(),
+            cwd: None,
+            title: None,
+            model: None,
+            git_branch: None,
+            created_at: 1700000001,
+            updated_at: 1700000020,
+            turns: vec![HistoricalTurn {
+                id: "turn-real".to_string(),
+                started_at: 1700000001,
+                completed_at: Some(1700000020),
+                items: vec![
+                    HistoricalTurnItem::Message(HistoricalMessage {
+                        role: HistoricalRole::User,
+                        content: "investigate the billing bug".to_string(),
+                        created_at: 1700000001,
+                    }),
+                    HistoricalTurnItem::Message(HistoricalMessage {
+                        role: HistoricalRole::Assistant,
+                        content: "Found it in invoice.rs".to_string(),
+                        created_at: 1700000020,
+                    }),
+                ],
+            }],
+        };
+        let reconciled_id = StateStore::import_historical_session(&mut state, &fixed, project_id)
+            .expect("a changed transcript must be reconciled, not skipped");
+
+        assert_eq!(
+            reconciled_id, original_id,
+            "reconciliation preserves the existing session's own id"
+        );
+        assert_eq!(state.sessions.len(), 1, "no duplicate session was created");
+        let session = state.sessions.iter().find(|s| s.id == original_id).unwrap();
+        assert_eq!(session.title, "investigate the billing bug");
+        assert_eq!(session.messages.len(), 2);
+        assert!(
+            !session
+                .messages
+                .iter()
+                .any(|m| m.content.contains("<command-name>")),
+            "raw slash-command markup must not survive reconciliation"
+        );
+
+        // Reconciling again with the identical (already-fixed) transcript is
+        // a true no-op.
+        let third_import = StateStore::import_historical_session(&mut state, &fixed, project_id);
+        assert!(
+            third_import.is_none(),
+            "reconciling an already-correct session must not report a change"
+        );
+    }
+
+    /// A session imported as noise before a parser fix (for example, a
+    /// session that turns out to be nothing but slash-command invocations,
+    /// which the fixed parser now correctly excludes from discovery
+    /// entirely) must be removed once discovery for its provider succeeds
+    /// and no longer reports it — otherwise it lingers forever, since
+    /// `import_historical_session` only reconciles sessions discovery still
+    /// finds.
+    #[test]
+    fn prune_removes_imported_sessions_the_provider_no_longer_reports() {
+        use std::collections::HashSet;
+
+        let mut state = PersistedState::empty();
+        let project_id = Uuid::new_v4();
+        state.projects.push(crate::model::Project {
+            id: project_id,
+            name: "Test Project".to_string(),
+            path: PathBuf::from("/tmp/test-project"),
+            created_at: 1700000000,
+        });
+
+        let mut still_imported = state.new_session(project_id, ProviderKind::Claude);
+        still_imported.is_imported = true;
+        still_imported.native_session_id = Some("claude-still-here".to_string());
+        let still_imported_id = still_imported.id;
+        state.sessions.push(still_imported);
+
+        let mut now_noise_only = state.new_session(project_id, ProviderKind::Claude);
+        now_noise_only.is_imported = true;
+        now_noise_only.native_session_id = Some("claude-now-noise-only".to_string());
+        state.sessions.push(now_noise_only);
+
+        let mut live_session = state.new_session(project_id, ProviderKind::Codex);
+        live_session.is_imported = false;
+        let live_session_id = live_session.id;
+        state.sessions.push(live_session);
+
+        let known_providers = HashSet::from([ProviderKind::Claude]);
+        let still_present =
+            HashSet::from([(ProviderKind::Claude, "claude-still-here".to_string())]);
+
+        let pruned =
+            StateStore::prune_stale_imported_sessions(&mut state, &known_providers, &still_present);
+
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(state.sessions.len(), 2);
+        assert!(state.sessions.iter().any(|s| s.id == still_imported_id));
+        assert!(
+            state.sessions.iter().any(|s| s.id == live_session_id),
+            "a non-imported session must never be pruned"
+        );
+    }
+
+    #[test]
+    fn prune_never_touches_sessions_for_a_provider_whose_discovery_failed() {
+        use std::collections::HashSet;
+
+        let mut state = PersistedState::empty();
+        let project_id = Uuid::new_v4();
+        state.projects.push(crate::model::Project {
+            id: project_id,
+            name: "Test Project".to_string(),
+            path: PathBuf::from("/tmp/test-project"),
+            created_at: 1700000000,
+        });
+
+        let mut imported = state.new_session(project_id, ProviderKind::Claude);
+        imported.is_imported = true;
+        imported.native_session_id = Some("claude-transiently-unreachable".to_string());
+        state.sessions.push(imported);
+
+        // Claude is NOT in known_providers (its discovery errored this run),
+        // and it reports no sessions present — a naive prune would delete
+        // real history on a transient failure.
+        let known_providers = HashSet::new();
+        let still_present = HashSet::new();
+
+        let pruned =
+            StateStore::prune_stale_imported_sessions(&mut state, &known_providers, &still_present);
+
+        assert!(
+            pruned.is_empty(),
+            "a failed discovery pass must never prune that provider's sessions"
+        );
+        assert_eq!(state.sessions.len(), 1);
     }
 }
