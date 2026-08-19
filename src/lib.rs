@@ -302,7 +302,15 @@ pub fn run() {
                     WindowOptions {
                         titlebar: Some(TitlebarOptions {
                             title: Some(APP_NAME.into()),
-                            appears_transparent: cfg!(target_os = "macos"),
+                            // Windows creates the window without `WS_CAPTION`
+                            // either way; asking for the transparent titlebar
+                            // is what extends the client area over the frame
+                            // so Waku's own header can host the caption
+                            // buttons and drag region.
+                            appears_transparent: cfg!(any(
+                                target_os = "macos",
+                                target_os = "windows"
+                            )),
                             traffic_light_position: cfg!(target_os = "macos")
                                 .then(|| point(px(16.0), px(17.0))),
                         }),

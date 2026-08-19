@@ -270,6 +270,12 @@ impl Waku {
             window,
             cx,
         );
+        // Only as tall as whatever actually sits in it: macOS's native
+        // traffic lights, or the client-side buttons a Linux desktop puts on
+        // this side. Windows keeps all three on the far side, and a desktop
+        // like GNOME keeps none here, so there is nothing to clear and the
+        // strip is only somewhere to drag the window by — the content
+        // column's own titlebar carries the rest of that job.
         let height = if cfg!(target_os = "macos") || left_window_controls.is_some() {
             48.0
         } else {
@@ -2156,8 +2162,12 @@ impl Waku {
         id: &'static str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        div()
-            .id(id)
+        let region = div().id(id);
+        // Windows drags from the hit test rather than a mouse-move handler.
+        #[cfg(target_os = "windows")]
+        let region = region.window_control_area(gpui::WindowControlArea::Drag);
+
+        region
             .h(px(48.0))
             .flex_none()
             .on_click(|event, window, _| {

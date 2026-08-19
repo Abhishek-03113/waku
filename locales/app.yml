@@ -57,8 +57,6 @@ window.restore:
 
 updater.update:
   en: Update
-updater.checking:
-  en: Checking for updates…
 updater.updating:
   en: Updating…
 updater.up_to_date:
@@ -143,7 +141,7 @@ settings.search:
 daemon.expose_title:
   en: Expose managed daemon
 daemon.expose_description:
-  en: Listen beyond this Mac so another Waku client can connect. Changing this restarts only the daemon.
+  en: Listen beyond this machine so another Waku client can connect. Changing this restarts only the daemon.
 daemon.status_local:
   en: Local only
 daemon.status_exposed:
@@ -173,7 +171,7 @@ daemon.restarting:
 daemon.credentials_title:
   en: Connection details
 daemon.credentials_description:
-  en: Enter these in Waku Web. The URL uses this Mac’s local network hostname.
+  en: Enter these in Waku Web. The URL uses this machine’s local network hostname.
 daemon.websocket_url:
   en: WebSocket URL
 daemon.token:
@@ -185,7 +183,7 @@ daemon.hide_token:
 daemon.regenerate_token:
   en: Regenerate
 daemon.security_warning:
-  en: The token grants full access to tasks, files, Git, attachments, and coding agents on this Mac. Use WSS through a trusted TLS proxy outside a private network.
+  en: The token grants full access to tasks, files, Git, attachments, and coding agents on this machine. Use WSS through a trusted TLS proxy outside a private network.
 daemon.external_title:
   en: External daemon
 daemon.external_description:
@@ -318,7 +316,7 @@ common.creating:
 settings.local_by_default:
   en: Local by default
 settings.local_by_default_description:
-  en: Projects, conversations, and settings are stored on this Mac
+  en: Projects, conversations, and settings are stored on this computer
 settings.local_by_default_web_description:
   en: Projects, conversations, and attachments stay on the connected daemon host. Waku Web preferences stay in this browser.
 settings.automatic_updates:
@@ -333,7 +331,7 @@ settings.share_anonymous_usage_data_description:
 providers.coding_agents:
   en: Coding agents
 providers.description:
-  en: Waku drives agent CLIs installed on this Mac. Install or sign in with each agent's own CLI, then refresh
+  en: Waku drives agent CLIs installed on this computer. Install or sign in with each agent's own CLI, then refresh
 providers.web_description:
   en: Waku drives agent CLIs installed on the daemon host. Install or sign in with each agent's own CLI, then refresh
 providers.check_failed:
@@ -487,7 +485,7 @@ project.your_project:
 onboarding.open_project_to_begin:
   en: Open a project to begin
 onboarding.description:
-  en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this Mac
+  en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this computer
 onboarding.web_description:
   en: Choose a path on the daemon host, or start without a project.
 onboarding.open_project_folder:
@@ -1684,8 +1682,8 @@ browser.start_hint:
   en: Enter a URL or search above — %{shortcut} focuses the address bar
 browser.unavailable:
   en: Browser unavailable
-browser.requires_macos:
-  en: The browser surface requires macOS
+browser.unavailable_on_platform:
+  en: The browser surface is not available on this platform yet
 
 find.bad_pattern:
   en: Bad pattern

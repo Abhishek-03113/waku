@@ -223,6 +223,12 @@ impl Waku {
         region: Stateful<Div>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        // Windows drags from the hit test, not from a mouse-move handler:
+        // `DefWindowProc` moves the window once the region reports itself as
+        // caption, and performs the user's configured double-click action.
+        #[cfg(target_os = "windows")]
+        let region = region.window_control_area(gpui::WindowControlArea::Drag);
+
         region
             .on_click(|event, window, _| {
                 if event.click_count() == 2 {
@@ -561,13 +567,7 @@ impl Waku {
             let indicator = motion::spin_slow(icon("icons/loader-circle.svg", 14.0, foreground));
             return Some(
                 button
-                    .tooltip(Tooltip::text(
-                        if status == crate::updater::UpdateStatus::Checking {
-                            tr!("updater.checking")
-                        } else {
-                            tr!("updater.updating")
-                        },
-                    ))
+                    .tooltip(Tooltip::text(tr!("updater.updating")))
                     .child(
                         div()
                             .size_full()
